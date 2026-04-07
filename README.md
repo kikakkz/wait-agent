@@ -46,10 +46,12 @@ This repository currently contains product documentation only. Implementation ha
 Current documents:
 
 - [Product PRD](docs/wait-agent-prd.md)
+- [Architecture](docs/architecture.md)
+- [Functional Design](docs/functional-design.md)
+- [Module Design](docs/module-design.md)
 
 ## Recommended Next Documents
 
-- `docs/architecture.md`
 - `docs/protocol.md`
 - `docs/mvp-plan.md`
 
