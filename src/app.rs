@@ -2,7 +2,7 @@ use crate::cli::{Cli, Command, RunCommand, ServerCommand};
 use crate::config::AppConfig;
 use crate::pty::{PtyManager, PtySize, SpawnRequest};
 use crate::session::{SessionAddress, SessionRegistry};
-use crate::terminal::TerminalRuntime;
+use crate::terminal::{TerminalEngine, TerminalRuntime};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
@@ -60,6 +60,7 @@ impl App {
         let session =
             self.sessions
                 .create_local_session(runtime.node.node_id.clone(), title, command_line);
+        let mut screen_engine = TerminalEngine::new(terminal_snapshot.size);
         let mut handle = self.pty.spawn(
             session.address().clone(),
             SpawnRequest {
@@ -70,6 +71,8 @@ impl App {
         )?;
         self.sessions
             .mark_running(session.address(), handle.process_id());
+        self.sessions
+            .update_screen_state(session.address(), screen_engine.state());
 
         print_runtime_header("run", &runtime, Some(session.address()));
         println!("agent_command: {}", session.command_line);
@@ -101,6 +104,9 @@ impl App {
         let output = handle.read_to_end()?;
         if !output.is_empty() {
             self.sessions.mark_output(session.address());
+            screen_engine.feed(&output);
+            self.sessions
+                .update_screen_state(session.address(), screen_engine.state());
             let mut stdout = io::stdout().lock();
             stdout
                 .write_all(&output)

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod console;
 mod pty;
+mod renderer;
 mod scheduler;
 mod session;
 mod terminal;

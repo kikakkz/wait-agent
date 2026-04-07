@@ -228,6 +228,369 @@ impl Drop for RawModeGuard {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSnapshot {
+    pub size: TerminalSize,
+    pub lines: Vec<String>,
+    pub scrollback: Vec<String>,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub alternate_screen: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenState {
+    pub normal: ScreenSnapshot,
+    pub alternate: ScreenSnapshot,
+    pub alternate_screen_active: bool,
+}
+
+impl ScreenState {
+    pub fn active_snapshot(&self) -> &ScreenSnapshot {
+        if self.alternate_screen_active {
+            &self.alternate
+        } else {
+            &self.normal
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalEngine {
+    normal: ScreenBuffer,
+    alternate: ScreenBuffer,
+    alternate_screen_active: bool,
+}
+
+impl TerminalEngine {
+    pub fn new(size: TerminalSize) -> Self {
+        Self {
+            normal: ScreenBuffer::new(size),
+            alternate: ScreenBuffer::new(size),
+            alternate_screen_active: false,
+        }
+    }
+
+    pub fn resize(&mut self, size: TerminalSize) {
+        self.normal.resize(size);
+        self.alternate.resize(size);
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let mut plain = Vec::new();
+        let mut index = 0;
+
+        while index < bytes.len() {
+            match bytes[index] {
+                0x1b => {
+                    self.flush_plain(&mut plain);
+                    index += 1;
+                    if index < bytes.len() && bytes[index] == b'[' {
+                        index += 1;
+                        index = self.consume_csi(bytes, index);
+                    }
+                }
+                b'\n' => {
+                    self.flush_plain(&mut plain);
+                    self.active_buffer_mut().line_feed();
+                    index += 1;
+                }
+                b'\r' => {
+                    self.flush_plain(&mut plain);
+                    self.active_buffer_mut().carriage_return();
+                    index += 1;
+                }
+                0x08 => {
+                    self.flush_plain(&mut plain);
+                    self.active_buffer_mut().backspace();
+                    index += 1;
+                }
+                b'\t' => {
+                    self.flush_plain(&mut plain);
+                    self.active_buffer_mut().tab();
+                    index += 1;
+                }
+                byte => {
+                    plain.push(byte);
+                    index += 1;
+                }
+            }
+        }
+
+        self.flush_plain(&mut plain);
+    }
+
+    pub fn snapshot(&self) -> ScreenSnapshot {
+        self.active_buffer().snapshot(self.alternate_screen_active)
+    }
+
+    pub fn state(&self) -> ScreenState {
+        ScreenState {
+            normal: self.normal.snapshot(false),
+            alternate: self.alternate.snapshot(true),
+            alternate_screen_active: self.alternate_screen_active,
+        }
+    }
+
+    fn active_buffer(&self) -> &ScreenBuffer {
+        if self.alternate_screen_active {
+            &self.alternate
+        } else {
+            &self.normal
+        }
+    }
+
+    fn active_buffer_mut(&mut self) -> &mut ScreenBuffer {
+        if self.alternate_screen_active {
+            &mut self.alternate
+        } else {
+            &mut self.normal
+        }
+    }
+
+    fn flush_plain(&mut self, plain: &mut Vec<u8>) {
+        if plain.is_empty() {
+            return;
+        }
+
+        let text = String::from_utf8_lossy(plain);
+        for ch in text.chars() {
+            self.active_buffer_mut().put_char(ch);
+        }
+        plain.clear();
+    }
+
+    fn consume_csi(&mut self, bytes: &[u8], mut index: usize) -> usize {
+        let start = index;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if (0x40..=0x7e).contains(&byte) {
+                let params = &bytes[start..index];
+                self.handle_csi(params, byte as char);
+                return index + 1;
+            }
+            index += 1;
+        }
+
+        bytes.len()
+    }
+
+    fn handle_csi(&mut self, params: &[u8], final_byte: char) {
+        let params_text = String::from_utf8_lossy(params);
+
+        if let Some(private_params) = params_text.strip_prefix('?') {
+            self.handle_private_mode(private_params, final_byte);
+            return;
+        }
+
+        let numbers = parse_csi_numbers(&params_text);
+        match final_byte {
+            'A' => self
+                .active_buffer_mut()
+                .move_cursor_relative(-(first_or(&numbers, 1) as isize), 0),
+            'B' => self
+                .active_buffer_mut()
+                .move_cursor_relative(first_or(&numbers, 1) as isize, 0),
+            'C' => self
+                .active_buffer_mut()
+                .move_cursor_relative(0, first_or(&numbers, 1) as isize),
+            'D' => self
+                .active_buffer_mut()
+                .move_cursor_relative(0, -(first_or(&numbers, 1) as isize)),
+            'H' | 'f' => {
+                let row = first_or(&numbers, 1).saturating_sub(1);
+                let col = second_or(&numbers, 1).saturating_sub(1);
+                self.active_buffer_mut().move_cursor_to(row, col);
+            }
+            'J' => self.active_buffer_mut().clear_screen(first_or(&numbers, 0)),
+            'K' => self.active_buffer_mut().clear_line(first_or(&numbers, 0)),
+            'm' => {}
+            _ => {}
+        }
+    }
+
+    fn handle_private_mode(&mut self, params: &str, final_byte: char) {
+        if params == "1049" {
+            match final_byte {
+                'h' => self.alternate_screen_active = true,
+                'l' => self.alternate_screen_active = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScreenBuffer {
+    size: TerminalSize,
+    cells: Vec<Vec<char>>,
+    cursor_row: u16,
+    cursor_col: u16,
+    scrollback: Vec<String>,
+}
+
+impl ScreenBuffer {
+    fn new(size: TerminalSize) -> Self {
+        Self {
+            size,
+            cells: blank_cells(size),
+            cursor_row: 0,
+            cursor_col: 0,
+            scrollback: Vec::new(),
+        }
+    }
+
+    fn resize(&mut self, size: TerminalSize) {
+        let mut next = blank_cells(size);
+
+        for row in 0..usize::min(self.cells.len(), next.len()) {
+            for col in 0..usize::min(self.cells[row].len(), next[row].len()) {
+                next[row][col] = self.cells[row][col];
+            }
+        }
+
+        self.size = size;
+        self.cells = next;
+        self.cursor_row = self.cursor_row.min(size.rows.saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
+    }
+
+    fn snapshot(&self, alternate_screen: bool) -> ScreenSnapshot {
+        ScreenSnapshot {
+            size: self.size,
+            lines: self
+                .cells
+                .iter()
+                .map(|row| row.iter().collect::<String>())
+                .collect(),
+            scrollback: self.scrollback.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            alternate_screen,
+        }
+    }
+
+    fn put_char(&mut self, ch: char) {
+        if self.size.rows == 0 || self.size.cols == 0 {
+            return;
+        }
+
+        let row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        self.cells[row][col] = ch;
+
+        if self.cursor_col + 1 >= self.size.cols {
+            self.cursor_col = 0;
+            self.line_feed();
+        } else {
+            self.cursor_col += 1;
+        }
+    }
+
+    fn carriage_return(&mut self) {
+        self.cursor_col = 0;
+    }
+
+    fn line_feed(&mut self) {
+        if self.size.rows == 0 {
+            return;
+        }
+
+        if self.cursor_row + 1 >= self.size.rows {
+            if !self.cells.is_empty() {
+                let top = self.cells.remove(0);
+                self.scrollback.push(top.into_iter().collect());
+                self.cells.push(blank_row(self.size.cols));
+            }
+            self.cursor_row = self.size.rows.saturating_sub(1);
+        } else {
+            self.cursor_row += 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.cursor_col = self.cursor_col.saturating_sub(1);
+    }
+
+    fn tab(&mut self) {
+        if self.size.cols == 0 {
+            return;
+        }
+
+        let next_tab_stop = ((self.cursor_col / 8) + 1) * 8;
+        self.cursor_col = next_tab_stop.min(self.size.cols.saturating_sub(1));
+    }
+
+    fn move_cursor_to(&mut self, row: u16, col: u16) {
+        self.cursor_row = row.min(self.size.rows.saturating_sub(1));
+        self.cursor_col = col.min(self.size.cols.saturating_sub(1));
+    }
+
+    fn move_cursor_relative(&mut self, row_delta: isize, col_delta: isize) {
+        let next_row = (self.cursor_row as isize + row_delta)
+            .clamp(0, self.size.rows.saturating_sub(1) as isize) as u16;
+        let next_col = (self.cursor_col as isize + col_delta)
+            .clamp(0, self.size.cols.saturating_sub(1) as isize) as u16;
+        self.cursor_row = next_row;
+        self.cursor_col = next_col;
+    }
+
+    fn clear_screen(&mut self, mode: u16) {
+        match mode {
+            0 => {
+                for row in self.cursor_row as usize..self.cells.len() {
+                    let start_col = if row == self.cursor_row as usize {
+                        self.cursor_col as usize
+                    } else {
+                        0
+                    };
+                    for col in start_col..self.cells[row].len() {
+                        self.cells[row][col] = ' ';
+                    }
+                }
+            }
+            1 => {
+                for row in 0..=self.cursor_row as usize {
+                    let end_col = if row == self.cursor_row as usize {
+                        self.cursor_col as usize
+                    } else {
+                        self.cells[row].len().saturating_sub(1)
+                    };
+                    for col in 0..=end_col {
+                        self.cells[row][col] = ' ';
+                    }
+                }
+            }
+            _ => {
+                self.cells = blank_cells(self.size);
+                self.cursor_row = 0;
+                self.cursor_col = 0;
+            }
+        }
+    }
+
+    fn clear_line(&mut self, mode: u16) {
+        let row = self.cursor_row as usize;
+        match mode {
+            0 => {
+                for col in self.cursor_col as usize..self.cells[row].len() {
+                    self.cells[row][col] = ' ';
+                }
+            }
+            1 => {
+                for col in 0..=self.cursor_col as usize {
+                    self.cells[row][col] = ' ';
+                }
+            }
+            _ => {
+                for cell in &mut self.cells[row] {
+                    *cell = ' ';
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TerminalError {
     Io(String, io::Error),
@@ -244,6 +607,33 @@ impl fmt::Display for TerminalError {
 }
 
 impl std::error::Error for TerminalError {}
+
+fn blank_cells(size: TerminalSize) -> Vec<Vec<char>> {
+    (0..size.rows).map(|_| blank_row(size.cols)).collect()
+}
+
+fn blank_row(cols: u16) -> Vec<char> {
+    vec![' '; cols as usize]
+}
+
+fn parse_csi_numbers(params: &str) -> Vec<u16> {
+    if params.is_empty() {
+        return Vec::new();
+    }
+
+    params
+        .split(';')
+        .map(|value| value.parse::<u16>().unwrap_or(0))
+        .collect()
+}
+
+fn first_or(values: &[u16], default: u16) -> u16 {
+    values.first().copied().unwrap_or(default)
+}
+
+fn second_or(values: &[u16], default: u16) -> u16 {
+    values.get(1).copied().unwrap_or(default)
+}
 
 fn is_tty(fd: RawFd) -> bool {
     unsafe { isatty(fd as c_int) == 1 }
@@ -287,8 +677,8 @@ fn make_raw(mut termios: Termios) -> Termios {
 #[cfg(test)]
 mod tests {
     use super::{
-        make_raw, ResizeTracker, TerminalSize, Termios, BRKINT, ECHO, ICANON, ICRNL, IEXTEN, INPCK,
-        ISIG, ISTRIP, IXON, OPOST, VMIN, VTIME,
+        make_raw, ResizeTracker, TerminalEngine, TerminalSize, Termios, BRKINT, ECHO, ICANON,
+        ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, VMIN, VTIME,
     };
 
     #[test]
@@ -334,5 +724,128 @@ mod tests {
         assert_eq!(raw.c_lflag & (ECHO | ICANON | IEXTEN | ISIG), 0);
         assert_eq!(raw.c_cc[VMIN], 1);
         assert_eq!(raw.c_cc[VTIME], 0);
+    }
+
+    #[test]
+    fn engine_tracks_plain_text_and_cursor_state() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"hello");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "hello ");
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 5);
+        assert!(!snapshot.alternate_screen);
+    }
+
+    #[test]
+    fn engine_handles_carriage_return_and_cursor_positioning() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"hello\rHE");
+        engine.feed(b"\x1b[2;3H!");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "HEllo ");
+        assert_eq!(snapshot.lines[1], "  !   ");
+    }
+
+    #[test]
+    fn engine_handles_clear_line_and_clear_screen() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"hello\x1b[2K");
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.lines[0], "      ");
+
+        engine.feed(b"\x1b[2J");
+        let cleared = engine.snapshot();
+        assert_eq!(
+            cleared.lines,
+            vec!["      ".to_string(), "      ".to_string()]
+        );
+        assert_eq!(cleared.cursor_row, 0);
+        assert_eq!(cleared.cursor_col, 0);
+    }
+
+    #[test]
+    fn engine_tracks_scrollback_when_screen_overflows() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 5,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"one\r\ntwo\r\nthree");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(
+            snapshot.scrollback,
+            vec!["one  ".to_string(), "two  ".to_string()]
+        );
+        assert_eq!(snapshot.lines[0], "three");
+    }
+
+    #[test]
+    fn engine_preserves_normal_and_alternate_screens() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"main");
+        engine.feed(b"\x1b[?1049h");
+        engine.feed(b"alt");
+        let alternate = engine.snapshot();
+        assert!(alternate.alternate_screen);
+        assert_eq!(alternate.lines[0], "alt   ");
+
+        engine.feed(b"\x1b[?1049l");
+        let normal = engine.snapshot();
+        assert!(!normal.alternate_screen);
+        assert_eq!(normal.lines[0], "main  ");
+    }
+
+    #[test]
+    fn engine_resize_preserves_visible_prefix() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"hello\r\nworld");
+        engine.resize(TerminalSize {
+            rows: 3,
+            cols: 4,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "hell");
+        assert_eq!(snapshot.lines[1], "worl");
+        assert_eq!(snapshot.size.cols, 4);
+        assert_eq!(snapshot.size.rows, 3);
     }
 }

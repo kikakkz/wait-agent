@@ -166,12 +166,46 @@ impl ConsoleState {
         self.input_state = InputState::Idle;
     }
 
-    pub fn enter_peek(&mut self, session: SessionAddress) {
-        self.peek_session = Some(session);
+    pub fn enter_peek(
+        &mut self,
+        sessions: &[SessionAddress],
+        target: &SessionAddress,
+    ) -> Option<SessionAddress> {
+        if !sessions.iter().any(|session| session == target) {
+            return None;
+        }
+
+        if self.focused_session.as_ref() == Some(target) {
+            return None;
+        }
+
+        let target = target.clone();
+        self.peek_session = Some(target.clone());
+        Some(target)
     }
 
-    pub fn exit_peek(&mut self) {
+    pub fn exit_peek(&mut self) -> Option<SessionAddress> {
+        let restored = self.focused_session.clone();
         self.peek_session = None;
+        restored
+    }
+
+    pub fn is_peeking(&self) -> bool {
+        self.peek_session.is_some()
+    }
+
+    pub fn rendered_session(&self) -> Option<&SessionAddress> {
+        self.peek_session
+            .as_ref()
+            .or_else(|| self.focused_session.as_ref())
+    }
+
+    pub fn peeked_session(&self) -> Option<&SessionAddress> {
+        self.peek_session.as_ref()
+    }
+
+    pub fn input_owner_session(&self) -> Option<&SessionAddress> {
+        self.focused_session.as_ref()
     }
 
     pub fn arm_switch_lock(&mut self) {
@@ -230,10 +264,13 @@ mod tests {
         let focus = SessionAddress::new("local", "claude-1");
         let peek = SessionAddress::new("local", "codex-2");
         console.focus(focus.clone());
-        console.enter_peek(peek);
-        console.exit_peek();
+        console
+            .enter_peek(&[focus.clone(), peek.clone()], &peek)
+            .expect("peek should enter");
+        let restored = console.exit_peek();
 
         assert_eq!(console.focused_session, Some(focus));
+        assert_eq!(restored, console.focused_session);
         assert!(console.peek_session.is_none());
     }
 
@@ -307,5 +344,36 @@ mod tests {
 
         console.clear_switch_lock();
         assert_eq!(console.switch_lock, super::SwitchLock::Clear);
+    }
+
+    #[test]
+    fn peek_keeps_input_ownership_on_focused_session() {
+        let mut console = ConsoleState::new("console-1");
+        let focus = SessionAddress::new("local", "session-1");
+        let peek = SessionAddress::new("local", "session-2");
+        console.focus(focus.clone());
+
+        console
+            .enter_peek(&[focus.clone(), peek.clone()], &peek)
+            .expect("peek should enter");
+
+        assert_eq!(console.rendered_session(), Some(&peek));
+        assert_eq!(console.input_owner_session(), Some(&focus));
+        assert!(console.is_peeking());
+    }
+
+    #[test]
+    fn rejects_peek_for_unknown_or_focused_session() {
+        let mut console = ConsoleState::new("console-1");
+        let focus = SessionAddress::new("local", "session-1");
+        let other = SessionAddress::new("local", "session-2");
+        let missing = SessionAddress::new("local", "session-3");
+        console.focus(focus.clone());
+
+        assert_eq!(console.enter_peek(&[focus.clone(), other], &focus), None);
+        assert_eq!(console.enter_peek(&[focus.clone()], &missing), None);
+        assert_eq!(console.rendered_session(), Some(&focus));
+        assert_eq!(console.input_owner_session(), Some(&focus));
+        assert!(!console.is_peeking());
     }
 }

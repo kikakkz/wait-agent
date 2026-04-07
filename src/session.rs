@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::terminal::ScreenState;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,6 +50,8 @@ pub struct SessionRecord {
     pub command_line: String,
     pub status: SessionStatus,
     pub process_id: Option<u32>,
+    pub screen_state: Option<ScreenState>,
+    pub snapshot_version: u64,
     pub created_at_unix_ms: u128,
     pub last_output_at_unix_ms: Option<u128>,
     pub last_input_at_unix_ms: Option<u128>,
@@ -86,6 +89,8 @@ impl SessionRegistry {
             command_line,
             status: SessionStatus::Starting,
             process_id: None,
+            screen_state: None,
+            snapshot_version: 0,
             created_at_unix_ms: now_unix_ms(),
             last_output_at_unix_ms: None,
             last_input_at_unix_ms: None,
@@ -156,9 +161,24 @@ impl SessionRegistry {
         Some(record)
     }
 
+    pub fn update_screen_state(
+        &mut self,
+        address: &SessionAddress,
+        screen_state: ScreenState,
+    ) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.screen_state = Some(screen_state);
+        record.snapshot_version += 1;
+        Some(record)
+    }
+
     pub fn list(&self) -> Vec<&SessionRecord> {
         let mut sessions = self.sessions.values().collect::<Vec<_>>();
-        sessions.sort_by(|left, right| left.created_at_unix_ms.cmp(&right.created_at_unix_ms));
+        sessions.sort_by(|left, right| {
+            left.created_at_unix_ms
+                .cmp(&right.created_at_unix_ms)
+                .then_with(|| left.address.session_id().cmp(right.address.session_id()))
+        });
         sessions
     }
 }
@@ -173,6 +193,7 @@ fn now_unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::SessionRegistry;
+    use crate::terminal::{TerminalEngine, TerminalSize};
 
     #[test]
     fn creates_sessions_with_stable_local_addresses() {
@@ -187,5 +208,39 @@ mod tests {
         assert_eq!(session.address().session_id(), "session-1");
         assert_eq!(session.title, "claude");
         assert!(session.process_id.is_none());
+        assert!(session.screen_state.is_none());
+        assert_eq!(session.snapshot_version, 0);
+    }
+
+    #[test]
+    fn updates_screen_state_and_bumps_snapshot_version() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "devbox-1".to_string(),
+            "claude".to_string(),
+            "claude".to_string(),
+        );
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"hello");
+
+        let updated = registry
+            .update_screen_state(session.address(), engine.state())
+            .expect("session should update");
+
+        assert_eq!(updated.snapshot_version, 1);
+        assert_eq!(
+            updated
+                .screen_state
+                .as_ref()
+                .expect("screen state should exist")
+                .normal
+                .lines[0],
+            "hello "
+        );
     }
 }

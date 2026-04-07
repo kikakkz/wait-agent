@@ -64,6 +64,12 @@ Current project state:
 - Console focus and Peek runtime state exist
 - Waiting heuristic and FIFO waiting queue foundations exist
 - Auto-switch and continuation-protection state machine foundations exist
+- Explicit read-only Peek interaction path exists
+- VT screen-state engine foundation exists
+- Session screen snapshot storage exists
+- Focused renderer and minimal status-line chrome exist
+- Focus-restore render path exists
+- Explicit Peek read-only render path exists
 
 Current phase:
 
@@ -129,18 +135,18 @@ The board is split into the following execution tracks:
 | `T2-05` | Implement waiting queue management | `T2-04` | `done` | FIFO queue sync preserves first-wait order and removes resumed sessions |
 | `T2-06` | Implement auto-switch state machine | `T2-03`, `T2-05` | `done` | One-enter one-switch decision flow and switch lock behavior exist in scheduler state |
 | `T2-07` | Implement continuation protection | `T2-06` | `done` | Current-session continuation keeps focus until the round stabilizes |
-| `T2-08` | Implement Peek mode | `T2-01` | `not_started` | Read-only inspection path |
+| `T2-08` | Implement Peek mode | `T2-01` | `done` | Explicit read-only Peek entry, exit, rendered-session, and input-owner behavior exist |
 
 ## 6.4 T3 Terminal UI and Rendering
 
 | ID | Task | Depends On | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `T3-01` | Integrate VT screen state engine | `T1-04` | `not_started` | Screen reconstruction layer |
-| `T3-02` | Implement session screen snapshot storage | `T3-01`, `T1-03` | `not_started` | Focus restore support |
-| `T3-03` | Implement focused session renderer | `T2-01`, `T3-02` | `not_started` | Main viewport only |
-| `T3-04` | Implement minimal top and bottom status lines | `T3-03` | `not_started` | Follow [ui-design.md](ui-design.md) |
-| `T3-05` | Implement focus restore on switch | `T3-02`, `T2-02` | `not_started` | No summary rewrite |
-| `T3-06` | Implement Peek rendering path | `T2-08`, `T3-02` | `not_started` | Read-only mode |
+| `T3-01` | Integrate VT screen state engine | `T1-04` | `done` | Terminal engine reconstructs screen state, cursor, alternate screen, and scrollback from PTY bytes |
+| `T3-02` | Implement session screen snapshot storage | `T3-01`, `T1-03` | `done` | Sessions store canonical screen state and snapshot versions for focus restore |
+| `T3-03` | Implement focused session renderer | `T2-01`, `T3-02` | `done` | Renderer composes the focused or peeked session snapshot into a main viewport frame |
+| `T3-04` | Implement minimal top and bottom status lines | `T3-03` | `done` | Renderer outputs minimal top and bottom status lines for normal and peek states |
+| `T3-05` | Implement focus restore on switch | `T3-02`, `T2-02` | `done` | Renderer restores the target snapshot immediately after focus changes with a short restore notice |
+| `T3-06` | Implement Peek rendering path | `T2-08`, `T3-02` | `done` | Dedicated read-only render mode now distinguishes viewport ownership from input ownership |
 | `T3-07` | Implement narrow terminal compaction rules | `T3-04` | `not_started` | Optional in local MVP, required before hardening |
 
 ## 6.5 T4 Local MVP Validation
@@ -273,17 +279,16 @@ Status:
 
 Current blockers:
 
-- No explicit Peek interaction path exists yet
-- No focused renderer exists yet
+- No active blocker in the current local rendering track
 
 ## 9. Recommended Next Actions
 
 Recommended immediate sequence:
 
-1. Start `T2-08` and complete the explicit read-only Peek interaction path
-2. Start `T3-01` once scheduler outputs are stable enough to drive screen-state updates
-3. Start `T3-02` to persist per-session screen snapshots for focus restore
-4. Start `T3-03` and `T3-04` only after terminal screen-state capture exists
+1. Start `T4-01` now that focus and Peek render paths exist together
+2. Add scheduler unit tests under `T4-02` before expanding transport work
+3. Add renderer snapshot tests under `T4-04` once the local interactive path is wired
+4. Validate local switching and restore behavior manually under `T4-05`
 5. Do not start `T5-*` until local Stage A exit criteria are met
 
 ## 10. Update Rules
