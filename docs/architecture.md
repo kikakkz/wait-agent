@@ -437,16 +437,12 @@ Recommended runtime split:
   CLI binary
 - `waitagent-server`
   Optional dedicated server entrypoint
-- `waitagent-client`
-  Optional dedicated client entrypoint
 
 Alternative:
 
 - One binary with subcommands:
-  - `waitagent local`
+  - `waitagent run`
   - `waitagent server`
-  - `waitagent client`
-  - `waitagent attach`
 
 The single-binary model is preferable for consistency and distribution simplicity.
 
@@ -454,11 +450,9 @@ Recommended command progression:
 
 - Phase 1:
   - `waitagent run`
-  - `waitagent attach`
 - Phase 2:
   - `waitagent server`
-  - `waitagent client --connect ...`
-  - `waitagent attach --server ...`
+  - `waitagent run --connect ...`
 
 ## 13. Persistence Strategy
 

@@ -1,4 +1,4 @@
-use crate::cli::{AttachCommand, Cli, ClientCommand, Command, RunCommand, ServerCommand};
+use crate::cli::{Cli, Command, RunCommand, ServerCommand};
 use crate::config::AppConfig;
 use crate::session::{SessionAddress, SessionRegistry};
 use std::error::Error;
@@ -8,6 +8,7 @@ pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
     let config = AppConfig::from_env();
     let mut app = App::new(config);
+    print_banner();
 
     app.execute(cli.command)
 }
@@ -28,9 +29,7 @@ impl App {
     fn execute(&mut self, command: Command) -> Result<(), AppError> {
         match command {
             Command::Run(run) => self.handle_run(run),
-            Command::Attach(attach) => self.handle_attach(attach),
             Command::Server(server) => self.handle_server(server),
-            Command::Client(client) => self.handle_client(client),
             Command::Help(help) => {
                 println!("{help}");
                 Ok(())
@@ -57,31 +56,16 @@ impl App {
         print_runtime_header("run", &runtime, Some(session.address()));
         println!("agent_command: {}", session.command_line);
         println!("status: bootstrapped");
+        if let Some(connect_addr) = runtime.network.access_point.as_deref() {
+            println!("mirror: enabled");
+            println!("mirror_target: {connect_addr}");
+        } else {
+            println!("mirror: disabled");
+        }
         println!(
             "note: PTY execution is not implemented yet; command and config plumbing are ready."
         );
 
-        Ok(())
-    }
-
-    fn handle_attach(&mut self, command: AttachCommand) -> Result<(), AppError> {
-        if let Some(server_addr) = command.server.as_deref() {
-            let runtime = self.config.runtime_for_attach_server(server_addr);
-            print_runtime_header("attach", &runtime, None);
-            println!("attach_target: server");
-            println!(
-                "server_access_point: {}",
-                runtime.network.access_point_display()
-            );
-            println!("status: stub");
-            return Ok(());
-        }
-
-        let runtime = self.config.runtime_for_local_attach();
-        print_runtime_header("attach", &runtime, None);
-        println!("attach_target: local");
-        println!("status: stub");
-        println!("note: local console runtime will be added in T2/T3.");
         Ok(())
     }
 
@@ -94,27 +78,26 @@ impl App {
         println!("listen_addr: {}", runtime.network.listen_addr);
         println!("status: stub");
         println!("note: transport and aggregate session view are deferred to Stage B.");
-        Ok(())
-    }
-
-    fn handle_client(&mut self, command: ClientCommand) -> Result<(), AppError> {
-        let runtime = self.config.runtime_for_client(
-            command.connect.as_deref(),
-            command.node_id.as_deref(),
-            command.proxy.as_deref(),
-            command.all_proxy.as_deref(),
-            command.http_proxy.as_deref(),
-            command.https_proxy.as_deref(),
-        );
-
-        print_runtime_header("client", &runtime, None);
-        println!("connect_addr: {}", runtime.network.access_point_display());
-        println!("status: stub");
         println!(
-            "note: client transport will be added in Stage B; config boundaries are ready now."
+            "note: local agents may later run directly on the server or mirror in via `waitagent run --connect {}`.",
+            runtime.network.listen_addr
         );
         Ok(())
     }
+}
+
+fn print_banner() {
+    println!(
+        r#" __        __    _ _      _                            _
+ \ \      / /_ _(_) |_   / \   __ _  ___ _ __   __ _ | |_
+  \ \ /\ / / _` | | __| / _ \ / _` |/ _ \ '_ \ / _` || __|
+   \ V  V / (_| | | |_ / ___ \ (_| |  __/ | | | (_| || |_
+    \_/\_/ \__,_|_|\__/_/   \_\__, |\___|_| |_|\__,_| \__|
+                              |___/
+"#
+    );
+    println!("One terminal. Many agents. Zero tab thrash.");
+    println!();
 }
 
 fn print_runtime_header(command: &str, config: &AppConfig, session: Option<&SessionAddress>) {
@@ -123,7 +106,6 @@ fn print_runtime_header(command: &str, config: &AppConfig, session: Option<&Sess
     println!("mode: {}", config.mode_name());
     println!("listen_addr: {}", config.network.listen_addr);
     println!("access_point: {}", config.network.access_point_display());
-    println!("proxy: {}", config.network.proxy.describe());
 
     if let Some(address) = session {
         println!("session: {address}");

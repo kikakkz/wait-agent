@@ -10,9 +10,7 @@ pub struct Cli {
 #[derive(Debug, Clone)]
 pub enum Command {
     Run(RunCommand),
-    Attach(AttachCommand),
     Server(ServerCommand),
-    Client(ClientCommand),
     Help(String),
 }
 
@@ -34,24 +32,9 @@ impl RunCommand {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct AttachCommand {
-    pub server: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
 pub struct ServerCommand {
     pub listen: Option<String>,
     pub node_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ClientCommand {
-    pub connect: Option<String>,
-    pub node_id: Option<String>,
-    pub proxy: Option<String>,
-    pub all_proxy: Option<String>,
-    pub http_proxy: Option<String>,
-    pub https_proxy: Option<String>,
 }
 
 impl Cli {
@@ -82,9 +65,7 @@ impl Cli {
 
         let command = match subcommand.as_str() {
             "run" => Command::Run(parse_run(args)?),
-            "attach" => Command::Attach(parse_attach(args)?),
             "server" => Command::Server(parse_server(args)?),
-            "client" => Command::Client(parse_client(args)?),
             "help" | "--help" | "-h" => Command::Help(help_text()),
             other => {
                 return Err(CliError::UnknownSubcommand(other.to_string()));
@@ -145,21 +126,6 @@ fn parse_run(args: Vec<String>) -> Result<RunCommand, CliError> {
     })
 }
 
-fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut command = AttachCommand::default();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--server" => command.server = Some(expect_value("--server", &mut iter)?),
-            "--help" | "-h" => return Ok(command),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(command)
-}
-
 fn parse_server(args: Vec<String>) -> Result<ServerCommand, CliError> {
     let mut iter = args.into_iter();
     let mut command = ServerCommand::default();
@@ -175,29 +141,6 @@ fn parse_server(args: Vec<String>) -> Result<ServerCommand, CliError> {
 
     Ok(command)
 }
-
-fn parse_client(args: Vec<String>) -> Result<ClientCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut command = ClientCommand::default();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--connect" => command.connect = Some(expect_value("--connect", &mut iter)?),
-            "--node-id" => command.node_id = Some(expect_value("--node-id", &mut iter)?),
-            "--proxy" => command.proxy = Some(expect_value("--proxy", &mut iter)?),
-            "--all-proxy" => command.all_proxy = Some(expect_value("--all-proxy", &mut iter)?),
-            "--http-proxy" => command.http_proxy = Some(expect_value("--http-proxy", &mut iter)?),
-            "--https-proxy" => {
-                command.https_proxy = Some(expect_value("--https-proxy", &mut iter)?)
-            }
-            "--help" | "-h" => return Ok(command),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(command)
-}
-
 fn expect_value<I>(flag: &str, iter: &mut I) -> Result<String, CliError>
 where
     I: Iterator<Item = String>,
@@ -212,18 +155,12 @@ fn help_text() -> String {
         "",
         "Usage:",
         "  waitagent run [--node-id <id>] [--connect <addr>] -- <agent-command...>",
-        "  waitagent attach [--server <addr>]",
         "  waitagent server [--listen <addr>] [--node-id <id>]",
-        "  waitagent client [--connect <addr>] [--node-id <id>] [--proxy <url>]",
         "",
         "Environment:",
         "  WAITAGENT_NODE_ID",
         "  WAITAGENT_ACCESS_POINT",
         "  WAITAGENT_LISTEN_ADDR",
-        "  WAITAGENT_PROXY",
-        "  WAITAGENT_ALL_PROXY",
-        "  WAITAGENT_HTTP_PROXY",
-        "  WAITAGENT_HTTPS_PROXY",
     ]
     .join("\n")
 }
@@ -277,18 +214,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_client_proxy_flags() {
+    fn parses_run_command_with_connect() {
         match parse(&[
             "waitagent",
-            "client",
+            "run",
             "--connect",
             "ws://127.0.0.1:7474",
-            "--proxy",
-            "socks5://127.0.0.1:7897",
+            "--",
+            "claude",
         ]) {
-            Command::Client(client) => {
-                assert_eq!(client.connect.as_deref(), Some("ws://127.0.0.1:7474"));
-                assert_eq!(client.proxy.as_deref(), Some("socks5://127.0.0.1:7897"));
+            Command::Run(run) => {
+                assert_eq!(run.connect.as_deref(), Some("ws://127.0.0.1:7474"));
+                assert_eq!(run.program, "claude");
             }
             other => panic!("unexpected command: {other:?}"),
         }

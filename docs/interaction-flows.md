@@ -62,11 +62,11 @@ Edge notes:
 
 - If process launch fails, no session is registered.
 
-### 3.2 Attach Local Console Flow
+### 3.2 Local Console Runtime Flow
 
 Trigger:
 
-- The user attaches to a local WaitAgent runtime
+- The user starts or re-enters a local WaitAgent-controlled terminal flow
 
 Preconditions:
 
@@ -74,7 +74,7 @@ Preconditions:
 
 Main path:
 
-1. User runs `waitagent attach`.
+1. User runs a local WaitAgent command such as `waitagent run`.
 2. WaitAgent creates a console runtime for the current terminal.
 3. WaitAgent selects an initial focused session.
 4. WaitAgent enables raw mode and resize handling.
@@ -221,10 +221,10 @@ Preconditions:
 Main path:
 
 1. User configures `--connect <access-point>` or equivalent configuration.
-2. Client establishes a connection to the server.
-3. Client authenticates.
-4. Client publishes node metadata.
-5. Client registers all local sessions.
+2. The mirrored local runtime establishes a connection to the server.
+3. The mirrored local runtime authenticates.
+4. The mirrored local runtime publishes node metadata.
+5. The mirrored local runtime registers all local sessions.
 6. Server adds the node and sessions to its aggregate registry.
 
 Result:
@@ -232,11 +232,11 @@ Result:
 - Local sessions become visible on the server side.
 - Local CLI behavior remains unchanged.
 
-### 4.2 Server Attach Flow
+### 4.2 Server Console Flow
 
 Trigger:
 
-- The user attaches a console on the server side
+- The user starts a server-side WaitAgent runtime
 
 Preconditions:
 
@@ -244,7 +244,7 @@ Preconditions:
 
 Main path:
 
-1. User attaches to the server console.
+1. User runs `waitagent server`.
 2. Server creates a console runtime.
 3. Server builds the aggregate session view.
 4. Server selects an initial focused session.
@@ -440,4 +440,3 @@ Recommended implementation order for flows:
 7. Server attach
 8. Mirrored interaction
 9. Disconnect and reconnect
-

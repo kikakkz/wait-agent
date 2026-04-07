@@ -49,29 +49,17 @@ When a session exits:
 - Preserve enough metadata for short-term UI continuity
 - If focused, move focus to the next valid session
 
-### 3.2 Console Attach
+### 3.2 Console Runtime and Mirrored Visibility
 
-#### 3.2.1 Local Attach
+The current public command surface does not expose dedicated `attach` or `client` commands.
 
-A local CLI console may attach to the local WaitAgent runtime.
+Current model:
 
-Behavior:
+- `waitagent run -- <agent-command...>` starts a local session
+- `waitagent run --connect <server-endpoint> -- <agent-command...>` starts a local session and marks it for mirrored server-side visibility
+- `waitagent server` starts the future aggregate server runtime
 
-- One focused session is chosen
-- Terminal resize and raw mode are enabled
-- Input is routed to the focused session
-
-#### 3.2.2 Server Attach
-
-A server console may attach to the aggregate session plane.
-
-Behavior:
-
-- Sessions across nodes are visible
-- Server-side scheduling uses aggregate waiting data
-- Input to a remote session is forwarded to the owning client
-
-#### 3.2.3 Multi-Console Attach
+#### 3.2.1 Multi-Console Attach
 
 The same session may be attached from more than one console.
 
@@ -206,18 +194,31 @@ Behavior:
 
 #### 3.8.1 Configure Access Point
 
-The user may configure one server access point for a local WaitAgent instance.
+The user may configure one server access point for a local WaitAgent run.
 
 Behavior:
 
-- The client connects to the server
+- The mirrored local runtime connects to the server
 - Local sessions register automatically
 - Server-side consoles can view and interact with those sessions
 - Local behavior remains unchanged
 
-#### 3.8.2 Disconnect
+#### 3.8.2 Mirrored Run
 
-If the client loses connection:
+The user may start a session through:
+
+- `waitagent run --connect <server-endpoint> -- <agent-command...>`
+
+Behavior:
+
+- The session still starts locally
+- Local ownership does not change
+- The session becomes eligible for mirrored server-side visibility
+- This replaces the need for a separate public `client` entrypoint
+
+#### 3.8.3 Disconnect
+
+If the mirrored runtime loses connection:
 
 - Mark the node offline on the server
 - Keep local sessions running
@@ -261,14 +262,11 @@ This section defines a suggested MVP command model.
 ### 4.1 Session Commands
 
 - `waitagent run <agent-command...>`
-- `waitagent list`
-- `waitagent attach`
+- `waitagent run --connect <server-endpoint> <agent-command...>`
 
 ### 4.2 Network Commands
 
 - `waitagent server`
-- `waitagent client --connect <access-point>`
-- `waitagent attach --server <access-point>`
 
 ### 4.3 Focus Commands
 
@@ -325,4 +323,3 @@ Those belong in:
 
 - `protocol.md`
 - [module-design.md](module-design.md)
-
