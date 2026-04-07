@@ -49,6 +49,8 @@ Current documents:
 - [Architecture](docs/architecture.md)
 - [Functional Design](docs/functional-design.md)
 - [Module Design](docs/module-design.md)
+- [UI Design](docs/ui-design.md)
+- [Interaction Flows](docs/interaction-flows.md)
 
 ## Recommended Next Documents
 
