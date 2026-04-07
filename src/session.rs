@@ -48,6 +48,7 @@ pub struct SessionRecord {
     pub title: String,
     pub command_line: String,
     pub status: SessionStatus,
+    pub process_id: Option<u32>,
     pub created_at_unix_ms: u128,
     pub last_output_at_unix_ms: Option<u128>,
     pub last_input_at_unix_ms: Option<u128>,
@@ -75,7 +76,7 @@ impl SessionRegistry {
         node_id: String,
         title: String,
         command_line: String,
-    ) -> &SessionRecord {
+    ) -> SessionRecord {
         self.local_counter += 1;
         let session_id = format!("session-{}", self.local_counter);
         let address = SessionAddress::new(node_id, session_id);
@@ -84,19 +85,36 @@ impl SessionRegistry {
             title,
             command_line,
             status: SessionStatus::Starting,
+            process_id: None,
             created_at_unix_ms: now_unix_ms(),
             last_output_at_unix_ms: None,
             last_input_at_unix_ms: None,
         };
 
-        self.sessions.insert(address.clone(), record);
-        self.sessions
-            .get(&address)
-            .expect("newly inserted session should exist")
+        self.sessions.insert(address, record.clone());
+        record
     }
 
     pub fn get(&self, address: &SessionAddress) -> Option<&SessionRecord> {
         self.sessions.get(address)
+    }
+
+    pub fn mark_running(
+        &mut self,
+        address: &SessionAddress,
+        process_id: Option<u32>,
+    ) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.status = SessionStatus::Running;
+        record.process_id = process_id;
+        record.last_output_at_unix_ms = Some(now_unix_ms());
+        Some(record)
+    }
+
+    pub fn mark_exited(&mut self, address: &SessionAddress) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.status = SessionStatus::Exited;
+        Some(record)
     }
 
     pub fn list(&self) -> Vec<&SessionRecord> {
@@ -129,5 +147,6 @@ mod tests {
         assert_eq!(session.address().node_id(), "devbox-1");
         assert_eq!(session.address().session_id(), "session-1");
         assert_eq!(session.title, "claude");
+        assert!(session.process_id.is_none());
     }
 }

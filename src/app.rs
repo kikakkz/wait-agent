@@ -1,8 +1,10 @@
 use crate::cli::{Cli, Command, RunCommand, ServerCommand};
 use crate::config::AppConfig;
+use crate::pty::{PtyManager, PtySize, SpawnRequest};
 use crate::session::{SessionAddress, SessionRegistry};
 use std::error::Error;
 use std::fmt;
+use std::io::{self, Write};
 
 pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
@@ -16,6 +18,7 @@ pub fn run() -> Result<(), AppError> {
 struct App {
     config: AppConfig,
     sessions: SessionRegistry,
+    pty: PtyManager,
 }
 
 impl App {
@@ -23,6 +26,7 @@ impl App {
         Self {
             config,
             sessions: SessionRegistry::new(),
+            pty: PtyManager::new(),
         }
     }
 
@@ -52,10 +56,29 @@ impl App {
         let session =
             self.sessions
                 .create_local_session(runtime.node.node_id.clone(), title, command_line);
+        let mut handle = self.pty.spawn(
+            session.address().clone(),
+            SpawnRequest {
+                program: command.program,
+                args: command.args,
+                size: PtySize::default(),
+            },
+        )?;
+        self.sessions
+            .mark_running(session.address(), handle.process_id());
 
         print_runtime_header("run", &runtime, Some(session.address()));
         println!("agent_command: {}", session.command_line);
-        println!("status: bootstrapped");
+        println!("pty_id: {}", handle.pty_id());
+        println!("status: running");
+        println!(
+            "terminal_size: {}x{}",
+            handle.size().cols,
+            handle.size().rows
+        );
+        if let Some(process_id) = handle.process_id() {
+            println!("process_id: {process_id}");
+        }
         if let Some(connect_addr) = runtime.network.access_point.as_deref() {
             println!("mirror: enabled");
             println!("mirror_target: {connect_addr}");
@@ -63,8 +86,26 @@ impl App {
             println!("mirror: disabled");
         }
         println!(
-            "note: PTY execution is not implemented yet; command and config plumbing are ready."
+            "note: stdin multiplexing and raw terminal control land in the next runtime task."
         );
+        println!();
+
+        let output = handle.read_to_end()?;
+        if !output.is_empty() {
+            let mut stdout = io::stdout().lock();
+            stdout
+                .write_all(&output)
+                .map_err(|error| AppError::Io("failed to write PTY output".to_string(), error))?;
+            stdout
+                .flush()
+                .map_err(|error| AppError::Io("failed to flush PTY output".to_string(), error))?;
+        }
+
+        let exit_status = handle.wait()?;
+        self.sessions.mark_exited(session.address());
+        self.pty.release(session.address());
+        println!();
+        println!("session_exit: {}", format_exit_status(exit_status));
 
         Ok(())
     }
@@ -83,6 +124,14 @@ impl App {
             runtime.network.listen_addr
         );
         Ok(())
+    }
+}
+
+fn format_exit_status(status: crate::pty::ExitStatus) -> String {
+    if status.success() {
+        "success".to_string()
+    } else {
+        status.to_string()
     }
 }
 
@@ -116,6 +165,8 @@ fn print_runtime_header(command: &str, config: &AppConfig, session: Option<&Sess
 pub enum AppError {
     Cli(crate::cli::CliError),
     InvalidCommand(String),
+    Pty(crate::pty::PtyError),
+    Io(String, io::Error),
 }
 
 impl fmt::Display for AppError {
@@ -123,6 +174,8 @@ impl fmt::Display for AppError {
         match self {
             Self::Cli(error) => write!(f, "{error}"),
             Self::InvalidCommand(message) => write!(f, "invalid command: {message}"),
+            Self::Pty(error) => write!(f, "{error}"),
+            Self::Io(context, error) => write!(f, "{context}: {error}"),
         }
     }
 }
@@ -132,5 +185,11 @@ impl Error for AppError {}
 impl From<crate::cli::CliError> for AppError {
     fn from(value: crate::cli::CliError) -> Self {
         Self::Cli(value)
+    }
+}
+
+impl From<crate::pty::PtyError> for AppError {
+    fn from(value: crate::pty::PtyError) -> Self {
+        Self::Pty(value)
     }
 }

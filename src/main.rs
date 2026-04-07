@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod config;
 mod console;
+mod pty;
 mod session;
 
 use std::process::ExitCode;

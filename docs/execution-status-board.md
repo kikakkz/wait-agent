@@ -59,10 +59,11 @@ Current project state:
 - Rust implementation workspace exists
 - Command and config skeleton exists
 - Core session and console domain skeletons exist
+- Local PTY-backed process spawn and ownership model exist
 
 Current phase:
 
-- `Phase 0: Design baseline`
+- `Phase 1: Local MVP`
 
 ## 4. Milestones
 
@@ -108,8 +109,8 @@ The board is split into the following execution tracks:
 | --- | --- | --- | --- | --- |
 | `T1-01` | Initialize implementation workspace and crate structure | `T0-04` | `done` | Rust crate and base source layout exist |
 | `T1-02` | Implement base config loading and app bootstrap | `T1-01` | `done` | Local-first bootstrap and command dispatch exist |
-| `T1-03` | Implement session registry core types | `T1-01` | `in_progress` | Addressing, status, registry, and local session creation exist |
-| `T1-04` | Implement PTY manager spawn and ownership model | `T1-01` | `ready` | Next real systems task |
+| `T1-03` | Implement session registry core types | `T1-01` | `done` | Addressing, status, registry, local session creation, and lifecycle updates exist |
+| `T1-04` | Implement PTY manager spawn and ownership model | `T1-01` | `done` | Local PTY spawn, ownership mapping, resize API, and exit tracking exist |
 | `T1-05` | Implement internal event bus | `T1-01` | `not_started` | Needed for local/network unification |
 | `T1-06` | Implement terminal raw mode and resize capture | `T1-01` | `not_started` | Console foundation |
 
