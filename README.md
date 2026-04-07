@@ -51,11 +51,13 @@ Current documents:
 - [Module Design](docs/module-design.md)
 - [UI Design](docs/ui-design.md)
 - [Interaction Flows](docs/interaction-flows.md)
+- [Protocol](docs/protocol.md)
+- [MVP Plan](docs/mvp-plan.md)
+- [Execution Status Board](docs/execution-status-board.md)
 
-## Recommended Next Documents
+## Recommended Next Step
 
-- `docs/protocol.md`
-- `docs/mvp-plan.md`
+- Start implementation from the local-first plan in [docs/mvp-plan.md](docs/mvp-plan.md)
 
 ## Why This Exists
 

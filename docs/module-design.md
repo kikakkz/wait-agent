@@ -100,6 +100,13 @@ Key types:
 - `SessionRecord`
 - `SessionRegistry`
 
+Recommended internal split:
+
+- `AuthoritativeSessionStore`
+  Lives with the PTY owner
+- `AggregateSessionView`
+  Replicated projection used by the server and other non-owning consoles
+
 ### 3.5 `pty`
 
 Responsibilities:
@@ -187,6 +194,13 @@ Key types:
 - `TransportClient`
 - `TransportServer`
 - `ConnectionId`
+
+Local-first rule:
+
+- The implementation must compile and run without enabling remote transport
+- Transport should be an optional integration boundary, not a prerequisite for local mode
+- A `LoopbackTransport` test adapter is acceptable
+- A real remote transport implementation is phase-two work
 
 ### 3.10 `server`
 
@@ -286,6 +300,7 @@ Important constraints:
 - `renderer` must not depend on `pty`
 - `pty` must not depend on `scheduler`
 - `transport` must not know terminal rendering details
+- `console`, `scheduler`, and `renderer` must not depend on real network transport for local mode
 
 ## 5. Core Interfaces
 
@@ -445,6 +460,14 @@ Reasoning:
 - Local mode should become real before network mode
 - Scheduler correctness should be proven before remote synchronization increases complexity
 
+Local-first checkpoint:
+
+- Do not start `transport`, `server`, or `client` implementation until one local console can:
+  - run multiple sessions
+  - enforce typing protection
+  - switch focus
+  - render Peek
+
 ## 10. Open Module Questions
 
 Questions to resolve:
@@ -459,4 +482,3 @@ Questions to resolve:
 - [wait-agent-prd.md](wait-agent-prd.md)
 - [architecture.md](architecture.md)
 - [functional-design.md](functional-design.md)
-

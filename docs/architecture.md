@@ -134,6 +134,14 @@ The registry should distinguish:
 - `derived state`
   Waiting heuristics, activity windows, focus eligibility
 
+Implementation note for local-first delivery:
+
+- In `local mode`, the registry is authoritative because the PTY lives in-process
+- In `network mode`, the PTY-owning client keeps the authoritative registry for local sessions
+- The server maintains an aggregate replicated view, not PTY authority
+
+This distinction must stay explicit in code to avoid over-designing the local MVP around distributed ownership.
+
 ### 5.4 PTY Runtime
 
 Responsibilities:
@@ -174,6 +182,22 @@ Responsibilities in network mode:
 - Route events to the correct client or server console
 - Broadcast PTY output to attached consoles
 - Support reconnect and replay
+
+### 5.8 Aggregate Session View
+
+Responsibilities:
+
+- Represent remote sessions without taking PTY ownership
+- Merge replicated session metadata from many nodes
+- Support server-side focus, scheduling, and rendering
+
+This component exists only as a network-layer projection.
+
+It must not:
+
+- Become the source of truth for PTY lifecycle
+- Own the canonical session screen state for client-owned PTYs
+- Require the local MVP to implement replication logic before local interaction works
 
 ## 6. State Ownership
 
@@ -398,6 +422,13 @@ That means:
 
 This reduces behavioral drift between local and network mode.
 
+Important local-first clarification:
+
+- The local MVP should ship with no real remote transport dependency
+- The only requirement is that transport-facing boundaries already exist
+- Network mode should later plug into those boundaries using a remote transport adapter
+- If useful, a loopback transport adapter may be used in tests or in-process simulations, but it must not become a prerequisite for delivering the first local MVP
+
 ## 12. Process Architecture
 
 Recommended runtime split:
@@ -418,6 +449,16 @@ Alternative:
   - `waitagent attach`
 
 The single-binary model is preferable for consistency and distribution simplicity.
+
+Recommended command progression:
+
+- Phase 1:
+  - `waitagent run`
+  - `waitagent attach`
+- Phase 2:
+  - `waitagent server`
+  - `waitagent client --connect ...`
+  - `waitagent attach --server ...`
 
 ## 13. Persistence Strategy
 
@@ -521,4 +562,3 @@ Next implementation documents should refine:
 - [functional-design.md](functional-design.md)
 - [module-design.md](module-design.md)
 - `protocol.md`
-
