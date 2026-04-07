@@ -56,7 +56,9 @@ Current project state:
 - Interaction flows are documented
 - Protocol design is documented
 - MVP execution plan is documented
-- No implementation code exists yet
+- Rust implementation workspace exists
+- Command and config skeleton exists
+- Core session and console domain skeletons exist
 
 Current phase:
 
@@ -104,10 +106,10 @@ The board is split into the following execution tracks:
 
 | ID | Task | Depends On | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `T1-01` | Initialize implementation workspace and crate structure | `T0-04` | `ready` | Follow repository structure in [module-design.md](module-design.md) |
-| `T1-02` | Implement base config loading and app bootstrap | `T1-01` | `not_started` | Local-only first |
-| `T1-03` | Implement session registry core types | `T1-01` | `not_started` | Session metadata and lifecycle |
-| `T1-04` | Implement PTY manager spawn and ownership model | `T1-01` | `not_started` | Local PTY only |
+| `T1-01` | Initialize implementation workspace and crate structure | `T0-04` | `done` | Rust crate and base source layout exist |
+| `T1-02` | Implement base config loading and app bootstrap | `T1-01` | `done` | Local-first bootstrap and command dispatch exist |
+| `T1-03` | Implement session registry core types | `T1-01` | `in_progress` | Addressing, status, registry, and local session creation exist |
+| `T1-04` | Implement PTY manager spawn and ownership model | `T1-01` | `ready` | Next real systems task |
 | `T1-05` | Implement internal event bus | `T1-01` | `not_started` | Needed for local/network unification |
 | `T1-06` | Implement terminal raw mode and resize capture | `T1-01` | `not_started` | Console foundation |
 
@@ -266,16 +268,17 @@ Status:
 
 Current blockers:
 
-- No implementation workspace exists yet
+- No PTY runtime exists yet
+- No terminal raw-mode or resize integration exists yet
 
 ## 9. Recommended Next Actions
 
 Recommended immediate sequence:
 
-1. Start `T1-01` by creating the implementation workspace
-2. Start `T1-03` and `T1-04` together, because session registry and PTY ownership are the first real foundation
+1. Complete `T1-03` by extending the registry beyond bootstrapped local session creation
+2. Start `T1-04` and land the first real PTY manager
 3. Start `T1-06` immediately after PTY ownership is stable
-4. Start `T2-04` early enough to test the waiting heuristic before UI hardens around it
+4. Start `T2-01` once PTY events can drive console state
 5. Do not start `T5-*` until local Stage A exit criteria are met
 
 ## 10. Update Rules
