@@ -17,30 +17,61 @@ It complements:
 
 WaitAgent provides three layers of functionality:
 
+- Workspace hosting
 - Session hosting
 - Attention scheduling
 - Optional cross-machine aggregation
 
 ## 3. Functional Areas
 
-### 3.1 Session Lifecycle
+### 3.1 Workspace Lifecycle
 
-#### 3.1.1 Start Session
+#### 3.1.1 Start Workspace
 
-The system must allow a user to start a new session through WaitAgent.
+The system must allow a user to start one local WaitAgent workspace through:
+
+- `waitagent`
+- `waitagent --connect <server-endpoint>`
+
+Expected behavior:
+
+- Bootstrap one local workspace runtime
+- Attach the current terminal as the active console
+- Load any configured access point
+- Restore or initialize the local session registry
+- Render the currently focused session or an empty workspace state
+
+#### 3.1.2 Workspace-Network Extension
+
+If an access point is configured:
+
+- The same local workspace connects to the server
+- Existing local sessions are published automatically
+- Local interaction remains available
+- Server-side interaction becomes an additional synchronized surface
+
+The user must not need a separate public `client` entrypoint.
+
+### 3.2 Session Lifecycle
+
+#### 3.2.1 Start Session
+
+The system must allow a user to start a new managed session from inside WaitAgent.
 
 Expected behavior:
 
 - Allocate or adopt a PTY
-- Launch the agent process
+- Launch the session with a shell-capable environment or configured template
 - Register the session
 - Make the session eligible for focus and scheduling
 
-#### 3.1.2 Adopt Existing Session
+Inside the session, the user may run `codex`, `claude`, `kilo`, `cd`, scripts, or normal shell commands without WaitAgent rewriting them.
+
+#### 3.2.2 Adopt Existing Session
 
 The system may support adopting an externally started session later, but this is not required for the MVP unless the PTY adoption path is technically straightforward.
 
-#### 3.1.3 Exit Session
+#### 3.2.3 Exit Session
 
 When a session exits:
 
@@ -49,17 +80,21 @@ When a session exits:
 - Preserve enough metadata for short-term UI continuity
 - If focused, move focus to the next valid session
 
-### 3.2 Console Runtime and Mirrored Visibility
+### 3.3 Console Runtime and Mirrored Visibility
 
 The current public command surface does not expose dedicated `attach` or `client` commands.
 
-Current model:
+Target model:
 
-- `waitagent run -- <agent-command...>` starts a local session
-- `waitagent run --connect <server-endpoint> -- <agent-command...>` starts a local session and marks it for mirrored server-side visibility
-- `waitagent server` starts the future aggregate server runtime
+- `waitagent` starts a local workspace
+- `waitagent --connect <server-endpoint>` starts the same local workspace and mirrors it to the server
+- `waitagent server` starts the aggregate server runtime
 
-#### 3.2.1 Multi-Console Attach
+Current implementation note:
+
+- `waitagent run ...` may continue to exist as a temporary bridge during implementation, but it is not the intended long-term UX
+
+#### 3.3.1 Multi-Console Attach
 
 The same session may be attached from more than one console.
 
@@ -69,9 +104,9 @@ Behavior:
 - Any console may send input
 - Concurrent input is serialized by arrival order
 
-### 3.3 Focus Management
+### 3.4 Focus Management
 
-#### 3.3.1 Initial Focus Selection
+#### 3.4.1 Initial Focus Selection
 
 When a console attaches:
 
@@ -79,7 +114,7 @@ When a console attaches:
 - Else if there is a most recent interactive session, reuse it
 - Else choose the earliest active session
 
-#### 3.3.2 Manual Focus Switch
+#### 3.4.2 Manual Focus Switch
 
 The user may manually switch to:
 
@@ -94,7 +129,7 @@ Effects:
 - Scheduler lock clears
 - Renderer restores the target screen
 
-#### 3.3.3 Focus Loss
+#### 3.4.3 Focus Loss
 
 If the focused session exits or becomes unreachable:
 
@@ -102,9 +137,9 @@ If the focused session exits or becomes unreachable:
 - Choose the next eligible session
 - Render a minimal transition notice
 
-### 3.4 Input Handling
+### 3.5 Input Handling
 
-#### 3.4.1 Typing State
+#### 3.5.1 Typing State
 
 While the user has in-progress unsubmitted input:
 
@@ -113,7 +148,7 @@ While the user has in-progress unsubmitted input:
 
 This rule prevents misrouting partially typed commands.
 
-#### 3.4.2 Input Submission
+#### 3.5.2 Input Submission
 
 When the user presses `Enter`:
 
@@ -121,7 +156,7 @@ When the user presses `Enter`:
 - Arm one automatic scheduling opportunity
 - Start the continuation observation window
 
-#### 3.4.3 Mirrored Input
+#### 3.5.3 Mirrored Input
 
 In network mode:
 
@@ -129,35 +164,35 @@ In network mode:
 - Input from the server-side attached view appears in the local CLI
 - Resulting PTY output is synchronized to both
 
-### 3.5 Automatic Scheduling
+### 3.6 Automatic Scheduling
 
-#### 3.5.1 Entry Condition
+#### 3.6.1 Entry Condition
 
 Automatic scheduling may only be considered after input submission.
 
-#### 3.5.2 Continuation Observation
+#### 3.6.2 Continuation Observation
 
 After input submission:
 
 - If the current session continues producing output as part of the same interaction round, stay on it
 - Only when that round stabilizes may the scheduler consume the switch opportunity
 
-#### 3.5.3 Waiting Queue Selection
+#### 3.6.3 Waiting Queue Selection
 
 If a switch opportunity is available and the current interaction has stabilized:
 
 - Choose the earliest waiting session in FIFO order
 
-#### 3.5.4 Locking
+#### 3.6.4 Locking
 
 After an automatic switch:
 
 - Lock further automatic switching
 - Unlock on next input submission or manual switch
 
-### 3.6 Waiting Detection
+### 3.7 Waiting Detection
 
-#### 3.6.1 Required Signals
+#### 3.7.1 Required Signals
 
 The system must infer waiting without agent protocol support.
 
@@ -168,7 +203,7 @@ MVP signals:
 - No input was sent recently
 - Process is still alive
 
-#### 3.6.2 Waiting Queue Update
+#### 3.7.2 Waiting Queue Update
 
 When a session transitions into waiting:
 
@@ -179,7 +214,7 @@ When a session becomes active again:
 
 - Remove it from the waiting queue
 
-### 3.7 Peek
+### 3.8 Peek
 
 Peek is a read-only operation.
 
@@ -190,33 +225,29 @@ Behavior:
 - Do not change input ownership
 - Exit back to the original focused session
 
-### 3.8 Network Access Point
+### 3.9 Network Access Point
 
-#### 3.8.1 Configure Access Point
+#### 3.9.1 Configure Access Point
 
-The user may configure one server access point for a local WaitAgent run.
+The user may configure one server access point for a local WaitAgent workspace.
 
 Behavior:
 
-- The mirrored local runtime connects to the server
+- The local workspace connects to the server
 - Local sessions register automatically
 - Server-side consoles can view and interact with those sessions
 - Local behavior remains unchanged
 
-#### 3.8.2 Mirrored Run
+#### 3.9.2 Mirrored Workspace Behavior
 
-The user may start a session through:
+When a workspace is connected:
 
-- `waitagent run --connect <server-endpoint> -- <agent-command...>`
-
-Behavior:
-
-- The session still starts locally
+- Sessions still start locally
 - Local ownership does not change
-- The session becomes eligible for mirrored server-side visibility
-- This replaces the need for a separate public `client` entrypoint
+- Sessions become eligible for mirrored server-side visibility
+- The user still does not need a separate public `client` entrypoint
 
-#### 3.8.3 Disconnect
+#### 3.9.3 Disconnect
 
 If the mirrored runtime loses connection:
 
@@ -225,7 +256,7 @@ If the mirrored runtime loses connection:
 - Prevent server-side writes to unreachable sessions
 - Restore session linkage after reconnect when possible
 
-### 3.9 Resize Synchronization
+### 3.10 Resize Synchronization
 
 When the console terminal size changes:
 
@@ -233,7 +264,7 @@ When the console terminal size changes:
 - Propagate size change to the owning PTY
 - In network mode, forward resize through the server/client path
 
-### 3.10 Minimal UI
+### 3.11 Minimal UI
 
 The visible UI must remain terminal-native.
 
@@ -259,23 +290,24 @@ Disallowed:
 
 This section defines a suggested MVP command model.
 
-### 4.1 Session Commands
+### 4.1 Entry Commands
 
-- `waitagent run <agent-command...>`
-- `waitagent run --connect <server-endpoint> <agent-command...>`
+- `waitagent`
+- `waitagent --connect <server-endpoint>`
 
 ### 4.2 Network Commands
 
 - `waitagent server`
 
-### 4.3 Focus Commands
+### 4.3 Workspace Commands
 
+- `new-session`
 - `next-session`
 - `prev-session`
 - `focus-session <session>`
 - `peek-session <session>`
 
-These may be implemented as keyboard shortcuts rather than shell subcommands.
+These may be implemented as keyboard shortcuts, prompt commands, or lightweight control actions inside the workspace rather than traditional shell subcommands.
 
 ## 5. Functional Invariants
 
@@ -292,7 +324,9 @@ The following must hold in every mode:
 
 ### 6.1 Local Mode
 
-- Start three sessions
+- Start one `waitagent`
+- Create three sessions inside it
+- Run an agent command such as `codex` or `claude` inside one session
 - Focus one
 - Type partial input
 - Verify switch is blocked
@@ -302,7 +336,7 @@ The following must hold in every mode:
 
 ### 6.2 Network Mode
 
-- Connect two client nodes
+- Connect two workspace nodes
 - Verify sessions appear on the server
 - Interact locally with a remote-registered session
 - Verify the server sees synchronized output

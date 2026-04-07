@@ -12,7 +12,7 @@ It is intentionally narrower than the full board.
 
 Primary rule:
 
-> Deliver a usable local MVP first. Add network capabilities only after the local interaction model is proven.
+> Deliver a usable single-entry local workspace first. Add network capabilities only after the workspace interaction model is proven.
 
 It complements:
 
@@ -33,9 +33,11 @@ Stage B must not begin until Stage A is usable end to end.
 
 ## 3.1 Goal
 
-Prove that WaitAgent can solve the core interaction problem locally:
+Prove that WaitAgent can solve the core interaction problem locally through one `waitagent` entrypoint:
 
+- One workspace shell
 - Multiple sessions
+- In-workspace session creation
 - Single-focus console
 - Waiting heuristic
 - One-enter one-switch scheduling
@@ -45,16 +47,20 @@ Prove that WaitAgent can solve the core interaction problem locally:
 ## 3.2 Included Scope
 
 - CLI bootstrap
+- Workspace shell bootstrap
 - Session registry
 - PTY manager
 - Terminal raw mode and resize
 - Console runtime
+- In-workspace session creation and listing
+- Shell-backed session defaults and working-directory context
 - Typing-state protection
 - Waiting heuristic
 - Waiting queue
 - Auto-switch scheduler
 - Peek
 - Focus renderer and minimal status lines
+- A user-visible path where a single machine only needs one `waitagent`
 
 ## 3.3 Explicitly Excluded from Stage A
 
@@ -88,18 +94,23 @@ Use this exact order:
 17. `T3-04` Implement minimal top and bottom status lines
 18. `T3-05` Implement focus restore on switch
 19. `T3-06` Implement Peek rendering path
-20. `T4-01` Build end-to-end local attach command
+20. `T4-01` Build end-to-end local interactive runtime bridge
 21. `T4-02` Add scheduler unit tests
 22. `T4-03` Add PTY integration tests
 23. `T4-04` Add renderer snapshot tests
 24. `T4-05` Validate three-session local workflow manually
 25. `T4-06` Fix local MVP defects and stabilize
+26. `T4-07` Implement single-entry workspace shell bootstrap
+27. `T4-08` Implement in-workspace session creation and background lifecycle
+28. `T4-09` Implement shell-backed session defaults and working-directory handling
+29. `T4-10` Validate three-session workflow through one `waitagent` entrypoint
 
 ## 3.5 Stage A Exit Criteria
 
 Stage A is complete only if all of the following are true:
 
 - A user can run at least three local sessions
+- The user only needs one local `waitagent` instance to manage those sessions
 - One console can switch among them
 - Partial input blocks switching
 - One `Enter` creates at most one automatic switch
@@ -111,7 +122,7 @@ Stage A is complete only if all of the following are true:
 
 ## 4.1 Goal
 
-Extend the local MVP so sessions from remote nodes can appear on a server-side console while preserving local CLI interaction.
+Extend the local workspace MVP so sessions from remote nodes can appear on a server-side console while preserving the same local workspace interaction.
 
 ## 4.2 Included Scope
 
@@ -121,10 +132,11 @@ Extend the local MVP so sessions from remote nodes can appear on a server-side c
 - Node registration
 - Remote session publication
 - Server-side aggregate session registry
+- Workspace-level access-point bootstrap
 - Remote input and resize routing
 - Mirrored output broadcast
 - Mirrored input propagation
-- Server-side console attach
+- Server-side workspace console
 
 ## 4.3 Explicitly Excluded from Stage B
 
@@ -140,6 +152,7 @@ Do not start Stage B until:
 - Stage A exit criteria are met
 - Local scheduler behavior is stable
 - Local renderer behavior is stable
+- The single-entry local workspace UX is the primary supported interaction model
 - Core session and PTY ownership model has not been changing for at least one iteration
 
 ## 4.5 Stage B Task Set
@@ -154,7 +167,7 @@ Use this order:
 6. `T5-05` Implement remote session publication
 7. `T5-06` Implement aggregate server session registry
 8. `T5-07` Implement remote resize and input routing
-9. `T6-01` Implement server-side console attach
+9. `T6-01` Implement server-side workspace console
 10. `T6-02` Implement mirrored output broadcast
 11. `T6-03` Implement mirrored input propagation
 12. `T6-04` Implement server-side waiting queue
@@ -170,6 +183,7 @@ Stage B is complete only if:
 - The same session can be attached locally and from the server
 - Input from either side reaches the same PTY
 - Output from that PTY is mirrored to all attached consoles
+- The local machine still feels like one `waitagent` workspace rather than a special client mode
 - Server-side focus and waiting queue behavior work for remote sessions
 
 ## 5. Deferred Work
@@ -219,10 +233,9 @@ Mitigation:
 
 If implementation starts now, begin with:
 
-1. `T1-01` Initialize implementation workspace and crate structure
-2. `T1-03` Implement session registry core types
-3. `T1-04` Implement PTY manager spawn and ownership model
-4. `T1-06` Implement terminal raw mode and resize capture
+1. `T4-07` Implement single-entry workspace shell bootstrap
+2. `T4-08` Implement in-workspace session creation and background lifecycle
+3. `T4-09` Implement shell-backed session defaults and working-directory handling
+4. `T4-10` Validate the local multi-session workflow through one `waitagent`
 
-These are the minimum foundational tasks that unlock the rest of Stage A.
-
+The local runtime foundations already exist. The next critical work is making the workspace-first UX the primary product surface before continuing network-facing UX work.

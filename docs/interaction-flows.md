@@ -36,55 +36,78 @@ Each flow is described with:
 
 ## 3. Primary Flows
 
-### 3.1 Start Local Session Flow
+### 3.1 Start Local Workspace Flow
 
 Trigger:
 
-- The user starts a new local session through WaitAgent
+- The user starts WaitAgent on a local machine
 
 Preconditions:
 
-- Local WaitAgent runtime is available
+- Local WaitAgent binary is available
 
 Main path:
 
-1. User runs `waitagent run <agent-command...>`.
-2. WaitAgent allocates a PTY and starts the agent process.
-3. WaitAgent registers the session in the local session registry.
-4. If no focus exists, WaitAgent focuses the new session.
-5. The terminal begins rendering the session viewport.
+1. User runs `waitagent`.
+2. WaitAgent boots one local workspace runtime.
+3. WaitAgent creates a console runtime for the current terminal.
+4. WaitAgent restores existing session state or initializes an empty workspace.
+5. If a focusable session exists, WaitAgent focuses it.
+6. The terminal begins rendering the focused session or empty workspace state.
 
 Result:
 
-- A new session exists and is eligible for scheduling.
+- One local WaitAgent workspace is active and ready to manage sessions.
 
 Edge notes:
 
-- If process launch fails, no session is registered.
+- Starting WaitAgent should not require the user to decide upfront which agent command will run first.
 
-### 3.2 Local Console Runtime Flow
+### 3.2 Create Local Session Flow
 
 Trigger:
 
-- The user starts or re-enters a local WaitAgent-controlled terminal flow
+- The user creates a new managed session inside WaitAgent
 
 Preconditions:
 
-- One or more local sessions exist
+- A local workspace is active
 
 Main path:
 
-1. User runs a local WaitAgent command such as `waitagent run`.
-2. WaitAgent creates a console runtime for the current terminal.
-3. WaitAgent selects an initial focused session.
-4. WaitAgent enables raw mode and resize handling.
-5. WaitAgent renders the focused session.
+1. User triggers `new-session` or the equivalent control action.
+2. WaitAgent allocates a PTY for the new session.
+3. WaitAgent starts the session with the configured shell or template.
+4. WaitAgent registers the session in the local session registry.
+5. If policy says the new session should be foregrounded, WaitAgent focuses it.
+6. The terminal renders the new focused session or keeps the prior focus if creation was backgrounded.
 
 Result:
 
-- The user is interacting with one focused session in one console.
+- A new managed session exists and is eligible for scheduling.
 
-### 3.3 Typing and Submit Flow
+### 3.3 Run Agent Command Inside Session Flow
+
+Trigger:
+
+- The user is inside a focused session and starts an agent workflow
+
+Preconditions:
+
+- A focused session exists
+
+Main path:
+
+1. User types a normal command such as `codex`, `claude`, `kilo`, `cd`, or a shell script.
+2. WaitAgent forwards the raw bytes to the focused PTY.
+3. The session command runs inside that PTY-backed session.
+4. Output renders as raw terminal output in the focused viewport.
+
+Result:
+
+- WaitAgent remains a transport and scheduling layer, not a semantic command interpreter.
+
+### 3.4 Typing and Submit Flow
 
 Trigger:
 
@@ -109,7 +132,7 @@ Result:
 - The session receives the input.
 - One scheduling opportunity exists.
 
-### 3.4 Continuous Interaction Protection Flow
+### 3.5 Continuous Interaction Protection Flow
 
 Trigger:
 
@@ -135,7 +158,7 @@ Edge notes:
 
 - This is the rule that protects `prompt1 -> input -> prompt2`.
 
-### 3.5 Automatic Switch Flow
+### 3.6 Automatic Switch Flow
 
 Trigger:
 
@@ -160,7 +183,7 @@ Result:
 - One automatic switch occurs.
 - No further auto-switch may happen until unlock.
 
-### 3.6 Manual Switch Flow
+### 3.7 Manual Switch Flow
 
 Trigger:
 
@@ -182,7 +205,7 @@ Result:
 
 - The user now interacts with the selected session.
 
-### 3.7 Peek Flow
+### 3.8 Peek Flow
 
 Trigger:
 
@@ -211,20 +234,20 @@ Result:
 
 Trigger:
 
-- The user configures a WaitAgent server access point on a client node
+- The user configures a WaitAgent server access point for a local workspace
 
 Preconditions:
 
-- Client runtime is installed
+- Local workspace runtime is installed
 - Network credentials are available
 
 Main path:
 
-1. User configures `--connect <access-point>` or equivalent configuration.
-2. The mirrored local runtime establishes a connection to the server.
-3. The mirrored local runtime authenticates.
-4. The mirrored local runtime publishes node metadata.
-5. The mirrored local runtime registers all local sessions.
+1. User starts `waitagent --connect <access-point>` or sets equivalent configuration.
+2. The local workspace establishes a connection to the server.
+3. The local workspace authenticates.
+4. The local workspace publishes node metadata.
+5. The local workspace registers all local sessions.
 6. Server adds the node and sessions to its aggregate registry.
 
 Result:
@@ -252,7 +275,7 @@ Main path:
 
 Result:
 
-- The server terminal becomes a first-class interaction surface.
+- The server terminal becomes a first-class interaction surface for the same workspace model.
 
 ### 4.3 Mirrored Interaction Flow
 
@@ -431,12 +454,14 @@ Every interaction flow must preserve:
 
 Recommended implementation order for flows:
 
-1. Local session start and attach
-2. Typing and submit
-3. Manual switch
-4. Automatic scheduling
-5. Peek
-6. Access point and registration
-7. Server attach
-8. Mirrored interaction
-9. Disconnect and reconnect
+1. Local workspace start
+2. Local session creation
+3. Run agent command inside a session
+4. Typing and submit
+5. Manual switch
+6. Automatic scheduling
+7. Peek
+8. Access point and registration
+9. Server workspace interaction
+10. Mirrored interaction
+11. Disconnect and reconnect

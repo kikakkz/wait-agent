@@ -11,6 +11,14 @@ One-line definition:
 
 > Let multiple AI agent sessions share one terminal instead of forcing the user to move across many terminals. These sessions may come from one machine or many machines.
 
+Primary UX model:
+
+- On one machine, the user starts one `waitagent`
+- That `waitagent` instance becomes the workspace shell for creating and managing sessions
+- Each managed session is a PTY-backed work context where the user can still run `codex`, `claude`, `kilo`, `cd`, scripts, and normal shell workflows
+- In network mode, the same local workspace may connect to one `waitagent server`
+- The server becomes an additional interaction surface, not a different product
+
 WaitAgent is not an agent, not an IDE, and not an orchestrator. It is a:
 
 > Terminal-native interaction scheduler
@@ -24,8 +32,8 @@ It sits between the user and multiple agent sessions and decides:
 
 WaitAgent supports two deployment modes:
 
-- `Local mode`: multiple sessions run on one machine and are aggregated locally
-- `Network mode`: the user configures one access point; local sessions become visible on a server-side console, while the local CLI remains fully interactive and both sides stay synchronized
+- `Local mode`: one `waitagent` instance hosts multiple managed sessions on one machine
+- `Network mode`: the user configures one access point; the same local workspace becomes visible on a server-side console, while the local CLI remains fully interactive and both sides stay synchronized
 
 ## 2. Background and Problem
 
@@ -60,18 +68,20 @@ WaitAgent does not try to make agents smarter. It tries to:
 ### 3.1 Goals
 
 - Support multiple independent agent sessions behind one terminal experience
+- Make one `waitagent` instance the default entrypoint per machine
 - Support sessions from multiple machines inside one interaction plane
 - Expose only one session for active interaction at a time within a given console
 - Keep local mode and network mode behaviorally consistent
 - Detect sessions that are likely waiting for user input
 - Allow at most one automatic switch after the user submits input
-- Preserve raw TTY semantics and avoid changing agent behavior or command habits
+- Preserve raw TTY semantics and avoid changing agent behavior or in-session command habits
 - Let a user configure a single access point and have sessions become naturally available on the server side
 - Keep both the local CLI and the server-side console interactive in network mode, with automatic synchronization
 
 ### 3.2 Success Criteria
 
 - The user no longer needs to maintain a many-terminal mental model
+- On a single machine, the user only needs to start one `waitagent`
 - The user can manage sessions from multiple client machines on one server console
 - The user does not lose the local CLI interaction model when enabling network mode
 - The user can always tell where input is going within the active console
@@ -118,7 +128,7 @@ These users generally:
 - `100% TTY passthrough`
 - `No semantic parsing`
 - `No agent behavior modification`
-- `No command habit changes`
+- `No in-session command habit changes`
 
 ### 6.2 P1: Experience Principles
 
@@ -134,7 +144,9 @@ These users generally:
 
 ### 7.1 Session
 
-A session is one agent process attached to one PTY.
+A session is one PTY-backed WaitAgent-managed work context.
+
+In the preferred UX, a new session starts as a shell-capable environment where the user may launch `codex`, `claude`, `kilo`, shell scripts, or other terminal workflows without WaitAgent interpreting them semantically.
 
 In network mode, a session belongs to a client node but is visible through the server.
 
@@ -193,11 +205,13 @@ WaitAgent Server is the aggregation and interaction surface that:
 
 WaitAgent Client runs on the machine that owns the PTY and:
 
-- Starts or adopts local agent processes
+- Starts or adopts local managed sessions
 - Maintains local PTYs and screen buffers
 - Synchronizes session output and state to the server
 - Writes input coming from the local CLI or the server-side console into the same PTY
 - Preserves full local interaction even after network mode is enabled
+
+`Client` is an implementation role, not a separate user-facing product entrypoint.
 
 ### 7.10 Session Address
 
@@ -403,27 +417,27 @@ Note:
 Local mode:
 
 ```text
-Shell alias
+User Terminal
    ↓
-Proxy / PTY Manager
+WaitAgent Workspace Shell
    ↓
-Multiple PTYs (one per agent)
-   ↓
-Session Manager
+Console Runtime + Session Manager
    ↓
 Focus Scheduler
    ↓
 Renderer + Input Controller
    ↓
-Single Terminal Output
+Managed Session PTYs
+   ↓
+Shells / Agent Commands / Workflows
 ```
 
 Network mode:
 
 ```text
-User Terminal
+Server Terminal
    ↓
-WaitAgent Server
+WaitAgent Server Workspace
    ↓
 Global Session Registry + Aggregate Scheduler
    ↓
@@ -431,9 +445,9 @@ Persistent Connections
    ↓
 WaitAgent Clients (multiple machines)
    ↓
-Local PTY Managers
+Local WaitAgent Workspaces
    ↓
-Agent Processes on each machine
+Managed Session PTYs on each machine
 ```
 
 Experience invariants:
@@ -445,8 +459,8 @@ Experience invariants:
 
 Responsibilities:
 
-- Start or adopt agent processes
-- Create one PTY per agent
+- Start or adopt managed sessions
+- Create one PTY per session
 - Pass through stdin, stdout, and stderr
 - Handle ANSI, cursor control, raw mode, and resize
 
@@ -501,7 +515,7 @@ Responsibilities:
 
 Responsibilities:
 
-- Start or adopt local agent processes
+- Start or adopt local managed sessions
 - Maintain local PTYs and screen buffers
 - Report session output, state changes, and lifecycle events
 - Accept input, resize, and attach requests from the server
@@ -616,9 +630,12 @@ Allowed minimal UI elements:
 
 ### 13.1 Phase 1: Local Single-Machine Version
 
+- One `waitagent` workspace entrypoint
 - Alias injection
 - PTY proxy
 - Multi-session management
+- In-workspace session creation
+- Shell-backed session defaults
 - Single-focus switching
 - One automatic switch opportunity after input submission
 - Manual switching
@@ -630,11 +647,11 @@ Allowed minimal UI elements:
 ### 13.2 Phase 2: Network Version
 
 - WaitAgent Server
-- WaitAgent Client
+- WaitAgent Client runtime
 - Multi-node session aggregation
 - Global session namespace
 - Cross-machine aggregate waiting queue
-- Mirrored server/client interaction
+- Mirrored workspace interaction
 - Multi-console attach and broadcast
 - Access point configuration
 - Reconnect and offline-node handling
@@ -658,6 +675,7 @@ Allowed minimal UI elements:
 Functional acceptance:
 
 - Support at least `3` simultaneous sessions
+- On a single machine, those sessions must be reachable through one `waitagent` instance
 - Foreground input must never enter background sessions within a console
 - Waiting sessions must enter FIFO order correctly
 - One `Enter` must trigger at most one automatic switch
@@ -676,6 +694,7 @@ Experience acceptance:
 - Users switch terminals significantly less often
 - Users no longer need to poll background sessions constantly
 - Users can clearly tell where input goes within the active console
+- Users do not need to open a second local WaitAgent instance just to manage additional sessions
 - Users do not need to log into multiple machines just to take over sessions
 - Users do not need to change local CLI habits to benefit from server aggregation
 
@@ -724,6 +743,7 @@ These tools solve:
 They do not solve:
 
 - How multiple independent sessions share one terminal workflow
+- A single workspace-shell entry that can create, background, and revisit those sessions
 - Human input scheduling across many sessions
 - A vendor-neutral single-focus interaction layer
 - Safe cross-machine aggregation behind one interaction surface

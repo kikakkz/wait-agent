@@ -24,6 +24,7 @@ The architecture must preserve the following product constraints:
 - The system must not parse or rewrite agent intent
 - The same interaction model must apply in local and network mode
 - Network mode must extend local mode rather than replace it
+- One `waitagent` instance should be the default local entrypoint per machine
 - Multiple consoles may attach to the same session, but each console keeps one local focus
 
 ## 3. Architectural View
@@ -53,7 +54,7 @@ Network mode only adds:
 ```text
 User Terminal
    ↓
-CLI Frontend
+WaitAgent Workspace Entry
    ↓
 Console Runtime
    ↓
@@ -63,7 +64,7 @@ Scheduler
    ↓
 PTY Runtime
    ↓
-Agent Processes
+Managed Shell / Agent Workflows
 ```
 
 ### 4.2 Network Mode
@@ -71,7 +72,7 @@ Agent Processes
 ```text
 Server Terminal
    ↓
-Server CLI Frontend
+Server Workspace Entry
    ↓
 Server Console Runtime
    ↓
@@ -83,23 +84,31 @@ Transport Hub
    ↙                ↘
 Client A            Client B
    ↓                  ↓
-Local Console       Local Console
+Local Workspace     Local Workspace
    ↓                  ↓
 Local PTY Runtime   Local PTY Runtime
    ↓                  ↓
-Agent Processes     Agent Processes
+Managed Sessions    Managed Sessions
 ```
 
 ## 5. Core Architectural Components
 
-### 5.1 CLI Frontend
+### 5.1 Workspace Entry
 
 Responsibilities:
 
 - Parse commands and flags
-- Bootstrap local or network mode
+- Bootstrap local workspace mode or server mode
 - Attach the current terminal as a console
 - Apply terminal raw mode and resize wiring
+
+Preferred public model:
+
+- `waitagent`
+- `waitagent --connect <server-endpoint>`
+- `waitagent server`
+
+The current `run` bridge may still exist temporarily during implementation, but it is not the target UX.
 
 ### 5.2 Console Runtime
 
@@ -434,14 +443,12 @@ Important local-first clarification:
 Recommended runtime split:
 
 - `waitagent`
-  CLI binary
-- `waitagent-server`
-  Optional dedicated server entrypoint
+  Workspace-first CLI binary
 
 Alternative:
 
 - One binary with subcommands:
-  - `waitagent run`
+  - `waitagent`
   - `waitagent server`
 
 The single-binary model is preferable for consistency and distribution simplicity.
@@ -449,10 +456,10 @@ The single-binary model is preferable for consistency and distribution simplicit
 Recommended command progression:
 
 - Phase 1:
-  - `waitagent run`
+  - `waitagent`
 - Phase 2:
   - `waitagent server`
-  - `waitagent run --connect ...`
+  - `waitagent --connect ...`
 
 ## 13. Persistence Strategy
 
@@ -548,6 +555,7 @@ These questions should be resolved before implementation locks down:
 - Should local and server schedulers share waiting metadata or derive independently
 - How should alternate screen restoration behave across console attaches
 - Whether attach notifications should be silent or explicit by default
+- Whether new local sessions should always start from a shell template or support an optional initial command in the MVP
 
 ## 19. Deliverables After This Document
 

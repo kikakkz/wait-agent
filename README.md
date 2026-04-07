@@ -6,25 +6,34 @@ It does not try to replace agents, IDEs, or orchestration platforms. It focuses 
 
 > Let multiple AI agent sessions share one terminal, instead of forcing the user to switch between many terminals.
 
+The target UX is workspace-first:
+
+- On a single machine, the user starts one `waitagent`
+- Inside that WaitAgent workspace, the user creates and manages multiple background sessions
+- In multi-machine mode, those same local workspaces connect to one `waitagent server`
+- Local and server-side interaction stay synchronized and follow the same single-focus model
+
 ## Current Positioning
 
 The core goals of WaitAgent are:
 
+- Provide one workspace shell entrypoint per machine
 - Run multiple independent agent sessions behind a single terminal experience
 - Expose only one active session for interaction at a time within each attached console
 - Detect sessions that are likely waiting for user input
 - Allow at most one automatic switch after the user submits input
 - Preserve raw TTY behavior without semantic parsing or agent-specific behavior changes
+- Keep local mode and network mode behaviorally identical from the user’s perspective
 
 ## Deployment Modes
 
 ### Local Mode
 
-Multiple sessions run on the same machine and are aggregated by a local WaitAgent instance.
+The user starts one `waitagent` workspace on the machine and creates multiple managed sessions inside it.
 
 ### Network Mode
 
-The user only needs to configure an access point for a WaitAgent instance:
+The user configures one access point for the same `waitagent` workspace:
 
 - Local sessions become visible on the server side automatically
 - The local CLI remains fully interactive
@@ -41,7 +50,14 @@ The user only needs to configure an access point for a WaitAgent instance:
 
 ## Current State
 
-This repository currently contains product documentation only. Implementation has not started yet.
+This repository contains product documentation and an active Rust implementation.
+
+Current implementation status:
+
+- Local PTY runtime, scheduler, Peek, renderer, and validation coverage exist
+- Network transport, server runtime, client runtime, node registration, and remote session publication baselines exist
+- The current public CLI still reflects a temporary bridge model centered on `run` and `server`
+- The next user-facing milestone is the workspace-first UX where one `waitagent` manages multiple local sessions directly
 
 Current documents:
 
@@ -57,7 +73,7 @@ Current documents:
 
 ## Recommended Next Step
 
-- Start implementation from the local-first plan in [docs/mvp-plan.md](docs/mvp-plan.md)
+- Finish the local workspace shell UX described in [docs/mvp-plan.md](docs/mvp-plan.md), then resume network aggregation work on top of that entry model
 
 ## Why This Exists
 
