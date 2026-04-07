@@ -104,16 +104,55 @@ impl SessionRegistry {
         address: &SessionAddress,
         process_id: Option<u32>,
     ) -> Option<&SessionRecord> {
+        self.mark_running_at(address, process_id, None)
+    }
+
+    pub(crate) fn mark_running_at(
+        &mut self,
+        address: &SessionAddress,
+        process_id: Option<u32>,
+        output_at_unix_ms: Option<u128>,
+    ) -> Option<&SessionRecord> {
         let record = self.sessions.get_mut(address)?;
         record.status = SessionStatus::Running;
         record.process_id = process_id;
-        record.last_output_at_unix_ms = Some(now_unix_ms());
+        record.last_output_at_unix_ms = output_at_unix_ms;
         Some(record)
     }
 
     pub fn mark_exited(&mut self, address: &SessionAddress) -> Option<&SessionRecord> {
         let record = self.sessions.get_mut(address)?;
         record.status = SessionStatus::Exited;
+        Some(record)
+    }
+
+    pub fn mark_output(&mut self, address: &SessionAddress) -> Option<&SessionRecord> {
+        self.mark_output_at(address, now_unix_ms())
+    }
+
+    pub(crate) fn mark_output_at(
+        &mut self,
+        address: &SessionAddress,
+        at_unix_ms: u128,
+    ) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.status = SessionStatus::Running;
+        record.last_output_at_unix_ms = Some(at_unix_ms);
+        Some(record)
+    }
+
+    pub fn mark_input(&mut self, address: &SessionAddress) -> Option<&SessionRecord> {
+        self.mark_input_at(address, now_unix_ms())
+    }
+
+    pub(crate) fn mark_input_at(
+        &mut self,
+        address: &SessionAddress,
+        at_unix_ms: u128,
+    ) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.status = SessionStatus::Running;
+        record.last_input_at_unix_ms = Some(at_unix_ms);
         Some(record)
     }
 

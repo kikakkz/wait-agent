@@ -3,7 +3,9 @@ mod cli;
 mod config;
 mod console;
 mod pty;
+mod scheduler;
 mod session;
+mod terminal;
 
 use std::process::ExitCode;
 

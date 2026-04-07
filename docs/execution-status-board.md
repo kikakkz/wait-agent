@@ -60,6 +60,10 @@ Current project state:
 - Command and config skeleton exists
 - Core session and console domain skeletons exist
 - Local PTY-backed process spawn and ownership model exist
+- Terminal raw-mode and size-capture foundation exist
+- Console focus and Peek runtime state exist
+- Waiting heuristic and FIFO waiting queue foundations exist
+- Auto-switch and continuation-protection state machine foundations exist
 
 Current phase:
 
@@ -112,19 +116,19 @@ The board is split into the following execution tracks:
 | `T1-03` | Implement session registry core types | `T1-01` | `done` | Addressing, status, registry, local session creation, and lifecycle updates exist |
 | `T1-04` | Implement PTY manager spawn and ownership model | `T1-01` | `done` | Local PTY spawn, ownership mapping, resize API, and exit tracking exist |
 | `T1-05` | Implement internal event bus | `T1-01` | `not_started` | Needed for local/network unification |
-| `T1-06` | Implement terminal raw mode and resize capture | `T1-01` | `not_started` | Console foundation |
+| `T1-06` | Implement terminal raw mode and resize capture | `T1-01` | `done` | Terminal module, raw-mode guard, size snapshot, and resize tracker exist |
 
 ## 6.3 T2 Console Interaction and Scheduler
 
 | ID | Task | Depends On | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `T2-01` | Implement console runtime state | `T1-02`, `T1-03` | `not_started` | Focus, Peek, input state |
-| `T2-02` | Implement manual focus switching | `T2-01`, `T1-03` | `not_started` | Next, previous, direct target |
-| `T2-03` | Implement typing-state protection | `T2-01` | `not_started` | No switching during partial input |
-| `T2-04` | Implement waiting heuristic engine | `T1-03`, `T1-04` | `not_started` | Non-semantic detection only |
-| `T2-05` | Implement waiting queue management | `T2-04` | `not_started` | FIFO ordering |
-| `T2-06` | Implement auto-switch state machine | `T2-03`, `T2-05` | `not_started` | One-enter one-switch rule |
-| `T2-07` | Implement continuation protection | `T2-06` | `not_started` | Protect `prompt1 -> input -> prompt2` |
+| `T2-01` | Implement console runtime state | `T1-02`, `T1-03` | `done` | Focus, Peek, attach selection, manual switching, and focus loss handling exist |
+| `T2-02` | Implement manual focus switching | `T2-01`, `T1-03` | `done` | Next, previous, index, and direct-target switching exist in console state |
+| `T2-03` | Implement typing-state protection | `T2-01` | `done` | Manual focus switching is blocked during partial input |
+| `T2-04` | Implement waiting heuristic engine | `T1-03`, `T1-04` | `done` | Non-semantic waiting classification exists for running, waiting, idle, and exited sessions |
+| `T2-05` | Implement waiting queue management | `T2-04` | `done` | FIFO queue sync preserves first-wait order and removes resumed sessions |
+| `T2-06` | Implement auto-switch state machine | `T2-03`, `T2-05` | `done` | One-enter one-switch decision flow and switch lock behavior exist in scheduler state |
+| `T2-07` | Implement continuation protection | `T2-06` | `done` | Current-session continuation keeps focus until the round stabilizes |
 | `T2-08` | Implement Peek mode | `T2-01` | `not_started` | Read-only inspection path |
 
 ## 6.4 T3 Terminal UI and Rendering
@@ -269,17 +273,17 @@ Status:
 
 Current blockers:
 
-- No PTY runtime exists yet
-- No terminal raw-mode or resize integration exists yet
+- No explicit Peek interaction path exists yet
+- No focused renderer exists yet
 
 ## 9. Recommended Next Actions
 
 Recommended immediate sequence:
 
-1. Complete `T1-03` by extending the registry beyond bootstrapped local session creation
-2. Start `T1-04` and land the first real PTY manager
-3. Start `T1-06` immediately after PTY ownership is stable
-4. Start `T2-01` once PTY events can drive console state
+1. Start `T2-08` and complete the explicit read-only Peek interaction path
+2. Start `T3-01` once scheduler outputs are stable enough to drive screen-state updates
+3. Start `T3-02` to persist per-session screen snapshots for focus restore
+4. Start `T3-03` and `T3-04` only after terminal screen-state capture exists
 5. Do not start `T5-*` until local Stage A exit criteria are met
 
 ## 10. Update Rules

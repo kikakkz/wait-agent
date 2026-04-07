@@ -2,6 +2,7 @@ use crate::cli::{Cli, Command, RunCommand, ServerCommand};
 use crate::config::AppConfig;
 use crate::pty::{PtyManager, PtySize, SpawnRequest};
 use crate::session::{SessionAddress, SessionRegistry};
+use crate::terminal::TerminalRuntime;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
@@ -19,6 +20,7 @@ struct App {
     config: AppConfig,
     sessions: SessionRegistry,
     pty: PtyManager,
+    terminal: TerminalRuntime,
 }
 
 impl App {
@@ -27,6 +29,7 @@ impl App {
             config,
             sessions: SessionRegistry::new(),
             pty: PtyManager::new(),
+            terminal: TerminalRuntime::stdio(),
         }
     }
 
@@ -53,6 +56,7 @@ impl App {
             .runtime_for_run(command.node_id.as_deref(), command.connect.as_deref());
         let command_line = command.command_line();
         let title = command.program.clone();
+        let terminal_snapshot = self.terminal.snapshot()?;
         let session =
             self.sessions
                 .create_local_session(runtime.node.node_id.clone(), title, command_line);
@@ -61,7 +65,7 @@ impl App {
             SpawnRequest {
                 program: command.program,
                 args: command.args,
-                size: PtySize::default(),
+                size: PtySize::from(terminal_snapshot.size),
             },
         )?;
         self.sessions
@@ -76,6 +80,10 @@ impl App {
             handle.size().cols,
             handle.size().rows
         );
+        println!(
+            "console_tty: input={}, output={}",
+            terminal_snapshot.input_is_tty, terminal_snapshot.output_is_tty
+        );
         if let Some(process_id) = handle.process_id() {
             println!("process_id: {process_id}");
         }
@@ -86,12 +94,13 @@ impl App {
             println!("mirror: disabled");
         }
         println!(
-            "note: stdin multiplexing and raw terminal control land in the next runtime task."
+            "note: raw mode is implemented in the terminal layer; live stdin routing lands with the console runtime."
         );
         println!();
 
         let output = handle.read_to_end()?;
         if !output.is_empty() {
+            self.sessions.mark_output(session.address());
             let mut stdout = io::stdout().lock();
             stdout
                 .write_all(&output)
@@ -166,6 +175,7 @@ pub enum AppError {
     Cli(crate::cli::CliError),
     InvalidCommand(String),
     Pty(crate::pty::PtyError),
+    Terminal(crate::terminal::TerminalError),
     Io(String, io::Error),
 }
 
@@ -175,6 +185,7 @@ impl fmt::Display for AppError {
             Self::Cli(error) => write!(f, "{error}"),
             Self::InvalidCommand(message) => write!(f, "invalid command: {message}"),
             Self::Pty(error) => write!(f, "{error}"),
+            Self::Terminal(error) => write!(f, "{error}"),
             Self::Io(context, error) => write!(f, "{context}: {error}"),
         }
     }
@@ -191,5 +202,11 @@ impl From<crate::cli::CliError> for AppError {
 impl From<crate::pty::PtyError> for AppError {
     fn from(value: crate::pty::PtyError) -> Self {
         Self::Pty(value)
+    }
+}
+
+impl From<crate::terminal::TerminalError> for AppError {
+    fn from(value: crate::terminal::TerminalError) -> Self {
+        Self::Terminal(value)
     }
 }
