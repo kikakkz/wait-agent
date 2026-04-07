@@ -142,7 +142,7 @@ The board is split into the following execution tracks:
 
 | ID | Task | Depends On | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `T4-01` | Build end-to-end local attach command | `T1-06`, `T2-01`, `T3-03` | `not_started` | Minimum usable local flow |
+| `T4-01` | Build end-to-end local interactive run flow | `T1-06`, `T2-01`, `T3-03` | `not_started` | Minimum usable local flow |
 | `T4-02` | Add scheduler unit tests | `T2-06`, `T2-07` | `not_started` | Deterministic rule testing |
 | `T4-03` | Add PTY integration tests | `T1-04` | `not_started` | Spawn, resize, exit |
 | `T4-04` | Add renderer snapshot tests | `T3-03`, `T3-05`, `T3-06` | `not_started` | Focus and Peek |
