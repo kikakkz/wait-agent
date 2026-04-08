@@ -2,7 +2,7 @@
 
 use crate::pty::PtySize;
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_int, c_uchar, c_uint, c_ulong};
 use std::os::unix::io::RawFd;
@@ -12,6 +12,8 @@ const STDOUT_FD: RawFd = 1;
 const TIOCGWINSZ: c_ulong = 0x5413;
 const TCSAFLUSH: c_int = 2;
 const NCCS: usize = 32;
+const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h\x1b[H";
+const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l\x1b[?25h";
 
 const BRKINT: c_uint = 0o000002;
 const ICRNL: c_uint = 0o000400;
@@ -202,6 +204,18 @@ impl TerminalRuntime {
             active: true,
         })
     }
+
+    pub fn enter_alternate_screen(&self) -> Result<AlternateScreenGuard, TerminalError> {
+        if !self.output_is_tty() {
+            return Err(TerminalError::NotTty("stdout".to_string()));
+        }
+
+        write_escape(self.output_fd, ENTER_ALTERNATE_SCREEN)?;
+        Ok(AlternateScreenGuard {
+            fd: self.output_fd,
+            active: true,
+        })
+    }
 }
 
 pub struct RawModeGuard {
@@ -228,11 +242,35 @@ impl Drop for RawModeGuard {
     }
 }
 
+pub struct AlternateScreenGuard {
+    fd: RawFd,
+    active: bool,
+}
+
+impl AlternateScreenGuard {
+    pub fn restore(&mut self) -> Result<(), TerminalError> {
+        if !self.active {
+            return Ok(());
+        }
+
+        write_escape(self.fd, LEAVE_ALTERNATE_SCREEN)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for AlternateScreenGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSnapshot {
     pub size: TerminalSize,
     pub lines: Vec<String>,
     pub scrollback: Vec<String>,
+    pub window_title: Option<String>,
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub alternate_screen: bool,
@@ -260,6 +298,7 @@ pub struct TerminalEngine {
     normal: ScreenBuffer,
     alternate: ScreenBuffer,
     alternate_screen_active: bool,
+    window_title: Option<String>,
 }
 
 impl TerminalEngine {
@@ -268,6 +307,7 @@ impl TerminalEngine {
             normal: ScreenBuffer::new(size),
             alternate: ScreenBuffer::new(size),
             alternate_screen_active: false,
+            window_title: None,
         }
     }
 
@@ -285,9 +325,19 @@ impl TerminalEngine {
                 0x1b => {
                     self.flush_plain(&mut plain);
                     index += 1;
-                    if index < bytes.len() && bytes[index] == b'[' {
-                        index += 1;
-                        index = self.consume_csi(bytes, index);
+                    if index >= bytes.len() {
+                        break;
+                    }
+                    match bytes[index] {
+                        b'[' => {
+                            index += 1;
+                            index = self.consume_csi(bytes, index);
+                        }
+                        b']' => {
+                            index += 1;
+                            index = self.consume_osc(bytes, index);
+                        }
+                        _ => {}
                     }
                 }
                 b'\n' => {
@@ -321,13 +371,14 @@ impl TerminalEngine {
     }
 
     pub fn snapshot(&self) -> ScreenSnapshot {
-        self.active_buffer().snapshot(self.alternate_screen_active)
+        self.active_buffer()
+            .snapshot(self.alternate_screen_active, self.window_title.clone())
     }
 
     pub fn state(&self) -> ScreenState {
         ScreenState {
-            normal: self.normal.snapshot(false),
-            alternate: self.alternate.snapshot(true),
+            normal: self.normal.snapshot(false, self.window_title.clone()),
+            alternate: self.alternate.snapshot(true, self.window_title.clone()),
             alternate_screen_active: self.alternate_screen_active,
         }
     }
@@ -373,6 +424,35 @@ impl TerminalEngine {
         }
 
         bytes.len()
+    }
+
+    fn consume_osc(&mut self, bytes: &[u8], mut index: usize) -> usize {
+        let start = index;
+        while index < bytes.len() {
+            match bytes[index] {
+                0x07 => {
+                    self.handle_osc(&bytes[start..index]);
+                    return index + 1;
+                }
+                0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
+                    self.handle_osc(&bytes[start..index]);
+                    return index + 2;
+                }
+                _ => index += 1,
+            }
+        }
+
+        bytes.len()
+    }
+
+    fn handle_osc(&mut self, payload: &[u8]) {
+        let text = String::from_utf8_lossy(payload);
+        let Some((kind, value)) = text.split_once(';') else {
+            return;
+        };
+        if matches!(kind, "0" | "2") && !value.trim().is_empty() {
+            self.window_title = Some(value.to_string());
+        }
     }
 
     fn handle_csi(&mut self, params: &[u8], final_byte: char) {
@@ -455,7 +535,7 @@ impl ScreenBuffer {
         self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
     }
 
-    fn snapshot(&self, alternate_screen: bool) -> ScreenSnapshot {
+    fn snapshot(&self, alternate_screen: bool, window_title: Option<String>) -> ScreenSnapshot {
         ScreenSnapshot {
             size: self.size,
             lines: self
@@ -464,6 +544,7 @@ impl ScreenBuffer {
                 .map(|row| row.iter().collect::<String>())
                 .collect(),
             scrollback: self.scrollback.clone(),
+            window_title,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
             alternate_screen,
@@ -664,6 +745,22 @@ fn write_termios(fd: RawFd, termios: &Termios) -> Result<(), TerminalError> {
     Ok(())
 }
 
+fn write_escape(fd: RawFd, value: &str) -> Result<(), TerminalError> {
+    let path = format!("/proc/self/fd/{fd}");
+    let mut handle = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            TerminalError::Io("failed to open terminal output stream".to_string(), error)
+        })?;
+    handle
+        .write_all(value.as_bytes())
+        .map_err(|error| TerminalError::Io("failed to write terminal escape".to_string(), error))?;
+    handle
+        .flush()
+        .map_err(|error| TerminalError::Io("failed to flush terminal escape".to_string(), error))
+}
+
 fn make_raw(mut termios: Termios) -> Termios {
     termios.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     termios.c_oflag &= !OPOST;
@@ -823,6 +920,38 @@ mod tests {
         let normal = engine.snapshot();
         assert!(!normal.alternate_screen);
         assert_eq!(normal.lines[0], "main  ");
+    }
+
+    #[test]
+    fn engine_ignores_osc_window_title_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b]0;k@k: /tmp\x07prompt$ ");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "prompt$             ");
+        assert_eq!(snapshot.window_title.as_deref(), Some("k@k: /tmp"));
+    }
+
+    #[test]
+    fn engine_ignores_osc_sequences_terminated_by_st() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b]0;session title\x1b\\ready");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "ready               ");
+        assert_eq!(snapshot.window_title.as_deref(), Some("session title"));
     }
 
     #[test]

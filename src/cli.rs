@@ -9,9 +9,16 @@ pub struct Cli {
 
 #[derive(Debug, Clone)]
 pub enum Command {
+    Workspace(WorkspaceCommand),
     Run(RunCommand),
     Server(ServerCommand),
     Help(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceCommand {
+    pub node_id: Option<String>,
+    pub connect: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,23 +64,48 @@ impl Cli {
 
         if args.is_empty() {
             return Ok(Self {
-                command: Command::Help(help_text()),
+                command: Command::Workspace(WorkspaceCommand::default()),
             });
         }
 
-        let subcommand = args.remove(0);
-
-        let command = match subcommand.as_str() {
-            "run" => Command::Run(parse_run(args)?),
-            "server" => Command::Server(parse_server(args)?),
-            "help" | "--help" | "-h" => Command::Help(help_text()),
+        let command = match args[0].as_str() {
+            "run" => {
+                args.remove(0);
+                Command::Run(parse_run(args)?)
+            }
+            "server" => {
+                args.remove(0);
+                Command::Server(parse_server(args)?)
+            }
+            "help" => Command::Help(help_text()),
+            "--help" | "-h" => Command::Help(help_text()),
             other => {
-                return Err(CliError::UnknownSubcommand(other.to_string()));
+                if other.starts_with("--") {
+                    Command::Workspace(parse_workspace(args)?)
+                } else {
+                    return Err(CliError::UnknownSubcommand(other.to_string()));
+                }
             }
         };
 
         Ok(Self { command })
     }
+}
+
+fn parse_workspace(args: Vec<String>) -> Result<WorkspaceCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = WorkspaceCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--node-id" => command.node_id = Some(expect_value("--node-id", &mut iter)?),
+            "--connect" => command.connect = Some(expect_value("--connect", &mut iter)?),
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
 }
 
 fn parse_run(args: Vec<String>) -> Result<RunCommand, CliError> {
@@ -154,6 +186,7 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
+        "  waitagent [--node-id <id>] [--connect <addr>]",
         "  waitagent run [--node-id <id>] [--connect <addr>] -- <agent-command...>",
         "  waitagent server [--listen <addr>] [--node-id <id>]",
         "",
@@ -191,6 +224,34 @@ mod tests {
     fn parse(args: &[&str]) -> Command {
         let argv = args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>();
         Cli::parse(argv).expect("cli parse should succeed").command
+    }
+
+    #[test]
+    fn defaults_to_workspace_command_without_subcommand() {
+        match parse(&["waitagent"]) {
+            Command::Workspace(command) => {
+                assert!(command.node_id.is_none());
+                assert!(command.connect.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_workspace_command_with_top_level_flags() {
+        match parse(&[
+            "waitagent",
+            "--connect",
+            "127.0.0.1:7474",
+            "--node-id",
+            "devbox-1",
+        ]) {
+            Command::Workspace(command) => {
+                assert_eq!(command.connect.as_deref(), Some("127.0.0.1:7474"));
+                assert_eq!(command.node_id.as_deref(), Some("devbox-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

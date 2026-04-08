@@ -48,6 +48,7 @@ pub struct SessionRecord {
     address: SessionAddress,
     pub title: String,
     pub command_line: String,
+    pub current_working_dir: Option<String>,
     pub status: SessionStatus,
     pub process_id: Option<u32>,
     pub screen_state: Option<ScreenState>,
@@ -87,6 +88,7 @@ impl SessionRegistry {
             address: address.clone(),
             title,
             command_line,
+            current_working_dir: None,
             status: SessionStatus::Starting,
             process_id: None,
             screen_state: None,
@@ -167,6 +169,14 @@ impl SessionRegistry {
         screen_state: ScreenState,
     ) -> Option<&SessionRecord> {
         let record = self.sessions.get_mut(address)?;
+        if let Some(working_dir) = screen_state
+            .active_snapshot()
+            .window_title
+            .as_deref()
+            .and_then(extract_working_dir_from_title)
+        {
+            record.current_working_dir = Some(working_dir.to_string());
+        }
         record.screen_state = Some(screen_state);
         record.snapshot_version += 1;
         Some(record)
@@ -190,9 +200,32 @@ fn now_unix_ms() -> u128 {
         .as_millis()
 }
 
+fn extract_working_dir_from_title(title: &str) -> Option<&str> {
+    let trimmed = title.trim();
+    if looks_like_working_dir(trimmed) {
+        return Some(trimmed);
+    }
+
+    if let Some((_, tail)) = trimmed.rsplit_once(": ") {
+        let tail = tail.trim();
+        if looks_like_working_dir(tail) {
+            return Some(tail);
+        }
+    }
+
+    trimmed
+        .split_whitespace()
+        .rev()
+        .find(|segment| looks_like_working_dir(segment))
+}
+
+fn looks_like_working_dir(value: &str) -> bool {
+    matches!(value.chars().next(), Some('/' | '~' | '.'))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SessionRegistry;
+    use super::{extract_working_dir_from_title, SessionRegistry};
     use crate::terminal::{TerminalEngine, TerminalSize};
 
     #[test]
@@ -207,6 +240,7 @@ mod tests {
         assert_eq!(session.address().node_id(), "devbox-1");
         assert_eq!(session.address().session_id(), "session-1");
         assert_eq!(session.title, "claude");
+        assert!(session.current_working_dir.is_none());
         assert!(session.process_id.is_none());
         assert!(session.screen_state.is_none());
         assert_eq!(session.snapshot_version, 0);
@@ -226,6 +260,7 @@ mod tests {
             pixel_width: 0,
             pixel_height: 0,
         });
+        engine.feed(b"\x1b]0;k@k: /opt/data/workspace/wait-agent\x07");
         engine.feed(b"hello");
 
         let updated = registry
@@ -242,5 +277,26 @@ mod tests {
                 .lines[0],
             "hello "
         );
+        assert_eq!(
+            updated.current_working_dir.as_deref(),
+            Some("/opt/data/workspace/wait-agent")
+        );
+    }
+
+    #[test]
+    fn extracts_working_dir_from_common_shell_titles() {
+        assert_eq!(
+            extract_working_dir_from_title("k@k: /opt/data/workspace/wait-agent"),
+            Some("/opt/data/workspace/wait-agent")
+        );
+        assert_eq!(
+            extract_working_dir_from_title("/tmp/project"),
+            Some("/tmp/project")
+        );
+        assert_eq!(
+            extract_working_dir_from_title("devbox ~/project"),
+            Some("~/project")
+        );
+        assert_eq!(extract_working_dir_from_title("codex"), None);
     }
 }

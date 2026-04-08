@@ -12,7 +12,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const TIOCSWINSZ: c_ulong = 0x5414;
-const EIO: i32 = 5;
+pub const PTY_EOF_ERRNO: i32 = 5;
+const SIGKILL: c_int = 9;
 
 extern "C" {
     fn forkpty(
@@ -22,6 +23,7 @@ extern "C" {
         winp: *const Winsize,
     ) -> c_int;
     fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
+    fn kill(pid: c_int, sig: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn _exit(status: c_int) -> !;
@@ -140,19 +142,23 @@ impl PtyHandle {
 
     pub fn read_to_end(&mut self) -> Result<Vec<u8>, PtyError> {
         let mut buffer = Vec::new();
-        let mut reader = self.master.try_clone().map_err(PtyError::CloneReader)?;
+        let mut reader = self.try_clone_reader()?;
         let mut chunk = [0_u8; 4096];
 
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => buffer.extend_from_slice(&chunk[..count]),
-                Err(error) if error.raw_os_error() == Some(EIO) => break,
+                Err(error) if error.raw_os_error() == Some(PTY_EOF_ERRNO) => break,
                 Err(error) => return Err(PtyError::Read(error)),
             }
         }
 
         Ok(buffer)
+    }
+
+    pub fn try_clone_reader(&self) -> Result<File, PtyError> {
+        self.master.try_clone().map_err(PtyError::CloneReader)
     }
 
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
@@ -173,6 +179,23 @@ impl PtyHandle {
         }
 
         Ok(ExitStatus::from_wait_status(status))
+    }
+
+    pub fn terminate(&self) -> Result<(), PtyError> {
+        let process_id = self.process_id.ok_or_else(|| {
+            PtyError::Terminate(io::Error::new(ErrorKind::Other, "missing process id"))
+        })?;
+        let process_group = -(process_id as c_int);
+        let result = unsafe { kill(process_group, SIGKILL) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        let fallback = unsafe { kill(process_id as c_int, SIGKILL) };
+        if fallback != 0 {
+            return Err(PtyError::Terminate(io::Error::last_os_error()));
+        }
+        Ok(())
     }
 }
 
@@ -251,6 +274,7 @@ pub enum PtyError {
     Write(std::io::Error),
     Resize(std::io::Error),
     Wait(std::io::Error),
+    Terminate(std::io::Error),
 }
 
 impl fmt::Display for PtyError {
@@ -264,6 +288,7 @@ impl fmt::Display for PtyError {
             Self::Write(error) => write!(f, "failed to write PTY input: {error}"),
             Self::Resize(error) => write!(f, "failed to resize PTY: {error}"),
             Self::Wait(error) => write!(f, "failed to wait for PTY child: {error}"),
+            Self::Terminate(error) => write!(f, "failed to terminate PTY child: {error}"),
         }
     }
 }
@@ -375,5 +400,32 @@ mod tests {
 
         handle.resize(new_size).expect("resize should succeed");
         assert_eq!(handle.size(), new_size);
+    }
+
+    #[test]
+    fn writes_input_into_spawned_process_and_reads_response() {
+        let mut manager = PtyManager::new();
+        let session = SessionAddress::new("local", "session-3");
+        let request = SpawnRequest {
+            program: "sh".to_string(),
+            args: vec![
+                "-lc".to_string(),
+                "read line; printf 'ack:%s' \"$line\"".to_string(),
+            ],
+            size: PtySize::default(),
+        };
+
+        let mut handle = manager
+            .spawn(session, request)
+            .expect("spawn should succeed");
+
+        handle
+            .write_all(b"hello from test\n")
+            .expect("write should succeed");
+        let output = handle.read_to_end().expect("read should succeed");
+        let status = handle.wait().expect("wait should succeed");
+
+        assert!(status.success());
+        assert!(String::from_utf8_lossy(&output).contains("ack:hello from test"));
     }
 }

@@ -1,12 +1,16 @@
 mod app;
 mod cli;
+mod client;
 mod config;
 mod console;
+mod event;
 mod pty;
 mod renderer;
 mod scheduler;
+mod server;
 mod session;
 mod terminal;
+mod transport;
 
 use std::process::ExitCode;
 

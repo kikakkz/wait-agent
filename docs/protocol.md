@@ -432,3 +432,118 @@ The first network-capable subset should support only:
 
 Everything else can layer on later.
 
+## 20. Executable Schema Baseline
+
+The repository now includes an executable baseline for protocol schema and versioning in:
+
+- `src/transport.rs`
+
+This baseline currently defines:
+
+- `ProtocolVersion`
+- `ConnectionId`
+- `MessageId`
+- `TransportEnvelope`
+- `TransportPayload`
+- Explicit payload structs for the MVP protocol subset
+- Validation rules for protocol version, session identity, and console identity
+
+Current implementation rule:
+
+- The code-level schema is the source of truth for transport-facing types during implementation
+- This document remains the source of truth for behavior and message semantics
+
+## 20.1 Client Runtime Skeleton Baseline
+
+The repository now includes a client runtime skeleton in:
+
+- `src/client.rs`
+
+This baseline currently owns:
+
+- Endpoint normalization and TCP connect setup
+- Client-side runtime connection identity
+- `ClientHello` envelope preparation
+- `Heartbeat` envelope preparation
+- Internal transport event publication
+- The temporary delegated-spawn control bridge used by `waitagent run --connect`
+
+Current implementation rule:
+
+- The client runtime must remain the single boundary for connect-side network behavior
+- Temporary delegated spawn is allowed to coexist with the future transport stream until `T5-05` and `T5-06` replace it with published remote session state
+
+## 20.2 Registration And Liveness Baseline
+
+The repository now includes the first executable registration and liveness baseline in:
+
+- `src/transport.rs`
+- `src/client.rs`
+- `src/server.rs`
+
+This baseline currently owns:
+
+- Binary envelope encoding and decoding for `ClientHello`, `ServerHello`, and `Heartbeat`
+- Client-side registration handshake before delegated spawn
+- Server-side node registration from `ClientHello`
+- Server-side heartbeat updates from `Heartbeat`
+- Server-side heartbeat timeout to transition nodes from `online` to `offline`
+
+Current implementation rule:
+
+- Registration and liveness must flow through transport envelopes, not through a second ad hoc registration path
+- Delegated spawn may continue to share the same TCP connection as a temporary bridge until session publication lands
+- Local PTY ownership remains unchanged; registration only exposes node reachability and readiness
+
+## 20.3 Remote Session Publication Baseline
+
+The repository now includes the first executable remote session publication baseline in:
+
+- `src/transport.rs`
+- `src/client.rs`
+- `src/server.rs`
+
+This baseline currently owns:
+
+- Binary envelope encoding and decoding for `SessionStarted`, `SessionUpdated`, and `SessionExited`
+- Client-side preparation of session lifecycle envelopes from local session records
+- Optional client-side publication helpers for session lifecycle messages
+- Server-side intake of published session lifecycle messages as runtime events
+
+Current implementation rule:
+
+- Session publication must reuse the same transport envelope model as registration and liveness
+- Publication intake on the server is event-only until `T5-06` materializes an aggregate registry
+- Delegated spawn remains a temporary bridge and is not yet replaced by published aggregate session state
+
+## 21. Versioning Rules
+
+The current versioning baseline is:
+
+- `CURRENT_PROTOCOL_VERSION = 1`
+- `MIN_SUPPORTED_PROTOCOL_VERSION = 1`
+
+Rules:
+
+- Every transport envelope must carry an explicit protocol version
+- Unsupported versions must be rejected before payload handling
+- Version negotiation may widen later, but the first implementation uses one accepted version only
+- Backward-compatible additions should prefer extending payload structs over reinterpreting existing fields
+
+## 22. Internal Event Bus Baseline
+
+The repository now includes an internal event bus baseline in:
+
+- `src/event.rs`
+
+This baseline defines:
+
+- `EventGroup`
+- `EventBusMessage`
+- `EventEnvelope`
+- `EventBus`
+
+Current implementation rule:
+
+- Local and network runtimes should share the same event-envelope model
+- Transport integration should publish into the internal event bus rather than bypassing runtime boundaries with ad hoc direct calls

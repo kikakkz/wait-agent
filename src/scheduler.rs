@@ -244,6 +244,10 @@ impl SchedulerState {
                 return SchedulingDecision::stay(evaluations);
             }
 
+            if now_unix_ms.saturating_sub(*entered_at_unix_ms) < self.heuristic.input_grace_ms {
+                return SchedulingDecision::no_action(evaluations);
+            }
+
             let recent_output_after_enter = sessions
                 .iter()
                 .find(|record| Some(record.address()) == focused_session.as_ref())
@@ -512,6 +516,40 @@ mod tests {
     }
 
     #[test]
+    fn does_not_switch_before_continuation_observation_window_expires() {
+        let mut registry = SessionRegistry::new();
+        let current = registry.create_local_session(
+            "local".to_string(),
+            "current".to_string(),
+            "current".to_string(),
+        );
+        let waiter = registry.create_local_session(
+            "local".to_string(),
+            "waiter".to_string(),
+            "waiter".to_string(),
+        );
+        let current_address = current.address().clone();
+        let waiter_address = waiter.address().clone();
+        let base = current.created_at_unix_ms.max(waiter.created_at_unix_ms);
+        registry.mark_running_at(&current_address, Some(1), None);
+        registry.mark_running_at(&waiter_address, Some(2), None);
+        registry.mark_output_at(&waiter_address, base + 100);
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(current_address.clone());
+        let mut scheduler = SchedulerState::new();
+        scheduler.on_input_submitted(&mut console, base + 500);
+
+        let early = scheduler.decide_auto_switch(&mut console, registry.list(), base + 900);
+        assert_eq!(early.action, SchedulingAction::None);
+        assert_eq!(console.focused_session, Some(current_address));
+        assert_eq!(console.switch_lock, SwitchLock::Armed);
+
+        let later = scheduler.decide_auto_switch(&mut console, registry.list(), base + 2_000);
+        assert_eq!(later.action, SchedulingAction::SwitchTo(waiter_address));
+    }
+
+    #[test]
     fn continuation_output_prevents_switch_until_round_stabilizes() {
         let mut registry = SessionRegistry::new();
         let current = registry.create_local_session(
@@ -599,5 +637,31 @@ mod tests {
 
         assert_eq!(console.switch_lock, SwitchLock::Clear);
         assert_eq!(scheduler.phase(), &SchedulerPhase::Idle);
+    }
+
+    #[test]
+    fn does_not_auto_switch_when_only_focused_session_is_waiting() {
+        let mut registry = SessionRegistry::new();
+        let current = registry.create_local_session(
+            "local".to_string(),
+            "current".to_string(),
+            "current".to_string(),
+        );
+        let current_address = current.address().clone();
+        let base = current.created_at_unix_ms;
+        registry.mark_running_at(&current_address, Some(1), None);
+        registry.mark_output_at(&current_address, base + 100);
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(current_address.clone());
+        let mut scheduler = SchedulerState::new();
+        scheduler.on_input_submitted(&mut console, base + 500);
+
+        let decision = scheduler.decide_auto_switch(&mut console, registry.list(), base + 2_000);
+
+        assert_eq!(decision.action, SchedulingAction::None);
+        assert_eq!(console.focused_session, Some(current_address.clone()));
+        assert_eq!(scheduler.waiting_queue().addresses(), vec![current_address]);
+        assert_eq!(console.switch_lock, SwitchLock::Armed);
     }
 }

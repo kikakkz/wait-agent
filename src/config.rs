@@ -36,6 +36,10 @@ impl AppConfig {
         self.with_overrides(node_id, connect, None)
     }
 
+    pub fn runtime_for_workspace(&self, node_id: Option<&str>, connect: Option<&str>) -> Self {
+        self.with_overrides(node_id, connect, None)
+    }
+
     pub fn runtime_for_server(&self, listen: Option<&str>, node_id: Option<&str>) -> Self {
         self.with_overrides(node_id, None, listen)
     }
