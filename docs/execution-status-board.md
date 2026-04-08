@@ -174,10 +174,10 @@ The board is split into the following execution tracks:
 | `T4-04` | Add renderer snapshot tests | `T3-03`, `T3-05`, `T3-06` | `done` | Renderer tests now assert full focused and Peek frame snapshots in addition to field-level behavior |
 | `T4-05` | Validate three-session local workflow manually | `T4-01`, `T4-02`, `T4-03`, `T4-04` | `done` | Manual validation passed for three delegated local sessions, focus switching, typing protection, auto-switch, and host Peek behavior |
 | `T4-06` | Fix local MVP defects and stabilize | `T4-05` | `done` | Fixed the continuation-observation race that caused premature auto-switch before current-session follow-up output rendered |
-| `T4-07` | Implement single-entry workspace shell bootstrap | `T1-02`, `T2-01`, `T3-03` | `ready` | `waitagent` becomes the primary local entrypoint instead of per-session `run` |
-| `T4-08` | Implement in-workspace session creation and background lifecycle | `T4-07`, `T1-03`, `T1-04` | `ready` | New sessions are created from inside the workspace and continue to obey single-focus rules |
-| `T4-09` | Implement shell-backed session defaults and working-directory handling | `T4-08` | `ready` | A managed session should behave like a reusable shell context that can launch agent commands or normal workflows |
-| `T4-10` | Validate one-process multi-session workflow through one `waitagent` entrypoint | `T4-08`, `T4-09` | `not_started` | Replaces delegated `run` validation as the local UX acceptance gate |
+| `T4-07` | Implement single-entry workspace shell bootstrap | `T1-02`, `T2-01`, `T3-03` | `done` | The workspace-first local entrypoint is live and `waitagent` is now the primary local interaction surface |
+| `T4-08` | Implement in-workspace session creation and background lifecycle | `T4-07`, `T1-03`, `T1-04` | `done` | Sessions can be created, focused, backgrounded, listed, and closed from inside the workspace shell |
+| `T4-09` | Implement shell-backed session defaults and working-directory handling | `T4-08` | `done` | Managed sessions default to reusable shell contexts and surface working-directory updates in the UI |
+| `T4-10` | Validate one-process multi-session workflow through one `waitagent` entrypoint | `T4-08`, `T4-09` | `in_progress` | Real-agent acceptance is underway; use [local-acceptance-checklist.md](local-acceptance-checklist.md) as the gate, with auto-switch still requiring more validation in real workflows |
 
 ## 6.6 T5 Network Transport and Registration
 
@@ -300,17 +300,17 @@ Status:
 
 Current blockers:
 
-- No hard architecture blocker, but the workspace-first UX now gates the next user-facing milestone
+- No hard architecture blocker, but local workspace acceptance is still open
+- Auto-switch behavior needs more real-workflow tuning before `M1` can be called done
 
 ## 9. Recommended Next Actions
 
 Recommended immediate sequence:
 
-1. Start `T4-07` so `waitagent` becomes the primary local workspace entrypoint
-2. Follow with `T4-08` and `T4-09` to create and manage shell-backed sessions inside that workspace
-3. Use `T4-10` as the new local acceptance gate for the product UX
-4. Resume `T5-06` only after the workspace-first local model is the supported default
-5. Reuse the existing transport, client, and server foundations rather than replacing them
+1. Finish `T4-10` and use it as the local acceptance gate for the product UX
+2. Refine auto-switch behavior and other remaining real-agent terminal fidelity gaps discovered during `T4-10`
+3. Resume `T5-06` and `T6-01` only after the workspace-first local model is accepted as the supported default
+4. Reuse the existing transport, client, and server foundations rather than replacing them
 
 ## 10. Update Rules
 

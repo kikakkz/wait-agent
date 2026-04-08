@@ -233,9 +233,9 @@ Mitigation:
 
 If implementation starts now, begin with:
 
-1. `T4-07` Implement single-entry workspace shell bootstrap
-2. `T4-08` Implement in-workspace session creation and background lifecycle
-3. `T4-09` Implement shell-backed session defaults and working-directory handling
-4. `T4-10` Validate the local multi-session workflow through one `waitagent`
+1. `T4-10` Validate the local multi-session workflow through one `waitagent` using [local-acceptance-checklist.md](local-acceptance-checklist.md)
+2. Refine auto-switch behavior and terminal fidelity issues discovered during local acceptance
+3. Resume `T5-06` once the local workspace path is accepted
+4. Continue with `T6-01` and mirrored interaction work on top of the accepted local entry model
 
-The local runtime foundations already exist. The next critical work is making the workspace-first UX the primary product surface before continuing network-facing UX work.
+The local runtime foundations and workspace-first shell now exist. The next critical work is closing the local acceptance gap before continuing network-facing UX work.

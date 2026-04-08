@@ -54,10 +54,12 @@ This repository contains product documentation and an active Rust implementation
 
 Current implementation status:
 
+- Local workspace-first interaction is now the primary local UX: one `waitagent` can create and manage multiple shell-backed sessions inside the same terminal
 - Local PTY runtime, scheduler, Peek, renderer, and validation coverage exist
+- Terminal fidelity has been hardened for Codex-like TUIs, including terminal capability replies, application cursor keys, managed viewport sizing, UTF-8 handling, cursor visibility, and wide-character rendering
 - Network transport, server runtime, client runtime, node registration, and remote session publication baselines exist
-- The current public CLI still reflects a temporary bridge model centered on `run` and `server`
-- The next user-facing milestone is the workspace-first UX where one `waitagent` manages multiple local sessions directly
+- The remaining local MVP work is acceptance and stabilization, with auto-switch behavior still requiring more real-workflow validation
+- Mirrored multi-console network UX is still the next major product milestone after the local workspace path is accepted
 
 Current documents:
 
@@ -69,11 +71,12 @@ Current documents:
 - [Interaction Flows](docs/interaction-flows.md)
 - [Protocol](docs/protocol.md)
 - [MVP Plan](docs/mvp-plan.md)
+- [Local Acceptance Checklist](docs/local-acceptance-checklist.md)
 - [Execution Status Board](docs/execution-status-board.md)
 
 ## Recommended Next Step
 
-- Finish the local workspace shell UX described in [docs/mvp-plan.md](docs/mvp-plan.md), then resume network aggregation work on top of that entry model
+- Finish local workspace acceptance and refine auto-switch behavior in real agent workflows, then resume network aggregation work on top of that entry model
 
 ## Why This Exists
 
