@@ -299,6 +299,7 @@ pub struct TerminalEngine {
     alternate: ScreenBuffer,
     alternate_screen_active: bool,
     window_title: Option<String>,
+    pending_escape: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -308,6 +309,7 @@ impl TerminalEngine {
             alternate: ScreenBuffer::new(size),
             alternate_screen_active: false,
             window_title: None,
+            pending_escape: Vec::new(),
         }
     }
 
@@ -317,25 +319,47 @@ impl TerminalEngine {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
+        input.extend_from_slice(&self.pending_escape);
+        input.extend_from_slice(bytes);
+        self.pending_escape.clear();
+
         let mut plain = Vec::new();
         let mut index = 0;
 
-        while index < bytes.len() {
-            match bytes[index] {
+        while index < input.len() {
+            match input[index] {
                 0x1b => {
                     self.flush_plain(&mut plain);
+                    let escape_start = index;
                     index += 1;
-                    if index >= bytes.len() {
+                    if index >= input.len() {
+                        self.pending_escape
+                            .extend_from_slice(&input[escape_start..]);
                         break;
                     }
-                    match bytes[index] {
+                    match input[index] {
                         b'[' => {
                             index += 1;
-                            index = self.consume_csi(bytes, index);
+                            match self.consume_csi(&input, index) {
+                                Some(next_index) => index = next_index,
+                                None => {
+                                    self.pending_escape
+                                        .extend_from_slice(&input[escape_start..]);
+                                    break;
+                                }
+                            }
                         }
                         b']' => {
                             index += 1;
-                            index = self.consume_osc(bytes, index);
+                            match self.consume_osc(&input, index) {
+                                Some(next_index) => index = next_index,
+                                None => {
+                                    self.pending_escape
+                                        .extend_from_slice(&input[escape_start..]);
+                                    break;
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -348,6 +372,10 @@ impl TerminalEngine {
                 b'\r' => {
                     self.flush_plain(&mut plain);
                     self.active_buffer_mut().carriage_return();
+                    index += 1;
+                }
+                0x07 => {
+                    self.flush_plain(&mut plain);
                     index += 1;
                 }
                 0x08 => {
@@ -411,38 +439,38 @@ impl TerminalEngine {
         plain.clear();
     }
 
-    fn consume_csi(&mut self, bytes: &[u8], mut index: usize) -> usize {
+    fn consume_csi(&mut self, bytes: &[u8], mut index: usize) -> Option<usize> {
         let start = index;
         while index < bytes.len() {
             let byte = bytes[index];
             if (0x40..=0x7e).contains(&byte) {
                 let params = &bytes[start..index];
                 self.handle_csi(params, byte as char);
-                return index + 1;
+                return Some(index + 1);
             }
             index += 1;
         }
 
-        bytes.len()
+        None
     }
 
-    fn consume_osc(&mut self, bytes: &[u8], mut index: usize) -> usize {
+    fn consume_osc(&mut self, bytes: &[u8], mut index: usize) -> Option<usize> {
         let start = index;
         while index < bytes.len() {
             match bytes[index] {
                 0x07 => {
                     self.handle_osc(&bytes[start..index]);
-                    return index + 1;
+                    return Some(index + 1);
                 }
                 0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
                     self.handle_osc(&bytes[start..index]);
-                    return index + 2;
+                    return Some(index + 2);
                 }
                 _ => index += 1,
             }
         }
 
-        bytes.len()
+        None
     }
 
     fn handle_osc(&mut self, payload: &[u8]) {
@@ -882,6 +910,40 @@ mod tests {
     }
 
     #[test]
+    fn engine_handles_split_csi_sequences_across_feed_calls() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"echo abc");
+        engine.feed(b"\x08\x1b[");
+        engine.feed(b"K");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "echo ab         ");
+        assert_eq!(snapshot.cursor_col, 7);
+    }
+
+    #[test]
+    fn engine_ignores_bell_without_advancing_cursor() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"abc\x07\x07");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "abc     ");
+        assert_eq!(snapshot.cursor_col, 3);
+    }
+
+    #[test]
     fn engine_tracks_scrollback_when_screen_overflows() {
         let mut engine = TerminalEngine::new(TerminalSize {
             rows: 2,
@@ -952,6 +1014,23 @@ mod tests {
 
         assert_eq!(snapshot.lines[0], "ready               ");
         assert_eq!(snapshot.window_title.as_deref(), Some("session title"));
+    }
+
+    #[test]
+    fn engine_handles_split_osc_window_title_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b]0;k@k: /tm");
+        engine.feed(b"p\x07prompt$ ");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "prompt$             ");
+        assert_eq!(snapshot.window_title.as_deref(), Some("k@k: /tmp"));
     }
 
     #[test]

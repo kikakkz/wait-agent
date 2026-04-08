@@ -393,6 +393,8 @@ impl App {
                             if let Some(target) = console.input_owner_session().cloned() {
                                 if let Some(runtime) = hosted.get_mut(&target) {
                                     if !bytes_to_forward.is_empty() {
+                                        command_prompt
+                                            .clear_message_on_forwarded_input(&bytes_to_forward);
                                         self.sessions.mark_input(&target);
                                         input_tracker.observe(
                                             &bytes_to_forward,
@@ -401,13 +403,6 @@ impl App {
                                             now_unix_ms(),
                                         );
                                         runtime.handle.write_all(&bytes_to_forward)?;
-                                        self.render_workspace_console(
-                                            &mut renderer_state,
-                                            &renderer,
-                                            &console,
-                                            &scheduler,
-                                            &command_prompt,
-                                        )?;
                                     }
                                 }
                             }
@@ -695,14 +690,6 @@ impl App {
                         self.sessions.mark_input(&target);
                         input_tracker.observe(&bytes, &mut console, &mut scheduler, now_unix_ms());
                         handle.write_all(&bytes)?;
-                        self.render_console(
-                            &mut renderer_state,
-                            &renderer,
-                            &console,
-                            &scheduler,
-                            Vec::new(),
-                            None,
-                        )?;
                     }
                 }
                 Ok(RuntimeEvent::InputClosed) => {}
@@ -1341,6 +1328,8 @@ impl App {
                             if let Some(target) = console.input_owner_session().cloned() {
                                 if let Some(runtime) = hosted.get_mut(&target) {
                                     if !bytes_to_forward.is_empty() {
+                                        command_prompt
+                                            .clear_message_on_forwarded_input(&bytes_to_forward);
                                         self.sessions.mark_input(&target);
                                         input_tracker.observe(
                                             &bytes_to_forward,
@@ -1349,13 +1338,6 @@ impl App {
                                             now_unix_ms(),
                                         );
                                         runtime.handle.write_all(&bytes_to_forward)?;
-                                        self.render_host_console(
-                                            &mut renderer_state,
-                                            &renderer,
-                                            &console,
-                                            &scheduler,
-                                            &command_prompt,
-                                        )?;
                                     }
                                 }
                             }
@@ -2129,8 +2111,11 @@ impl CommandPromptState {
         self.clear_pending_picker_escape();
     }
 
-    fn has_overlay(&self) -> bool {
-        !matches!(self.overlay, CommandOverlay::None)
+    fn has_blocking_overlay(&self) -> bool {
+        matches!(
+            self.overlay,
+            CommandOverlay::Help | CommandOverlay::Sessions
+        )
     }
 
     fn dismiss(&mut self) -> bool {
@@ -2171,11 +2156,20 @@ impl CommandPromptState {
     }
 
     fn submit_overlay(&self, bytes: &[u8]) -> bool {
-        if self.open || !self.has_overlay() {
+        if self.open || !self.has_blocking_overlay() {
             return false;
         }
 
         matches!(bytes, b"\r" | b"\n" | b"\r\n")
+    }
+
+    fn clear_message_on_forwarded_input(&mut self, bytes: &[u8]) -> bool {
+        if !matches!(self.overlay, CommandOverlay::Message(_)) || bytes.is_empty() {
+            return false;
+        }
+
+        self.clear_overlay();
+        true
     }
 
     fn handle_picker_navigation(
@@ -2924,6 +2918,16 @@ mod tests {
             .handle_picker_navigation(&[0x1b], &sessions, focused, 100)
             .is_some());
         assert!(prompt.flush_picker_navigation_timeout(100 + PICKER_ESCAPE_TIMEOUT_MS + 1));
+        assert_eq!(prompt.overlay, CommandOverlay::None);
+    }
+
+    #[test]
+    fn notice_overlay_does_not_block_enter_and_clears_on_forwarded_input() {
+        let mut prompt = CommandPromptState::default();
+        prompt.set_message("Created new session.");
+
+        assert!(!prompt.submit_overlay(b"\r"));
+        assert!(prompt.clear_message_on_forwarded_input(b"\t"));
         assert_eq!(prompt.overlay, CommandOverlay::None);
     }
 }

@@ -108,6 +108,11 @@ impl Renderer {
             .unwrap_or_else(|| blank_snapshot(focused));
         let viewport = normalize_viewport(&snapshot, context.overlay_lines.len());
         let viewport_line_count = viewport.lines.len();
+        let cursor_row = snapshot
+            .cursor_row
+            .saturating_sub(viewport.start_row as u16)
+            .min(viewport_line_count.saturating_sub(1) as u16);
+        let cursor_col = projected_cursor_col(&viewport.lines, cursor_row, snapshot.cursor_col);
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -125,13 +130,8 @@ impl Renderer {
                 context.waiting_count,
                 snapshot.size.cols as usize,
             ),
-            cursor_row: snapshot
-                .cursor_row
-                .saturating_sub(viewport.start_row as u16)
-                .min(viewport_line_count.saturating_sub(1) as u16),
-            cursor_col: snapshot
-                .cursor_col
-                .min(snapshot.size.cols.saturating_sub(1)),
+            cursor_row,
+            cursor_col,
         })
     }
 
@@ -153,6 +153,11 @@ impl Renderer {
             .unwrap_or_else(|| blank_snapshot(peeked));
         let viewport = normalize_viewport(&snapshot, context.overlay_lines.len());
         let viewport_line_count = viewport.lines.len();
+        let cursor_row = snapshot
+            .cursor_row
+            .saturating_sub(viewport.start_row as u16)
+            .min(viewport_line_count.saturating_sub(1) as u16);
+        let cursor_col = projected_cursor_col(&viewport.lines, cursor_row, snapshot.cursor_col);
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -170,13 +175,8 @@ impl Renderer {
                 context.waiting_count,
                 snapshot.size.cols as usize,
             ),
-            cursor_row: snapshot
-                .cursor_row
-                .saturating_sub(viewport.start_row as u16)
-                .min(viewport_line_count.saturating_sub(1) as u16),
-            cursor_col: snapshot
-                .cursor_col
-                .min(snapshot.size.cols.saturating_sub(1)),
+            cursor_row,
+            cursor_col,
         })
     }
 }
@@ -271,7 +271,6 @@ struct ViewportProjection {
 }
 
 fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: usize) -> ViewportProjection {
-    let width = snapshot.size.cols as usize;
     let reserved_rows = 1 + overlay_lines;
     let available_rows = usize::max(
         1,
@@ -289,9 +288,17 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: usize) -> Viewpo
     let lines = snapshot
         .lines
         .iter()
+        .enumerate()
         .skip(viewport_start)
         .take(available_rows)
-        .map(|line| trim_line(line, width))
+        .map(|(row, line)| {
+            visible_line(
+                line,
+                row,
+                snapshot.cursor_row as usize,
+                snapshot.cursor_col as usize,
+            )
+        })
         .collect();
     ViewportProjection {
         lines,
@@ -311,8 +318,27 @@ fn fit_width(line: &str, width: usize) -> String {
     chars.into_iter().collect()
 }
 
-fn trim_line(line: &str, width: usize) -> String {
-    fit_width(line, width).trim_end().to_string()
+fn visible_line(line: &str, absolute_row: usize, cursor_row: usize, cursor_col: usize) -> String {
+    let chars = line.chars().collect::<Vec<_>>();
+    let content_width = chars
+        .iter()
+        .rposition(|ch| *ch != ' ')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let visible_width = if absolute_row == cursor_row {
+        content_width.max(cursor_col)
+    } else {
+        content_width
+    };
+    chars.into_iter().take(visible_width).collect()
+}
+
+fn projected_cursor_col(lines: &[String], cursor_row: u16, cursor_col: u16) -> u16 {
+    let rendered_width = lines
+        .get(cursor_row as usize)
+        .map(|line| line.chars().count() as u16)
+        .unwrap_or(0);
+    cursor_col.min(rendered_width)
 }
 
 fn compose_bar(left: &str, right: &str, width: usize) -> String {
@@ -417,7 +443,7 @@ mod tests {
         assert_eq!(frame.rendered_session, address);
         assert_eq!(frame.input_owner_session, frame.rendered_session);
         assert!(frame.top_line.is_empty());
-        assert_eq!(frame.viewport_lines[0], "hello");
+        assert!(frame.viewport_lines[0].starts_with("hello"));
         assert!(frame
             .bottom_line
             .starts_with("WaitAgent | claude | devbox-1/session-1"));
@@ -453,7 +479,7 @@ mod tests {
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "hello");
+        assert!(lines[0].starts_with("hello"));
         assert!(lines[1].starts_with("WaitAgent | claude | devbox-1/session-1"));
         assert!(lines[1].ends_with("active | 1 waiting | 1/1"));
     }
@@ -500,7 +526,7 @@ mod tests {
         assert_eq!(frame.rendered_session, peeked_address);
         assert_eq!(frame.input_owner_session, focused_address.clone());
         assert!(frame.top_line.is_empty());
-        assert_eq!(frame.viewport_lines[0], "peek");
+        assert!(frame.viewport_lines[0].starts_with("peek"));
         assert!(frame
             .bottom_line
             .starts_with("WaitAgent | peek devbox-2/session-2 <- devbox-1/session-1"));
@@ -549,7 +575,7 @@ mod tests {
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "peek");
+        assert!(lines[0].starts_with("peek"));
         assert!(lines[1].starts_with("WaitAgent | peek devbox-2/session-2 <- devbox-1/session-1"));
         assert!(lines[1].ends_with("peek | 0 waiting | 1/2"));
     }
@@ -634,7 +660,7 @@ mod tests {
             .expect("second render should succeed");
         assert_eq!(second_frame.mode, RenderMode::Focused);
         assert_eq!(second_frame.rendered_session, second_address);
-        assert_eq!(second_frame.viewport_lines[0], "second");
+        assert!(second_frame.viewport_lines[0].starts_with("second"));
         assert!(second_frame
             .bottom_line
             .ends_with("active | 0 waiting | 2/2"));
@@ -682,12 +708,12 @@ mod tests {
 
         assert_eq!(frame.overlay_lines, vec![":/new"]);
         assert_eq!(frame.viewport_lines.len(), 2);
-        assert_eq!(frame.viewport_lines[0], "hello");
+        assert!(frame.viewport_lines[0].starts_with("hello"));
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0], "hello");
-        assert_eq!(lines[1], "");
+        assert!(lines[0].starts_with("hello"));
+        assert!(lines[1].trim().is_empty());
         assert_eq!(lines[2], ":/new");
         assert!(lines[3].starts_with("WaitAgent | bash | devbox-1/session-1"));
         assert!(lines[3].ends_with("active | 0 waiting | 1/1"));
@@ -726,6 +752,9 @@ mod tests {
             )
             .expect("render should succeed");
 
-        assert_eq!(frame.viewport_lines, vec!["one", "two", "three"]);
+        assert_eq!(frame.viewport_lines.len(), 3);
+        assert!(frame.viewport_lines[0].starts_with("one"));
+        assert!(frame.viewport_lines[1].starts_with("two"));
+        assert!(frame.viewport_lines[2].starts_with("three"));
     }
 }
