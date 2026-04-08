@@ -6,6 +6,7 @@ use crate::session::{SessionAddress, SessionRecord, SessionStatus};
 const DEFAULT_OUTPUT_QUIET_MS: u128 = 800;
 const DEFAULT_INPUT_GRACE_MS: u128 = 1_200;
 const DEFAULT_STARTUP_GRACE_MS: u128 = 2_000;
+const DEFAULT_COMPLETION_OUTPUT_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitingHeuristic {
@@ -181,25 +182,44 @@ impl SchedulerState {
     }
 
     pub fn on_input_submitted(&mut self, console: &mut ConsoleState, now_unix_ms: u128) {
+        self.on_input_submitted_with_bytes(console, now_unix_ms, 0);
+    }
+
+    pub fn on_input_submitted_with_bytes(
+        &mut self,
+        console: &mut ConsoleState,
+        now_unix_ms: u128,
+        submitted_input_bytes: usize,
+    ) {
         console.submit_input();
         console.arm_switch_lock();
         self.phase = SchedulerPhase::ObservingContinuation {
             session: console.focused_session.clone(),
             entered_at_unix_ms: now_unix_ms,
             saw_output: false,
+            output_bytes_after_enter: 0,
+            submitted_input_bytes,
         };
     }
 
-    pub fn on_session_output(&mut self, session: &SessionAddress, output_at_unix_ms: u128) {
+    pub fn on_session_output(
+        &mut self,
+        session: &SessionAddress,
+        output_at_unix_ms: u128,
+        output_bytes: usize,
+    ) {
         if let SchedulerPhase::ObservingContinuation {
             session: current_session,
             entered_at_unix_ms,
             saw_output,
+            output_bytes_after_enter,
+            ..
         } = &mut self.phase
         {
             if current_session.as_ref() == Some(session) && output_at_unix_ms >= *entered_at_unix_ms
             {
                 *saw_output = true;
+                *output_bytes_after_enter += output_bytes;
             }
         }
     }
@@ -232,12 +252,18 @@ impl SchedulerState {
             session,
             entered_at_unix_ms,
             saw_output,
+            output_bytes_after_enter,
+            submitted_input_bytes,
         } = &self.phase
         {
             let focused_matches = session.as_ref() == focused_session.as_ref();
             let current_status = current_session_status(&evaluations, focused_session.as_ref());
-            let current_continues =
-                focused_matches && *saw_output && current_status == Some(SessionStatus::Running);
+            let meaningful_output_after_enter = output_bytes_after_enter
+                .saturating_sub(submitted_input_bytes.saturating_add(2));
+            let current_continues = focused_matches
+                && *saw_output
+                && meaningful_output_after_enter >= DEFAULT_COMPLETION_OUTPUT_BYTES
+                && current_status == Some(SessionStatus::Running);
 
             if current_continues {
                 return SchedulingDecision::stay(evaluations);
@@ -245,10 +271,8 @@ impl SchedulerState {
 
             let current_round_completed = focused_matches
                 && *saw_output
-                && matches!(
-                    current_status,
-                    Some(SessionStatus::WaitingInput | SessionStatus::Idle)
-                );
+                && meaningful_output_after_enter >= DEFAULT_COMPLETION_OUTPUT_BYTES
+                && current_status == Some(SessionStatus::WaitingInput);
 
             if current_round_completed {
                 console.clear_switch_lock();
@@ -268,6 +292,7 @@ impl SchedulerState {
                 .unwrap_or(false);
 
             if recent_output_after_enter
+                && meaningful_output_after_enter >= DEFAULT_COMPLETION_OUTPUT_BYTES
                 && current_session_status(&evaluations, focused_session.as_ref())
                     == Some(SessionStatus::Running)
             {
@@ -308,6 +333,8 @@ pub enum SchedulerPhase {
         session: Option<SessionAddress>,
         entered_at_unix_ms: u128,
         saw_output: bool,
+        output_bytes_after_enter: usize,
+        submitted_input_bytes: usize,
     },
     ArmedAfterEnter,
     LockedAfterAutoSwitch,
@@ -586,7 +613,7 @@ mod tests {
         let mut scheduler = SchedulerState::new();
         scheduler.on_input_submitted(&mut console, base + 500);
         registry.mark_output_at(&current_address, base + 700);
-        scheduler.on_session_output(&current_address, base + 700);
+        scheduler.on_session_output(&current_address, base + 700, 32);
 
         let first = scheduler.decide_auto_switch(&mut console, registry.list(), base + 900);
         assert_eq!(first.action, SchedulingAction::StayOnCurrent);
@@ -598,6 +625,143 @@ mod tests {
         assert_eq!(console.focused_session, Some(current_address));
         assert_eq!(console.switch_lock, SwitchLock::Clear);
         assert_eq!(scheduler.phase(), &SchedulerPhase::Idle);
+    }
+
+    #[test]
+    fn switches_to_waiter_when_focused_session_had_prior_prompt_but_no_post_enter_output() {
+        let mut registry = SessionRegistry::new();
+        let current = registry.create_local_session(
+            "local".to_string(),
+            "current".to_string(),
+            "current".to_string(),
+        );
+        let waiter = registry.create_local_session(
+            "local".to_string(),
+            "waiter".to_string(),
+            "waiter".to_string(),
+        );
+        let current_address = current.address().clone();
+        let waiter_address = waiter.address().clone();
+        let base = current.created_at_unix_ms.max(waiter.created_at_unix_ms);
+
+        registry.mark_running_at(&current_address, Some(1), None);
+        registry.mark_running_at(&waiter_address, Some(2), None);
+
+        // Both sessions had already rendered a shell prompt and settled into waiting state.
+        registry.mark_output_at(&current_address, base + 100);
+        registry.mark_output_at(&waiter_address, base + 200);
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(current_address.clone());
+        let mut scheduler = SchedulerState::new();
+
+        scheduler.evaluate_sessions(registry.list(), base + 2_000);
+        assert_eq!(
+            scheduler.waiting_queue().addresses(),
+            vec![current_address.clone(), waiter_address.clone()]
+        );
+
+        // The focused session receives a blocking command. It has input, but no meaningful output after Enter yet.
+        registry.mark_input_at(&current_address, base + 2_100);
+        scheduler.on_input_submitted_with_bytes(&mut console, base + 2_100, 7);
+
+        let decision = scheduler.decide_auto_switch(&mut console, registry.list(), base + 3_500);
+
+        assert_eq!(
+            decision.action,
+            SchedulingAction::SwitchTo(waiter_address.clone())
+        );
+        assert_eq!(console.focused_session, Some(waiter_address));
+        assert_eq!(console.switch_lock, SwitchLock::Blocked);
+    }
+
+    #[test]
+    fn switches_to_waiter_when_post_enter_echo_is_followed_by_silence() {
+        let mut registry = SessionRegistry::new();
+        let current = registry.create_local_session(
+            "local".to_string(),
+            "current".to_string(),
+            "current".to_string(),
+        );
+        let waiter = registry.create_local_session(
+            "local".to_string(),
+            "waiter".to_string(),
+            "waiter".to_string(),
+        );
+        let current_address = current.address().clone();
+        let waiter_address = waiter.address().clone();
+        let base = current.created_at_unix_ms.max(waiter.created_at_unix_ms);
+
+        registry.mark_running_at(&current_address, Some(1), None);
+        registry.mark_running_at(&waiter_address, Some(2), None);
+        registry.mark_output_at(&current_address, base + 100);
+        registry.mark_output_at(&waiter_address, base + 200);
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(current_address.clone());
+        let mut scheduler = SchedulerState::new();
+
+        scheduler.evaluate_sessions(registry.list(), base + 2_000);
+        registry.mark_input_at(&current_address, base + 2_100);
+        scheduler.on_input_submitted(&mut console, base + 2_100);
+
+        // A tiny immediate post-Enter echo happened, but the command then went silent.
+        registry.mark_output_at(&current_address, base + 2_120);
+        scheduler.on_session_output(&current_address, base + 2_120, 2);
+
+        let decision = scheduler.decide_auto_switch(&mut console, registry.list(), base + 3_500);
+
+        assert_eq!(
+            decision.action,
+            SchedulingAction::SwitchTo(waiter_address.clone())
+        );
+        assert_eq!(console.focused_session, Some(waiter_address));
+        assert_eq!(console.switch_lock, SwitchLock::Blocked);
+    }
+
+    #[test]
+    fn tiny_continuation_noise_does_not_block_auto_switch() {
+        let mut registry = SessionRegistry::new();
+        let current = registry.create_local_session(
+            "local".to_string(),
+            "current".to_string(),
+            "current".to_string(),
+        );
+        let waiter = registry.create_local_session(
+            "local".to_string(),
+            "waiter".to_string(),
+            "waiter".to_string(),
+        );
+        let current_address = current.address().clone();
+        let waiter_address = waiter.address().clone();
+        let base = current.created_at_unix_ms.max(waiter.created_at_unix_ms);
+
+        registry.mark_running_at(&current_address, Some(1), None);
+        registry.mark_running_at(&waiter_address, Some(2), None);
+        registry.mark_output_at(&current_address, base + 100);
+        registry.mark_output_at(&waiter_address, base + 200);
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(current_address.clone());
+        let mut scheduler = SchedulerState::new();
+
+        scheduler.evaluate_sessions(registry.list(), base + 2_000);
+        registry.mark_input_at(&current_address, base + 2_100);
+        scheduler.on_input_submitted(&mut console, base + 2_100);
+
+        // Small post-Enter PTY chatter keeps the session classified as running,
+        // but should not count as real continuation after subtracting echoed input.
+        registry.mark_output_at(&current_address, base + 2_900);
+        scheduler.on_session_output(&current_address, base + 2_900, 9);
+
+        let decision = scheduler.decide_auto_switch(&mut console, registry.list(), base + 3_500);
+
+        assert_eq!(
+            decision.action,
+            SchedulingAction::SwitchTo(waiter_address.clone())
+        );
+        assert_eq!(console.focused_session, Some(waiter_address));
+        assert_eq!(console.switch_lock, SwitchLock::Blocked);
     }
 
     #[test]

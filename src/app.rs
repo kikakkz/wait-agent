@@ -435,7 +435,7 @@ impl App {
                         if !replies.is_empty() {
                             runtime.handle.write_all(&replies)?;
                         }
-                        scheduler.on_session_output(&output_session, now_unix_ms());
+                        scheduler.on_session_output(&output_session, now_unix_ms(), bytes.len());
                         self.render_workspace_console(
                             &mut renderer_state,
                             &renderer,
@@ -720,7 +720,7 @@ impl App {
                     screen_engine.feed(&bytes);
                     self.sessions
                         .update_screen_state(&output_session, screen_engine.state());
-                    scheduler.on_session_output(&output_session, now_unix_ms());
+                    scheduler.on_session_output(&output_session, now_unix_ms(), bytes.len());
                     self.render_console(
                         &mut renderer_state,
                         &renderer,
@@ -1397,7 +1397,7 @@ impl App {
                         if !replies.is_empty() {
                             runtime.handle.write_all(&replies)?;
                         }
-                        scheduler.on_session_output(&output_session, now_unix_ms());
+                        scheduler.on_session_output(&output_session, now_unix_ms(), bytes.len());
                         self.render_host_console(
                             &mut renderer_state,
                             &renderer,
@@ -2485,8 +2485,13 @@ impl InputTracker {
         while index < input.len() {
             match input[index] {
                 b'\r' | b'\n' => {
+                    let submitted_input_bytes = self.pending_bytes;
                     self.pending_bytes = 0;
-                    scheduler.on_input_submitted(console, now_unix_ms);
+                    scheduler.on_input_submitted_with_bytes(
+                        console,
+                        now_unix_ms,
+                        submitted_input_bytes,
+                    );
                     index += 1;
                 }
                 0x08 | 0x7f => {
@@ -2947,6 +2952,8 @@ mod tests {
                 session: console.focused_session.clone(),
                 entered_at_unix_ms: 200,
                 saw_output: false,
+                output_bytes_after_enter: 0,
+                submitted_input_bytes: 3,
             }
         );
     }
