@@ -19,6 +19,7 @@ pub struct RenderFrame {
     pub bottom_line: String,
     pub cursor_row: u16,
     pub cursor_col: u16,
+    pub cursor_visible: bool,
 }
 
 impl RenderFrame {
@@ -132,6 +133,7 @@ impl Renderer {
             ),
             cursor_row,
             cursor_col,
+            cursor_visible: snapshot.cursor_visible,
         })
     }
 
@@ -177,6 +179,7 @@ impl Renderer {
             ),
             cursor_row,
             cursor_col,
+            cursor_visible: snapshot.cursor_visible,
         })
     }
 }
@@ -271,7 +274,7 @@ struct ViewportProjection {
 }
 
 fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: usize) -> ViewportProjection {
-    let reserved_rows = 1 + overlay_lines;
+    let reserved_rows = overlay_lines;
     let available_rows = usize::max(
         1,
         (snapshot.size.rows as usize).saturating_sub(reserved_rows),
@@ -322,21 +325,23 @@ fn visible_line(line: &str, absolute_row: usize, cursor_row: usize, cursor_col: 
     let chars = line.chars().collect::<Vec<_>>();
     let content_width = chars
         .iter()
-        .rposition(|ch| *ch != ' ')
-        .map(|index| index + 1)
+        .enumerate()
+        .rev()
+        .find(|(_, ch)| **ch != ' ')
+        .map(|(index, _)| display_width(chars[..=index].iter().copied()))
         .unwrap_or(0);
     let visible_width = if absolute_row == cursor_row {
-        content_width.max(cursor_col)
+        content_width.max(cursor_col as u16)
     } else {
         content_width
     };
-    chars.into_iter().take(visible_width).collect()
+    take_display_width(chars.into_iter(), visible_width as usize)
 }
 
 fn projected_cursor_col(lines: &[String], cursor_row: u16, cursor_col: u16) -> u16 {
     let rendered_width = lines
         .get(cursor_row as usize)
-        .map(|line| line.chars().count() as u16)
+        .map(|line| display_width(line.chars()))
         .unwrap_or(0);
     cursor_col.min(rendered_width)
 }
@@ -385,7 +390,50 @@ fn blank_snapshot(address: &SessionAddress) -> ScreenSnapshot {
         window_title: None,
         cursor_row: 0,
         cursor_col: len as u16,
+        cursor_visible: true,
         alternate_screen: false,
+    }
+}
+
+fn take_display_width(chars: impl IntoIterator<Item = char>, width: usize) -> String {
+    let mut rendered = String::new();
+    let mut used = 0;
+
+    for ch in chars {
+        let next = char_display_width(ch) as usize;
+        if used >= width {
+            break;
+        }
+        rendered.push(ch);
+        used += next;
+    }
+
+    rendered
+}
+
+fn display_width(chars: impl IntoIterator<Item = char>) -> u16 {
+    chars.into_iter().map(char_display_width).sum()
+}
+
+fn char_display_width(ch: char) -> u16 {
+    if ch.is_control() {
+        0
+    } else if matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+    ) {
+        2
+    } else {
+        1
     }
 }
 
@@ -478,10 +526,11 @@ mod tests {
 
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("hello"));
-        assert!(lines[1].starts_with("WaitAgent | claude | devbox-1/session-1"));
-        assert!(lines[1].ends_with("active | 1 waiting | 1/1"));
+        assert!(lines[1].trim().is_empty());
+        assert!(lines[2].starts_with("WaitAgent | claude | devbox-1/session-1"));
+        assert!(lines[2].ends_with("active | 1 waiting | 1/1"));
     }
 
     #[test]
@@ -574,10 +623,11 @@ mod tests {
 
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("peek"));
-        assert!(lines[1].starts_with("WaitAgent | peek devbox-2/session-2 <- devbox-1/session-1"));
-        assert!(lines[1].ends_with("peek | 0 waiting | 1/2"));
+        assert!(lines[1].trim().is_empty());
+        assert!(lines[2].starts_with("WaitAgent | peek devbox-2/session-2 <- devbox-1/session-1"));
+        assert!(lines[2].ends_with("peek | 0 waiting | 1/2"));
     }
 
     #[test]
@@ -707,20 +757,21 @@ mod tests {
             .expect("render should succeed");
 
         assert_eq!(frame.overlay_lines, vec![":/new"]);
-        assert_eq!(frame.viewport_lines.len(), 2);
+        assert_eq!(frame.viewport_lines.len(), 3);
         assert!(frame.viewport_lines[0].starts_with("hello"));
         let rendered = frame.as_text();
         let lines = rendered.split("\r\n").collect::<Vec<_>>();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
         assert!(lines[0].starts_with("hello"));
         assert!(lines[1].trim().is_empty());
-        assert_eq!(lines[2], ":/new");
-        assert!(lines[3].starts_with("WaitAgent | bash | devbox-1/session-1"));
-        assert!(lines[3].ends_with("active | 0 waiting | 1/1"));
+        assert!(lines[2].trim().is_empty());
+        assert_eq!(lines[3], ":/new");
+        assert!(lines[4].starts_with("WaitAgent | bash | devbox-1/session-1"));
+        assert!(lines[4].ends_with("active | 0 waiting | 1/1"));
     }
 
     #[test]
-    fn viewport_tracks_latest_visible_rows_when_bottom_space_is_reserved() {
+    fn viewport_preserves_full_child_height_without_overlay() {
         let mut registry = SessionRegistry::new();
         let session = registry.create_local_session(
             "devbox-1".to_string(),
@@ -729,12 +780,45 @@ mod tests {
         );
         let address = session.address().clone();
         let mut engine = TerminalEngine::new(TerminalSize {
-            rows: 5,
+            rows: 4,
             cols: 96,
             pixel_width: 0,
             pixel_height: 0,
         });
-        engine.feed(b"one\r\ntwo\r\nthree");
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        registry.update_screen_state(&address, engine.state());
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address);
+
+        let sessions = registry.list();
+        let frame = Renderer::new()
+            .render(&console, &sessions, context(0))
+            .expect("render should succeed");
+
+        assert_eq!(frame.viewport_lines.len(), 4);
+        assert!(frame.viewport_lines[0].starts_with("one"));
+        assert!(frame.viewport_lines[1].starts_with("two"));
+        assert!(frame.viewport_lines[2].starts_with("three"));
+        assert!(frame.viewport_lines[3].starts_with("four"));
+    }
+
+    #[test]
+    fn viewport_shrinks_only_for_overlay_rows() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "devbox-1".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 4,
+            cols: 96,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
         registry.update_screen_state(&address, engine.state());
 
         let mut console = ConsoleState::new("console-1");
@@ -753,8 +837,8 @@ mod tests {
             .expect("render should succeed");
 
         assert_eq!(frame.viewport_lines.len(), 3);
-        assert!(frame.viewport_lines[0].starts_with("one"));
-        assert!(frame.viewport_lines[1].starts_with("two"));
-        assert!(frame.viewport_lines[2].starts_with("three"));
+        assert!(frame.viewport_lines[0].starts_with("two"));
+        assert!(frame.viewport_lines[1].starts_with("three"));
+        assert!(frame.viewport_lines[2].starts_with("four"));
     }
 }

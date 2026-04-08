@@ -235,12 +235,24 @@ impl SchedulerState {
         } = &self.phase
         {
             let focused_matches = session.as_ref() == focused_session.as_ref();
-            let current_continues = focused_matches
-                && *saw_output
-                && current_session_status(&evaluations, focused_session.as_ref())
-                    == Some(SessionStatus::Running);
+            let current_status = current_session_status(&evaluations, focused_session.as_ref());
+            let current_continues =
+                focused_matches && *saw_output && current_status == Some(SessionStatus::Running);
 
             if current_continues {
+                return SchedulingDecision::stay(evaluations);
+            }
+
+            let current_round_completed = focused_matches
+                && *saw_output
+                && matches!(
+                    current_status,
+                    Some(SessionStatus::WaitingInput | SessionStatus::Idle)
+                );
+
+            if current_round_completed {
+                console.clear_switch_lock();
+                self.phase = SchedulerPhase::Idle;
                 return SchedulingDecision::stay(evaluations);
             }
 
@@ -550,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn continuation_output_prevents_switch_until_round_stabilizes() {
+    fn continuation_output_keeps_focus_when_current_round_returns_to_prompt() {
         let mut registry = SessionRegistry::new();
         let current = registry.create_local_session(
             "local".to_string(),
@@ -582,12 +594,10 @@ mod tests {
         assert_eq!(console.switch_lock, SwitchLock::Armed);
 
         let second = scheduler.decide_auto_switch(&mut console, registry.list(), base + 2_000);
-        assert_eq!(
-            second.action,
-            SchedulingAction::SwitchTo(waiter_address.clone())
-        );
-        assert_eq!(console.focused_session, Some(waiter_address));
-        assert_eq!(console.switch_lock, SwitchLock::Blocked);
+        assert_eq!(second.action, SchedulingAction::StayOnCurrent);
+        assert_eq!(console.focused_session, Some(current_address));
+        assert_eq!(console.switch_lock, SwitchLock::Clear);
+        assert_eq!(scheduler.phase(), &SchedulerPhase::Idle);
     }
 
     #[test]

@@ -273,6 +273,7 @@ pub struct ScreenSnapshot {
     pub window_title: Option<String>,
     pub cursor_row: u16,
     pub cursor_col: u16,
+    pub cursor_visible: bool,
     pub alternate_screen: bool,
 }
 
@@ -281,6 +282,7 @@ pub struct ScreenState {
     pub normal: ScreenSnapshot,
     pub alternate: ScreenSnapshot,
     pub alternate_screen_active: bool,
+    pub application_cursor_keys: bool,
 }
 
 impl ScreenState {
@@ -298,8 +300,11 @@ pub struct TerminalEngine {
     normal: ScreenBuffer,
     alternate: ScreenBuffer,
     alternate_screen_active: bool,
+    application_cursor_keys: bool,
+    cursor_visible: bool,
     window_title: Option<String>,
     pending_escape: Vec<u8>,
+    pending_utf8: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -308,8 +313,11 @@ impl TerminalEngine {
             normal: ScreenBuffer::new(size),
             alternate: ScreenBuffer::new(size),
             alternate_screen_active: false,
+            application_cursor_keys: false,
+            cursor_visible: true,
             window_title: None,
             pending_escape: Vec::new(),
+            pending_utf8: Vec::new(),
         }
     }
 
@@ -319,12 +327,17 @@ impl TerminalEngine {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let _ = self.feed_and_collect_replies(bytes);
+    }
+
+    pub fn feed_and_collect_replies(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
         input.extend_from_slice(&self.pending_escape);
         input.extend_from_slice(bytes);
         self.pending_escape.clear();
 
         let mut plain = Vec::new();
+        let mut replies = Vec::new();
         let mut index = 0;
 
         while index < input.len() {
@@ -341,7 +354,7 @@ impl TerminalEngine {
                     match input[index] {
                         b'[' => {
                             index += 1;
-                            match self.consume_csi(&input, index) {
+                            match self.consume_csi(&input, index, &mut replies) {
                                 Some(next_index) => index = next_index,
                                 None => {
                                     self.pending_escape
@@ -352,7 +365,7 @@ impl TerminalEngine {
                         }
                         b']' => {
                             index += 1;
-                            match self.consume_osc(&input, index) {
+                            match self.consume_osc(&input, index, &mut replies) {
                                 Some(next_index) => index = next_index,
                                 None => {
                                     self.pending_escape
@@ -396,19 +409,34 @@ impl TerminalEngine {
         }
 
         self.flush_plain(&mut plain);
+        replies
     }
 
     pub fn snapshot(&self) -> ScreenSnapshot {
-        self.active_buffer()
-            .snapshot(self.alternate_screen_active, self.window_title.clone())
+        self.active_buffer().snapshot(
+            self.alternate_screen_active,
+            self.window_title.clone(),
+            self.cursor_visible,
+        )
     }
 
     pub fn state(&self) -> ScreenState {
         ScreenState {
-            normal: self.normal.snapshot(false, self.window_title.clone()),
-            alternate: self.alternate.snapshot(true, self.window_title.clone()),
+            normal: self
+                .normal
+                .snapshot(false, self.window_title.clone(), self.cursor_visible),
+            alternate: self.alternate.snapshot(
+                true,
+                self.window_title.clone(),
+                self.cursor_visible,
+            ),
             alternate_screen_active: self.alternate_screen_active,
+            application_cursor_keys: self.application_cursor_keys,
         }
+    }
+
+    pub fn application_cursor_keys(&self) -> bool {
+        self.application_cursor_keys
     }
 
     fn active_buffer(&self) -> &ScreenBuffer {
@@ -432,20 +460,29 @@ impl TerminalEngine {
             return;
         }
 
-        let text = String::from_utf8_lossy(plain);
-        for ch in text.chars() {
+        let mut input = Vec::with_capacity(self.pending_utf8.len() + plain.len());
+        input.extend_from_slice(&self.pending_utf8);
+        input.extend_from_slice(plain);
+        self.pending_utf8.clear();
+
+        for ch in decode_utf8_chars(&input, &mut self.pending_utf8) {
             self.active_buffer_mut().put_char(ch);
         }
         plain.clear();
     }
 
-    fn consume_csi(&mut self, bytes: &[u8], mut index: usize) -> Option<usize> {
+    fn consume_csi(
+        &mut self,
+        bytes: &[u8],
+        mut index: usize,
+        replies: &mut Vec<u8>,
+    ) -> Option<usize> {
         let start = index;
         while index < bytes.len() {
             let byte = bytes[index];
             if (0x40..=0x7e).contains(&byte) {
                 let params = &bytes[start..index];
-                self.handle_csi(params, byte as char);
+                self.handle_csi(params, byte as char, replies);
                 return Some(index + 1);
             }
             index += 1;
@@ -454,16 +491,21 @@ impl TerminalEngine {
         None
     }
 
-    fn consume_osc(&mut self, bytes: &[u8], mut index: usize) -> Option<usize> {
+    fn consume_osc(
+        &mut self,
+        bytes: &[u8],
+        mut index: usize,
+        replies: &mut Vec<u8>,
+    ) -> Option<usize> {
         let start = index;
         while index < bytes.len() {
             match bytes[index] {
                 0x07 => {
-                    self.handle_osc(&bytes[start..index]);
+                    self.handle_osc(&bytes[start..index], replies);
                     return Some(index + 1);
                 }
                 0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
-                    self.handle_osc(&bytes[start..index]);
+                    self.handle_osc(&bytes[start..index], replies);
                     return Some(index + 2);
                 }
                 _ => index += 1,
@@ -473,21 +515,27 @@ impl TerminalEngine {
         None
     }
 
-    fn handle_osc(&mut self, payload: &[u8]) {
+    fn handle_osc(&mut self, payload: &[u8], replies: &mut Vec<u8>) {
         let text = String::from_utf8_lossy(payload);
         let Some((kind, value)) = text.split_once(';') else {
             return;
         };
         if matches!(kind, "0" | "2") && !value.trim().is_empty() {
             self.window_title = Some(value.to_string());
+        } else if value == "?" {
+            match kind {
+                "10" => replies.extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+                "11" => replies.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+                _ => {}
+            }
         }
     }
 
-    fn handle_csi(&mut self, params: &[u8], final_byte: char) {
+    fn handle_csi(&mut self, params: &[u8], final_byte: char, replies: &mut Vec<u8>) {
         let params_text = String::from_utf8_lossy(params);
 
         if let Some(private_params) = params_text.strip_prefix('?') {
-            self.handle_private_mode(private_params, final_byte);
+            self.handle_private_mode(private_params, final_byte, replies);
             return;
         }
 
@@ -512,18 +560,45 @@ impl TerminalEngine {
             }
             'J' => self.active_buffer_mut().clear_screen(first_or(&numbers, 0)),
             'K' => self.active_buffer_mut().clear_line(first_or(&numbers, 0)),
+            'c' if numbers.is_empty() || numbers == [0] => {
+                replies.extend_from_slice(b"\x1b[?62;c");
+            }
+            'n' if numbers == [6] => {
+                let snapshot = self.active_buffer().snapshot(
+                    self.alternate_screen_active,
+                    self.window_title.clone(),
+                    self.cursor_visible,
+                );
+                let row = snapshot.cursor_row.saturating_add(1);
+                let col = snapshot.cursor_col.saturating_add(1);
+                replies.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
+            }
             'm' => {}
             _ => {}
         }
     }
 
-    fn handle_private_mode(&mut self, params: &str, final_byte: char) {
+    fn handle_private_mode(&mut self, params: &str, final_byte: char, replies: &mut Vec<u8>) {
         if params == "1049" {
             match final_byte {
                 'h' => self.alternate_screen_active = true,
                 'l' => self.alternate_screen_active = false,
                 _ => {}
             }
+        } else if params == "1" {
+            match final_byte {
+                'h' => self.application_cursor_keys = true,
+                'l' => self.application_cursor_keys = false,
+                _ => {}
+            }
+        } else if params == "25" {
+            match final_byte {
+                'h' => self.cursor_visible = true,
+                'l' => self.cursor_visible = false,
+                _ => {}
+            }
+        } else if params.is_empty() && final_byte == 'u' {
+            replies.extend_from_slice(b"\x1b[?0u");
         }
     }
 }
@@ -563,18 +638,29 @@ impl ScreenBuffer {
         self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
     }
 
-    fn snapshot(&self, alternate_screen: bool, window_title: Option<String>) -> ScreenSnapshot {
+    fn snapshot(
+        &self,
+        alternate_screen: bool,
+        window_title: Option<String>,
+        cursor_visible: bool,
+    ) -> ScreenSnapshot {
         ScreenSnapshot {
             size: self.size,
             lines: self
                 .cells
                 .iter()
-                .map(|row| row.iter().collect::<String>())
+                .map(|row| {
+                    row.iter()
+                        .copied()
+                        .filter(|cell| *cell != WIDE_CONTINUATION)
+                        .collect::<String>()
+                })
                 .collect(),
             scrollback: self.scrollback.clone(),
             window_title,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
+            cursor_visible,
             alternate_screen,
         }
     }
@@ -584,15 +670,36 @@ impl ScreenBuffer {
             return;
         }
 
+        let width = char_display_width(ch);
+        if width == 0 {
+            return;
+        }
+
         let row = self.cursor_row as usize;
         let col = self.cursor_col as usize;
+        self.clear_wide_overlap(row, col);
         self.cells[row][col] = ch;
 
-        if self.cursor_col + 1 >= self.size.cols {
-            self.cursor_col = 0;
-            self.line_feed();
+        if width == 2 && self.size.cols > 1 {
+            if self.cursor_col + 1 >= self.size.cols {
+                self.cursor_col = 0;
+                self.line_feed();
+                let row = self.cursor_row as usize;
+                self.clear_wide_overlap(row, self.cursor_col as usize);
+                self.cells[row][self.cursor_col as usize] = ch;
+                self.cells[row][self.cursor_col as usize + 1] = WIDE_CONTINUATION;
+                self.cursor_col += 2;
+            } else {
+                self.cells[row][col + 1] = WIDE_CONTINUATION;
+                self.cursor_col += 2;
+            }
         } else {
             self.cursor_col += 1;
+        }
+
+        if self.cursor_col >= self.size.cols {
+            self.cursor_col = 0;
+            self.line_feed();
         }
     }
 
@@ -697,6 +804,78 @@ impl ScreenBuffer {
                 }
             }
         }
+    }
+
+    fn clear_wide_overlap(&mut self, row: usize, col: usize) {
+        if self.cells[row][col] == WIDE_CONTINUATION {
+            self.cells[row][col] = ' ';
+            if col > 0 {
+                self.cells[row][col - 1] = ' ';
+            }
+        } else if col + 1 < self.cells[row].len() && self.cells[row][col + 1] == WIDE_CONTINUATION {
+            self.cells[row][col + 1] = ' ';
+        }
+    }
+}
+
+const WIDE_CONTINUATION: char = '\0';
+
+fn decode_utf8_chars(bytes: &[u8], pending_utf8: &mut Vec<u8>) -> Vec<char> {
+    let mut output = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match std::str::from_utf8(&bytes[index..]) {
+            Ok(valid) => {
+                output.extend(valid.chars());
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    if let Ok(valid) = std::str::from_utf8(&bytes[index..index + valid_up_to]) {
+                        output.extend(valid.chars());
+                    }
+                    index += valid_up_to;
+                    continue;
+                }
+
+                match error.error_len() {
+                    Some(invalid_len) => {
+                        output.push(char::REPLACEMENT_CHARACTER);
+                        index += invalid_len;
+                    }
+                    None => {
+                        pending_utf8.extend_from_slice(&bytes[index..]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn char_display_width(ch: char) -> u16 {
+    if ch.is_control() {
+        0
+    } else if matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+    ) {
+        2
+    } else {
+        1
     }
 }
 
@@ -866,7 +1045,41 @@ mod tests {
         assert_eq!(snapshot.lines[0], "hello ");
         assert_eq!(snapshot.cursor_row, 0);
         assert_eq!(snapshot.cursor_col, 5);
+        assert!(snapshot.cursor_visible);
         assert!(!snapshot.alternate_screen);
+    }
+
+    #[test]
+    fn engine_preserves_split_utf8_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(&[0xE4, 0xBD]);
+        engine.feed(&[0xA0, b'a']);
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "你a   ");
+        assert_eq!(snapshot.cursor_col, 3);
+    }
+
+    #[test]
+    fn engine_tracks_wide_character_cursor_width() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 6,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed("你好".as_bytes());
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "你好  ");
+        assert_eq!(snapshot.cursor_col, 4);
     }
 
     #[test]
@@ -941,6 +1154,56 @@ mod tests {
 
         assert_eq!(snapshot.lines[0], "abc     ");
         assert_eq!(snapshot.cursor_col, 3);
+    }
+
+    #[test]
+    fn engine_replies_to_terminal_capability_queries() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        let replies = engine.feed_and_collect_replies(b"\x1b[6n\x1b[c\x1b[?u\x1b]10;?\x1b\\");
+
+        let reply_text = String::from_utf8_lossy(&replies);
+        assert!(reply_text.contains("\x1b[1;1R"));
+        assert!(reply_text.contains("\x1b[?62;c"));
+        assert!(reply_text.contains("\x1b[?0u"));
+        assert!(reply_text.contains("\x1b]10;rgb:ffff/ffff/ffff\x1b\\"));
+    }
+
+    #[test]
+    fn engine_tracks_application_cursor_mode() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[?1h");
+        assert!(engine.application_cursor_keys());
+
+        engine.feed(b"\x1b[?1l");
+        assert!(!engine.application_cursor_keys());
+    }
+
+    #[test]
+    fn engine_tracks_cursor_visibility() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[?25l");
+        assert!(!engine.snapshot().cursor_visible);
+
+        engine.feed(b"\x1b[?25h");
+        assert!(engine.snapshot().cursor_visible);
     }
 
     #[test]

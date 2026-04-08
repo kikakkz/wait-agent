@@ -36,6 +36,7 @@ const ANSI_BG_KEYS: &str = "\x1b[48;5;236m\x1b[38;5;252m";
 const ANSI_BG_COMMAND: &str = "\x1b[48;5;238m\x1b[38;5;255m";
 const ANSI_BG_PICKER: &str = "\x1b[48;5;235m\x1b[38;5;250m";
 const ANSI_BG_PICKER_ACTIVE: &str = "\x1b[48;5;31m\x1b[38;5;255m";
+const MANAGED_CONSOLE_STATUS_ROWS: u16 = 1;
 
 pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
@@ -140,8 +141,10 @@ impl App {
                                 &command_prompt,
                             )?;
                         }
-                    } else if matches!(parse_console_action(&bytes), Some(ConsoleAction::QuitHost))
-                    {
+                    } else if matches!(
+                        parse_console_action(&bytes, command_prompt.wants_escape_dismiss()),
+                        Some(ConsoleAction::QuitHost)
+                    ) {
                         should_exit = true;
                     } else if let Some(outcome) = command_prompt.handle_input(&bytes) {
                         should_exit = self.apply_command_outcome(
@@ -157,7 +160,9 @@ impl App {
                             &mut command_prompt,
                             RenderSurface::Workspace,
                         )?;
-                    } else if let Some(action) = parse_console_action(&bytes) {
+                    } else if let Some(action) =
+                        parse_console_action(&bytes, command_prompt.wants_escape_dismiss())
+                    {
                         match action {
                             ConsoleAction::PreviousSession
                                 if command_prompt.move_picker_previous(
@@ -285,7 +290,9 @@ impl App {
                                     &mut command_prompt,
                                     RenderSurface::Workspace,
                                 )?;
-                            } else if let Some(action) = parse_console_action(&single) {
+                            } else if let Some(action) =
+                                parse_console_action(&single, command_prompt.wants_escape_dismiss())
+                            {
                                 handled_control = true;
                                 match action {
                                     ConsoleAction::PreviousSession
@@ -395,14 +402,20 @@ impl App {
                                     if !bytes_to_forward.is_empty() {
                                         command_prompt
                                             .clear_message_on_forwarded_input(&bytes_to_forward);
-                                        self.sessions.mark_input(&target);
                                         input_tracker.observe(
                                             &bytes_to_forward,
                                             &mut console,
                                             &mut scheduler,
                                             now_unix_ms(),
                                         );
-                                        runtime.handle.write_all(&bytes_to_forward)?;
+                                        let forwarded = runtime.input_normalizer.normalize(
+                                            &bytes_to_forward,
+                                            runtime.screen_engine.application_cursor_keys(),
+                                        );
+                                        if !forwarded.is_empty() {
+                                            self.sessions.mark_input(&target);
+                                            runtime.handle.write_all(&forwarded)?;
+                                        }
                                     }
                                 }
                             }
@@ -416,9 +429,12 @@ impl App {
                 }) => {
                     if let Some(runtime) = hosted.get_mut(&output_session) {
                         self.sessions.mark_output(&output_session);
-                        runtime.screen_engine.feed(&bytes);
+                        let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
                         self.sessions
                             .update_screen_state(&output_session, runtime.screen_engine.state());
+                        if !replies.is_empty() {
+                            runtime.handle.write_all(&replies)?;
+                        }
                         scheduler.on_session_output(&output_session, now_unix_ms());
                         self.render_workspace_console(
                             &mut renderer_state,
@@ -460,9 +476,10 @@ impl App {
             }
 
             if let Some(size) = self.terminal.capture_resize()? {
+                let managed_size = managed_console_size(size);
                 for runtime in hosted.values_mut() {
-                    runtime.handle.resize(PtySize::from(size))?;
-                    runtime.screen_engine.resize(size);
+                    runtime.handle.resize(PtySize::from(managed_size))?;
+                    runtime.screen_engine.resize(managed_size);
                     let address = runtime.handle.ownership().session.clone();
                     self.sessions
                         .update_screen_state(&address, runtime.screen_engine.state());
@@ -534,13 +551,14 @@ impl App {
             .sessions
             .create_local_session(node_id, title, command_line);
         let address = session.address().clone();
-        let screen_engine = TerminalEngine::new(size);
+        let managed_size = managed_console_size(size);
+        let screen_engine = TerminalEngine::new(managed_size);
         let handle = self.pty.spawn(
             address.clone(),
             SpawnRequest {
                 program,
                 args,
-                size: PtySize::from(size),
+                size: PtySize::from(managed_size),
             },
         )?;
         self.sessions.mark_running(&address, handle.process_id());
@@ -552,6 +570,7 @@ impl App {
             HostedSession {
                 handle,
                 screen_engine,
+                input_normalizer: ForwardInputNormalizer::default(),
             },
         );
         Ok(address)
@@ -723,8 +742,9 @@ impl App {
             }
 
             if let Some(size) = self.terminal.capture_resize()? {
-                handle.resize(PtySize::from(size))?;
-                screen_engine.resize(size);
+                let managed_size = managed_console_size(size);
+                handle.resize(PtySize::from(managed_size))?;
+                screen_engine.resize(managed_size);
                 self.sessions
                     .update_screen_state(&session, screen_engine.state());
                 self.render_console(
@@ -831,15 +851,15 @@ impl App {
                 overlay_lines,
             },
         )?;
-        let (frame_text, cursor) = self.decorate_frame(&frame, command_prompt);
-        self.write_full_frame_at(&frame_text, cursor)
+        let (frame_text, cursor, cursor_visible) = self.decorate_frame(&frame, command_prompt);
+        self.write_full_frame_at(&frame_text, cursor, cursor_visible)
     }
 
     fn decorate_frame(
         &self,
         frame: &RenderFrame,
         command_prompt: Option<&CommandPromptState>,
-    ) -> (String, CursorPlacement) {
+    ) -> (String, CursorPlacement, bool) {
         let width = self.terminal.current_size_or_default().cols as usize;
         let mut lines =
             Vec::with_capacity(frame.viewport_lines.len() + frame.overlay_lines.len() + 2);
@@ -858,11 +878,13 @@ impl App {
             .filter(|prompt| prompt.open)
             .map(|prompt| self.command_bar_cursor(frame, prompt))
             .unwrap_or_else(|| self.frame_cursor(frame));
-        (lines.join("\r\n"), cursor)
+        let cursor_visible =
+            command_prompt.map(|prompt| prompt.open).unwrap_or(false) || frame.cursor_visible;
+        (lines.join("\r\n"), cursor, cursor_visible)
     }
 
     fn write_full_frame(&self, frame_text: &str) -> Result<(), AppError> {
-        self.write_full_frame_at(frame_text, CursorPlacement { row: 0, col: 0 })
+        self.write_full_frame_at(frame_text, CursorPlacement { row: 0, col: 0 }, true)
     }
 
     fn frame_cursor(&self, frame: &RenderFrame) -> CursorPlacement {
@@ -899,6 +921,7 @@ impl App {
         &self,
         frame_text: &str,
         cursor: CursorPlacement,
+        cursor_visible: bool,
     ) -> Result<(), AppError> {
         let mut stdout = io::stdout().lock();
         stdout
@@ -910,9 +933,14 @@ impl App {
         stdout
             .write_all(
                 format!(
-                    "\x1b[{};{}H\x1b[?25h",
+                    "\x1b[{};{}H{}",
                     cursor.row.saturating_add(1),
-                    cursor.col.saturating_add(1)
+                    cursor.col.saturating_add(1),
+                    if cursor_visible {
+                        "\x1b[?25h"
+                    } else {
+                        "\x1b[?25l"
+                    }
                 )
                 .as_bytes(),
             )
@@ -1075,8 +1103,10 @@ impl App {
                                 &command_prompt,
                             )?;
                         }
-                    } else if matches!(parse_console_action(&bytes), Some(ConsoleAction::QuitHost))
-                    {
+                    } else if matches!(
+                        parse_console_action(&bytes, command_prompt.wants_escape_dismiss()),
+                        Some(ConsoleAction::QuitHost)
+                    ) {
                         should_exit = true;
                     } else if let Some(outcome) = command_prompt.handle_input(&bytes) {
                         should_exit = self.apply_command_outcome(
@@ -1092,7 +1122,9 @@ impl App {
                             &mut command_prompt,
                             RenderSurface::Server,
                         )?;
-                    } else if let Some(action) = parse_console_action(&bytes) {
+                    } else if let Some(action) =
+                        parse_console_action(&bytes, command_prompt.wants_escape_dismiss())
+                    {
                         match action {
                             ConsoleAction::PreviousSession
                                 if command_prompt.move_picker_previous(
@@ -1220,7 +1252,9 @@ impl App {
                                     &mut command_prompt,
                                     RenderSurface::Server,
                                 )?;
-                            } else if let Some(action) = parse_console_action(&single) {
+                            } else if let Some(action) =
+                                parse_console_action(&single, command_prompt.wants_escape_dismiss())
+                            {
                                 handled_control = true;
                                 match action {
                                     ConsoleAction::PreviousSession
@@ -1330,14 +1364,20 @@ impl App {
                                     if !bytes_to_forward.is_empty() {
                                         command_prompt
                                             .clear_message_on_forwarded_input(&bytes_to_forward);
-                                        self.sessions.mark_input(&target);
                                         input_tracker.observe(
                                             &bytes_to_forward,
                                             &mut console,
                                             &mut scheduler,
                                             now_unix_ms(),
                                         );
-                                        runtime.handle.write_all(&bytes_to_forward)?;
+                                        let forwarded = runtime.input_normalizer.normalize(
+                                            &bytes_to_forward,
+                                            runtime.screen_engine.application_cursor_keys(),
+                                        );
+                                        if !forwarded.is_empty() {
+                                            self.sessions.mark_input(&target);
+                                            runtime.handle.write_all(&forwarded)?;
+                                        }
                                     }
                                 }
                             }
@@ -1351,9 +1391,12 @@ impl App {
                 }) => {
                     if let Some(runtime) = hosted.get_mut(&output_session) {
                         self.sessions.mark_output(&output_session);
-                        runtime.screen_engine.feed(&bytes);
+                        let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
                         self.sessions
                             .update_screen_state(&output_session, runtime.screen_engine.state());
+                        if !replies.is_empty() {
+                            runtime.handle.write_all(&replies)?;
+                        }
                         scheduler.on_session_output(&output_session, now_unix_ms());
                         self.render_host_console(
                             &mut renderer_state,
@@ -1397,9 +1440,10 @@ impl App {
             server_runtime.expire_stale_nodes(now_unix_ms());
 
             if let Some(size) = self.terminal.capture_resize()? {
+                let managed_size = managed_console_size(size);
                 for runtime in hosted.values_mut() {
-                    runtime.handle.resize(PtySize::from(size))?;
-                    runtime.screen_engine.resize(size);
+                    runtime.handle.resize(PtySize::from(managed_size))?;
+                    runtime.screen_engine.resize(managed_size);
                     let address = runtime.handle.ownership().session.clone();
                     self.sessions
                         .update_screen_state(&address, runtime.screen_engine.state());
@@ -1966,6 +2010,7 @@ impl App {
 struct HostedSession {
     handle: PtyHandle,
     screen_engine: TerminalEngine,
+    input_normalizer: ForwardInputNormalizer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2116,6 +2161,10 @@ impl CommandPromptState {
             self.overlay,
             CommandOverlay::Help | CommandOverlay::Sessions
         )
+    }
+
+    fn wants_escape_dismiss(&self) -> bool {
+        self.open || !matches!(self.overlay, CommandOverlay::None)
     }
 
     fn dismiss(&mut self) -> bool {
@@ -2416,6 +2465,7 @@ fn picker_sessions<'a>(
 #[derive(Debug, Default)]
 struct InputTracker {
     pending_bytes: usize,
+    pending_escape: Vec<u8>,
 }
 
 impl InputTracker {
@@ -2426,11 +2476,18 @@ impl InputTracker {
         scheduler: &mut SchedulerState,
         now_unix_ms: u128,
     ) {
-        for byte in bytes {
-            match *byte {
+        let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
+        input.extend_from_slice(&self.pending_escape);
+        input.extend_from_slice(bytes);
+        self.pending_escape.clear();
+
+        let mut index = 0;
+        while index < input.len() {
+            match input[index] {
                 b'\r' | b'\n' => {
                     self.pending_bytes = 0;
                     scheduler.on_input_submitted(console, now_unix_ms);
+                    index += 1;
                 }
                 0x08 | 0x7f => {
                     self.pending_bytes = self.pending_bytes.saturating_sub(1);
@@ -2440,14 +2497,92 @@ impl InputTracker {
                         console.start_typing();
                         console.set_input_len(self.pending_bytes);
                     }
+                    index += 1;
                 }
-                _ => {
+                b'\t' => {
+                    index += 1;
+                }
+                0x1b => match consume_input_escape(&input, index) {
+                    Some(next_index) => index = next_index,
+                    None => {
+                        self.pending_escape.extend_from_slice(&input[index..]);
+                        break;
+                    }
+                },
+                byte if is_typing_byte(byte) => {
                     self.pending_bytes += 1;
                     console.start_typing();
                     console.set_input_len(self.pending_bytes);
+                    index += 1;
+                }
+                _ => {
+                    index += 1;
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ForwardInputNormalizer {
+    pending_escape: Vec<u8>,
+}
+
+impl ForwardInputNormalizer {
+    fn normalize(&mut self, bytes: &[u8], application_cursor_keys: bool) -> Vec<u8> {
+        let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
+        input.extend_from_slice(&self.pending_escape);
+        input.extend_from_slice(bytes);
+        self.pending_escape.clear();
+
+        let mut output = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            if input[index] != 0x1b {
+                output.push(input[index]);
+                index += 1;
+                continue;
+            }
+
+            if index + 1 >= input.len() {
+                self.pending_escape.extend_from_slice(&input[index..]);
+                break;
+            }
+
+            match input[index + 1] {
+                b'[' => {
+                    if index + 2 >= input.len() {
+                        self.pending_escape.extend_from_slice(&input[index..]);
+                        break;
+                    }
+
+                    let final_byte = input[index + 2];
+                    if application_cursor_keys
+                        && matches!(final_byte, b'A' | b'B' | b'C' | b'D' | b'H' | b'F')
+                    {
+                        output.extend_from_slice(&[0x1b, b'O', final_byte]);
+                    } else {
+                        output.extend_from_slice(&input[index..index + 3]);
+                    }
+                    index += 3;
+                }
+                b'O' => {
+                    if index + 2 >= input.len() {
+                        self.pending_escape.extend_from_slice(&input[index..]);
+                        break;
+                    }
+
+                    output.extend_from_slice(&input[index..index + 3]);
+                    index += 3;
+                }
+                _ => {
+                    output.extend_from_slice(&input[index..index + 2]);
+                    index += 2;
+                }
+            }
+        }
+
+        output
     }
 }
 
@@ -2471,10 +2606,10 @@ fn workspace_idle_lines(surface: &str, active_count: usize, waiting_count: usize
     ]
 }
 
-fn parse_console_action(bytes: &[u8]) -> Option<ConsoleAction> {
+fn parse_console_action(bytes: &[u8], allow_escape_dismiss: bool) -> Option<ConsoleAction> {
     match bytes {
         [SHORTCUT_INTERRUPT_EXIT] => Some(ConsoleAction::QuitHost),
-        [0x1b] => Some(ConsoleAction::DismissOverlay),
+        [0x1b] if allow_escape_dismiss => Some(ConsoleAction::DismissOverlay),
         [SHORTCUT_PREVIOUS_SESSION] => Some(ConsoleAction::PreviousSession),
         [SHORTCUT_NEXT_SESSION] => Some(ConsoleAction::NextSession),
         [SHORTCUT_NEW_SESSION] => Some(ConsoleAction::CreateSession),
@@ -2489,6 +2624,32 @@ fn parse_console_action(bytes: &[u8]) -> Option<ConsoleAction> {
         [0x1b, digit @ b'1'..=b'9'] => Some(ConsoleAction::FocusIndex((digit - b'0') as usize)),
         _ => None,
     }
+}
+
+fn consume_input_escape(bytes: &[u8], index: usize) -> Option<usize> {
+    if index + 1 >= bytes.len() {
+        return None;
+    }
+
+    match bytes[index + 1] {
+        b'[' => {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                if (0x40..=0x7e).contains(&byte) {
+                    return Some(cursor + 1);
+                }
+                cursor += 1;
+            }
+            None
+        }
+        b'O' => (index + 2 < bytes.len()).then_some(index + 3),
+        _ => Some((index + 2).min(bytes.len())),
+    }
+}
+
+fn is_typing_byte(byte: u8) -> bool {
+    byte >= 0x20 && byte != 0x7f
 }
 
 fn style_overlay_line(line: &str, width: usize) -> String {
@@ -2583,6 +2744,13 @@ fn render_command_line(program: &str, args: &[String]) -> String {
     parts.push(program.to_string());
     parts.extend(args.iter().cloned());
     parts.join(" ")
+}
+
+fn managed_console_size(size: crate::terminal::TerminalSize) -> crate::terminal::TerminalSize {
+    crate::terminal::TerminalSize {
+        rows: size.rows.saturating_sub(MANAGED_CONSOLE_STATUS_ROWS).max(1),
+        ..size
+    }
 }
 
 fn default_shell_program() -> String {
@@ -2753,8 +2921,8 @@ impl From<crate::terminal::TerminalError> for AppError {
 mod tests {
     use super::{
         default_shell_program, parse_console_action, shell_title, CommandOverlay,
-        CommandPromptState, ConsoleAction, InputTracker, PICKER_ESCAPE_TIMEOUT_MS,
-        SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
+        CommandPromptState, ConsoleAction, ForwardInputNormalizer, InputTracker,
+        PICKER_ESCAPE_TIMEOUT_MS, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
     use crate::console::ConsoleState;
@@ -2800,42 +2968,43 @@ mod tests {
     #[test]
     fn console_action_parser_recognizes_focus_shortcuts() {
         assert_eq!(
-            parse_console_action(b"\x1bc"),
+            parse_console_action(b"\x1bc", false),
             Some(ConsoleAction::CreateSession)
         );
         assert_eq!(
-            parse_console_action(&[0x1b]),
+            parse_console_action(&[0x1b], true),
             Some(ConsoleAction::DismissOverlay)
         );
+        assert_eq!(parse_console_action(&[0x1b], false), None);
         assert_eq!(
-            parse_console_action(&[SHORTCUT_NEXT_SESSION]),
+            parse_console_action(&[SHORTCUT_NEXT_SESSION], false),
             Some(ConsoleAction::NextSession)
         );
         assert_eq!(
-            parse_console_action(&[SHORTCUT_PREVIOUS_SESSION]),
+            parse_console_action(&[SHORTCUT_PREVIOUS_SESSION], false),
             Some(ConsoleAction::PreviousSession)
         );
         assert_eq!(
-            parse_console_action(b"\x1bn"),
+            parse_console_action(b"\x1bn", false),
             Some(ConsoleAction::NextSession)
         );
         assert_eq!(
-            parse_console_action(b"\x1bp"),
+            parse_console_action(b"\x1bp", false),
             Some(ConsoleAction::PreviousSession)
         );
         assert_eq!(
-            parse_console_action(b"\x1b3"),
+            parse_console_action(b"\x1b3", false),
             Some(ConsoleAction::FocusIndex(3))
         );
         assert_eq!(
-            parse_console_action(b"\x1bv"),
+            parse_console_action(b"\x1bv", false),
             Some(ConsoleAction::TogglePeek)
         );
         assert_eq!(
-            parse_console_action(b"\x1bx"),
+            parse_console_action(b"\x1bx", false),
             Some(ConsoleAction::QuitHost)
         );
-        assert_eq!(parse_console_action(b"plain input"), None);
+        assert_eq!(parse_console_action(b"plain input", false), None);
     }
 
     #[test]
@@ -2929,5 +3098,88 @@ mod tests {
         assert!(!prompt.submit_overlay(b"\r"));
         assert!(prompt.clear_message_on_forwarded_input(b"\t"));
         assert_eq!(prompt.overlay, CommandOverlay::None);
+    }
+
+    #[test]
+    fn input_tracker_ignores_navigation_sequences_for_switch_lock() {
+        let mut tracker = InputTracker::default();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(SessionAddress::new("local", "session-1"));
+        let mut scheduler = SchedulerState::new();
+
+        tracker.observe(b"\x1b[A\t", &mut console, &mut scheduler, 100);
+
+        assert!(console.can_switch());
+    }
+
+    #[test]
+    fn picker_enter_can_focus_after_forwarded_navigation_input() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let sessions = registry.list();
+        let addresses = sessions
+            .iter()
+            .map(|session| session.address().clone())
+            .collect::<Vec<_>>();
+
+        let mut tracker = InputTracker::default();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(first.address().clone());
+        let mut scheduler = SchedulerState::new();
+        tracker.observe(b"\x1b[A\t", &mut console, &mut scheduler, 100);
+
+        let mut prompt = CommandPromptState::default();
+        prompt.toggle_sessions(&sessions, console.focused_session.as_ref());
+        prompt.handle_picker_navigation(
+            b"\x1b[B",
+            &sessions,
+            console.focused_session.as_ref(),
+            120,
+        );
+
+        let index = prompt
+            .selected_picker_index(&sessions, console.focused_session.as_ref())
+            .expect("picker selection");
+        assert_eq!(index, 2);
+        assert_eq!(
+            console.focus_index(&addresses, index),
+            Some(second.address().clone())
+        );
+    }
+
+    #[test]
+    fn forward_input_normalizer_translates_cursor_keys_for_application_mode() {
+        let mut normalizer = ForwardInputNormalizer::default();
+
+        assert_eq!(normalizer.normalize(b"\x1b[A", true), b"\x1bOA");
+        assert_eq!(normalizer.normalize(b"\x1b[B", true), b"\x1bOB");
+        assert_eq!(normalizer.normalize(b"\x1b[D", true), b"\x1bOD");
+        assert_eq!(normalizer.normalize(b"\x1b[H", true), b"\x1bOH");
+    }
+
+    #[test]
+    fn forward_input_normalizer_keeps_shell_sequences_when_application_mode_is_off() {
+        let mut normalizer = ForwardInputNormalizer::default();
+
+        assert_eq!(normalizer.normalize(b"\x1b[A", false), b"\x1b[A");
+        assert_eq!(normalizer.normalize(b"\x1b[Z", true), b"\x1b[Z");
+    }
+
+    #[test]
+    fn forward_input_normalizer_handles_split_arrow_sequences() {
+        let mut normalizer = ForwardInputNormalizer::default();
+
+        assert!(normalizer.normalize(&[0x1b], true).is_empty());
+        assert!(normalizer.normalize(b"[", true).is_empty());
+        assert_eq!(normalizer.normalize(b"A", true), b"\x1bOA");
     }
 }
