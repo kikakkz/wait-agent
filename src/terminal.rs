@@ -560,6 +560,17 @@ impl TerminalEngine {
             }
             'J' => self.active_buffer_mut().clear_screen(first_or(&numbers, 0)),
             'K' => self.active_buffer_mut().clear_line(first_or(&numbers, 0)),
+            'S' => self.active_buffer_mut().scroll_up_in_region(first_or(&numbers, 1)),
+            'r' => {
+                if numbers.is_empty() {
+                    self.active_buffer_mut().reset_scroll_region();
+                } else {
+                    let top = first_or(&numbers, 1).saturating_sub(1);
+                    let bottom = second_or(&numbers, self.active_buffer().size.rows)
+                        .saturating_sub(1);
+                    self.active_buffer_mut().set_scroll_region(top, bottom);
+                }
+            }
             'c' if numbers.is_empty() || numbers == [0] => {
                 replies.extend_from_slice(b"\x1b[?62;c");
             }
@@ -609,6 +620,8 @@ struct ScreenBuffer {
     cells: Vec<Vec<char>>,
     cursor_row: u16,
     cursor_col: u16,
+    scroll_top: u16,
+    scroll_bottom: u16,
     scrollback: Vec<String>,
 }
 
@@ -619,6 +632,8 @@ impl ScreenBuffer {
             cells: blank_cells(size),
             cursor_row: 0,
             cursor_col: 0,
+            scroll_top: 0,
+            scroll_bottom: size.rows.saturating_sub(1),
             scrollback: Vec::new(),
         }
     }
@@ -636,6 +651,11 @@ impl ScreenBuffer {
         self.cells = next;
         self.cursor_row = self.cursor_row.min(size.rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
+        self.scroll_top = self.scroll_top.min(size.rows.saturating_sub(1));
+        self.scroll_bottom = self
+            .scroll_bottom
+            .max(self.scroll_top)
+            .min(size.rows.saturating_sub(1));
     }
 
     fn snapshot(
@@ -712,13 +732,9 @@ impl ScreenBuffer {
             return;
         }
 
-        if self.cursor_row + 1 >= self.size.rows {
-            if !self.cells.is_empty() {
-                let top = self.cells.remove(0);
-                self.scrollback.push(top.into_iter().collect());
-                self.cells.push(blank_row(self.size.cols));
-            }
-            self.cursor_row = self.size.rows.saturating_sub(1);
+        if self.cursor_row >= self.scroll_bottom {
+            self.scroll_up_in_region(1);
+            self.cursor_row = self.scroll_bottom;
         } else {
             self.cursor_row += 1;
         }
@@ -749,6 +765,52 @@ impl ScreenBuffer {
             .clamp(0, self.size.cols.saturating_sub(1) as isize) as u16;
         self.cursor_row = next_row;
         self.cursor_col = next_col;
+    }
+
+    fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        if self.size.rows == 0 {
+            self.scroll_top = 0;
+            self.scroll_bottom = 0;
+            self.cursor_row = 0;
+            self.cursor_col = 0;
+            return;
+        }
+
+        let max_row = self.size.rows.saturating_sub(1);
+        let top = top.min(max_row);
+        let bottom = bottom.max(top).min(max_row);
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        self.cursor_row = top;
+        self.cursor_col = 0;
+    }
+
+    fn reset_scroll_region(&mut self) {
+        self.set_scroll_region(0, self.size.rows.saturating_sub(1));
+    }
+
+    fn scroll_up_in_region(&mut self, count: u16) {
+        if self.cells.is_empty() || self.size.rows == 0 {
+            return;
+        }
+
+        let top = self.scroll_top as usize;
+        let bottom = self.scroll_bottom as usize;
+        if top >= self.cells.len() || bottom >= self.cells.len() || top > bottom {
+            return;
+        }
+
+        let rows = bottom - top + 1;
+        let count = usize::min(count as usize, rows);
+        let full_screen_region = top == 0 && bottom + 1 == self.cells.len();
+
+        for _ in 0..count {
+            let removed = self.cells.remove(top);
+            if full_screen_region {
+                self.scrollback.push(removed.into_iter().collect());
+            }
+            self.cells.insert(bottom, blank_row(self.size.cols));
+        }
     }
 
     fn clear_screen(&mut self, mode: u16) {
@@ -1138,6 +1200,45 @@ mod tests {
 
         assert_eq!(snapshot.lines[0], "echo ab         ");
         assert_eq!(snapshot.cursor_col, 7);
+    }
+
+    #[test]
+    fn engine_handles_scroll_region_and_scroll_up() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 5,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(
+            b"row1\r\nrow2\r\nrow3\r\nrow4\r\nrow5\x1b[1;3r\x1b[2S\x1b[r",
+        );
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "row3    ");
+        assert_eq!(snapshot.lines[1], "        ");
+        assert_eq!(snapshot.lines[2], "        ");
+        assert_eq!(snapshot.lines[3], "row4    ");
+        assert_eq!(snapshot.lines[4], "row5    ");
+    }
+
+    #[test]
+    fn engine_line_feed_respects_scroll_region() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 4,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"top\r\nmid\r\nbot");
+        engine.feed(b"\x1b[2;3r\x1b[3;1H!\n");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "top     ");
+        assert_eq!(snapshot.lines[1], "!ot     ");
+        assert_eq!(snapshot.lines[2], "        ");
     }
 
     #[test]

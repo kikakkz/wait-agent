@@ -6,10 +6,10 @@ history:
     summary: shell-backed session defaults and working-directory handling were completed for reusable local sessions
     source_of_truth:
       file: docs/execution-status-board.md
-      reference: T4-09
+      reference: Track Summary
   - task_id: task.t4-10
     status: in_progress
     summary: final local acceptance sign-off is active and remains the gate before resumed network implementation
     source_of_truth:
       file: docs/execution-status-board.md
-      reference: T4-10
+      reference: Current Focus And Next Queue

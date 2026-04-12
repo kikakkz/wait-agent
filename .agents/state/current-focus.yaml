@@ -4,4 +4,4 @@ current_task: task.t4-10
 focus_statement: finish local acceptance sign-off before resuming aggregate server-session work
 last_updated_from:
   file: docs/execution-status-board.md
-  reference: T4-10
+  reference: Current Focus And Next Queue

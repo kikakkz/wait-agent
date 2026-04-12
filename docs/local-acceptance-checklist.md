@@ -1,22 +1,23 @@
 # WaitAgent Local Acceptance Checklist
 
-Version: `v1.0`  
-Status: `Active`  
-Date: `2026-04-08`
+Version: `v1.1`  
+Status: `Pending Final Manual Sign-off`  
+Date: `2026-04-12`
 
 ## 1. Purpose
 
-This document defines the local acceptance gate for `T4-10`.
+This document is the human-run acceptance checklist for `T4-10`.
 
-It is intentionally product-facing rather than implementation-facing.
-The goal is to prove that one local `waitagent` workspace is usable as the real default interaction model before network-facing UX work resumes.
+It is intentionally product-facing.
+Detailed machine verification state now lives in `.agents/state/last-verified.yaml`.
 
-It complements:
+Use this file for:
 
-- [execution-status-board.md](execution-status-board.md)
-- [functional-design.md](functional-design.md)
-- [interaction-flows.md](interaction-flows.md)
-- [ui-design.md](ui-design.md)
+- what a human should validate
+- what counts as acceptance
+- what kinds of failures keep the gate open
+
+Do not use this file as a machine verification ledger.
 
 ## 2. Acceptance Objective
 
@@ -24,15 +25,15 @@ Local acceptance passes only when one `waitagent` process can reliably manage mu
 
 In practical terms:
 
-- The workspace shell must be usable
-- Session lifecycle controls must be usable
-- Shell behavior must remain natural
+- the workspace shell must be usable
+- session lifecycle controls must be usable
+- shell behavior must remain natural
 - Codex-like full-screen TUIs must remain usable
-- Auto-switch must behave predictably enough to trust in daily use
+- auto-switch must behave predictably enough to trust in daily use
 
-## 3. Test Environment
+## 3. Recommended Environment
 
-Minimum local matrix:
+Recommended validation matrix:
 
 - `bash`
 - `codex`
@@ -40,26 +41,26 @@ Minimum local matrix:
 
 Recommended terminal conditions:
 
-- Standard-width terminal
-- Narrow terminal resize case
+- standard-width terminal
+- narrow terminal resize case
 - UTF-8 locale enabled
 
 Recommended shell conditions:
 
-- Working directory with sibling folders for completion tests
-- Repository directory with enough visible output to exercise scrolling and redraw
+- a working directory with sibling folders for completion tests
+- a repository directory with enough visible output to exercise scrolling and redraw
 
 ## 4. Exit Criteria
 
 `T4-10` may be marked `done` only when all of the following are true:
 
-- The workspace can create, focus, list, and close multiple sessions reliably
-- A shell-backed session behaves like a real reusable shell context
+- the workspace can create, focus, list, and close multiple sessions reliably
+- a shell-backed session behaves like a real reusable shell context
 - Codex can start, render, navigate menus, and accept follow-up input inside WaitAgent
 - Chinese input and normal UTF-8 output remain readable in validated sessions
 - Peek works without stealing input ownership
-- No known blocker remains in auto-switch behavior for common local workflows
-- Any remaining issues are minor enough that network work would not multiply debugging cost
+- no known blocker remains in auto-switch behavior for common local workflows
+- any remaining issues are minor enough that network work would not multiply debugging cost
 
 ## 5. Scenario Checklist
 
@@ -70,7 +71,7 @@ Recommended shell conditions:
 - Confirm the initial managed shell session appears and becomes focused.
 - Confirm exit from WaitAgent returns the terminal to a clean shell state.
 
-### 5.2 Session Creation and Lifecycle
+### 5.2 Session Creation And Lifecycle
 
 - Create a second session from inside the workspace.
 - Create a third session from inside the workspace.
@@ -101,14 +102,14 @@ Recommended shell conditions:
 - Confirm cursor visibility looks natural while navigating Codex.
 - Confirm the Codex viewport is not vertically clipped by WaitAgent chrome.
 
-### 5.5 UTF-8 and Chinese Input
+### 5.5 UTF-8 And Chinese Input
 
 - Type Chinese text inside a normal shell session.
 - Type Chinese text inside Codex if the workflow supports it.
 - Confirm no mojibake appears during input echo or output rendering.
 - Confirm mixed Chinese and ASCII text keeps visual alignment well enough for practical use.
 
-### 5.6 Picker and Overlay Behavior
+### 5.6 Picker And Overlay Behavior
 
 - Open the picker while another session is in the background.
 - Use Up/Down to move the picker highlight.
@@ -137,22 +138,22 @@ This section is mandatory because auto-switch is currently the highest-risk loca
 
 ### 6.1 Must Hold
 
-- Auto-switch is considered only after `Enter`.
-- At most one automatic switch may happen per submitted input round.
-- No automatic switch may occur while partial input is still being typed.
-- Manual switching must clear the current auto-switch opportunity.
+- auto-switch is considered only after `Enter`
+- at most one automatic switch may happen per submitted input round
+- no automatic switch may occur while partial input is still being typed
+- manual switching must clear the current auto-switch opportunity
 
 ### 6.2 Same-Round Protection
 
-- If the focused session continues the same interaction round after `Enter`, WaitAgent must stay on it.
-- If the focused session produces follow-up output and then returns to its own prompt, WaitAgent must still stay on it.
-- A prompt-to-prompt follow-up inside the same session must not be treated as permission to switch away.
+- if the focused session continues the same interaction round after `Enter`, WaitAgent must stay on it
+- if the focused session produces follow-up output and then returns to its own prompt, WaitAgent must still stay on it
+- a prompt-to-prompt follow-up inside the same session must not be treated as permission to switch away
 
 ### 6.3 Waiting-Session Switching
 
-- If another session is already waiting and the current round truly stabilizes, one switch may occur.
-- The switched-to target must be the earliest waiting session in FIFO order.
-- After the switch, further auto-switching must remain blocked until the user submits new input or manually changes focus.
+- if another session is already waiting and the current round truly stabilizes, one switch may occur
+- the switched-to target must be the earliest waiting session in FIFO order
+- after the switch, further auto-switching must remain blocked until the user submits new input or manually changes focus
 
 ### 6.4 Failure Conditions
 
@@ -161,19 +162,17 @@ Any of the following keeps `T4-10` open:
 - WaitAgent switches away from Codex or another session before the same interaction round is really done
 - WaitAgent fails to switch when a clearly waiting background session should receive the one allowed switch
 - WaitAgent switches more than once per submitted input round
-- The lock state becomes hard to predict from user-visible behavior
+- the lock state becomes hard to predict from user-visible behavior
 
-## 7. Bug Capture Template
+## 7. How To Record A Failure
 
 For each failed scenario, record:
 
-- Session type: `bash`, `codex`, `claude`, or other
-- Focused session before the issue
-- Triggering input
-- Observed result
-- Expected result
-- Whether the failure involves auto-switch, picker, shell fidelity, resize, or UTF-8 behavior
+- session type: `bash`, `codex`, `claude`, or other
+- focused session before the issue
+- triggering input
+- observed result
+- expected result
+- whether the failure involves auto-switch, picker, shell fidelity, resize, or UTF-8 behavior
 
-## 8. Current Recommendation
-
-Until this checklist passes cleanly, local acceptance should remain the priority over mirrored network interaction work.
+The detailed machine-readable verification result should then be synced into `.agents/state/last-verified.yaml` and related task state.

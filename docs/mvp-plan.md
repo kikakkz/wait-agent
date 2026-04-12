@@ -1,241 +1,108 @@
 # WaitAgent MVP Plan
 
-Version: `v1.0`  
-Status: `Draft`  
-Date: `2026-04-07`
+Version: `v1.1`  
+Status: `Active`  
+Date: `2026-04-12`
 
 ## 1. Purpose
 
-This document converts the execution board into a concrete near-term build plan.
+This document explains the human delivery strategy for the WaitAgent MVP.
 
-It is intentionally narrower than the full board.
-
-Primary rule:
-
-> Deliver a usable single-entry local workspace first. Add network capabilities only after the workspace interaction model is proven.
-
-It complements:
-
-- [execution-status-board.md](execution-status-board.md)
-- [architecture.md](architecture.md)
-- [protocol.md](protocol.md)
+It is no longer the place for exact machine execution ordering.
+Detailed task sequencing now lives in `.agents/tasks/` and related runbooks.
 
 ## 2. MVP Strategy
 
-The MVP is split into two implementation stages:
+The MVP remains split into two stages:
 
 - `Stage A`: Local single-machine MVP
 - `Stage B`: Network extension MVP
 
-Stage B must not begin until Stage A is usable end to end.
+The core strategic rule is unchanged:
+
+> Prove the local workspace interaction model first. Resume network work only after that model is trusted in real use.
 
 ## 3. Stage A: Local Single-Machine MVP
 
-## 3.1 Goal
+Goal:
 
-Prove that WaitAgent can solve the core interaction problem locally through one `waitagent` entrypoint:
+- make one `waitagent` entrypoint usable as the default local workspace
 
-- One workspace shell
-- Multiple sessions
-- In-workspace session creation
-- Single-focus console
-- Waiting heuristic
-- One-enter one-switch scheduling
+Included scope:
+
+- local workspace bootstrap
+- shell-backed session hosting
+- console focus management
+- waiting detection and one-enter one-switch scheduling
 - Peek
-- Minimal terminal-native UI
+- terminal-native rendering
+- reusable local session context
 
-## 3.2 Included Scope
+Explicitly excluded:
 
-- CLI bootstrap
-- Workspace shell bootstrap
-- Session registry
-- PTY manager
-- Terminal raw mode and resize
-- Console runtime
-- In-workspace session creation and listing
-- Shell-backed session defaults and working-directory context
-- Typing-state protection
-- Waiting heuristic
-- Waiting queue
-- Auto-switch scheduler
-- Peek
-- Focus renderer and minimal status lines
-- A user-visible path where a single machine only needs one `waitagent`
+- remote transport as a requirement for local usability
+- authentication hardening
+- reconnect recovery
+- mirrored multi-console interaction
 
-## 3.3 Explicitly Excluded from Stage A
+Human exit criteria:
 
-- Remote transport
-- Server runtime
-- Client runtime
-- Authentication
-- Reconnect logic
-- Multi-console mirrored interaction
-
-## 3.4 Stage A Task Set
-
-Use this exact order:
-
-1. `T1-01` Initialize implementation workspace and crate structure
-2. `T1-02` Implement base config loading and app bootstrap
-3. `T1-03` Implement session registry core types
-4. `T1-04` Implement PTY manager spawn and ownership model
-5. `T1-06` Implement terminal raw mode and resize capture
-6. `T2-01` Implement console runtime state
-7. `T2-03` Implement typing-state protection
-8. `T2-04` Implement waiting heuristic engine
-9. `T2-05` Implement waiting queue management
-10. `T2-02` Implement manual focus switching
-11. `T2-06` Implement auto-switch state machine
-12. `T2-07` Implement continuation protection
-13. `T2-08` Implement Peek mode
-14. `T3-01` Integrate VT screen state engine
-15. `T3-02` Implement session screen snapshot storage
-16. `T3-03` Implement focused session renderer
-17. `T3-04` Implement minimal top and bottom status lines
-18. `T3-05` Implement focus restore on switch
-19. `T3-06` Implement Peek rendering path
-20. `T4-01` Build end-to-end local interactive runtime bridge
-21. `T4-02` Add scheduler unit tests
-22. `T4-03` Add PTY integration tests
-23. `T4-04` Add renderer snapshot tests
-24. `T4-05` Validate three-session local workflow manually
-25. `T4-06` Fix local MVP defects and stabilize
-26. `T4-07` Implement single-entry workspace shell bootstrap
-27. `T4-08` Implement in-workspace session creation and background lifecycle
-28. `T4-09` Implement shell-backed session defaults and working-directory handling
-29. `T4-10` Validate three-session workflow through one `waitagent` entrypoint
-
-## 3.5 Stage A Exit Criteria
-
-Stage A is complete only if all of the following are true:
-
-- A user can run at least three local sessions
-- The user only needs one local `waitagent` instance to manage those sessions
-- One console can switch among them
-- Partial input blocks switching
-- One `Enter` creates at most one automatic switch
-- Peek works without changing input ownership
-- Focus restoration works visually
-- The local flow passes unit, integration, and manual validation
+- one local `waitagent` process can manage multiple sessions in one terminal
+- the local shell and agent workflows still feel natural
+- the local acceptance checklist passes in real use
 
 ## 4. Stage B: Network Extension MVP
 
-## 4.1 Goal
+Goal:
 
-Extend the local workspace MVP so sessions from remote nodes can appear on a server-side console while preserving the same local workspace interaction.
+- extend the accepted local workspace so remote sessions can appear on a server-side console without changing the local-first model
 
-## 4.2 Included Scope
+Included scope:
 
-- Protocol implementation subset
-- Server runtime skeleton
-- Client runtime skeleton
-- Node registration
-- Remote session publication
-- Server-side aggregate session registry
-- Workspace-level access-point bootstrap
-- Remote input and resize routing
-- Mirrored output broadcast
-- Mirrored input propagation
-- Server-side workspace console
+- transport protocol implementation
+- server and client runtime baselines
+- node registration and remote session publication
+- aggregate server-side session visibility
+- remote input and resize routing
+- mirrored output and server-side console interaction
 
-## 4.3 Explicitly Excluded from Stage B
+Explicitly excluded:
 
-- Full reconnect identity recovery
-- Full authentication hardening
-- Rich audit and diagnostics surfaces
-- Performance optimization beyond basic usability
+- full reconnect identity recovery
+- full authentication hardening
+- rich diagnostics and operational tooling beyond MVP usability
 
-## 4.4 Stage B Entry Gate
+Human entry gate:
 
-Do not start Stage B until:
+- Stage A must already be accepted
+- local scheduler behavior must feel stable
+- local renderer behavior must feel stable
+- no unresolved local UX issue should be likely to contaminate network debugging
 
-- Stage A exit criteria are met
-- Local scheduler behavior is stable
-- Local renderer behavior is stable
-- The single-entry local workspace UX is the primary supported interaction model
-- Core session and PTY ownership model has not been changing for at least one iteration
+## 5. Main Risks
 
-## 4.5 Stage B Task Set
+Primary risk:
 
-Use this order:
+- building distributed abstractions too early and destabilizing the accepted local interaction model
 
-1. `T0-07` Define wire protocol document
-2. `T5-01` Define protocol schema and versioning
-3. `T5-02` Implement server runtime skeleton
-4. `T5-03` Implement client runtime skeleton
-5. `T5-04` Implement node registration and liveness
-6. `T5-05` Implement remote session publication
-7. `T5-06` Implement aggregate server session registry
-8. `T5-07` Implement remote resize and input routing
-9. `T6-01` Implement server-side workspace console
-10. `T6-02` Implement mirrored output broadcast
-11. `T6-03` Implement mirrored input propagation
-12. `T6-04` Implement server-side waiting queue
-13. `T6-05` Implement multi-console attach awareness UI
-14. `T6-06` Validate mirrored local/server workflow end to end
+Secondary risk:
 
-## 4.6 Stage B Exit Criteria
-
-Stage B is complete only if:
-
-- A client node can connect to a server
-- Local sessions appear on the server
-- The same session can be attached locally and from the server
-- Input from either side reaches the same PTY
-- Output from that PTY is mirrored to all attached consoles
-- The local machine still feels like one `waitagent` workspace rather than a special client mode
-- Server-side focus and waiting queue behavior work for remote sessions
-
-## 5. Deferred Work
-
-These items are intentionally deferred until after the MVP stages:
-
-- `T7-01` Reconnect and session identity recovery
-- `T7-02` Offline handling hardening
-- `T7-03` Authentication and enrollment hardening
-- `T7-04` Structured diagnostics
-- `T7-05` Debug status views
-- `T7-06` Replay and reconnect test expansion
-
-## 6. Build Rules
-
-The implementation must obey these rules:
-
-- No real network dependency for Stage A
-- No semantic parsing
-- No multi-panel UI
-- No remote-first abstractions that block local usability
-- PTY ownership remains local to the PTY host
-
-## 7. Risk Controls
-
-## 7.1 Main Risk
-
-The biggest execution risk is building distributed abstractions too early.
+- incorrect switching behavior that is technically functional but not trustworthy in daily use
 
 Mitigation:
 
-- Finish local console, local scheduler, and local renderer first
-- Treat remote transport as an extension layer
-- Keep session authority local to the PTY owner
+- keep PTY authority local to the PTY-owning node
+- keep local mode runnable without remote prerequisites
+- validate terminal and scheduler behavior against real workflows, not only unit tests
 
-## 7.2 Scheduler Risk
+## 6. Immediate Human Focus
 
-The second major risk is incorrect switching behavior.
+The immediate focus is still:
 
-Mitigation:
+- close `T4-10` through final local acceptance sign-off
 
-- Write scheduler tests before remote transport work
-- Lock down the one-enter one-switch rule locally first
-- Validate continuation protection locally first
+After that:
 
-## 8. Recommended Immediate Next Tasks
+- resume `T5-06` as the first bounded post-acceptance network slice
 
-If implementation starts now, begin with:
-
-1. `T4-10` Validate the local multi-session workflow through one `waitagent` using [local-acceptance-checklist.md](local-acceptance-checklist.md)
-2. Refine auto-switch behavior and terminal fidelity issues discovered during local acceptance
-3. Resume `T5-06` once the local workspace path is accepted
-4. Continue with `T6-01` and mirrored interaction work on top of the accepted local entry model
-
-The local runtime foundations and workspace-first shell now exist. The next critical work is closing the local acceptance gap before continuing network-facing UX work.
+For exact execution order, use `.agents/tasks/current.yaml`, `.agents/tasks/backlog.yaml`, and `.agents/runbooks/`.

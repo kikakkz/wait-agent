@@ -6,7 +6,7 @@ status: in_progress
 priority: highest
 source_of_truth:
   file: docs/execution-status-board.md
-  reference: T4-10
+  reference: Current Focus And Next Queue
 depends_on:
   - task.t4-09.done
 linked_primitives:
