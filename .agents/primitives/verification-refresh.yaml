@@ -1,0 +1,21 @@
+id: primitive.verification-refresh
+kind: primitive
+version: 1
+purpose: Refresh .agents/state/last-verified.yaml after meaningful automated or manual validation.
+use_when:
+  - cargo tests were run
+  - a local acceptance scenario was rerun
+  - a task depends on newer validation evidence
+inputs:
+  - .agents/state/last-verified.yaml
+  - .agents/tasks/current.yaml
+steps:
+  - update or append the relevant check entry
+  - record the exact command or manual scenario used
+  - set status to pass, fail, blocked, or pending
+  - remove stale validation noise when it no longer helps the active task
+verification:
+  - current task has a readable verification trail
+failure_modes:
+  - stale pass results survive after regressions
+  - validation evidence is too vague to reproduce

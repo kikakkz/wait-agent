@@ -1,0 +1,24 @@
+id: primitive.network-registry-scope
+kind: primitive
+version: 1
+purpose: Keep the first post-acceptance network slice narrow and local-first.
+use_when:
+  - selecting work after T4-10 closes
+  - decomposing T5-06 or T5-07 into smaller implementation steps
+inputs:
+  - docs/architecture.md
+  - docs/module-design.md
+  - docs/execution-status-board.md
+  - src/server.rs
+  - src/client.rs
+  - src/session.rs
+  - src/transport.rs
+steps:
+  - scope the next network slice around one authoritative behavior boundary
+  - keep PTY ownership local to the PTY host
+  - preserve the rule that local mode compiles and runs without remote transport prerequisites
+  - define verification that proves local-first invariants still hold
+verification:
+  - the next network task is bounded, testable, and does not pull in unrelated mirrored-console work
+failure_modes:
+  - network tasks expand into multi-console UX before registry basics are stable

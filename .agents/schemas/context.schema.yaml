@@ -1,0 +1,15 @@
+kind: schema
+version: 1
+required_fields:
+  - id
+  - kind
+  - version
+  - summary
+optional_fields:
+  - current_phase
+  - current_focus
+  - upcoming_focus
+  - constraints
+  - source_of_truth
+  - module_map
+  - artifact_roots

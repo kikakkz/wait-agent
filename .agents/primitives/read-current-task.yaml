@@ -1,0 +1,22 @@
+id: primitive.read-current-task
+kind: primitive
+version: 1
+purpose: Establish the next executable task before touching code or planning follow-up work.
+use_when:
+  - starting a new session
+  - resuming work after a redirect, blocker, or finished task
+inputs:
+  - .agents/index.yaml
+  - .agents/tasks/current.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+steps:
+  - read default_task from .agents/index.yaml
+  - load the matching task file from .agents/tasks/current.yaml
+  - inspect blockers and current verification state
+  - choose the next action from linked_primitives, linked_runbooks, and done_criteria
+verification:
+  - current task id is known before repo-wide exploration continues
+failure_modes:
+  - default task is missing or stale
+  - blockers contradict the assumed task readiness

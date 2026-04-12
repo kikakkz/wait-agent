@@ -1,0 +1,11 @@
+kind: schema
+version: 1
+required_fields:
+  - kind
+  - version
+  - active
+  - next
+  - templates
+  - source_of_truth
+optional_fields:
+  - notes

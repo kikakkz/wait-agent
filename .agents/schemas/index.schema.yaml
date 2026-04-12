@@ -1,0 +1,14 @@
+kind: schema
+version: 1
+required_fields:
+  - version
+  - kind
+optional_fields:
+  - read_order
+  - entrypoints
+  - authoritative_sources
+  - required_rules
+  - directories
+  - active_context
+  - recommended_primitives
+  - recommended_runbooks

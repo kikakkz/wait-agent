@@ -1,0 +1,12 @@
+kind: schema
+version: 1
+required_fields:
+  - kind
+  - version
+optional_fields:
+  - current_task
+  - focus_statement
+  - last_updated_from
+  - blockers
+  - checks
+  - history

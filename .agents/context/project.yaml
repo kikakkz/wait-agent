@@ -1,0 +1,26 @@
+id: context.project
+kind: context
+version: 1
+summary:
+  product: WaitAgent
+  repo_type: single_crate_rust_repo
+  language: rust
+  package_manager: cargo
+  architecture_style: local_first_terminal_runtime
+  active_business_goal: complete trustworthy local workspace acceptance before extending mirrored network interaction
+current_phase:
+  phase_id: phase-1
+  phase_title: local workspace MVP
+  stage_id: local-workspace-mvp-acceptance
+  stage_title: final local acceptance sign-off and next-task preparation
+current_focus:
+  default_task_id: task.t4-10
+  focus_statement: validate and close the local workspace acceptance gate without reopening premature network complexity
+upcoming_focus:
+  - implement the aggregate server session registry after local acceptance is explicitly closed
+  - route remote resize and input through the PTY-owning node without breaking local-first behavior
+source_of_truth:
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - docs/architecture.md
+  - docs/functional-design.md

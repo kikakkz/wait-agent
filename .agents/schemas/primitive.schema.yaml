@@ -1,0 +1,13 @@
+kind: schema
+version: 1
+required_fields:
+  - id
+  - kind
+  - version
+  - purpose
+optional_fields:
+  - use_when
+  - inputs
+  - steps
+  - verification
+  - failure_modes

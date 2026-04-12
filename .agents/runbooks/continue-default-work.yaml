@@ -1,0 +1,22 @@
+id: runbook.continue-default-work
+kind: runbook
+version: 1
+objective: Resume project execution from the current machine-defined default task with minimal ambiguity.
+trigger:
+  - a new assistant session starts
+  - the user says continue or asks for the next work on this repo
+sequence:
+  - load primitive.read-current-task
+  - load the active task from .agents/tasks/current.yaml
+  - inspect blockers and current verification state
+  - if the task is task.t4-10, run primitive.acceptance-check-sync and primitive.local-workspace-validation
+  - refresh verification state when meaningful validation changed
+  - record blockers if a real stop condition was discovered
+  - refresh task history when lifecycle state changed materially
+  - sync the machine state with docs through primitive.task-board-sync
+  - update .agents if reusable execution knowledge changed
+  - if the task becomes done or blocked, run runbook.select-next-task
+stop_conditions:
+  - user redirects scope
+  - active task becomes blocked and the blocker is recorded
+  - active task done criteria are fully satisfied

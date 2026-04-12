@@ -1,0 +1,23 @@
+id: primitive.acceptance-check-sync
+kind: primitive
+version: 1
+purpose: Translate local acceptance checklist progress into machine-routable task state.
+use_when:
+  - the active task is T4-10
+  - manual acceptance evidence was gathered
+  - a checklist failure needs to open a follow-up slice or blocker
+inputs:
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/current.yaml
+  - .agents/state/last-verified.yaml
+  - .agents/state/open-blockers.yaml
+steps:
+  - map the validated checklist sections to concrete done criteria
+  - record any failed scenario using the checklist's bug-capture fields
+  - route serious failures to primitive.blocker-record or a queued task template
+  - keep the current task open until the final manual sign-off condition is explicit
+verification:
+  - acceptance evidence is reflected in task status and verification state
+failure_modes:
+  - checklist progress is discussed informally but not captured
+  - network work resumes before the acceptance gate is actually closed

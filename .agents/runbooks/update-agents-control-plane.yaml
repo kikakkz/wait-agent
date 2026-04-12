@@ -1,0 +1,15 @@
+id: runbook.update-agents-control-plane
+kind: runbook
+version: 1
+objective: Refresh the assistant control plane when project structure, phase, or operating rules change.
+trigger:
+  - new docs materially change task routing or architecture
+  - repo structure changes enough to stale the repo map
+  - repeated assistant confusion reveals a missing primitive or runbook
+sequence:
+  - review .agents/index.yaml, context files, backlog, and current task
+  - compare them against docs/execution-status-board.md and docs/agents-control-plane.md
+  - add, remove, or rewrite primitives and runbooks so they match the actual workflow
+  - refresh machine state references if phase or task ids changed
+stop_conditions:
+  - control-plane files already match the current repo and task model

@@ -1,0 +1,25 @@
+id: primitive.task-board-sync
+kind: primitive
+version: 1
+purpose: Keep .agents state, the execution board, and the acceptance checklist aligned after meaningful execution changes.
+use_when:
+  - task status changes
+  - blocker or verification state changes
+  - local acceptance evidence materially improves or regresses
+inputs:
+  - .agents/tasks/current.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+steps:
+  - update machine task state first
+  - sync blocker and verification state next
+  - refresh human docs when project-level visibility changed
+  - keep task wording and status names consistent across machine and human files
+verification:
+  - task id, task status, and blocker state do not disagree between .agents and docs
+failure_modes:
+  - .agents says done while the execution board still says in_progress
+  - checklist evidence exists but is not reflected in machine state

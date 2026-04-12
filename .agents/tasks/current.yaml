@@ -1,0 +1,43 @@
+id: task.t4-10
+kind: task
+version: 1
+title: finish local acceptance sign-off for the single-entry workspace UX
+status: in_progress
+priority: highest
+source_of_truth:
+  file: docs/execution-status-board.md
+  reference: T4-10
+depends_on:
+  - task.t4-09.done
+linked_primitives:
+  - primitive.acceptance-check-sync
+  - primitive.local-workspace-validation
+  - primitive.verification-refresh
+  - primitive.blocker-record
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+linked_runbooks:
+  - runbook.continue-default-work
+  - runbook.close-local-acceptance
+done_criteria:
+  - the local acceptance checklist is rerun in a real daily-use terminal environment
+  - the validated agent mix and any remaining local UX issues are explicitly recorded
+  - any issue serious enough to multiply network debugging cost is either fixed or recorded as a blocker
+  - .agents state and docs/execution-status-board.md agree on whether T4-10 remains open or can close
+verification:
+  - cargo test
+  - manual: rerun docs/local-acceptance-checklist.md sections 5.1 through 5.8
+  - manual: confirm docs/local-acceptance-checklist.md section 6 acceptance rules
+touched_paths:
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - src/app.rs
+  - src/terminal.rs
+  - .agents/
+  - docs/agents-control-plane.md
+blockers:
+  - final sign-off still depends on user-terminal validation with the preferred real agent mix
+notes:
+  - do not reopen broad network work until the local acceptance gate is explicitly closed
+  - the current worktree already contains ongoing edits related to acceptance and terminal behavior

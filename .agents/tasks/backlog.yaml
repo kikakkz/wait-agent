@@ -1,0 +1,28 @@
+kind: task_backlog
+version: 1
+active:
+  - id: task.t4-10
+    title: finish local acceptance sign-off for the single-entry workspace UX
+    status: in_progress
+next:
+  - id: task.t5-06
+    title: implement the aggregate server session registry
+    status: ready
+  - id: task.t5-07
+    title: implement remote resize and input routing
+    status: not_started
+  - id: task.t6-01
+    title: implement the server-side workspace console
+    status: not_started
+  - id: task.t3-07
+    title: implement narrow-terminal compaction rules
+    status: not_started
+templates:
+  - id: task-template.local-acceptance-cycle
+    title: local acceptance rerun or bug-fix slice
+  - id: task-template.network-implementation-slice
+    title: bounded network implementation slice
+source_of_truth:
+  file: docs/execution-status-board.md
+notes:
+  - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.

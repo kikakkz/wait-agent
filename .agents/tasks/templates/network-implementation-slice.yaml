@@ -1,0 +1,24 @@
+id: task-template.network-implementation-slice
+kind: task_template
+version: 1
+title: bounded network implementation slice
+use_when:
+  - local acceptance is closed and a concrete network increment needs to be executed
+  - a network task should be decomposed into a smaller, verifiable unit
+scaffold:
+  status: ready
+  priority: medium
+  required_fields:
+    - target_task_reference
+    - touched_paths
+    - verification
+  default_done_criteria:
+    - the bounded transport or registry behavior is implemented
+    - local-first invariants remain intact
+    - task board and verification state are refreshed
+default_primitives:
+  - primitive.network-registry-scope
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+default_verification:
+  - cargo test

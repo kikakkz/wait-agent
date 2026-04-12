@@ -1,0 +1,18 @@
+id: context.constraints
+kind: context
+version: 1
+summary:
+  intent: execution constraints that every coding assistant should keep in frame while working in this repository
+constraints:
+  - Preserve raw terminal semantics and PTY ownership boundaries.
+  - Do not introduce semantic parsing of agent intent.
+  - Prefer finishing local workspace acceptance before starting new mirrored-network work.
+  - Treat docs/execution-status-board.md and docs/local-acceptance-checklist.md as the human source of truth for project status.
+  - Keep human-readable process guidance in docs and machine-routable execution state in .agents.
+  - Dirty worktree files may include active user work; understand them before editing and never revert unrelated changes.
+  - Favor small validation slices that update verification state and blockers explicitly.
+source_of_truth:
+  - README.md
+  - docs/architecture.md
+  - docs/functional-design.md
+  - docs/local-acceptance-checklist.md

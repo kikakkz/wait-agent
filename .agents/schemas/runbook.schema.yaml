@@ -1,0 +1,11 @@
+kind: schema
+version: 1
+required_fields:
+  - id
+  - kind
+  - version
+  - objective
+optional_fields:
+  - trigger
+  - sequence
+  - stop_conditions

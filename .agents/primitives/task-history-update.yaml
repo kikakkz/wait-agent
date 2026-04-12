@@ -1,0 +1,19 @@
+id: primitive.task-history-update
+kind: primitive
+version: 1
+purpose: Keep a concise machine-readable record of meaningful task lifecycle changes.
+use_when:
+  - a task changes status
+  - task ownership materially shifts
+  - a finished task hands off to the next one
+inputs:
+  - .agents/tasks/current.yaml
+  - .agents/state/task-history.yaml
+steps:
+  - append or refresh the relevant task entry
+  - summarize the change in one sentence
+  - point back to the human source of truth reference
+verification:
+  - the latest active or completed task appears in .agents/state/task-history.yaml
+failure_modes:
+  - task state changes without a history trail

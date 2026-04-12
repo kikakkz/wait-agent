@@ -1,0 +1,15 @@
+id: runbook.instantiate-task-from-template
+kind: runbook
+version: 1
+objective: Create a bounded queued task from a reusable template when ad hoc work appears.
+trigger:
+  - a failed validation scenario needs its own follow-up task
+  - a larger task needs to be broken into a narrower slice
+sequence:
+  - choose the relevant template from .agents/tasks/templates
+  - copy the scaffold fields into a new queued task file under .agents/tasks/queued/
+  - fill in scenario-specific fields, touched paths, and verification
+  - update .agents/tasks/backlog.yaml if the new task should enter the next queue
+stop_conditions:
+  - the work is small enough to stay inside the current task
+  - the template does not match the discovered work

@@ -1,0 +1,12 @@
+id: context.generated-artifacts
+kind: context
+version: 1
+summary:
+  purpose: keep generated or disposable artifacts away from source-of-truth planning files
+artifact_roots:
+  - path: target/
+    policy: build output only; never treat as source of truth
+  - path: .agents/generated/
+    policy: generated assistant artifacts only; keep ignored by default
+  - path: .tmp-home/
+    policy: disposable local environment data

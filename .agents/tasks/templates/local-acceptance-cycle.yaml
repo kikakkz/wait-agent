@@ -1,0 +1,27 @@
+id: task-template.local-acceptance-cycle
+kind: task_template
+version: 1
+title: local acceptance rerun or bug-fix slice
+use_when:
+  - a local acceptance scenario fails or needs to be rerun with tighter scope
+  - a small defect fix is needed before T4-10 can close
+scaffold:
+  status: ready
+  priority: high
+  required_fields:
+    - scenario
+    - observed_behavior
+    - expected_behavior
+    - touched_paths
+  default_done_criteria:
+    - the failed checklist scenario reproduces or is ruled out
+    - the fix or mitigation is documented
+    - verification state is refreshed
+default_primitives:
+  - primitive.acceptance-check-sync
+  - primitive.local-workspace-validation
+  - primitive.verification-refresh
+  - primitive.blocker-record
+default_verification:
+  - cargo test
+  - manual: rerun the relevant acceptance checklist scenario

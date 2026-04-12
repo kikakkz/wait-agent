@@ -1,0 +1,62 @@
+version: 1
+kind: agent_control_plane
+read_order:
+  - .agents/state/current-focus.yaml
+  - .agents/context/project.yaml
+  - .agents/context/constraints.yaml
+  - .agents/context/repo-map.yaml
+  - .agents/context/generated-artifacts.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/templates/local-acceptance-cycle.yaml
+  - .agents/tasks/templates/network-implementation-slice.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+  - .agents/state/task-history.yaml
+entrypoints:
+  default_task: task.t4-10
+  default_runbook: runbook.continue-default-work
+  next_task_runbook: runbook.select-next-task
+  self_maintenance_runbook: runbook.update-agents-control-plane
+authoritative_sources:
+  execution_board: docs/execution-status-board.md
+  acceptance_checklist: docs/local-acceptance-checklist.md
+  architecture: docs/architecture.md
+  functional_design: docs/functional-design.md
+  interaction_flows: docs/interaction-flows.md
+  human_overview: docs/agents-control-plane.md
+required_rules:
+  - Read this file before exploring the repo.
+  - Use tasks plus primitives to decide the next action.
+  - Keep human-facing rationale in docs rather than .agents.
+  - Update .agents whenever task focus, blockers, validation state, or reusable execution knowledge changes.
+  - Do not let .agents drift from docs/execution-status-board.md or docs/local-acceptance-checklist.md.
+directories:
+  context: .agents/context
+  primitives: .agents/primitives
+  runbooks: .agents/runbooks
+  tasks: .agents/tasks
+  state: .agents/state
+  schemas: .agents/schemas
+  generated: .agents/generated
+active_context:
+  project_phase: phase-1
+  current_stage: local-workspace-mvp-acceptance
+  current_focus: finish local acceptance sign-off before resuming network aggregation work
+recommended_primitives:
+  - primitive.read-current-task
+  - primitive.acceptance-check-sync
+  - primitive.local-workspace-validation
+  - primitive.verification-refresh
+  - primitive.blocker-record
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.task-switch-current
+  - primitive.network-registry-scope
+  - primitive.agents-self-maintenance
+recommended_runbooks:
+  - runbook.continue-default-work
+  - runbook.close-local-acceptance
+  - runbook.select-next-task
+  - runbook.instantiate-task-from-template
+  - runbook.update-agents-control-plane

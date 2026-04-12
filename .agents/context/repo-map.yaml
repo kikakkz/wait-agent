@@ -1,0 +1,54 @@
+id: context.repo-map
+kind: context
+version: 1
+summary:
+  layout: repository structure most relevant to planning and execution
+module_map:
+  implementation:
+    - path: src/app.rs
+      responsibility: application bootstrap and runtime wiring
+    - path: src/cli.rs
+      responsibility: command-line parsing and public entrypoints
+    - path: src/config.rs
+      responsibility: runtime configuration
+    - path: src/console.rs
+      responsibility: console-local focus and interaction state
+    - path: src/session.rs
+      responsibility: session registry and lifecycle
+    - path: src/pty.rs
+      responsibility: PTY ownership and IO
+    - path: src/scheduler.rs
+      responsibility: waiting detection and one-enter one-switch scheduling
+    - path: src/renderer.rs
+      responsibility: focused and peek rendering
+    - path: src/terminal.rs
+      responsibility: terminal raw mode and VT state handling
+    - path: src/server.rs
+      responsibility: server runtime baseline
+    - path: src/client.rs
+      responsibility: client runtime baseline and publication helpers
+    - path: src/transport.rs
+      responsibility: transport envelope and protocol types
+    - path: src/event.rs
+      responsibility: internal runtime event bus
+  design_docs:
+    - path: docs/wait-agent-prd.md
+      responsibility: product requirements
+    - path: docs/architecture.md
+      responsibility: system architecture
+    - path: docs/functional-design.md
+      responsibility: user-visible behavior
+    - path: docs/module-design.md
+      responsibility: internal boundaries
+    - path: docs/interaction-flows.md
+      responsibility: stepwise interaction rules
+    - path: docs/protocol.md
+      responsibility: network protocol design
+    - path: docs/mvp-plan.md
+      responsibility: staged delivery order
+    - path: docs/execution-status-board.md
+      responsibility: human task board and phase status
+    - path: docs/local-acceptance-checklist.md
+      responsibility: local acceptance gate
+    - path: docs/agents-control-plane.md
+      responsibility: human-facing explanation of the assistant control plane

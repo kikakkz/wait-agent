@@ -1,0 +1,25 @@
+id: primitive.local-workspace-validation
+kind: primitive
+version: 1
+purpose: Run the smallest useful validation slice for the local workspace acceptance gate.
+use_when:
+  - task.t4-10 is active
+  - terminal, scheduler, renderer, or session UX changes need acceptance evidence
+inputs:
+  - docs/local-acceptance-checklist.md
+  - docs/execution-status-board.md
+  - src/app.rs
+  - src/terminal.rs
+  - src/console.rs
+  - src/scheduler.rs
+steps:
+  - prefer targeted validation that matches the touched surface
+  - run cargo test when code changes could affect automated coverage
+  - rerun the relevant manual checklist scenarios in a real terminal when behavior depends on TTY fidelity
+  - capture failures with focused repro steps rather than broad summaries
+  - refresh verification state and blockers immediately after the validation pass
+verification:
+  - the validation slice names the exact scenario or command used
+failure_modes:
+  - T4-10 remains active with no clear evidence trail
+  - acceptance is claimed based only on unit tests when terminal fidelity is the real risk

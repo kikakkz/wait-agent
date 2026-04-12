@@ -1,0 +1,19 @@
+kind: schema
+version: 1
+required_fields:
+  - id
+  - kind
+  - version
+  - title
+  - status
+  - priority
+  - source_of_truth
+  - linked_primitives
+  - done_criteria
+  - verification
+optional_fields:
+  - depends_on
+  - linked_runbooks
+  - touched_paths
+  - blockers
+  - notes

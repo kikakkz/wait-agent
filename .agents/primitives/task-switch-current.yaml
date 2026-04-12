@@ -1,0 +1,23 @@
+id: primitive.task-switch-current
+kind: primitive
+version: 1
+purpose: Move machine focus to the next bounded task when the current task is done or blocked.
+use_when:
+  - the active task has reached all done criteria
+  - the active task is blocked and a different ready task should become current
+inputs:
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+steps:
+  - confirm the current task is done or truly blocked
+  - select the highest-priority ready backlog item that does not violate current phase constraints
+  - rewrite .agents/tasks/current.yaml to the new task
+  - update .agents/state/current-focus.yaml to the new focus statement
+  - append the lifecycle change through primitive.task-history-update
+verification:
+  - current task and current focus point to the same new task id
+failure_modes:
+  - phase gate is violated by switching too early to network work
+  - task history is left behind

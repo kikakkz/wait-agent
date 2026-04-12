@@ -1,0 +1,17 @@
+id: runbook.select-next-task
+kind: runbook
+version: 1
+objective: Choose the next bounded task without violating the local-first phase gate.
+trigger:
+  - the active task became done
+  - the active task is blocked and another ready task is needed
+sequence:
+  - confirm the current task state through primitive.read-current-task
+  - inspect .agents/tasks/backlog.yaml in listed order
+  - if task.t4-10 is not explicitly done, keep local acceptance work current
+  - otherwise pick the first ready backlog item that matches the current phase rules
+  - switch machine focus through primitive.task-switch-current
+  - sync history and task-board state
+stop_conditions:
+  - no valid next task exists
+  - current phase constraints prevent a safe switch

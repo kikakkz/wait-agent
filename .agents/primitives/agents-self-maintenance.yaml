@@ -1,0 +1,23 @@
+id: primitive.agents-self-maintenance
+kind: primitive
+version: 1
+purpose: Keep the assistant control plane aligned with the evolving repo and documentation.
+use_when:
+  - docs or task structure changes materially
+  - reusable execution knowledge appears
+  - the current .agents layout becomes stale or misleading
+inputs:
+  - .agents/index.yaml
+  - .agents/context/project.yaml
+  - .agents/context/repo-map.yaml
+  - docs/agents-control-plane.md
+  - docs/execution-status-board.md
+steps:
+  - refresh .agents summaries when project phase or repo layout changes
+  - add or prune primitives and runbooks so they match the real workflow
+  - keep docs/agents-control-plane.md aligned with the machine layout
+verification:
+  - .agents still points assistants to the real next work with minimal ambiguity
+failure_modes:
+  - obsolete tasks or primitives remain the default route
+  - human and machine descriptions of the control plane diverge

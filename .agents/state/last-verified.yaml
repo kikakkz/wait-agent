@@ -1,0 +1,12 @@
+kind: state
+version: 1
+checks:
+  - id: local-three-session-validation
+    command: manual local workflow validation for three shell-backed sessions
+    status: pass
+  - id: local-auto-switch-shell-check
+    command: manual validation of same-session prompt rounds and FIFO switch behavior
+    status: pass
+  - id: local-acceptance-final-signoff
+    command: manual rerun of docs/local-acceptance-checklist.md sections 5 and 6 in the user's daily-use terminal environment
+    status: pending
