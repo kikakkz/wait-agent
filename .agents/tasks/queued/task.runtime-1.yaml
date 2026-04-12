@@ -1,0 +1,30 @@
+id: task.runtime-1
+kind: task
+version: 1
+title: extract a shared console runtime loop for workspace and server surfaces
+status: ready
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-1.done_or_in_progress
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - the duplicate event-loop logic in run_local_workspace and run_local_host is reduced to one shared runtime path
+  - surface-specific behavior is expressed through narrow hooks or configuration, not copy-pasted control flow
+  - the shared loop owns input handling, output handling, scheduler ticks, resize handling, and display refresh sequencing
+  - future network work can extend the runtime without reintroducing a second copy of the loop
+verification:
+  - cargo test
+  - targeted review of run_local_workspace and run_local_host for duplication removal
+touched_paths:
+  - src/app.rs
+  - src/console.rs
+  - src/server.rs
+  - .agents/tasks/queued/task.runtime-1.yaml
+notes:
+  - This task is driven by maintainability and by the need to make display-path changes land once, not twice.

@@ -1,0 +1,33 @@
+id: task.display-3
+kind: task
+version: 1
+title: collapse screen recovery to one primary restore path
+status: ready
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-1.done
+  - task.display-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one restore strategy is named as the primary path for session handoff and focus restoration
+  - replay_buffer and resize-nudge behavior are either removed, demoted to explicit fallback, or bounded behind clear trigger conditions
+  - the chosen restore path is consistent across shell sessions and fullscreen TUI sessions
+  - assistants can identify the restore strategy from machine docs without reverse-engineering app.rs
+verification:
+  - cargo test
+  - targeted review of redraw, replay, and snapshot restore control flow
+touched_paths:
+  - src/app.rs
+  - src/renderer.rs
+  - src/session.rs
+  - .agents/tasks/queued/task.display-3.yaml
+notes:
+  - The current implementation mixes snapshot restore, replay_buffer replay, and resize-driven redraw probes.
+  - This task is about architectural convergence, not only visual symptom suppression.

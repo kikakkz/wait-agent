@@ -1,0 +1,32 @@
+id: task.display-1
+kind: task
+version: 1
+title: separate focused PTY passthrough from WaitAgent chrome rendering
+status: ready
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t4-10.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - focused fullscreen TUI output is never concatenated with WaitAgent UI escape sequences in the same terminal write path
+  - live display mode chooses either raw PTY passthrough or explicit redraw, but not both at once
+  - any status or overlay chrome for a live fullscreen session is emitted through a separate, bounded path with explicit quiet-time or overlay conditions
+  - the new display boundary is documented in task notes or code comments where the control flow would otherwise be ambiguous
+verification:
+  - cargo test
+  - targeted review of src/app.rs live-surface output paths
+touched_paths:
+  - src/app.rs
+  - src/renderer.rs
+  - src/terminal.rs
+  - .agents/tasks/queued/task.display-1.yaml
+notes:
+  - This task exists because app.rs currently appends WaitAgent chrome bytes directly after PTY output chunks.
+  - Success is defined by architectural separation first, not by ad hoc escape-sequence filtering.

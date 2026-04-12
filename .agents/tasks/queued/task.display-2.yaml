@@ -1,0 +1,31 @@
+id: task.display-2
+kind: task
+version: 1
+title: keep the focused fullscreen TUI on the real terminal size
+status: ready
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t4-10.done
+  - task.display-1.done_or_in_progress
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - the focused fullscreen TUI always receives the user's real terminal size
+  - WaitAgent chrome no longer reserves rows by resizing the focused PTY viewport
+  - background-session sizing rules are explicit and do not distort the active fullscreen session
+  - any remaining chrome behavior for fullscreen sessions is compatible with the display split introduced in task.display-1
+verification:
+  - cargo test
+  - targeted review of viewport sizing and resize propagation in src/app.rs
+touched_paths:
+  - src/app.rs
+  - src/terminal.rs
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/queued/task.display-2.yaml
+notes:
+  - The primary product requirement is that a one-key handoff into Codex-like TUIs must not trigger layout churn or clipped viewports.

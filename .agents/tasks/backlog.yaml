@@ -5,6 +5,21 @@ active:
     title: finish local acceptance sign-off for the single-entry workspace UX
     status: in_progress
 next:
+  - id: task.display-1
+    title: separate focused PTY passthrough from WaitAgent chrome rendering
+    status: ready
+  - id: task.display-2
+    title: keep the focused fullscreen TUI on the real terminal size
+    status: ready
+  - id: task.display-3
+    title: collapse screen recovery to one primary restore path
+    status: ready
+  - id: task.runtime-1
+    title: extract a shared console runtime loop for workspace and server surfaces
+    status: ready
+  - id: task.terminal-1
+    title: decide and document the terminal-engine coverage strategy for reliable TUI switching
+    status: ready
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: ready
@@ -26,3 +41,4 @@ source_of_truth:
   file: docs/execution-status-board.md
 notes:
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
+  - Post-acceptance work now prioritizes display-architecture convergence before broader network expansion.

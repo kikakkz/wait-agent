@@ -1,0 +1,30 @@
+id: task.terminal-1
+kind: task
+version: 1
+title: decide and document the terminal-engine coverage strategy for reliable TUI switching
+status: ready
+priority: medium
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-3.done_or_in_progress
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the repository records whether terminal fidelity will continue through the current custom engine or move toward a more complete terminal-emulation dependency
+  - the required control-sequence coverage for trustworthy Codex-like TUI restoration is enumerated at a useful engineering level
+  - the chosen direction is translated into at least one follow-up implementation slice if more work is needed
+verification:
+  - code review of src/terminal.rs control-sequence support against the switching architecture
+  - update the relevant .agents task docs with the chosen direction
+touched_paths:
+  - src/terminal.rs
+  - .agents/tasks/queued/task.terminal-1.yaml
+  - .agents/context/project.yaml
+notes:
+  - This is an AI-facing architecture decision task, not a human-facing narrative doc task.
+  - The objective is to stop silent drift between product expectations and terminal-engine capability.
