@@ -107,7 +107,7 @@ impl Renderer {
             .as_ref()
             .map(|state| state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(focused));
-        let viewport = normalize_viewport(&snapshot, context.overlay_lines.len());
+        let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
         let viewport_line_count = viewport.lines.len();
         let cursor_row = snapshot
             .cursor_row
@@ -153,7 +153,7 @@ impl Renderer {
             .as_ref()
             .map(|screen_state| screen_state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(peeked));
-        let viewport = normalize_viewport(&snapshot, context.overlay_lines.len());
+        let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
         let viewport_line_count = viewport.lines.len();
         let cursor_row = snapshot
             .cursor_row
@@ -273,8 +273,12 @@ struct ViewportProjection {
     start_row: usize,
 }
 
-fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: usize) -> ViewportProjection {
-    let reserved_rows = overlay_lines;
+fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> ViewportProjection {
+    let reserved_rows = overlay_lines
+        .len()
+        .saturating_sub(usize::from(
+            overlay_lines.iter().any(|line| line.starts_with("keys:")),
+        ));
     let available_rows = usize::max(
         1,
         (snapshot.size.rows as usize).saturating_sub(reserved_rows),
@@ -309,7 +313,7 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: usize) -> Viewpo
     }
 }
 
-fn normalize_viewport_lines(snapshot: &ScreenSnapshot, overlay_lines: usize) -> Vec<String> {
+fn normalize_viewport_lines(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vec<String> {
     normalize_viewport(snapshot, overlay_lines).lines
 }
 
@@ -840,5 +844,48 @@ mod tests {
         assert!(frame.viewport_lines[0].starts_with("two"));
         assert!(frame.viewport_lines[1].starts_with("three"));
         assert!(frame.viewport_lines[2].starts_with("four"));
+    }
+
+    #[test]
+    fn keys_footer_row_does_not_shrink_viewport() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "devbox-1".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 4,
+            cols: 96,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        registry.update_screen_state(&address, engine.state());
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address);
+
+        let sessions = registry.list();
+        let frame = Renderer::new()
+            .render(
+                &console,
+                &sessions,
+                RenderContext {
+                    waiting_count: 0,
+                    overlay_lines: vec![
+                        "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit"
+                            .to_string(),
+                    ],
+                },
+            )
+            .expect("render should succeed");
+
+        assert_eq!(frame.viewport_lines.len(), 4);
+        assert!(frame.viewport_lines[0].starts_with("one"));
+        assert!(frame.viewport_lines[1].starts_with("two"));
+        assert!(frame.viewport_lines[2].starts_with("three"));
+        assert!(frame.viewport_lines[3].starts_with("four"));
     }
 }

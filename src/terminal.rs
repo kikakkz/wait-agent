@@ -374,6 +374,10 @@ impl TerminalEngine {
                                 }
                             }
                         }
+                        b'M' => {
+                            self.active_buffer_mut().reverse_index();
+                            index += 1;
+                        }
                         _ => {}
                     }
                 }
@@ -572,7 +576,7 @@ impl TerminalEngine {
                 }
             }
             'c' if numbers.is_empty() || numbers == [0] => {
-                replies.extend_from_slice(b"\x1b[?62;c");
+                replies.extend_from_slice(b"\x1b[?61;1;21;22c");
             }
             'n' if numbers == [6] => {
                 let snapshot = self.active_buffer().snapshot(
@@ -589,7 +593,7 @@ impl TerminalEngine {
         }
     }
 
-    fn handle_private_mode(&mut self, params: &str, final_byte: char, replies: &mut Vec<u8>) {
+    fn handle_private_mode(&mut self, params: &str, final_byte: char, _replies: &mut Vec<u8>) {
         if params == "1049" {
             match final_byte {
                 'h' => self.alternate_screen_active = true,
@@ -608,8 +612,6 @@ impl TerminalEngine {
                 'l' => self.cursor_visible = false,
                 _ => {}
             }
-        } else if params.is_empty() && final_byte == 'u' {
-            replies.extend_from_slice(b"\x1b[?0u");
         }
     }
 }
@@ -740,6 +742,19 @@ impl ScreenBuffer {
         }
     }
 
+    fn reverse_index(&mut self) {
+        if self.size.rows == 0 {
+            return;
+        }
+
+        if self.cursor_row <= self.scroll_top {
+            self.scroll_down_in_region(1);
+            self.cursor_row = self.scroll_top;
+        } else {
+            self.cursor_row -= 1;
+        }
+    }
+
     fn backspace(&mut self) {
         self.cursor_col = self.cursor_col.saturating_sub(1);
     }
@@ -810,6 +825,26 @@ impl ScreenBuffer {
                 self.scrollback.push(removed.into_iter().collect());
             }
             self.cells.insert(bottom, blank_row(self.size.cols));
+        }
+    }
+
+    fn scroll_down_in_region(&mut self, count: u16) {
+        if self.cells.is_empty() || self.size.rows == 0 {
+            return;
+        }
+
+        let top = self.scroll_top as usize;
+        let bottom = self.scroll_bottom as usize;
+        if top >= self.cells.len() || bottom >= self.cells.len() || top > bottom {
+            return;
+        }
+
+        let rows = bottom - top + 1;
+        let count = usize::min(count as usize, rows);
+
+        for _ in 0..count {
+            self.cells.remove(bottom);
+            self.cells.insert(top, blank_row(self.size.cols));
         }
     }
 
@@ -1242,6 +1277,27 @@ mod tests {
     }
 
     #[test]
+    fn engine_reverse_index_respects_scroll_region() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 4,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"row1\r\nrow2\r\nrow3\r\nrow4");
+        engine.feed(b"\x1b[2;4r\x1b[2;1H\x1bM");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "row1    ");
+        assert_eq!(snapshot.lines[1], "        ");
+        assert_eq!(snapshot.lines[2], "row2    ");
+        assert_eq!(snapshot.lines[3], "row3    ");
+        assert_eq!(snapshot.cursor_row, 1);
+        assert_eq!(snapshot.cursor_col, 0);
+    }
+
+    #[test]
     fn engine_ignores_bell_without_advancing_cursor() {
         let mut engine = TerminalEngine::new(TerminalSize {
             rows: 2,
@@ -1270,8 +1326,8 @@ mod tests {
 
         let reply_text = String::from_utf8_lossy(&replies);
         assert!(reply_text.contains("\x1b[1;1R"));
-        assert!(reply_text.contains("\x1b[?62;c"));
-        assert!(reply_text.contains("\x1b[?0u"));
+        assert!(reply_text.contains("\x1b[?61;1;21;22c"));
+        assert!(!reply_text.contains("\x1b[?0u"));
         assert!(reply_text.contains("\x1b]10;rgb:ffff/ffff/ffff\x1b\\"));
     }
 

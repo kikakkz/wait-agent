@@ -41,3 +41,11 @@ blockers:
 notes:
   - do not reopen broad network work until the local acceptance gate is explicitly closed
   - the current worktree already contains ongoing edits related to acceptance and terminal behavior
+  - 2026-04-15 manual PTY validation reconfirmed multi-session lifecycle, shell cwd preservation, UTF-8 Chinese echo, picker behavior, Peek input ownership, and fullscreen shell return to prompt
+  - 2026-04-15 managed Codex validation confirmed startup UI rendering, prompt visibility, and live-surface takeover inside waitagent with a background shell session still present
+  - 2026-04-15 src/app.rs was updated so Ctrl-C is no longer parsed as QuitHost while the focused session owns live passthrough display; cargo test covers the parser gate
+  - 2026-04-15 a human-style repro path for the switch-back display bug was established as waitagent -> Ctrl-N -> codex -> Ctrl-B -> Ctrl-F
+  - 2026-04-15 src/app.rs was further updated so live-surface chrome only returns after reactivation if post-reactivation output arrives; old pre-switch output no longer qualifies
+  - PTY-tool validation of raw Ctrl-C passthrough remains inconclusive because the outer test harness converts Ctrl-C into an interrupt for the whole PTY process
+  - managed Codex validation did not yet establish full end-to-end menu navigation and post-submit interaction completion in the preferred user terminal
+  - final manual sign-off still requires validation in the user's preferred real terminal with the preferred agent mix, especially Codex-like TUI behavior

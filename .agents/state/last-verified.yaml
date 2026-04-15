@@ -1,6 +1,22 @@
 kind: state
 version: 1
+last_updated_from: cargo test at 2026-04-15T05:17:04Z
 checks:
+  - id: cargo-test
+    command: cargo test
+    status: pass
+  - id: live-surface-switch-back-repro
+    command: manual PTY repro of waitagent -> new session -> codex -> switch away -> switch back path plus regression verification for the live-surface reactivation gate
+    status: pass
+  - id: live-surface-ctrl-c-routing
+    command: unit-level verification that Ctrl-C is not claimed as QuitHost while the focused session owns live passthrough display
+    status: pass
+  - id: local-managed-codex-startup-slice
+    command: manual managed-session validation that codex renders its startup UI and accepts prompt input inside waitagent
+    status: pass
+  - id: local-pty-shell-acceptance-slice
+    command: manual PTY validation of checklist sections 5.1, 5.2, 5.3, 5.5, 5.6, and 5.7 plus fullscreen shell return via less README.md
+    status: pass
   - id: local-three-session-validation
     command: manual local workflow validation for three shell-backed sessions
     status: pass
