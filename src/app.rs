@@ -141,17 +141,54 @@ impl App {
                         console.focused_session.as_ref(),
                         input_received_at,
                     ) {
-                        if matches!(outcome, PickerNavigationOutcome::Render) {
-                            self.refresh_surface(
-                                RenderSurface::Workspace,
-                                &mut live_surface,
-                                &mut hosted,
-                                &mut renderer_state,
-                                &renderer,
-                                &console,
-                                &scheduler,
-                                &command_prompt,
-                            )?;
+                        match outcome {
+                            PickerNavigationOutcome::Consumed => {}
+                            PickerNavigationOutcome::Render => {
+                                self.refresh_surface(
+                                    RenderSurface::Workspace,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                )?;
+                            }
+                            PickerNavigationOutcome::Submit => {
+                                if let Some(index) = command_prompt.selected_picker_index(
+                                    &self.sessions.list(),
+                                    console.focused_session.as_ref(),
+                                ) {
+                                    should_exit = self.apply_workspace_action(
+                                        ConsoleAction::FocusIndex(index),
+                                        runtime,
+                                        terminal_snapshot.size,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &tx,
+                                        &mut console,
+                                        &mut scheduler,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &mut command_prompt,
+                                    )?;
+                                } else {
+                                    should_exit = self.apply_workspace_action(
+                                        ConsoleAction::DismissOverlay,
+                                        runtime,
+                                        terminal_snapshot.size,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &tx,
+                                        &mut console,
+                                        &mut scheduler,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &mut command_prompt,
+                                    )?;
+                                }
+                            }
                         }
                     } else if matches!(
                         parse_console_action(
@@ -177,13 +214,11 @@ impl App {
                             &mut command_prompt,
                             RenderSurface::Workspace,
                         )?;
-                    } else if let Some(action) =
-                        parse_console_action(
-                            &bytes,
-                            command_prompt.wants_escape_dismiss(),
-                            allow_interrupt_exit,
-                        )
-                    {
+                    } else if let Some(action) = parse_console_action(
+                        &bytes,
+                        command_prompt.wants_escape_dismiss(),
+                        allow_interrupt_exit,
+                    ) {
                         match action {
                             ConsoleAction::PreviousSession
                                 if command_prompt.move_picker_previous(
@@ -297,17 +332,54 @@ impl App {
                                 now_unix_ms(),
                             ) {
                                 handled_control = true;
-                                if matches!(outcome, PickerNavigationOutcome::Render) {
-                                    self.refresh_surface(
-                                        RenderSurface::Workspace,
-                                        &mut live_surface,
-                                        &mut hosted,
-                                        &mut renderer_state,
-                                        &renderer,
-                                        &console,
-                                        &scheduler,
-                                        &command_prompt,
-                                    )?;
+                                match outcome {
+                                    PickerNavigationOutcome::Consumed => {}
+                                    PickerNavigationOutcome::Render => {
+                                        self.refresh_surface(
+                                            RenderSurface::Workspace,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &console,
+                                            &scheduler,
+                                            &command_prompt,
+                                        )?;
+                                    }
+                                    PickerNavigationOutcome::Submit => {
+                                        if let Some(index) = command_prompt.selected_picker_index(
+                                            &self.sessions.list(),
+                                            console.focused_session.as_ref(),
+                                        ) {
+                                            should_exit = self.apply_workspace_action(
+                                                ConsoleAction::FocusIndex(index),
+                                                runtime,
+                                                terminal_snapshot.size,
+                                                &mut live_surface,
+                                                &mut hosted,
+                                                &tx,
+                                                &mut console,
+                                                &mut scheduler,
+                                                &mut renderer_state,
+                                                &renderer,
+                                                &mut command_prompt,
+                                            )?;
+                                        } else {
+                                            should_exit = self.apply_workspace_action(
+                                                ConsoleAction::DismissOverlay,
+                                                runtime,
+                                                terminal_snapshot.size,
+                                                &mut live_surface,
+                                                &mut hosted,
+                                                &tx,
+                                                &mut console,
+                                                &mut scheduler,
+                                                &mut renderer_state,
+                                                &renderer,
+                                                &mut command_prompt,
+                                            )?;
+                                        }
+                                    }
                                 }
                             } else if let Some(outcome) = command_prompt.handle_input(&single) {
                                 handled_control = true;
@@ -325,13 +397,11 @@ impl App {
                                     &mut command_prompt,
                                     RenderSurface::Workspace,
                                 )?;
-                            } else if let Some(action) =
-                                parse_console_action(
-                                    &single,
-                                    command_prompt.wants_escape_dismiss(),
-                                    allow_interrupt_exit,
-                                )
-                            {
+                            } else if let Some(action) = parse_console_action(
+                                &single,
+                                command_prompt.wants_escape_dismiss(),
+                                allow_interrupt_exit,
+                            ) {
                                 handled_control = true;
                                 match action {
                                     ConsoleAction::PreviousSession
@@ -472,8 +542,10 @@ impl App {
                                     }
                                     if submitted_live_command {
                                         live_surface.mark_known_live_command(target.clone());
-                                        live_surface
-                                            .mark_session_bootstrapping(target.clone(), now_unix_ms());
+                                        live_surface.mark_session_bootstrapping(
+                                            target.clone(),
+                                            now_unix_ms(),
+                                        );
                                         scheduler.on_manual_switch(&mut console);
                                         self.sync_live_surface(
                                             &mut live_surface,
@@ -534,7 +606,11 @@ impl App {
                             runtime.handle.write_all(&replies)?;
                         }
                         if substantive_output {
-                            scheduler.on_session_output(&output_session, now_unix_ms(), bytes.len());
+                            scheduler.on_session_output(
+                                &output_session,
+                                now_unix_ms(),
+                                bytes.len(),
+                            );
                         }
                         self.maybe_activate_live_surface_for_output(
                             &mut live_surface,
@@ -688,7 +764,6 @@ impl App {
                 last_waiting_count = waiting_count;
                 last_waiting_addresses = waiting_addresses;
             }
-
         }
 
         self.restore_terminal_screen()?;
@@ -1046,9 +1121,9 @@ impl App {
 
     fn write_live_surface_output(&self, bytes: &[u8]) -> Result<(), AppError> {
         let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(bytes)
-            .map_err(|error| AppError::Io("failed to write live surface output".to_string(), error))?;
+        stdout.write_all(bytes).map_err(|error| {
+            AppError::Io("failed to write live surface output".to_string(), error)
+        })?;
         stdout
             .flush()
             .map_err(|error| AppError::Io("failed to flush live surface output".to_string(), error))
@@ -1142,8 +1217,11 @@ impl App {
         )?;
         let size = self.terminal.current_size_or_default();
         let width = size.cols as usize;
-        let overlay_lines =
-            live_overlay_lines(command_prompt, self.sessions.list(), console.focused_session.as_ref());
+        let overlay_lines = live_overlay_lines(
+            command_prompt,
+            self.sessions.list(),
+            console.focused_session.as_ref(),
+        );
         let keys_line = style_overlay_line(
             "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit",
             width,
@@ -1220,10 +1298,12 @@ impl App {
         let mut stdout = io::stdout().lock();
         stdout
             .write_all(overlay_buffer.as_bytes())
-            .map_err(|error| AppError::Io("failed to write live surface chrome".to_string(), error))?;
-        stdout
-            .flush()
-            .map_err(|error| AppError::Io("failed to flush live surface chrome".to_string(), error))?;
+            .map_err(|error| {
+                AppError::Io("failed to write live surface chrome".to_string(), error)
+            })?;
+        stdout.flush().map_err(|error| {
+            AppError::Io("failed to flush live surface chrome".to_string(), error)
+        })?;
         live_surface.chrome_visible = true;
         live_surface.overlay_rows = overlay_rows;
         Ok(())
@@ -1363,7 +1443,9 @@ impl App {
             && !console.is_peeking()
             && !live_overlay_visible(command_prompt)
             && self.focused_session_prefers_live_surface(live_surface, console);
-        desired_live.then(|| console.focused_session.clone()).flatten()
+        desired_live
+            .then(|| console.focused_session.clone())
+            .flatten()
     }
 
     fn focused_bootstrapping_session(
@@ -1752,17 +1834,54 @@ impl App {
                         console.focused_session.as_ref(),
                         input_received_at,
                     ) {
-                        if matches!(outcome, PickerNavigationOutcome::Render) {
-                            self.refresh_surface(
-                                RenderSurface::Server,
-                                &mut live_surface,
-                                &mut hosted,
-                                &mut renderer_state,
-                                &renderer,
-                                &console,
-                                &scheduler,
-                                &command_prompt,
-                            )?;
+                        match outcome {
+                            PickerNavigationOutcome::Consumed => {}
+                            PickerNavigationOutcome::Render => {
+                                self.refresh_surface(
+                                    RenderSurface::Server,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                )?;
+                            }
+                            PickerNavigationOutcome::Submit => {
+                                if let Some(index) = command_prompt.selected_picker_index(
+                                    &self.sessions.list(),
+                                    console.focused_session.as_ref(),
+                                ) {
+                                    should_exit = self.apply_host_action(
+                                        ConsoleAction::FocusIndex(index),
+                                        runtime,
+                                        terminal_snapshot.size,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &tx,
+                                        &mut console,
+                                        &mut scheduler,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &mut command_prompt,
+                                    )?;
+                                } else {
+                                    should_exit = self.apply_host_action(
+                                        ConsoleAction::DismissOverlay,
+                                        runtime,
+                                        terminal_snapshot.size,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &tx,
+                                        &mut console,
+                                        &mut scheduler,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &mut command_prompt,
+                                    )?;
+                                }
+                            }
                         }
                     } else if matches!(
                         parse_console_action(
@@ -1788,13 +1907,11 @@ impl App {
                             &mut command_prompt,
                             RenderSurface::Server,
                         )?;
-                    } else if let Some(action) =
-                        parse_console_action(
-                            &bytes,
-                            command_prompt.wants_escape_dismiss(),
-                            allow_interrupt_exit,
-                        )
-                    {
+                    } else if let Some(action) = parse_console_action(
+                        &bytes,
+                        command_prompt.wants_escape_dismiss(),
+                        allow_interrupt_exit,
+                    ) {
                         match action {
                             ConsoleAction::PreviousSession
                                 if command_prompt.move_picker_previous(
@@ -1908,17 +2025,54 @@ impl App {
                                 now_unix_ms(),
                             ) {
                                 handled_control = true;
-                                if matches!(outcome, PickerNavigationOutcome::Render) {
-                                    self.refresh_surface(
-                                        RenderSurface::Server,
-                                        &mut live_surface,
-                                        &mut hosted,
-                                        &mut renderer_state,
-                                        &renderer,
-                                        &console,
-                                        &scheduler,
-                                        &command_prompt,
-                                    )?;
+                                match outcome {
+                                    PickerNavigationOutcome::Consumed => {}
+                                    PickerNavigationOutcome::Render => {
+                                        self.refresh_surface(
+                                            RenderSurface::Server,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &console,
+                                            &scheduler,
+                                            &command_prompt,
+                                        )?;
+                                    }
+                                    PickerNavigationOutcome::Submit => {
+                                        if let Some(index) = command_prompt.selected_picker_index(
+                                            &self.sessions.list(),
+                                            console.focused_session.as_ref(),
+                                        ) {
+                                            should_exit = self.apply_host_action(
+                                                ConsoleAction::FocusIndex(index),
+                                                runtime,
+                                                terminal_snapshot.size,
+                                                &mut live_surface,
+                                                &mut hosted,
+                                                &tx,
+                                                &mut console,
+                                                &mut scheduler,
+                                                &mut renderer_state,
+                                                &renderer,
+                                                &mut command_prompt,
+                                            )?;
+                                        } else {
+                                            should_exit = self.apply_host_action(
+                                                ConsoleAction::DismissOverlay,
+                                                runtime,
+                                                terminal_snapshot.size,
+                                                &mut live_surface,
+                                                &mut hosted,
+                                                &tx,
+                                                &mut console,
+                                                &mut scheduler,
+                                                &mut renderer_state,
+                                                &renderer,
+                                                &mut command_prompt,
+                                            )?;
+                                        }
+                                    }
                                 }
                             } else if let Some(outcome) = command_prompt.handle_input(&single) {
                                 handled_control = true;
@@ -1936,13 +2090,11 @@ impl App {
                                     &mut command_prompt,
                                     RenderSurface::Server,
                                 )?;
-                            } else if let Some(action) =
-                                parse_console_action(
-                                    &single,
-                                    command_prompt.wants_escape_dismiss(),
-                                    allow_interrupt_exit,
-                                )
-                            {
+                            } else if let Some(action) = parse_console_action(
+                                &single,
+                                command_prompt.wants_escape_dismiss(),
+                                allow_interrupt_exit,
+                            ) {
                                 handled_control = true;
                                 match action {
                                     ConsoleAction::PreviousSession
@@ -2083,8 +2235,10 @@ impl App {
                                     }
                                     if submitted_live_command {
                                         live_surface.mark_known_live_command(target.clone());
-                                        live_surface
-                                            .mark_session_bootstrapping(target.clone(), now_unix_ms());
+                                        live_surface.mark_session_bootstrapping(
+                                            target.clone(),
+                                            now_unix_ms(),
+                                        );
                                         scheduler.on_manual_switch(&mut console);
                                         self.sync_live_surface(
                                             &mut live_surface,
@@ -2145,7 +2299,11 @@ impl App {
                             runtime.handle.write_all(&replies)?;
                         }
                         if substantive_output {
-                            scheduler.on_session_output(&output_session, now_unix_ms(), bytes.len());
+                            scheduler.on_session_output(
+                                &output_session,
+                                now_unix_ms(),
+                                bytes.len(),
+                            );
                         }
                         self.maybe_activate_live_surface_for_output(
                             &mut live_surface,
@@ -2270,26 +2428,26 @@ impl App {
                 )?;
             }
 
-        if !command_prompt.open
-            && !self.focused_session_owns_passthrough_display(&live_surface, &console)
-        {
-            let decision =
-                scheduler.decide_auto_switch(&mut console, self.sessions.list(), now_unix_ms());
-            let waiting_count = scheduler.waiting_queue().entries().len();
-            let waiting_addresses = scheduler.waiting_queue().addresses();
-            if let Some(message) = background_wait_notice(
-                &last_waiting_addresses,
-                &waiting_addresses,
-                console.focused_session.as_ref(),
-            ) {
-                command_prompt.set_passive_message(message);
-            }
-            if !matches!(decision.action, SchedulingAction::None)
-                || waiting_count != last_waiting_count
+            if !command_prompt.open
+                && !self.focused_session_owns_passthrough_display(&live_surface, &console)
             {
-                self.refresh_surface(
-                    RenderSurface::Server,
-                    &mut live_surface,
+                let decision =
+                    scheduler.decide_auto_switch(&mut console, self.sessions.list(), now_unix_ms());
+                let waiting_count = scheduler.waiting_queue().entries().len();
+                let waiting_addresses = scheduler.waiting_queue().addresses();
+                if let Some(message) = background_wait_notice(
+                    &last_waiting_addresses,
+                    &waiting_addresses,
+                    console.focused_session.as_ref(),
+                ) {
+                    command_prompt.set_passive_message(message);
+                }
+                if !matches!(decision.action, SchedulingAction::None)
+                    || waiting_count != last_waiting_count
+                {
+                    self.refresh_surface(
+                        RenderSurface::Server,
+                        &mut live_surface,
                         &mut hosted,
                         &mut renderer_state,
                         &renderer,
@@ -2301,7 +2459,6 @@ impl App {
                 last_waiting_count = waiting_count;
                 last_waiting_addresses = waiting_addresses;
             }
-
         }
 
         self.restore_terminal_screen()?;
@@ -2838,8 +2995,7 @@ impl App {
         let mut lines = workspace_idle_lines(surface, active_count, waiting_count);
         let target_rows = self.terminal.current_size_or_default().rows as usize;
         let show_footer_menu = !overlay_lines.is_empty();
-        let reserved_rows =
-            lines.len() + overlay_lines.len() + 1 + usize::from(show_footer_menu);
+        let reserved_rows = lines.len() + overlay_lines.len() + 1 + usize::from(show_footer_menu);
         let spacer_rows = target_rows.saturating_sub(reserved_rows);
         lines.extend(std::iter::repeat(String::new()).take(spacer_rows));
         if show_footer_menu {
@@ -3156,7 +3312,7 @@ impl CommandPromptState {
             return false;
         }
 
-        matches!(bytes, b"\r" | b"\n" | b"\r\n")
+        matches_overlay_submit(bytes)
     }
 
     fn clear_message_on_forwarded_input(&mut self, bytes: &[u8]) -> bool {
@@ -3183,8 +3339,8 @@ impl CommandPromptState {
         let mut combined = self.pending_picker_escape.clone();
         combined.extend_from_slice(bytes);
 
-        match combined.as_slice() {
-            b"\x1b[A" => {
+        match picker_escape_action(&combined) {
+            Some(PickerEscapeAction::Previous) => {
                 self.clear_pending_picker_escape();
                 let moved = self.move_picker_previous(sessions, focused);
                 Some(if moved {
@@ -3193,7 +3349,7 @@ impl CommandPromptState {
                     PickerNavigationOutcome::Consumed
                 })
             }
-            b"\x1b[B" => {
+            Some(PickerEscapeAction::Next) => {
                 self.clear_pending_picker_escape();
                 let moved = self.move_picker_next(sessions, focused);
                 Some(if moved {
@@ -3202,12 +3358,21 @@ impl CommandPromptState {
                     PickerNavigationOutcome::Consumed
                 })
             }
-            [0x1b] | [0x1b, b'['] => {
+            Some(PickerEscapeAction::Submit) => {
+                self.clear_pending_picker_escape();
+                Some(PickerNavigationOutcome::Submit)
+            }
+            None if combined.first() == Some(&0x1b)
+                && consume_input_escape(&combined, 0).is_none() =>
+            {
                 self.pending_picker_escape = combined;
                 self.pending_picker_started_at_unix_ms = Some(now_unix_ms);
                 Some(PickerNavigationOutcome::Consumed)
             }
-            _ => None,
+            None => {
+                self.clear_pending_picker_escape();
+                None
+            }
         }
     }
 
@@ -3453,6 +3618,14 @@ impl ShellCommandTracker {
 enum PickerNavigationOutcome {
     Consumed,
     Render,
+    Submit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerEscapeAction {
+    Previous,
+    Next,
+    Submit,
 }
 
 fn picker_sessions<'a>(
@@ -3463,6 +3636,36 @@ fn picker_sessions<'a>(
         .copied()
         .filter(|session| !matches!(session.status, SessionStatus::Exited))
         .collect()
+}
+
+fn matches_overlay_submit(bytes: &[u8]) -> bool {
+    matches!(bytes, b"\r" | b"\n" | b"\r\n")
+        || matches!(
+            picker_escape_action(bytes),
+            Some(PickerEscapeAction::Submit)
+        )
+}
+
+fn picker_escape_action(bytes: &[u8]) -> Option<PickerEscapeAction> {
+    match bytes {
+        b"\x1b[A" | b"\x1bOA" => Some(PickerEscapeAction::Previous),
+        b"\x1b[B" | b"\x1bOB" => Some(PickerEscapeAction::Next),
+        b"\x1bOM" => Some(PickerEscapeAction::Submit),
+        _ if matches_kitty_enter(bytes) => Some(PickerEscapeAction::Submit),
+        _ => None,
+    }
+}
+
+fn matches_kitty_enter(bytes: &[u8]) -> bool {
+    let Some(payload) = bytes.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    let Some(payload) = payload.strip_suffix(b"u") else {
+        return false;
+    };
+    let mut parts = payload.split(|byte| *byte == b';');
+    matches!(parts.next(), Some(b"13"))
+        && parts.all(|part| !part.is_empty() && part.iter().all(|byte| byte.is_ascii_digit()))
 }
 
 #[derive(Debug, Default)]
@@ -3722,9 +3925,7 @@ fn output_is_substantive(bytes: &[u8]) -> bool {
                                     index += 1;
                                     break;
                                 }
-                                0x1b
-                                    if index + 1 < bytes.len() && bytes[index + 1] == b'\\' =>
-                                {
+                                0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
                                     index += 2;
                                     break;
                                 }
@@ -3794,9 +3995,7 @@ fn looks_like_shell_prompt_output(bytes: &[u8]) -> bool {
                                     index += 1;
                                     break;
                                 }
-                                0x1b
-                                    if index + 1 < bytes.len() && bytes[index + 1] == b'\\' =>
-                                {
+                                0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
                                     index += 2;
                                     break;
                                 }
@@ -3957,7 +4156,11 @@ fn build_full_frame_buffer(
         "\x1b[{};{}H{}",
         cursor.row.saturating_add(1),
         cursor.col.saturating_add(1),
-        if cursor_visible { "\x1b[?25h" } else { "\x1b[?25l" }
+        if cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        }
     ));
     buffer
 }
@@ -4037,7 +4240,10 @@ fn render_command_line(program: &str, args: &[String]) -> String {
 
 fn managed_console_size(size: crate::terminal::TerminalSize) -> crate::terminal::TerminalSize {
     crate::terminal::TerminalSize {
-        rows: size.rows.saturating_sub(MANAGED_CONSOLE_RESERVED_ROWS).max(1),
+        rows: size
+            .rows
+            .saturating_sub(MANAGED_CONSOLE_RESERVED_ROWS)
+            .max(1),
         ..size
     }
 }
@@ -4218,12 +4424,11 @@ impl From<crate::terminal::TerminalError> for AppError {
 mod tests {
     use super::{
         background_wait_notice, build_full_frame_buffer, default_shell_program,
-        live_output_needs_chrome_redraw, live_overlay_visible,
-        looks_like_shell_prompt_output, looks_like_terminal_takeover_output,
-        live_surface_target_size, output_is_substantive, parse_console_action, shell_title,
-        style_footer_separator_line, App, CommandOverlay, CommandPromptState, ConsoleAction,
-        CursorPlacement,
-        ForwardInputNormalizer, InputTracker, LiveSurfaceState, PICKER_ESCAPE_TIMEOUT_MS,
+        live_output_needs_chrome_redraw, live_overlay_visible, live_surface_target_size,
+        looks_like_shell_prompt_output, looks_like_terminal_takeover_output, output_is_substantive,
+        parse_console_action, shell_title, style_footer_separator_line, App, CommandOverlay,
+        CommandPromptState, ConsoleAction, CursorPlacement, ForwardInputNormalizer, InputTracker,
+        LiveSurfaceState, PickerNavigationOutcome, PICKER_ESCAPE_TIMEOUT_MS,
         SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
@@ -4284,7 +4489,10 @@ mod tests {
             Some(ConsoleAction::DismissOverlay)
         );
         assert_eq!(parse_console_action(&[0x1b], false, true), None);
-        assert_eq!(parse_console_action(&[SHORTCUT_INTERRUPT_EXIT], false, false), None);
+        assert_eq!(
+            parse_console_action(&[SHORTCUT_INTERRUPT_EXIT], false, false),
+            None
+        );
         assert_eq!(
             parse_console_action(&[SHORTCUT_INTERRUPT_EXIT], false, true),
             Some(ConsoleAction::QuitHost)
@@ -4384,6 +4592,44 @@ mod tests {
     }
 
     #[test]
+    fn picker_accepts_application_cursor_navigation_sequences() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let _second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let sessions = registry.list();
+
+        let mut prompt = CommandPromptState::default();
+        prompt.toggle_sessions(&sessions, Some(first.address()));
+
+        assert_eq!(
+            prompt.handle_picker_navigation(b"\x1bOB", &sessions, Some(first.address()), 100),
+            Some(PickerNavigationOutcome::Render)
+        );
+        assert_eq!(
+            prompt.selected_picker_index(&sessions, Some(first.address())),
+            Some(2)
+        );
+
+        assert_eq!(
+            prompt.handle_picker_navigation(b"\x1bOA", &sessions, Some(first.address()), 110),
+            Some(PickerNavigationOutcome::Render)
+        );
+        assert_eq!(
+            prompt.selected_picker_index(&sessions, Some(first.address())),
+            Some(1)
+        );
+        assert_eq!(prompt.overlay, CommandOverlay::Sessions);
+    }
+
+    #[test]
     fn picker_closes_after_escape_timeout() {
         let mut registry = SessionRegistry::new();
         let first = registry.create_local_session(
@@ -4401,6 +4647,55 @@ mod tests {
             .is_some());
         assert!(prompt.flush_picker_navigation_timeout(100 + PICKER_ESCAPE_TIMEOUT_MS + 1));
         assert_eq!(prompt.overlay, CommandOverlay::None);
+    }
+
+    #[test]
+    fn session_overlay_submit_accepts_application_and_kitty_enter_sequences() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let _second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let sessions = registry.list();
+
+        let mut prompt = CommandPromptState::default();
+        prompt.toggle_sessions(&sessions, Some(first.address()));
+        prompt.handle_picker_navigation(b"\x1b[B", &sessions, Some(first.address()), 100);
+
+        assert_eq!(
+            prompt.handle_picker_navigation(&[0x1b], &sessions, Some(first.address()), 110),
+            Some(PickerNavigationOutcome::Consumed)
+        );
+        assert_eq!(
+            prompt.handle_picker_navigation(b"O", &sessions, Some(first.address()), 120),
+            Some(PickerNavigationOutcome::Consumed)
+        );
+        assert_eq!(
+            prompt.handle_picker_navigation(b"M", &sessions, Some(first.address()), 130),
+            Some(PickerNavigationOutcome::Submit)
+        );
+
+        let mut kitty_prompt = CommandPromptState::default();
+        kitty_prompt.toggle_sessions(&sessions, Some(first.address()));
+        kitty_prompt.handle_picker_navigation(b"\x1b[B", &sessions, Some(first.address()), 200);
+        assert_eq!(
+            kitty_prompt.handle_picker_navigation(
+                b"\x1b[13u",
+                &sessions,
+                Some(first.address()),
+                210,
+            ),
+            Some(PickerNavigationOutcome::Submit)
+        );
+
+        assert!(prompt.submit_overlay(b"\x1bOM"));
+        assert!(kitty_prompt.submit_overlay(b"\x1b[13u"));
     }
 
     #[test]
@@ -4526,11 +4821,7 @@ mod tests {
             None
         );
         assert_eq!(
-            background_wait_notice(
-                &[focused.clone(), waiter.clone()],
-                &[focused, waiter],
-                None
-            ),
+            background_wait_notice(&[focused.clone(), waiter.clone()], &[focused, waiter], None),
             None
         );
     }
@@ -4623,7 +4914,9 @@ mod tests {
         let mut normalizer = ForwardInputNormalizer::default();
 
         assert!(normalizer.normalize(&[0x1b], true, 100).is_empty());
-        assert!(normalizer.flush_pending_escape_timeout(100 + PICKER_ESCAPE_TIMEOUT_MS - 1).is_empty());
+        assert!(normalizer
+            .flush_pending_escape_timeout(100 + PICKER_ESCAPE_TIMEOUT_MS - 1)
+            .is_empty());
         assert_eq!(
             normalizer.flush_pending_escape_timeout(100 + PICKER_ESCAPE_TIMEOUT_MS + 1),
             b"\x1b"
@@ -4797,7 +5090,8 @@ mod tests {
 
         let mut fullscreen = TerminalEngine::new(TerminalSize::default());
         fullscreen.feed(b"\x1b[?1049h");
-        app.sessions.update_screen_state(&address, fullscreen.state());
+        app.sessions
+            .update_screen_state(&address, fullscreen.state());
         assert!(app.focused_session_prefers_live_surface(&live_surface, &console));
 
         let mut shell = TerminalEngine::new(TerminalSize::default());
@@ -4823,7 +5117,8 @@ mod tests {
 
         let mut fullscreen = TerminalEngine::new(TerminalSize::default());
         fullscreen.feed(b"\x1b[?1049hHELLO");
-        app.sessions.update_screen_state(&address, fullscreen.state());
+        app.sessions
+            .update_screen_state(&address, fullscreen.state());
         live_surface.set_display_session(Some(address.clone()), true, 100);
         live_surface.pending_redraw = false;
 
@@ -4860,7 +5155,8 @@ mod tests {
 
         let mut fullscreen = TerminalEngine::new(TerminalSize::default());
         fullscreen.feed(b"\x1b[?1049hHELLO");
-        app.sessions.update_screen_state(&address, fullscreen.state());
+        app.sessions
+            .update_screen_state(&address, fullscreen.state());
         live_surface.set_display_session(Some(address.clone()), true, 100);
         live_surface.pending_redraw = false;
 
@@ -4990,7 +5286,9 @@ mod tests {
 
     #[test]
     fn takeover_detection_stays_off_for_plain_shell_output() {
-        assert!(!looks_like_terminal_takeover_output(b"\x1b[?2004hk@k:/tmp$ "));
+        assert!(!looks_like_terminal_takeover_output(
+            b"\x1b[?2004hk@k:/tmp$ "
+        ));
         assert!(!looks_like_terminal_takeover_output(b"\x1b[2J"));
     }
 
@@ -5003,7 +5301,9 @@ mod tests {
 
     #[test]
     fn takeover_detection_turns_on_for_codex_style_bootstrap_output() {
-        assert!(looks_like_terminal_takeover_output(b"\x1b[?2026h\x1b[1;55H"));
+        assert!(looks_like_terminal_takeover_output(
+            b"\x1b[?2026h\x1b[1;55H"
+        ));
         assert!(looks_like_terminal_takeover_output(b"\x1b[?25l\x1b[1;55H"));
     }
 
