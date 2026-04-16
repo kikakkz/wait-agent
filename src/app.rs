@@ -1128,13 +1128,12 @@ impl App {
         let status_line = style_status_line(&status_text, width);
         let status_row = size.rows.max(1);
         let keys_row = status_row.saturating_sub(1).max(1);
-        let cursor_row = frame.cursor_row.saturating_add(1);
-        let cursor_col = frame.cursor_col.saturating_add(1);
         let cursor_visibility = if frame.cursor_visible {
             "\x1b[?25h"
         } else {
             "\x1b[?25l"
         };
+        let active_style_ansi = self.focused_live_surface_active_style(console);
 
         let available_overlay_rows = size.rows.saturating_sub(LIVE_SURFACE_STATUS_ROWS) as usize;
         let shown_overlay = if overlay_lines.len() > available_overlay_rows {
@@ -1166,7 +1165,7 @@ impl App {
             ));
         }
         overlay_buffer.push_str(&format!(
-            "\x1b[{keys_row};1H{keys_line}\x1b[{status_row};1H{status_line}\x1b[{cursor_row};{cursor_col}H{cursor_visibility}\x1b[u"
+            "\x1b[{keys_row};1H{keys_line}\x1b[{status_row};1H{status_line}\x1b[u{active_style_ansi}{cursor_visibility}"
         ));
 
         Ok((overlay_buffer, shown_overlay.len()))
@@ -1457,7 +1456,7 @@ impl App {
         if !frame.top_line.is_empty() {
             lines.push(frame.top_line.clone());
         }
-        lines.extend(frame.viewport_lines.iter().cloned());
+        lines.extend(frame.styled_viewport_lines.iter().cloned());
         if !frame.overlay_lines.is_empty() {
             lines.push(style_footer_separator_line(width));
         }
@@ -1478,6 +1477,16 @@ impl App {
         let cursor_visible =
             command_prompt.map(|prompt| prompt.open).unwrap_or(false) || frame.cursor_visible;
         (lines.join("\r\n"), cursor, cursor_visible)
+    }
+
+    fn focused_live_surface_active_style(&self, console: &ConsoleState) -> String {
+        console
+            .focused_session
+            .as_ref()
+            .and_then(|session| self.sessions.get(session))
+            .and_then(|record| record.screen_state.as_ref())
+            .map(|state| state.active_snapshot().active_style_ansi.clone())
+            .unwrap_or_else(|| "\x1b[0m".to_string())
     }
 
     fn write_full_frame(&self, frame_text: &str) -> Result<(), AppError> {
@@ -4130,6 +4139,7 @@ mod tests {
     use crate::client::normalize_endpoint;
     use crate::config::AppConfig;
     use crate::console::ConsoleState;
+    use crate::renderer::{Renderer, RendererState};
     use crate::scheduler::{SchedulerPhase, SchedulerState};
     use crate::session::{SessionAddress, SessionRegistry};
     use crate::terminal::{TerminalEngine, TerminalSize};
@@ -4771,6 +4781,44 @@ mod tests {
         let live_surface = LiveSurfaceState::default();
         assert!(!app.session_prefers_fullscreen_background(&live_surface, &shell_address));
         assert!(app.session_prefers_fullscreen_background(&live_surface, &codex_address));
+    }
+
+    #[test]
+    fn live_surface_overlay_restores_active_style_after_drawing_footer() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[38;5;196mred");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let (buffer, _) = app
+            .build_live_surface_ui_buffer(
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                0,
+            )
+            .expect("overlay buffer should build");
+
+        assert!(
+            buffer.ends_with("\x1b[u\x1b[0;38;5;196m\x1b[?25h"),
+            "overlay should restore the active style after restoring the cursor: {:?}",
+            buffer
+        );
     }
 
     #[test]

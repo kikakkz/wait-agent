@@ -16,6 +16,7 @@ pub struct RenderFrame {
     pub top_line: String,
     pub overlay_lines: Vec<String>,
     pub viewport_lines: Vec<String>,
+    pub styled_viewport_lines: Vec<String>,
     pub bottom_line: String,
     pub cursor_row: u16,
     pub cursor_col: u16,
@@ -29,7 +30,7 @@ impl RenderFrame {
         if !self.top_line.is_empty() {
             lines.push(self.top_line.clone());
         }
-        lines.extend(self.viewport_lines.iter().cloned());
+        lines.extend(self.styled_viewport_lines.iter().cloned());
         lines.extend(self.overlay_lines.iter().cloned());
         lines.push(self.bottom_line.clone());
         lines.join("\r\n")
@@ -108,12 +109,13 @@ impl Renderer {
             .map(|state| state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(focused));
         let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
-        let viewport_line_count = viewport.lines.len();
+        let viewport_line_count = viewport.plain_lines.len();
         let cursor_row = snapshot
             .cursor_row
             .saturating_sub(viewport.start_row as u16)
             .min(viewport_line_count.saturating_sub(1) as u16);
-        let cursor_col = projected_cursor_col(&viewport.lines, cursor_row, snapshot.cursor_col);
+        let cursor_col =
+            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col);
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -122,7 +124,8 @@ impl Renderer {
             input_owner_session: focused.clone(),
             top_line: String::new(),
             overlay_lines: context.overlay_lines.clone(),
-            viewport_lines: viewport.lines,
+            viewport_lines: viewport.plain_lines,
+            styled_viewport_lines: viewport.styled_lines,
             bottom_line: render_bottom_line(
                 console,
                 rendered_session,
@@ -154,12 +157,13 @@ impl Renderer {
             .map(|screen_state| screen_state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(peeked));
         let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
-        let viewport_line_count = viewport.lines.len();
+        let viewport_line_count = viewport.plain_lines.len();
         let cursor_row = snapshot
             .cursor_row
             .saturating_sub(viewport.start_row as u16)
             .min(viewport_line_count.saturating_sub(1) as u16);
-        let cursor_col = projected_cursor_col(&viewport.lines, cursor_row, snapshot.cursor_col);
+        let cursor_col =
+            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col);
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -168,7 +172,8 @@ impl Renderer {
             input_owner_session: focused.clone(),
             top_line: String::new(),
             overlay_lines: context.overlay_lines.clone(),
-            viewport_lines: viewport.lines,
+            viewport_lines: viewport.plain_lines,
+            styled_viewport_lines: viewport.styled_lines,
             bottom_line: render_bottom_line(
                 console,
                 rendered_session,
@@ -269,7 +274,8 @@ fn render_lock(lock: SwitchLock) -> &'static str {
 }
 
 struct ViewportProjection {
-    lines: Vec<String>,
+    plain_lines: Vec<String>,
+    styled_lines: Vec<String>,
     start_row: usize,
 }
 
@@ -292,7 +298,7 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vi
         .max((snapshot.cursor_row as usize).saturating_add(1))
         .min(snapshot.lines.len());
     let viewport_start = viewport_end.saturating_sub(available_rows);
-    let lines = snapshot
+    let plain_lines = snapshot
         .lines
         .iter()
         .enumerate()
@@ -306,15 +312,33 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vi
                 snapshot.cursor_col as usize,
             )
         })
+        .collect::<Vec<_>>();
+    let styled_lines = snapshot
+        .styled_lines
+        .iter()
+        .zip(snapshot.lines.iter())
+        .enumerate()
+        .skip(viewport_start)
+        .take(available_rows)
+        .map(|(row, (styled_line, plain_line))| {
+            visible_styled_line(
+                styled_line,
+                plain_line,
+                row,
+                snapshot.cursor_row as usize,
+                snapshot.cursor_col as usize,
+            )
+        })
         .collect();
     ViewportProjection {
-        lines,
+        plain_lines,
+        styled_lines,
         start_row: viewport_start,
     }
 }
 
 fn normalize_viewport_lines(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vec<String> {
-    normalize_viewport(snapshot, overlay_lines).lines
+    normalize_viewport(snapshot, overlay_lines).plain_lines
 }
 
 fn fit_width(line: &str, width: usize) -> String {
@@ -340,6 +364,29 @@ fn visible_line(line: &str, absolute_row: usize, cursor_row: usize, cursor_col: 
         content_width
     };
     take_display_width(chars.into_iter(), visible_width as usize)
+}
+
+fn visible_styled_line(
+    styled_line: &str,
+    plain_line: &str,
+    absolute_row: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+) -> String {
+    let chars = plain_line.chars().collect::<Vec<_>>();
+    let content_width = chars
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, ch)| **ch != ' ')
+        .map(|(index, _)| display_width(chars[..=index].iter().copied()))
+        .unwrap_or(0);
+    let visible_width = if absolute_row == cursor_row {
+        content_width.max(cursor_col as u16)
+    } else {
+        content_width
+    };
+    take_ansi_display_width(styled_line, visible_width as usize)
 }
 
 fn projected_cursor_col(lines: &[String], cursor_row: u16, cursor_col: u16) -> u16 {
@@ -413,6 +460,52 @@ fn take_display_width(chars: impl IntoIterator<Item = char>, width: usize) -> St
         }
         rendered.push(ch);
         used += next;
+    }
+
+    rendered
+}
+
+fn take_ansi_display_width(line: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let bytes = line.as_bytes();
+    let mut rendered = String::new();
+    let mut used = 0;
+    let mut index = 0;
+    let mut saw_escape = false;
+
+    while index < bytes.len() && used < width {
+        if bytes[index] == 0x1b {
+            let escape_start = index;
+            index += 1;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            rendered.push_str(&line[escape_start..index]);
+            saw_escape = true;
+            continue;
+        }
+
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        let ch_width = char_display_width(ch) as usize;
+        if used + ch_width > width {
+            break;
+        }
+        rendered.push(ch);
+        used += ch_width;
+        index += ch.len_utf8();
+    }
+
+    if saw_escape && !rendered.ends_with("\x1b[0m") {
+        rendered.push_str("\x1b[0m");
     }
 
     rendered
