@@ -280,11 +280,9 @@ struct ViewportProjection {
 }
 
 fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> ViewportProjection {
-    let reserved_rows = overlay_lines
-        .len()
-        .saturating_sub(usize::from(
-            overlay_lines.iter().any(|line| line.starts_with("keys:")),
-        ));
+    let reserved_rows = overlay_lines.len().saturating_sub(usize::from(
+        overlay_lines.iter().any(|line| line.starts_with("keys:")),
+    ));
     let available_rows = usize::max(
         1,
         (snapshot.size.rows as usize).saturating_sub(reserved_rows),
@@ -1023,7 +1021,8 @@ mod tests {
 
     #[test]
     fn styled_viewport_preserves_full_codex_placeholder_tail() {
-        let plain = "› Implement {feature}                                                           ";
+        let plain =
+            "› Implement {feature}                                                           ";
         let styled =
             "\x1b[0;1m›\x1b[0m Implement {feature}                                                           ";
 

@@ -586,14 +586,16 @@ impl TerminalEngine {
             }
             'J' => self.active_buffer_mut().clear_screen(first_or(&numbers, 0)),
             'K' => self.active_buffer_mut().clear_line(first_or(&numbers, 0)),
-            'S' => self.active_buffer_mut().scroll_up_in_region(first_or(&numbers, 1)),
+            'S' => self
+                .active_buffer_mut()
+                .scroll_up_in_region(first_or(&numbers, 1)),
             'r' => {
                 if numbers.is_empty() {
                     self.active_buffer_mut().reset_scroll_region();
                 } else {
                     let top = first_or(&numbers, 1).saturating_sub(1);
-                    let bottom = second_or(&numbers, self.active_buffer().size.rows)
-                        .saturating_sub(1);
+                    let bottom =
+                        second_or(&numbers, self.active_buffer().size.rows).saturating_sub(1);
                     self.active_buffer_mut().set_scroll_region(top, bottom);
                 }
             }
@@ -1052,8 +1054,10 @@ impl ScreenBuffer {
                         .collect(),
                 );
             }
-            self.cells
-                .insert(bottom, blank_row_with_style(self.size.cols, self.current_style));
+            self.cells.insert(
+                bottom,
+                blank_row_with_style(self.size.cols, self.current_style),
+            );
         }
     }
 
@@ -1073,8 +1077,10 @@ impl ScreenBuffer {
 
         for _ in 0..count {
             self.cells.remove(bottom);
-            self.cells
-                .insert(top, blank_row_with_style(self.size.cols, self.current_style));
+            self.cells.insert(
+                top,
+                blank_row_with_style(self.size.cols, self.current_style),
+            );
         }
     }
 
@@ -1593,14 +1599,8 @@ mod tests {
             pixel_height: 0,
         });
 
-        engine.feed(
-            "› explain co\x1b[s\x1b[2;1Hhelper\x1b[u"
-                .as_bytes(),
-        );
-        engine.feed(
-            "debase\x1b[3;1H不确定\x1b[s\x1b[4;1Hhelper\x1b[uXXXXX"
-                .as_bytes(),
-        );
+        engine.feed("› explain co\x1b[s\x1b[2;1Hhelper\x1b[u".as_bytes());
+        engine.feed("debase\x1b[3;1H不确定\x1b[s\x1b[4;1Hhelper\x1b[uXXXXX".as_bytes());
         let snapshot = engine.snapshot();
 
         assert_eq!(snapshot.lines[0], "› explain codebase      ");
@@ -1749,9 +1749,7 @@ mod tests {
             pixel_height: 0,
         });
 
-        engine.feed(
-            b"row1\r\nrow2\r\nrow3\r\nrow4\r\nrow5\x1b[1;3r\x1b[2S\x1b[r",
-        );
+        engine.feed(b"row1\r\nrow2\r\nrow3\r\nrow4\r\nrow5\x1b[1;3r\x1b[2S\x1b[r");
         let snapshot = engine.snapshot();
 
         assert_eq!(snapshot.lines[0], "row3    ");

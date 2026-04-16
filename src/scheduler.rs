@@ -258,8 +258,8 @@ impl SchedulerState {
         {
             let focused_matches = session.as_ref() == focused_session.as_ref();
             let current_status = current_session_status(&evaluations, focused_session.as_ref());
-            let meaningful_output_after_enter = output_bytes_after_enter
-                .saturating_sub(submitted_input_bytes.saturating_add(2));
+            let meaningful_output_after_enter =
+                output_bytes_after_enter.saturating_sub(submitted_input_bytes.saturating_add(2));
             let current_continues = focused_matches
                 && *saw_output
                 && meaningful_output_after_enter >= DEFAULT_COMPLETION_OUTPUT_BYTES
