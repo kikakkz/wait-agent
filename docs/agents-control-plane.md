@@ -24,11 +24,13 @@ The WaitAgent control plane follows these rules:
 
 - Human-readable rationale stays in `docs/`
 - Machine-routable task state stays in `.agents/`
+- `.agents/tasks/` is the unified task source and must contain the complete machine-readable task inventory
 - `.agents/index.yaml` is the single assistant entrypoint
 - `docs/execution-status-board.md` remains the human-facing status summary
 - `docs/local-acceptance-checklist.md` remains the human-facing acceptance checklist
 - Local workspace acceptance remains the phase gate before resumed network execution
 - Exact execution state, ordering, blockers, and verification now live in `.agents/`
+- Do not create orphan tasks that exist only in chat, scratch notes, or human docs without a matching `.agents/tasks/` entry
 
 ## 3. Directory Layout
 
@@ -95,6 +97,7 @@ Update `.agents/` when any of the following changes:
 - meaningful validation was run
 - the execution board changes phase or milestone emphasis
 - a new reusable assistant workflow appears
+- a new task is introduced, split, deferred, or reordered
 - a human doc was slimmed down and the machine state references need to follow it
 
 Do not use `.agents/` for:

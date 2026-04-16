@@ -22,6 +22,7 @@ Use `.agents/` for:
 
 - exact current task state
 - task backlog ordering
+- the complete machine task inventory
 - blocker records
 - verification records
 - reusable assistant primitives and runbooks
@@ -39,7 +40,7 @@ Current gate:
 Why this is still the gate:
 
 - the local workspace is now the intended default product entrypoint
-- network foundations exist, but they should not pull execution forward until local daily-use trust is established
+- tmux-style persistence work and network foundations both exist as follow-on priorities, but neither should pull execution forward until local daily-use trust is established
 - any serious local shell, terminal, or auto-switch issue would multiply debugging cost if mirrored-network work resumes too early
 
 ## 3. Current Snapshot
@@ -71,7 +72,7 @@ Execution tracks at human-summary level:
 - `T2` Console interaction and scheduler: complete
 - `T3` Terminal UI and rendering: functionally complete for the local gate, with `T3-07` still optional until acceptance evidence says otherwise
 - `T4` Local workspace UX and validation: complete through `T4-09`; `T4-10` remains open for final sign-off
-- `T5` Network transport and registration: complete through the current foundations; `T5-06` is the next ready implementation slice after local acceptance closes
+- `T5` Network transport and registration: complete through the current foundations; resumed network work now sits behind the queued lifecycle and UI follow-on tasks after local acceptance closes
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
 
@@ -89,12 +90,25 @@ What remains for `T4-10`:
 
 Next queue once `T4-10` closes:
 
-1. `T5-06` Implement aggregate server session registry
-2. `T5-07` Implement remote resize and input routing
-3. `T6-01` Implement server-side workspace console
-4. `T3-07` Implement narrow-terminal compaction rules if acceptance evidence makes it necessary
+1. `lifecycle-1` Wrap the current workspace runtime in a daemon-owned PTY envelope
+2. `lifecycle-2` Add workspace-local daemon discovery and single-client attach
+3. `lifecycle-3` Implement detach, reattach, and resize forwarding for the daemon envelope
+4. `lifecycle-4` Validate tmux-style persistence without changing interaction or rendering behavior
+5. `sidebar-1` Add a right-side session sidebar menu for future interaction
+6. `T5-06` Implement aggregate server session registry
+7. `T5-07` Implement remote resize and input routing
+8. `T6-01` Implement server-side workspace console
+9. `T3-07` Implement narrow-terminal compaction rules if acceptance evidence makes it necessary
 
 The exact machine ordering for that queue now lives in `.agents/tasks/backlog.yaml`.
+
+Deferred refactor queue for later reconsideration:
+
+- `display-1` Separate focused PTY passthrough from WaitAgent chrome rendering
+- `display-2` Keep the focused fullscreen TUI on the real terminal size
+- `display-3` Collapse screen recovery to one primary restore path
+- `runtime-1` Extract a shared console runtime loop for workspace and server surfaces
+- `terminal-1` Decide and document the terminal-engine coverage strategy for reliable TUI switching
 
 ## 7. Human Sign-Off Notes
 
@@ -117,3 +131,4 @@ Update this board when:
 
 Do not re-expand this file into a machine task database.
 That role now belongs to `.agents/`.
+Any task that becomes real work must be represented in `.agents/tasks/`; do not keep orphan tasks only in docs or chat.

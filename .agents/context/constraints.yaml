@@ -9,6 +9,7 @@ constraints:
   - Prefer finishing local workspace acceptance before starting new mirrored-network work.
   - Treat docs/execution-status-board.md and docs/local-acceptance-checklist.md as the human source of truth for project status.
   - Keep human-readable process guidance in docs and machine-routable execution state in .agents.
+  - Treat .agents/tasks/ as the complete task inventory; every task must be represented there and orphan tasks outside the unified task source are forbidden.
   - Dirty worktree files may include active user work; understand them before editing and never revert unrelated changes.
   - Favor small validation slices that update verification state and blockers explicitly.
 source_of_truth:

@@ -1,0 +1,30 @@
+id: task.sidebar-1
+kind: task
+version: 1
+title: add a right-side session sidebar menu for future interaction
+status: not_started
+priority: medium
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.lifecycle-4.done_or_in_progress
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - a right-side sidebar surface exists for showing the full session list
+  - the sidebar is suitable as the future home for session-focused interaction affordances
+  - the concrete interaction model, rendering tradeoffs, and rollout order are explicitly refined before implementation starts
+verification:
+  - manual: future design review before implementation scope is activated
+touched_paths:
+  - src/app.rs
+  - src/renderer.rs
+  - docs/ui-design.md
+  - .agents/tasks/queued/task.sidebar-1.yaml
+notes:
+  - This is an intentionally deferred placeholder task.
+  - Do not start implementation from this file alone; the detailed interaction model should be discussed and narrowed first.

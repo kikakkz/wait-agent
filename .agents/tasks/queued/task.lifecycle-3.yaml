@@ -1,0 +1,34 @@
+id: task.lifecycle-3
+kind: task
+version: 1
+title: implement detach, reattach, and resize forwarding for the daemon envelope
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.lifecycle-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - client disconnect, terminal close, or SSH loss detach the foreground terminal without stopping the daemon-owned workspace process
+  - a later attach restores the live workspace display and input path to the same daemon-owned PTY
+  - terminal resize events are forwarded through the attach layer to the daemon-owned PTY so the existing UI keeps its current behavior
+  - explicit command surface for at least `attach`, `status`, and daemon-managed reconnect behavior is documented and implemented
+verification:
+  - cargo test
+  - manual: close the attached terminal, reattach from a new terminal, and confirm the existing workspace sessions remain live
+  - manual: resize the terminal after reattach and confirm the current UI behavior matches the pre-daemon baseline
+touched_paths:
+  - src/cli.rs
+  - src/main.rs
+  - src/client.rs
+  - src/server.rs
+  - src/terminal.rs
+  - .agents/tasks/queued/task.lifecycle-3.yaml
+notes:
+  - Preserve the current workspace rendering and interaction semantics; this task only moves lifecycle ownership outward.

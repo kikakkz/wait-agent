@@ -1,0 +1,33 @@
+id: task.lifecycle-4
+kind: task
+version: 1
+title: validate tmux-style persistence without changing interaction or rendering behavior
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.lifecycle-3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.acceptance-check-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the daemonized workspace is validated in a real terminal workflow with shell-backed sessions and Codex-like TUI sessions surviving detach and reattach
+  - validation explicitly confirms that the current interaction behavior and stabilized rendering remain equivalent to the pre-daemon baseline
+  - any lifecycle regression serious enough to destabilize the existing local acceptance evidence is either fixed or recorded as a blocker
+  - docs and `.agents/` agree on the new lifecycle capability and on whether the follow-on queue can move to network work
+verification:
+  - cargo test
+  - manual: real-terminal detach and reattach validation with at least one shell session and one Codex-like TUI session
+  - manual: compare post-reattach menu, picker, and prompt behavior against the pre-daemon local acceptance baseline
+touched_paths:
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/queued/task.lifecycle-4.yaml
+  - .agents/
+notes:
+  - This validation task exists to protect the hard-won rendering stability while lifecycle ownership changes underneath it.

@@ -2,7 +2,7 @@ id: task.runtime-1
 kind: task
 version: 1
 title: extract a shared console runtime loop for workspace and server surfaces
-status: ready
+status: deferred
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -28,3 +28,4 @@ touched_paths:
   - .agents/tasks/queued/task.runtime-1.yaml
 notes:
   - This task is driven by maintainability and by the need to make display-path changes land once, not twice.
+  - This task is intentionally deferred because it primarily supports future display and rendering refactors rather than the current lifecycle priority.
