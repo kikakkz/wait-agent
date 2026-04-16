@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EVENT_LOOP_TICK: Duration = Duration::from_millis(50);
 const PICKER_ESCAPE_TIMEOUT_MS: u128 = 150;
-const CLEAR_FRAME: &str = "\x1b[H\x1b[2J";
+const RESET_FRAME_CURSOR: &str = "\x1b[H";
 const RESTORE_SCREEN: &str = "\x1b[2J\x1b[H\x1b[?25h";
 const SHORTCUT_INTERRUPT_EXIT: u8 = 0x03;
 const ANSI_RESET: &str = "\x1b[0m";
@@ -1071,7 +1071,7 @@ impl App {
         &self,
         snapshot: &crate::terminal::ScreenSnapshot,
     ) -> Result<(), AppError> {
-        let mut buffer = String::from(CLEAR_FRAME);
+        let mut buffer = String::from(RESET_FRAME_CURSOR);
         for (index, line) in snapshot.styled_lines.iter().enumerate() {
             let row = index.saturating_add(1);
             buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[0m\x1b[K"));
@@ -1530,28 +1530,16 @@ impl App {
         cursor: CursorPlacement,
         cursor_visible: bool,
     ) -> Result<(), AppError> {
+        let buffer = build_full_frame_buffer(
+            frame_text,
+            cursor,
+            cursor_visible,
+            self.terminal.current_size_or_default().rows,
+        );
         let mut stdout = io::stdout().lock();
         stdout
-            .write_all(CLEAR_FRAME.as_bytes())
-            .map_err(|error| AppError::Io("failed to clear terminal frame".to_string(), error))?;
-        stdout
-            .write_all(frame_text.as_bytes())
+            .write_all(buffer.as_bytes())
             .map_err(|error| AppError::Io("failed to write render frame".to_string(), error))?;
-        stdout
-            .write_all(
-                format!(
-                    "\x1b[{};{}H{}",
-                    cursor.row.saturating_add(1),
-                    cursor.col.saturating_add(1),
-                    if cursor_visible {
-                        "\x1b[?25h"
-                    } else {
-                        "\x1b[?25l"
-                    }
-                )
-                .as_bytes(),
-            )
-            .map_err(|error| AppError::Io("failed to position render cursor".to_string(), error))?;
         stdout
             .flush()
             .map_err(|error| AppError::Io("failed to flush render frame".to_string(), error))?;
@@ -3874,6 +3862,41 @@ fn style_footer_separator_line(width: usize) -> String {
     format!("{ANSI_FG_FOOTER_DIVIDER}{line}{ANSI_RESET}")
 }
 
+fn build_full_frame_buffer(
+    frame_text: &str,
+    cursor: CursorPlacement,
+    cursor_visible: bool,
+    terminal_rows: u16,
+) -> String {
+    let mut buffer = String::from(RESET_FRAME_CURSOR);
+    let lines = if frame_text.is_empty() {
+        Vec::new()
+    } else {
+        frame_text.split("\r\n").collect::<Vec<_>>()
+    };
+
+    for (index, line) in lines.iter().enumerate() {
+        let row = index + 1;
+        buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[K"));
+    }
+
+    let terminal_rows = terminal_rows.max(1) as usize;
+    let clear_start_row = if lines.is_empty() { 1 } else { lines.len() + 1 };
+    if clear_start_row <= terminal_rows {
+        for row in clear_start_row..=terminal_rows {
+            buffer.push_str(&format!("\x1b[{row};1H\x1b[K"));
+        }
+    }
+
+    buffer.push_str(&format!(
+        "\x1b[{};{}H{}",
+        cursor.row.saturating_add(1),
+        cursor.col.saturating_add(1),
+        if cursor_visible { "\x1b[?25h" } else { "\x1b[?25l" }
+    ));
+    buffer
+}
+
 fn style_status_line(line: &str, width: usize) -> String {
     format!("{ANSI_BG_BAR}{}{ANSI_RESET}", pad_line(line, width))
 }
@@ -4129,10 +4152,12 @@ impl From<crate::terminal::TerminalError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::{
-        background_wait_notice, default_shell_program, live_overlay_visible,
+        background_wait_notice, build_full_frame_buffer, default_shell_program,
+        live_overlay_visible,
         looks_like_shell_prompt_output, looks_like_terminal_takeover_output,
         live_surface_target_size, output_is_substantive, parse_console_action, shell_title,
         style_footer_separator_line, App, CommandOverlay, CommandPromptState, ConsoleAction,
+        CursorPlacement,
         ForwardInputNormalizer, InputTracker, LiveSurfaceState, PICKER_ESCAPE_TIMEOUT_MS,
         SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
     };
@@ -4584,6 +4609,40 @@ mod tests {
 
         assert!(line.contains("━━━━━━━━━━━━━━━━━━━━━━━━"));
         assert!(!line.contains("MENU"));
+    }
+
+    #[test]
+    fn full_frame_buffer_clears_stale_rows_below_shorter_replacement_frame() {
+        let buffer = build_full_frame_buffer(
+            "session-2\r\nprompt$ ",
+            CursorPlacement { row: 1, col: 7 },
+            true,
+            4,
+        );
+
+        assert!(buffer.starts_with("\x1b[H"));
+        assert!(buffer.contains("\x1b[1;1Hsession-2\x1b[K"));
+        assert!(buffer.contains("\x1b[2;1Hprompt$ \x1b[K"));
+        assert!(buffer.contains("\x1b[3;1H\x1b[K"));
+        assert!(buffer.contains("\x1b[4;1H\x1b[K"));
+        assert!(buffer.ends_with("\x1b[2;8H\x1b[?25h"));
+    }
+
+    #[test]
+    fn full_frame_buffer_does_not_clear_past_terminal_bottom() {
+        let buffer = build_full_frame_buffer(
+            "line 1\r\nline 2\r\nline 3",
+            CursorPlacement { row: 2, col: 6 },
+            true,
+            3,
+        );
+
+        assert!(buffer.contains("\x1b[1;1Hline 1\x1b[K"));
+        assert!(buffer.contains("\x1b[2;1Hline 2\x1b[K"));
+        assert!(buffer.contains("\x1b[3;1Hline 3\x1b[K"));
+        assert!(!buffer.contains("\x1b[4;1H"));
+        assert!(!buffer.contains("\x1b[J"));
+        assert!(buffer.ends_with("\x1b[3;7H\x1b[?25h"));
     }
 
     #[test]
