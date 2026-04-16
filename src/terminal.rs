@@ -272,6 +272,8 @@ pub struct ScreenSnapshot {
     pub styled_lines: Vec<String>,
     pub active_style_ansi: String,
     pub scrollback: Vec<String>,
+    pub scroll_top: u16,
+    pub scroll_bottom: u16,
     pub window_title: Option<String>,
     pub cursor_row: u16,
     pub cursor_col: u16,
@@ -307,6 +309,14 @@ pub struct TerminalEngine {
     window_title: Option<String>,
     pending_escape: Vec<u8>,
     pending_utf8: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SavedCursorState {
+    row: u16,
+    col: u16,
+    style: TextStyle,
+    valid: bool,
 }
 
 impl TerminalEngine {
@@ -376,11 +386,21 @@ impl TerminalEngine {
                                 }
                             }
                         }
+                        b'7' => {
+                            self.active_buffer_mut().save_cursor();
+                            index += 1;
+                        }
+                        b'8' => {
+                            self.active_buffer_mut().restore_cursor();
+                            index += 1;
+                        }
                         b'M' => {
                             self.active_buffer_mut().reverse_index();
                             index += 1;
                         }
-                        _ => {}
+                        _ => {
+                            index += 1;
+                        }
                     }
                 }
                 b'\n' => {
@@ -591,6 +611,8 @@ impl TerminalEngine {
                 replies.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
             'm' => self.active_buffer_mut().apply_sgr(&numbers),
+            's' if numbers.is_empty() => self.active_buffer_mut().save_cursor(),
+            'u' if numbers.is_empty() => self.active_buffer_mut().restore_cursor(),
             _ => {}
         }
     }
@@ -700,6 +722,7 @@ struct ScreenBuffer {
     scroll_bottom: u16,
     scrollback: Vec<String>,
     current_style: TextStyle,
+    saved_cursor: SavedCursorState,
 }
 
 impl ScreenBuffer {
@@ -713,6 +736,7 @@ impl ScreenBuffer {
             scroll_bottom: size.rows.saturating_sub(1),
             scrollback: Vec::new(),
             current_style: TextStyle::default(),
+            saved_cursor: SavedCursorState::default(),
         }
     }
 
@@ -734,6 +758,10 @@ impl ScreenBuffer {
             .scroll_bottom
             .max(self.scroll_top)
             .min(size.rows.saturating_sub(1));
+        if self.saved_cursor.valid {
+            self.saved_cursor.row = self.saved_cursor.row.min(size.rows.saturating_sub(1));
+            self.saved_cursor.col = self.saved_cursor.col.min(size.cols.saturating_sub(1));
+        }
     }
 
     fn snapshot(
@@ -761,6 +789,8 @@ impl ScreenBuffer {
                 .collect(),
             active_style_ansi: self.current_style.to_ansi(),
             scrollback: self.scrollback.clone(),
+            scroll_top: self.scroll_top,
+            scroll_bottom: self.scroll_bottom,
             window_title,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
@@ -874,6 +904,25 @@ impl ScreenBuffer {
             .clamp(0, self.size.cols.saturating_sub(1) as isize) as u16;
         self.cursor_row = next_row;
         self.cursor_col = next_col;
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = SavedCursorState {
+            row: self.cursor_row,
+            col: self.cursor_col,
+            style: self.current_style,
+            valid: true,
+        };
+    }
+
+    fn restore_cursor(&mut self) {
+        if !self.saved_cursor.valid {
+            return;
+        }
+
+        self.cursor_row = self.saved_cursor.row.min(self.size.rows.saturating_sub(1));
+        self.cursor_col = self.saved_cursor.col.min(self.size.cols.saturating_sub(1));
+        self.current_style = self.saved_cursor.style;
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -1497,6 +1546,198 @@ mod tests {
 
         assert_eq!(snapshot.lines[0], "echo ab         ");
         assert_eq!(snapshot.cursor_col, 7);
+    }
+
+    #[test]
+    fn engine_handles_save_and_restore_cursor_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 3,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"hello\x1b7\x1b[2;1Hrow2\x1b8 world");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "hello world     ");
+        assert_eq!(snapshot.lines[1], "row2            ");
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 11);
+    }
+
+    #[test]
+    fn engine_handles_csi_save_and_restore_cursor_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 3,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"abc\x1b[s\x1b[2;1Hxyz\x1b[u123");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "abc123          ");
+        assert_eq!(snapshot.lines[1], "xyz             ");
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 6);
+    }
+
+    #[test]
+    fn engine_restores_line_tails_after_csi_cursor_save_and_restore() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 5,
+            cols: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(
+            "› explain co\x1b[s\x1b[2;1Hhelper\x1b[u"
+                .as_bytes(),
+        );
+        engine.feed(
+            "debase\x1b[3;1H不确定\x1b[s\x1b[4;1Hhelper\x1b[uXXXXX"
+                .as_bytes(),
+        );
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "› explain codebase      ");
+        assert_eq!(snapshot.lines[2], "不确定XXXXX             ");
+    }
+
+    #[test]
+    fn engine_ignores_unknown_single_char_escape_sequences() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"a\x1b=b");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "ab      ");
+        assert_eq!(snapshot.cursor_col, 2);
+    }
+
+    #[test]
+    fn engine_preserves_codex_placeholder_tail_across_reverse_index_scroll() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 20,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(
+            b"\x1b[6;22H\x1b[0m\x1b[49m\x1b[K\
+\x1b[7;2H\x1b[0m\x1b[49m\x1b[K\
+\x1b[8;48H\x1b[0m\x1b[49m\x1b[K\
+\x1b[6;1H\x1b[1m\xe2\x80\xba\
+\x1b[6;3H\x1b[22m\x1b[2m\x1b[2mImplement {fe",
+        );
+        engine.feed(
+            b"ature}\
+\x1b[8;1H  gpt-5.4 high \xc2\xb7 /tmp\
+\x1b[39m\x1b[49m\x1b[0m\x1b[?25h\
+\x1b[6;3H\x1b[?2026l\x1b[?2026h\
+\x1b[4;20r\x1b[4;1H\
+\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\
+\x1b[r\x1b[1;12r\x1b[3;1H",
+        );
+        let snapshot = engine.snapshot();
+
+        assert!(
+            snapshot
+                .lines
+                .iter()
+                .any(|line| line.contains("› Implement {feature}")),
+            "expected full placeholder in snapshot, got: {:?}",
+            snapshot.lines
+        );
+    }
+
+    #[test]
+    fn engine_preserves_codex_placeholder_across_arbitrary_chunking() {
+        let bytes = b"\x1b[6;22H\x1b[0m\x1b[49m\x1b[K\
+\x1b[7;2H\x1b[0m\x1b[49m\x1b[K\
+\x1b[8;48H\x1b[0m\x1b[49m\x1b[K\
+\x1b[6;1H\x1b[1m\xe2\x80\xba\
+\x1b[6;3H\x1b[22m\x1b[2m\x1b[2mImplement {feature}\
+\x1b[8;1H  gpt-5.4 high \xc2\xb7 /tmp\
+\x1b[39m\x1b[49m\x1b[0m\x1b[?25h\
+\x1b[6;3H\x1b[?2026l\x1b[?2026h\
+\x1b[4;20r\x1b[4;1H\
+\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\
+\x1b[r\x1b[1;12r\x1b[3;1H";
+
+        for chunk_size in 1..=bytes.len() {
+            let mut engine = TerminalEngine::new(TerminalSize {
+                rows: 20,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+
+            for chunk in bytes.chunks(chunk_size) {
+                engine.feed(chunk);
+            }
+
+            let snapshot = engine.snapshot();
+            assert!(
+                snapshot
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("› Implement {feature}")),
+                "expected full placeholder with chunk size {chunk_size}, got: {:?}",
+                snapshot.lines
+            );
+        }
+    }
+
+    #[test]
+    fn engine_preserves_codex_placeholder_across_three_chunk_splits_with_snapshots() {
+        let bytes = b"\x1b[6;22H\x1b[0m\x1b[49m\x1b[K\
+\x1b[7;2H\x1b[0m\x1b[49m\x1b[K\
+\x1b[8;48H\x1b[0m\x1b[49m\x1b[K\
+\x1b[6;1H\x1b[1m\xe2\x80\xba\
+\x1b[6;3H\x1b[22m\x1b[2m\x1b[2mImplement {feature}\
+\x1b[8;1H  gpt-5.4 high \xc2\xb7 /tmp\
+\x1b[39m\x1b[49m\x1b[0m\x1b[?25h\
+\x1b[6;3H\x1b[?2026l\x1b[?2026h\
+\x1b[4;20r\x1b[4;1H\
+\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\x1bM\
+\x1b[r\x1b[1;12r\x1b[3;1H";
+
+        for first_split in 1..bytes.len() {
+            for second_split in first_split + 1..bytes.len() {
+                let mut engine = TerminalEngine::new(TerminalSize {
+                    rows: 20,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+
+                engine.feed(&bytes[..first_split]);
+                let _ = engine.state();
+                engine.feed(&bytes[first_split..second_split]);
+                let _ = engine.state();
+                engine.feed(&bytes[second_split..]);
+                let snapshot = engine.snapshot();
+
+                assert!(
+                    snapshot
+                        .lines
+                        .iter()
+                        .any(|line| line.contains("› Implement {feature}")),
+                    "expected full placeholder with splits {first_split}/{second_split}, got: {:?}",
+                    snapshot.lines
+                );
+            }
+        }
     }
 
     #[test]

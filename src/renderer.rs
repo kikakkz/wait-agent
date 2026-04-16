@@ -386,7 +386,13 @@ fn visible_styled_line(
     } else {
         content_width
     };
-    take_ansi_display_width(styled_line, visible_width as usize)
+    let rendered = take_ansi_display_width(styled_line, visible_width as usize);
+    let expected_plain = take_display_width(plain_line.chars(), visible_width as usize);
+    if ansi_visible_text(&rendered) != expected_plain {
+        styled_line.to_string()
+    } else {
+        rendered
+    }
 }
 
 fn projected_cursor_col(lines: &[String], cursor_row: u16, cursor_col: u16) -> u16 {
@@ -441,6 +447,8 @@ fn blank_snapshot(address: &SessionAddress) -> ScreenSnapshot {
         styled_lines,
         active_style_ansi: "\x1b[0m".to_string(),
         scrollback: Vec::new(),
+        scroll_top: 0,
+        scroll_bottom: size.rows.saturating_sub(1),
         window_title: None,
         cursor_row: 0,
         cursor_col: len as u16,
@@ -506,6 +514,34 @@ fn take_ansi_display_width(line: &str, width: usize) -> String {
 
     if saw_escape && !rendered.ends_with("\x1b[0m") {
         rendered.push_str("\x1b[0m");
+    }
+
+    rendered
+}
+
+fn ansi_visible_text(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut rendered = String::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            index += 1;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        rendered.push(ch);
+        index += ch.len_utf8();
     }
 
     rendered
@@ -983,5 +1019,16 @@ mod tests {
         assert!(frame.viewport_lines[1].starts_with("two"));
         assert!(frame.viewport_lines[2].starts_with("three"));
         assert!(frame.viewport_lines[3].starts_with("four"));
+    }
+
+    #[test]
+    fn styled_viewport_preserves_full_codex_placeholder_tail() {
+        let plain = "› Implement {feature}                                                           ";
+        let styled =
+            "\x1b[0;1m›\x1b[0m Implement {feature}                                                           ";
+
+        let rendered = super::visible_styled_line(styled, plain, 14, 2, 0);
+
+        assert_eq!(rendered, styled);
     }
 }
