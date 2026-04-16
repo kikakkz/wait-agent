@@ -32,7 +32,7 @@ const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_FG_ACCENT: &str = "\x1b[38;5;81m";
 const ANSI_FG_NOTICE: &str = "\x1b[38;5;120m";
 const ANSI_BG_BAR: &str = "\x1b[48;5;24m\x1b[38;5;255m";
-const ANSI_BG_FOOTER_DIVIDER: &str = "\x1b[48;5;60m\x1b[38;5;255m";
+const ANSI_FG_FOOTER_DIVIDER: &str = "\x1b[1;38;5;255m";
 const ANSI_BG_KEYS: &str = "\x1b[48;5;236m\x1b[38;5;252m";
 const ANSI_BG_COMMAND: &str = "\x1b[48;5;238m\x1b[38;5;255m";
 const ANSI_BG_PICKER: &str = "\x1b[48;5;235m\x1b[38;5;250m";
@@ -3861,8 +3861,8 @@ fn style_overlay_line(line: &str, width: usize) -> String {
 }
 
 fn style_footer_separator_line(width: usize) -> String {
-    let line = "─".repeat(width);
-    format!("{ANSI_BG_FOOTER_DIVIDER}{line}{ANSI_RESET}")
+    let line = "━".repeat(width);
+    format!("{ANSI_FG_FOOTER_DIVIDER}{line}{ANSI_RESET}")
 }
 
 fn style_status_line(line: &str, width: usize) -> String {
@@ -4572,7 +4572,7 @@ mod tests {
     fn footer_separator_line_labels_the_menu_region() {
         let line = style_footer_separator_line(24);
 
-        assert!(line.contains("────────────────────────"));
+        assert!(line.contains("━━━━━━━━━━━━━━━━━━━━━━━━"));
         assert!(!line.contains("MENU"));
     }
 
