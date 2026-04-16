@@ -32,11 +32,12 @@ const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_FG_ACCENT: &str = "\x1b[38;5;81m";
 const ANSI_FG_NOTICE: &str = "\x1b[38;5;120m";
 const ANSI_BG_BAR: &str = "\x1b[48;5;24m\x1b[38;5;255m";
+const ANSI_BG_FOOTER_DIVIDER: &str = "\x1b[48;5;60m\x1b[38;5;255m";
 const ANSI_BG_KEYS: &str = "\x1b[48;5;236m\x1b[38;5;252m";
 const ANSI_BG_COMMAND: &str = "\x1b[48;5;238m\x1b[38;5;255m";
 const ANSI_BG_PICKER: &str = "\x1b[48;5;235m\x1b[38;5;250m";
 const ANSI_BG_PICKER_ACTIVE: &str = "\x1b[48;5;31m\x1b[38;5;255m";
-const LIVE_SURFACE_STATUS_ROWS: u16 = 2;
+const LIVE_SURFACE_STATUS_ROWS: u16 = 3;
 const MANAGED_CONSOLE_RESERVED_ROWS: u16 = LIVE_SURFACE_STATUS_ROWS;
 
 pub fn run() -> Result<(), AppError> {
@@ -1071,9 +1072,9 @@ impl App {
         snapshot: &crate::terminal::ScreenSnapshot,
     ) -> Result<(), AppError> {
         let mut buffer = String::from(CLEAR_FRAME);
-        for (index, line) in snapshot.lines.iter().enumerate() {
+        for (index, line) in snapshot.styled_lines.iter().enumerate() {
             let row = index.saturating_add(1);
-            buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[K"));
+            buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[0m\x1b[K"));
         }
         let cursor_row = snapshot.cursor_row.saturating_add(1);
         let cursor_col = snapshot.cursor_col.saturating_add(1);
@@ -1082,7 +1083,10 @@ impl App {
         } else {
             "\x1b[?25l"
         };
-        buffer.push_str(&format!("\x1b[{cursor_row};{cursor_col}H{cursor_visibility}"));
+        buffer.push_str(&format!(
+            "\x1b[{cursor_row};{cursor_col}H{}{cursor_visibility}",
+            snapshot.active_style_ansi
+        ));
 
         let mut stdout = io::stdout().lock();
         stdout.write_all(buffer.as_bytes()).map_err(|error| {
@@ -1119,10 +1123,11 @@ impl App {
             "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit",
             width,
         );
+        let separator_line = style_footer_separator_line(width);
         let status_text = command_prompt.status_line(&frame.bottom_line);
         let status_line = style_status_line(&status_text, width);
-        let keys_row = size.rows.saturating_sub(1).max(1);
         let status_row = size.rows.max(1);
+        let keys_row = status_row.saturating_sub(1).max(1);
         let cursor_row = frame.cursor_row.saturating_add(1);
         let cursor_col = frame.cursor_col.saturating_add(1);
         let cursor_visibility = if frame.cursor_visible {
@@ -1137,16 +1142,22 @@ impl App {
         } else {
             overlay_lines
         };
-        let overlay_start_row = keys_row
-            .saturating_sub(shown_overlay.len() as u16)
+        let current_footer_rows = shown_overlay.len() + LIVE_SURFACE_STATUS_ROWS as usize;
+        let previous_footer_rows = previous_overlay_rows + LIVE_SURFACE_STATUS_ROWS as usize;
+        let clear_footer_rows = current_footer_rows.max(previous_footer_rows);
+        let footer_start_row = status_row
+            .saturating_sub(current_footer_rows.saturating_sub(1) as u16)
             .max(1);
-        let clear_start_row = keys_row
-            .saturating_sub(previous_overlay_rows as u16)
+        let separator_row = footer_start_row;
+        let overlay_start_row = separator_row.saturating_add(1);
+        let clear_start_row = status_row
+            .saturating_sub(clear_footer_rows.saturating_sub(1) as u16)
             .max(1);
         let mut overlay_buffer = String::from("\x1b[s");
-        for row in clear_start_row..keys_row {
+        for row in clear_start_row..=status_row {
             overlay_buffer.push_str(&format!("\x1b[{row};1H{}\x1b[K", " ".repeat(width)));
         }
+        overlay_buffer.push_str(&format!("\x1b[{separator_row};1H{separator_line}\x1b[K"));
         for (index, line) in shown_overlay.iter().enumerate() {
             let row = overlay_start_row.saturating_add(index as u16);
             overlay_buffer.push_str(&format!(
@@ -1442,11 +1453,14 @@ impl App {
     ) -> (String, CursorPlacement, bool) {
         let width = self.terminal.current_size_or_default().cols as usize;
         let mut lines =
-            Vec::with_capacity(frame.viewport_lines.len() + frame.overlay_lines.len() + 2);
+            Vec::with_capacity(frame.viewport_lines.len() + frame.overlay_lines.len() + 3);
         if !frame.top_line.is_empty() {
             lines.push(frame.top_line.clone());
         }
         lines.extend(frame.viewport_lines.iter().cloned());
+        if !frame.overlay_lines.is_empty() {
+            lines.push(style_footer_separator_line(width));
+        }
         lines.extend(
             frame
                 .overlay_lines
@@ -1486,6 +1500,7 @@ impl App {
         let command_row = frame
             .viewport_lines
             .len()
+            .saturating_add(usize::from(!frame.overlay_lines.is_empty()))
             .saturating_add(frame.overlay_lines.len().saturating_sub(1))
             as u16;
         let max_col = self
@@ -2764,9 +2779,16 @@ impl App {
     ) -> String {
         let mut lines = workspace_idle_lines(surface, active_count, waiting_count);
         let target_rows = self.terminal.current_size_or_default().rows as usize;
-        let reserved_rows = lines.len() + overlay_lines.len() + 1;
+        let show_footer_menu = !overlay_lines.is_empty();
+        let reserved_rows =
+            lines.len() + overlay_lines.len() + 1 + usize::from(show_footer_menu);
         let spacer_rows = target_rows.saturating_sub(reserved_rows);
         lines.extend(std::iter::repeat(String::new()).take(spacer_rows));
+        if show_footer_menu {
+            lines.push(style_footer_separator_line(
+                self.terminal.current_size_or_default().cols as usize,
+            ));
+        }
         lines.extend(overlay_lines.iter().map(|line| {
             style_overlay_line(line, self.terminal.current_size_or_default().cols as usize)
         }));
@@ -3209,7 +3231,7 @@ impl CommandPromptState {
             }
             CommandOverlay::Sessions => {
                 lines.push(
-                    "picker: Up/Down move  ^B prev  ^F next  Enter select  Esc close  1-9 direct"
+                    "sessions: Up/Down move  ^B prev  ^F next  Enter select  Esc close  1-9 direct"
                         .to_string(),
                 );
                 let selected = self
@@ -3224,20 +3246,15 @@ impl CommandPromptState {
                         " "
                     };
                     lines.push(format!(
-                        "{} {:>2}. {} ({})",
+                        "{} {:>2}. {} | {} | cwd: {}",
                         marker,
                         index + 1,
                         session.address(),
-                        session.title
+                        session.title,
+                        picker_session_cwd(session)
                     ));
-                    if let Some(working_dir) = session.current_working_dir.as_deref() {
-                        lines.push(format!("   cwd: {working_dir}"));
-                    } else {
-                        lines.push("   cwd: unknown".to_string());
-                    }
                 }
             }
-
         }
 
         lines.push("keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit".to_string());
@@ -3329,6 +3346,10 @@ fn live_overlay_lines(
         .into_iter()
         .filter(|line| !line.starts_with("keys:"))
         .collect()
+}
+
+fn picker_session_cwd(session: &crate::session::SessionRecord) -> &str {
+    session.current_working_dir.as_deref().unwrap_or("unknown")
 }
 
 fn live_overlay_visible(command_prompt: &CommandPromptState) -> bool {
@@ -3839,6 +3860,11 @@ fn style_overlay_line(line: &str, width: usize) -> String {
     }
 }
 
+fn style_footer_separator_line(width: usize) -> String {
+    let line = "─".repeat(width);
+    format!("{ANSI_BG_FOOTER_DIVIDER}{line}{ANSI_RESET}")
+}
+
 fn style_status_line(line: &str, width: usize) -> String {
     format!("{ANSI_BG_BAR}{}{ANSI_RESET}", pad_line(line, width))
 }
@@ -4096,11 +4122,10 @@ mod tests {
     use super::{
         background_wait_notice, default_shell_program, live_overlay_visible,
         looks_like_shell_prompt_output, looks_like_terminal_takeover_output,
-        live_surface_target_size, output_is_substantive, parse_console_action, shell_title, App,
-        CommandOverlay,
-        CommandPromptState, ConsoleAction, ForwardInputNormalizer, InputTracker,
-        LiveSurfaceState, PICKER_ESCAPE_TIMEOUT_MS, SHORTCUT_INTERRUPT_EXIT,
-        SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
+        live_surface_target_size, output_is_substantive, parse_console_action, shell_title,
+        style_footer_separator_line, App, CommandOverlay, CommandPromptState, ConsoleAction,
+        ForwardInputNormalizer, InputTracker, LiveSurfaceState, PICKER_ESCAPE_TIMEOUT_MS,
+        SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
     use crate::config::AppConfig;
@@ -4334,6 +4359,47 @@ mod tests {
     }
 
     #[test]
+    fn session_picker_renders_styled_header_and_single_line_entries() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"\x1b]0;k@k: /opt/data/workspace/test\x07");
+        registry.update_screen_state(second.address(), engine.state());
+
+        let sessions = registry.list();
+        let mut prompt = CommandPromptState::default();
+        prompt.toggle_sessions(&sessions, Some(first.address()));
+
+        let lines = prompt.overlay_lines(sessions, Some(first.address()));
+
+        assert_eq!(
+            lines[0],
+            "sessions: Up/Down move  ^B prev  ^F next  Enter select  Esc close  1-9 direct"
+        );
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[1], ">  1. local/session-1 | bash | cwd: unknown");
+        assert_eq!(
+            lines[2],
+            "   2. local/session-2 | codex | cwd: /opt/data/workspace/test"
+        );
+        assert!(lines[3].starts_with("keys:"));
+    }
+
+    #[test]
     fn background_wait_notice_reports_new_non_focused_waiter() {
         let focused = SessionAddress::new("local", "session-1");
         let waiter = SessionAddress::new("local", "session-2");
@@ -4476,7 +4542,7 @@ mod tests {
         assert_eq!(
             live_surface_target_size(true, false, terminal_size),
             TerminalSize {
-                rows: 22,
+                rows: 21,
                 cols: 80,
                 pixel_width: 0,
                 pixel_height: 0,
@@ -4485,7 +4551,7 @@ mod tests {
         assert_eq!(
             live_surface_target_size(false, true, terminal_size),
             TerminalSize {
-                rows: 22,
+                rows: 21,
                 cols: 80,
                 pixel_width: 0,
                 pixel_height: 0,
@@ -4494,12 +4560,20 @@ mod tests {
         assert_eq!(
             live_surface_target_size(false, false, terminal_size),
             TerminalSize {
-                rows: 22,
+                rows: 21,
                 cols: 80,
                 pixel_width: 0,
                 pixel_height: 0,
             }
         );
+    }
+
+    #[test]
+    fn footer_separator_line_labels_the_menu_region() {
+        let line = style_footer_separator_line(24);
+
+        assert!(line.contains("────────────────────────"));
+        assert!(!line.contains("MENU"));
     }
 
     #[test]

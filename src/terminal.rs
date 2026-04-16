@@ -269,6 +269,8 @@ impl Drop for AlternateScreenGuard {
 pub struct ScreenSnapshot {
     pub size: TerminalSize,
     pub lines: Vec<String>,
+    pub styled_lines: Vec<String>,
+    pub active_style_ansi: String,
     pub scrollback: Vec<String>,
     pub window_title: Option<String>,
     pub cursor_row: u16,
@@ -588,7 +590,7 @@ impl TerminalEngine {
                 let col = snapshot.cursor_col.saturating_add(1);
                 replies.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
-            'm' => {}
+            'm' => self.active_buffer_mut().apply_sgr(&numbers),
             _ => {}
         }
     }
@@ -616,15 +618,88 @@ impl TerminalEngine {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScreenCell {
+    ch: char,
+    style: TextStyle,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TextStyle {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    inverse: bool,
+    foreground: Option<ColorValue>,
+    background: Option<ColorValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorValue {
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl TextStyle {
+    fn to_ansi(self) -> String {
+        if self == Self::default() {
+            return "\x1b[0m".to_string();
+        }
+
+        let mut params = vec!["0".to_string()];
+        if self.bold {
+            params.push("1".to_string());
+        }
+        if self.italic {
+            params.push("3".to_string());
+        }
+        if self.underline {
+            params.push("4".to_string());
+        }
+        if self.inverse {
+            params.push("7".to_string());
+        }
+        if let Some(foreground) = self.foreground {
+            foreground.push_ansi_params(&mut params, true);
+        }
+        if let Some(background) = self.background {
+            background.push_ansi_params(&mut params, false);
+        }
+
+        format!("\x1b[{}m", params.join(";"))
+    }
+}
+
+impl ColorValue {
+    fn push_ansi_params(self, params: &mut Vec<String>, foreground: bool) {
+        let prefix = if foreground { "38" } else { "48" };
+        match self {
+            Self::Indexed(index) => {
+                params.push(prefix.to_string());
+                params.push("5".to_string());
+                params.push(index.to_string());
+            }
+            Self::Rgb(red, green, blue) => {
+                params.push(prefix.to_string());
+                params.push("2".to_string());
+                params.push(red.to_string());
+                params.push(green.to_string());
+                params.push(blue.to_string());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ScreenBuffer {
     size: TerminalSize,
-    cells: Vec<Vec<char>>,
+    cells: Vec<Vec<ScreenCell>>,
     cursor_row: u16,
     cursor_col: u16,
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: Vec<String>,
+    current_style: TextStyle,
 }
 
 impl ScreenBuffer {
@@ -637,6 +712,7 @@ impl ScreenBuffer {
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             scrollback: Vec::new(),
+            current_style: TextStyle::default(),
         }
     }
 
@@ -673,11 +749,17 @@ impl ScreenBuffer {
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .copied()
-                        .filter(|cell| *cell != WIDE_CONTINUATION)
+                        .filter(|cell| cell.ch != WIDE_CONTINUATION)
+                        .map(|cell| cell.ch)
                         .collect::<String>()
                 })
                 .collect(),
+            styled_lines: self
+                .cells
+                .iter()
+                .map(|row| render_styled_row(row))
+                .collect(),
+            active_style_ansi: self.current_style.to_ansi(),
             scrollback: self.scrollback.clone(),
             window_title,
             cursor_row: self.cursor_row,
@@ -700,7 +782,10 @@ impl ScreenBuffer {
         let row = self.cursor_row as usize;
         let col = self.cursor_col as usize;
         self.clear_wide_overlap(row, col);
-        self.cells[row][col] = ch;
+        self.cells[row][col] = ScreenCell {
+            ch,
+            style: self.current_style,
+        };
 
         if width == 2 && self.size.cols > 1 {
             if self.cursor_col + 1 >= self.size.cols {
@@ -708,11 +793,20 @@ impl ScreenBuffer {
                 self.line_feed();
                 let row = self.cursor_row as usize;
                 self.clear_wide_overlap(row, self.cursor_col as usize);
-                self.cells[row][self.cursor_col as usize] = ch;
-                self.cells[row][self.cursor_col as usize + 1] = WIDE_CONTINUATION;
+                self.cells[row][self.cursor_col as usize] = ScreenCell {
+                    ch,
+                    style: self.current_style,
+                };
+                self.cells[row][self.cursor_col as usize + 1] = ScreenCell {
+                    ch: WIDE_CONTINUATION,
+                    style: self.current_style,
+                };
                 self.cursor_col += 2;
             } else {
-                self.cells[row][col + 1] = WIDE_CONTINUATION;
+                self.cells[row][col + 1] = ScreenCell {
+                    ch: WIDE_CONTINUATION,
+                    style: self.current_style,
+                };
                 self.cursor_col += 2;
             }
         } else {
@@ -804,6 +898,85 @@ impl ScreenBuffer {
         self.set_scroll_region(0, self.size.rows.saturating_sub(1));
     }
 
+    fn apply_sgr(&mut self, params: &[u16]) {
+        if params.is_empty() {
+            self.current_style = TextStyle::default();
+            return;
+        }
+
+        let mut index = 0;
+        while index < params.len() {
+            match params[index] {
+                0 => self.current_style = TextStyle::default(),
+                1 => self.current_style.bold = true,
+                3 => self.current_style.italic = true,
+                4 => self.current_style.underline = true,
+                7 => self.current_style.inverse = true,
+                22 => self.current_style.bold = false,
+                23 => self.current_style.italic = false,
+                24 => self.current_style.underline = false,
+                27 => self.current_style.inverse = false,
+                30..=37 => {
+                    self.current_style.foreground =
+                        Some(ColorValue::Indexed((params[index] - 30) as u8));
+                }
+                39 => self.current_style.foreground = None,
+                40..=47 => {
+                    self.current_style.background =
+                        Some(ColorValue::Indexed((params[index] - 40) as u8));
+                }
+                49 => self.current_style.background = None,
+                90..=97 => {
+                    self.current_style.foreground =
+                        Some(ColorValue::Indexed((params[index] - 90 + 8) as u8));
+                }
+                100..=107 => {
+                    self.current_style.background =
+                        Some(ColorValue::Indexed((params[index] - 100 + 8) as u8));
+                }
+                38 | 48 => {
+                    let target_foreground = params[index] == 38;
+                    match params.get(index + 1).copied() {
+                        Some(5) => {
+                            if let Some(value) = params.get(index + 2).copied() {
+                                let color = ColorValue::Indexed(value.min(255) as u8);
+                                if target_foreground {
+                                    self.current_style.foreground = Some(color);
+                                } else {
+                                    self.current_style.background = Some(color);
+                                }
+                                index += 2;
+                            }
+                        }
+                        Some(2) => {
+                            if let (Some(r), Some(g), Some(b)) = (
+                                params.get(index + 2).copied(),
+                                params.get(index + 3).copied(),
+                                params.get(index + 4).copied(),
+                            ) {
+                                let color = ColorValue::Rgb(
+                                    r.min(255) as u8,
+                                    g.min(255) as u8,
+                                    b.min(255) as u8,
+                                );
+                                if target_foreground {
+                                    self.current_style.foreground = Some(color);
+                                } else {
+                                    self.current_style.background = Some(color);
+                                }
+                                index += 4;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+
+            index += 1;
+        }
+    }
+
     fn scroll_up_in_region(&mut self, count: u16) {
         if self.cells.is_empty() || self.size.rows == 0 {
             return;
@@ -822,9 +995,16 @@ impl ScreenBuffer {
         for _ in 0..count {
             let removed = self.cells.remove(top);
             if full_screen_region {
-                self.scrollback.push(removed.into_iter().collect());
+                self.scrollback.push(
+                    removed
+                        .into_iter()
+                        .filter(|cell| cell.ch != WIDE_CONTINUATION)
+                        .map(|cell| cell.ch)
+                        .collect(),
+                );
             }
-            self.cells.insert(bottom, blank_row(self.size.cols));
+            self.cells
+                .insert(bottom, blank_row_with_style(self.size.cols, self.current_style));
         }
     }
 
@@ -844,7 +1024,8 @@ impl ScreenBuffer {
 
         for _ in 0..count {
             self.cells.remove(bottom);
-            self.cells.insert(top, blank_row(self.size.cols));
+            self.cells
+                .insert(top, blank_row_with_style(self.size.cols, self.current_style));
         }
     }
 
@@ -858,7 +1039,7 @@ impl ScreenBuffer {
                         0
                     };
                     for col in start_col..self.cells[row].len() {
-                        self.cells[row][col] = ' ';
+                        self.cells[row][col] = blank_cell_with_style(self.current_style);
                     }
                 }
             }
@@ -870,12 +1051,12 @@ impl ScreenBuffer {
                         self.cells[row].len().saturating_sub(1)
                     };
                     for col in 0..=end_col {
-                        self.cells[row][col] = ' ';
+                        self.cells[row][col] = blank_cell_with_style(self.current_style);
                     }
                 }
             }
             _ => {
-                self.cells = blank_cells(self.size);
+                self.cells = blank_cells_with_style(self.size, self.current_style);
                 self.cursor_row = 0;
                 self.cursor_col = 0;
             }
@@ -887,30 +1068,32 @@ impl ScreenBuffer {
         match mode {
             0 => {
                 for col in self.cursor_col as usize..self.cells[row].len() {
-                    self.cells[row][col] = ' ';
+                    self.cells[row][col] = blank_cell_with_style(self.current_style);
                 }
             }
             1 => {
                 for col in 0..=self.cursor_col as usize {
-                    self.cells[row][col] = ' ';
+                    self.cells[row][col] = blank_cell_with_style(self.current_style);
                 }
             }
             _ => {
                 for cell in &mut self.cells[row] {
-                    *cell = ' ';
+                    *cell = blank_cell_with_style(self.current_style);
                 }
             }
         }
     }
 
     fn clear_wide_overlap(&mut self, row: usize, col: usize) {
-        if self.cells[row][col] == WIDE_CONTINUATION {
-            self.cells[row][col] = ' ';
+        if self.cells[row][col].ch == WIDE_CONTINUATION {
+            self.cells[row][col] = blank_cell();
             if col > 0 {
-                self.cells[row][col - 1] = ' ';
+                self.cells[row][col - 1] = blank_cell();
             }
-        } else if col + 1 < self.cells[row].len() && self.cells[row][col + 1] == WIDE_CONTINUATION {
-            self.cells[row][col + 1] = ' ';
+        } else if col + 1 < self.cells[row].len()
+            && self.cells[row][col + 1].ch == WIDE_CONTINUATION
+        {
+            self.cells[row][col + 1] = blank_cell();
         }
     }
 }
@@ -993,12 +1176,49 @@ impl fmt::Display for TerminalError {
 
 impl std::error::Error for TerminalError {}
 
-fn blank_cells(size: TerminalSize) -> Vec<Vec<char>> {
-    (0..size.rows).map(|_| blank_row(size.cols)).collect()
+fn blank_cells(size: TerminalSize) -> Vec<Vec<ScreenCell>> {
+    blank_cells_with_style(size, TextStyle::default())
 }
 
-fn blank_row(cols: u16) -> Vec<char> {
-    vec![' '; cols as usize]
+fn blank_cells_with_style(size: TerminalSize, style: TextStyle) -> Vec<Vec<ScreenCell>> {
+    (0..size.rows)
+        .map(|_| blank_row_with_style(size.cols, style))
+        .collect()
+}
+
+fn blank_row(cols: u16) -> Vec<ScreenCell> {
+    blank_row_with_style(cols, TextStyle::default())
+}
+
+fn blank_row_with_style(cols: u16, style: TextStyle) -> Vec<ScreenCell> {
+    vec![blank_cell_with_style(style); cols as usize]
+}
+
+fn blank_cell() -> ScreenCell {
+    blank_cell_with_style(TextStyle::default())
+}
+
+fn blank_cell_with_style(style: TextStyle) -> ScreenCell {
+    ScreenCell { ch: ' ', style }
+}
+
+fn render_styled_row(row: &[ScreenCell]) -> String {
+    let mut rendered = String::new();
+    let mut active_style = TextStyle::default();
+
+    for cell in row.iter().filter(|cell| cell.ch != WIDE_CONTINUATION) {
+        if cell.style != active_style {
+            rendered.push_str(&cell.style.to_ansi());
+            active_style = cell.style;
+        }
+        rendered.push(cell.ch);
+    }
+
+    if active_style != TextStyle::default() {
+        rendered.push_str("\x1b[0m");
+    }
+
+    rendered
 }
 
 fn parse_csi_numbers(params: &str) -> Vec<u16> {
@@ -1144,6 +1364,48 @@ mod tests {
         assert_eq!(snapshot.cursor_col, 5);
         assert!(snapshot.cursor_visible);
         assert!(!snapshot.alternate_screen);
+    }
+
+    #[test]
+    fn engine_snapshot_preserves_ansi_sgr_styling() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[38;5;196mred\x1b[0m plain");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "red plain       ");
+        assert!(
+            snapshot.styled_lines[0].starts_with("\x1b[0;38;5;196mred\x1b[0m plain"),
+            "styled line should preserve the foreground color: {:?}",
+            snapshot.styled_lines[0]
+        );
+        assert_eq!(snapshot.active_style_ansi, "\x1b[0m");
+    }
+
+    #[test]
+    fn engine_snapshot_preserves_active_sgr_for_future_output() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[38;5;196mred");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "red             ");
+        assert!(
+            snapshot.styled_lines[0].starts_with("\x1b[0;38;5;196mred"),
+            "styled line should preserve the foreground color: {:?}",
+            snapshot.styled_lines[0]
+        );
+        assert_eq!(snapshot.active_style_ansi, "\x1b[0;38;5;196m");
     }
 
     #[test]

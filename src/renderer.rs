@@ -387,9 +387,12 @@ fn blank_snapshot(address: &SessionAddress) -> ScreenSnapshot {
     let label = format!("session: {address}");
     let len = usize::min(label.chars().count(), size.cols as usize);
     lines[0] = fit_width(&label, size.cols as usize);
+    let styled_lines = lines.clone();
     ScreenSnapshot {
         size,
         lines,
+        styled_lines,
+        active_style_ansi: "\x1b[0m".to_string(),
         scrollback: Vec::new(),
         window_title: None,
         cursor_row: 0,
