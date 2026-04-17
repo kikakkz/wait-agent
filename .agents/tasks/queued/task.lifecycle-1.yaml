@@ -2,7 +2,7 @@ id: task.lifecycle-1
 kind: task
 version: 1
 title: wrap the current workspace runtime in a daemon-owned PTY envelope
-status: ready
+status: done
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml

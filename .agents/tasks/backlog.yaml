@@ -7,16 +7,19 @@ active:
 next:
   - id: task.lifecycle-1
     title: wrap the current workspace runtime in a daemon-owned PTY envelope
-    status: ready
+    status: done
   - id: task.lifecycle-2
     title: add workspace-local daemon discovery and single-client attach
-    status: not_started
+    status: done
   - id: task.lifecycle-3
     title: implement detach, reattach, and resize forwarding for the daemon envelope
-    status: not_started
+    status: done
   - id: task.lifecycle-4
     title: validate tmux-style persistence without changing interaction or rendering behavior
-    status: not_started
+    status: done
+  - id: task.lifecycle-5
+    title: support tmux-style attach workflows with multi-client attach and daemon listing
+    status: done
   - id: task.sidebar-1
     title: add a right-side session sidebar menu for future interaction
     status: not_started

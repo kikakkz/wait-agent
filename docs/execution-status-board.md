@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.1`  
+Version: `v1.2`  
 Status: `Active`  
-Date: `2026-04-12`
+Date: `2026-04-17`
 
 ## 1. Purpose
 
@@ -51,6 +51,7 @@ Project status at a glance:
 - The Rust implementation workspace and core local runtime are in place
 - Local PTY ownership, console focus, scheduling, Peek, renderer, and VT screen-state handling exist
 - Local multi-session workspace behavior has passed the main implementation and live validation loops
+- The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
 - Network foundations up through client/server registration and remote session publication baselines also exist
 - The remaining product gate is human sign-off that the local workspace is trustworthy in a real daily-use terminal environment
 
@@ -90,15 +91,11 @@ What remains for `T4-10`:
 
 Next queue once `T4-10` closes:
 
-1. `lifecycle-1` Wrap the current workspace runtime in a daemon-owned PTY envelope
-2. `lifecycle-2` Add workspace-local daemon discovery and single-client attach
-3. `lifecycle-3` Implement detach, reattach, and resize forwarding for the daemon envelope
-4. `lifecycle-4` Validate tmux-style persistence without changing interaction or rendering behavior
-5. `sidebar-1` Add a right-side session sidebar menu for future interaction
-6. `T5-06` Implement aggregate server session registry
-7. `T5-07` Implement remote resize and input routing
-8. `T6-01` Implement server-side workspace console
-9. `T3-07` Implement narrow-terminal compaction rules if acceptance evidence makes it necessary
+1. `sidebar-1` Add a right-side session sidebar menu for future interaction
+2. `T5-06` Implement aggregate server session registry
+3. `T5-07` Implement remote resize and input routing
+4. `T6-01` Implement server-side workspace console
+5. `T3-07` Implement narrow-terminal compaction rules if acceptance evidence makes it necessary
 
 The exact machine ordering for that queue now lives in `.agents/tasks/backlog.yaml`.
 

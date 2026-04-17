@@ -1,10 +1,13 @@
-use crate::cli::{AttachCommand, DaemonCommand, DetachCommand, StatusCommand, WorkspaceCommand};
+use crate::cli::{
+    AttachCommand, DaemonCommand, DetachCommand, ListCommand, StatusCommand, WorkspaceCommand,
+};
 use crate::config::AppConfig;
 use crate::pty::{PtyHandle, PtyManager, PtySize, SpawnRequest, PTY_EOF_ERRNO};
 use crate::session::SessionAddress;
 use crate::terminal::{
     ScreenSnapshot, TerminalEngine, TerminalError, TerminalRuntime, TerminalSize,
 };
+use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs::{self, File};
@@ -79,6 +82,63 @@ pub fn run_attach(command: AttachCommand) -> Result<(), LifecycleError> {
     let paths = WorkspacePaths::from_dir(&workspace_dir);
     wait_for_existing_daemon_ready(&paths, DAEMON_START_TIMEOUT, true);
     run_attach_client(&paths, snapshot.size)
+}
+
+pub fn run_list(_command: ListCommand) -> Result<(), LifecycleError> {
+    let runtime_dir = runtime_root_dir();
+    if !runtime_dir.exists() {
+        println!("no waitagent daemons running");
+        return Ok(());
+    }
+
+    let mut daemons = Vec::new();
+    for entry in fs::read_dir(&runtime_dir).map_err(|error| {
+        LifecycleError::Io(
+            format!(
+                "failed to read waitagent runtime directory {}",
+                runtime_dir.display()
+            ),
+            error,
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            LifecycleError::Io("failed to read waitagent runtime entry".to_string(), error)
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("sock") {
+            continue;
+        }
+
+        let Some(status) = query_status_by_socket(&path)? else {
+            continue;
+        };
+        if let Some(parsed) = parse_status_fields(&status, path) {
+            daemons.push(parsed);
+        }
+    }
+
+    if daemons.is_empty() {
+        println!("no waitagent daemons running");
+        return Ok(());
+    }
+
+    daemons.sort_by(|left, right| left.workspace_dir.cmp(&right.workspace_dir));
+    for daemon in daemons {
+        println!(
+            "{}: {} | node={} | ready={} | attached={} | pid={} | size={}x{} | socket={}",
+            daemon.key,
+            daemon.workspace_dir.display(),
+            daemon.node_id,
+            if daemon.ready { "yes" } else { "no" },
+            daemon.attached_clients,
+            daemon.child_pid,
+            daemon.cols,
+            daemon.rows,
+            daemon.socket_path.display()
+        );
+    }
+
+    Ok(())
 }
 
 pub fn run_status(command: StatusCommand) -> Result<(), LifecycleError> {
@@ -164,16 +224,20 @@ struct WorkspacePaths {
 impl WorkspacePaths {
     fn from_dir(workspace_dir: &Path) -> Self {
         let key = stable_workspace_key(workspace_dir);
-        let runtime_root = env::var("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
-        let base_dir = runtime_root.join("waitagent");
+        let base_dir = runtime_root_dir();
         let socket_path = base_dir.join(format!("{key}.sock"));
         Self {
             workspace_dir: workspace_dir.to_path_buf(),
             socket_path,
         }
     }
+}
+
+fn runtime_root_dir() -> PathBuf {
+    env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("waitagent")
 }
 
 fn resolve_workspace_dir(value: Option<&str>) -> Result<PathBuf, LifecycleError> {
@@ -318,6 +382,87 @@ fn daemon_status_ready(status: &str) -> bool {
         .find_map(|line| line.strip_prefix("ready: "))
         .map(|value| value == "yes")
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+struct DaemonStatusRecord {
+    key: String,
+    workspace_dir: PathBuf,
+    socket_path: PathBuf,
+    node_id: String,
+    child_pid: String,
+    ready: bool,
+    attached_clients: usize,
+    rows: u16,
+    cols: u16,
+}
+
+fn query_status_by_socket(socket_path: &Path) -> Result<Option<String>, LifecycleError> {
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::ConnectionRefused =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(LifecycleError::Io(
+                format!(
+                    "failed to connect to waitagent daemon at {}",
+                    socket_path.display()
+                ),
+                error,
+            ));
+        }
+    };
+
+    write_frame(&mut stream, &Frame::StatusRequest)?;
+    match read_frame(&mut stream)? {
+        Frame::StatusResponse(status) | Frame::Ack(status) => Ok(Some(status)),
+        Frame::Error(message) => Err(LifecycleError::Protocol(message)),
+        other => Err(LifecycleError::Protocol(format!(
+            "unexpected status response from {}: {:?}",
+            socket_path.display(),
+            other
+        ))),
+    }
+}
+
+fn parse_status_fields(status: &str, socket_path: PathBuf) -> Option<DaemonStatusRecord> {
+    let mut fields = HashMap::<String, String>::new();
+    for line in status.lines() {
+        let (key, value) = line.split_once(": ")?;
+        fields.insert(key.to_string(), value.to_string());
+    }
+
+    let workspace_dir = PathBuf::from(fields.get("workspace")?.clone());
+    let key = fields
+        .get("key")
+        .cloned()
+        .unwrap_or_else(|| stable_workspace_key(&workspace_dir));
+    let node_id = fields.get("node")?.clone();
+    let child_pid = fields.get("child_pid")?.clone();
+    let ready = fields.get("ready").map(|value| value == "yes")?;
+    let attached_clients = fields.get("attached_clients")?.parse::<usize>().ok()?;
+    let (rows, cols) = parse_screen_size(fields.get("screen_size")?)?;
+
+    Some(DaemonStatusRecord {
+        key,
+        workspace_dir,
+        socket_path,
+        node_id,
+        child_pid,
+        ready,
+        attached_clients,
+        rows,
+        cols,
+    })
+}
+
+fn parse_screen_size(value: &str) -> Option<(u16, u16)> {
+    let (rows, cols) = value.split_once('x')?;
+    Some((rows.parse().ok()?, cols.parse().ok()?))
 }
 
 fn workspace_snapshot_ready(snapshot: &ScreenSnapshot) -> bool {
@@ -488,7 +633,7 @@ struct DaemonRuntime {
     engine: TerminalEngine,
     workspace_ready: bool,
     latest_frame_bytes: Option<Vec<u8>>,
-    active_client: Option<AttachedClient>,
+    attached_clients: HashMap<u64, AttachedClient>,
     next_client_id: u64,
     rx: Receiver<DaemonEvent>,
     tx: Sender<DaemonEvent>,
@@ -564,7 +709,7 @@ impl DaemonRuntime {
             engine,
             workspace_ready: false,
             latest_frame_bytes: None,
-            active_client: None,
+            attached_clients: HashMap::new(),
             next_client_id: 0,
             rx,
             tx,
@@ -587,21 +732,17 @@ impl DaemonRuntime {
                     } else {
                         self.workspace_ready |= workspace_snapshot_ready(&self.engine.snapshot());
                     }
-                    if let Some(client) = self.active_client.as_mut() {
-                        if write_frame(&mut client.stream, &Frame::Output(bytes)).is_err() {
-                            self.active_client = None;
-                        }
-                    }
+                    self.broadcast_frame(Frame::Output(bytes));
                 }
                 DaemonEvent::PtyClosed => {
-                    self.active_client = None;
+                    self.attached_clients.clear();
                     break;
                 }
                 DaemonEvent::Incoming(stream) => {
                     self.handle_incoming(stream)?;
                 }
                 DaemonEvent::ClientFrame(client_id, frame) => {
-                    if self.active_client.as_ref().map(|client| client.id) != Some(client_id) {
+                    if !self.attached_clients.contains_key(&client_id) {
                         continue;
                     }
                     match frame {
@@ -616,9 +757,7 @@ impl DaemonRuntime {
                     }
                 }
                 DaemonEvent::ClientDisconnected(client_id) => {
-                    if self.active_client.as_ref().map(|client| client.id) == Some(client_id) {
-                        self.active_client = None;
-                    }
+                    self.attached_clients.remove(&client_id);
                 }
             }
         }
@@ -650,13 +789,9 @@ impl DaemonRuntime {
                 Ok(())
             }
             Frame::DetachRequest => {
-                let message = if let Some(mut client) = self.active_client.take() {
-                    let _ = write_frame(
-                        &mut client.stream,
-                        &Frame::Error("detached by external request".to_string()),
-                    );
-                    let _ = client.stream.shutdown(Shutdown::Both);
-                    "detached active client".to_string()
+                let detached = self.detach_all_clients("detached by external request");
+                let message = if detached > 0 {
+                    format!("detached {detached} attached client(s)")
                 } else {
                     "no attached client".to_string()
                 };
@@ -678,14 +813,6 @@ impl DaemonRuntime {
         mut stream: UnixStream,
         size: PtySize,
     ) -> Result<(), LifecycleError> {
-        if let Some(mut existing) = self.active_client.take() {
-            let _ = write_frame(
-                &mut existing.stream,
-                &Frame::Error("detached because another terminal attached".to_string()),
-            );
-            let _ = existing.stream.shutdown(Shutdown::Both);
-        }
-
         self.pty.resize(size)?;
         self.engine.resize(size.into());
 
@@ -702,11 +829,31 @@ impl DaemonRuntime {
             LifecycleError::Io("failed to clone attached client socket".to_string(), error)
         })?;
         spawn_daemon_client_reader(client_id, reader, self.tx.clone());
-        self.active_client = Some(AttachedClient {
-            id: client_id,
-            stream,
-        });
+        self.attached_clients
+            .insert(client_id, AttachedClient { stream });
         Ok(())
+    }
+
+    fn broadcast_frame(&mut self, frame: Frame) {
+        let mut disconnected = Vec::new();
+        for (&client_id, client) in &mut self.attached_clients {
+            if write_frame(&mut client.stream, &frame).is_err() {
+                disconnected.push(client_id);
+            }
+        }
+        for client_id in disconnected {
+            self.attached_clients.remove(&client_id);
+        }
+    }
+
+    fn detach_all_clients(&mut self, reason: &str) -> usize {
+        let mut detached = 0;
+        for (_, mut client) in self.attached_clients.drain() {
+            let _ = write_frame(&mut client.stream, &Frame::Error(reason.to_string()));
+            let _ = client.stream.shutdown(Shutdown::Both);
+            detached += 1;
+        }
+        detached
     }
 
     fn render_status(&self) -> String {
@@ -717,13 +864,14 @@ impl DaemonRuntime {
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         format!(
-            "workspace: {}\nsocket: {}\nnode: {}\nchild_pid: {}\nready: {}\nattached: {}\nscreen_size: {}x{}\ninitial_size: {}x{}\nalternate_screen: {}",
+            "workspace: {}\nsocket: {}\nkey: {}\nnode: {}\nchild_pid: {}\nready: {}\nattached_clients: {}\nscreen_size: {}x{}\ninitial_size: {}x{}\nalternate_screen: {}",
             self.workspace_dir.display(),
             self.paths.socket_path.display(),
+            stable_workspace_key(&self.workspace_dir),
             self.runtime.node.node_id,
             child_pid,
             if self.workspace_ready { "yes" } else { "no" },
-            if self.active_client.is_some() { "yes" } else { "no" },
+            self.attached_clients.len(),
             snapshot.size.rows,
             snapshot.size.cols,
             self.initial_size.rows,
@@ -744,7 +892,6 @@ impl Drop for SocketGuard {
 }
 
 struct AttachedClient {
-    id: u64,
     stream: UnixStream,
 }
 
@@ -1051,9 +1198,10 @@ impl From<TerminalError> for LifecycleError {
 mod tests {
     use super::{
         daemon_status_ready, frame_has_visible_first_line, looks_like_full_frame,
-        workspace_snapshot_ready,
+        parse_status_fields, workspace_snapshot_ready,
     };
     use crate::terminal::{ScreenSnapshot, TerminalSize};
+    use std::path::PathBuf;
 
     fn snapshot(lines: &[&str], cursor_row: u16, cursor_col: u16) -> ScreenSnapshot {
         let size = TerminalSize {
@@ -1101,6 +1249,30 @@ mod tests {
         let bytes = b"\x1b[H\x1b[1;1H\x1b[K\x1b[2;1H\x1b[K";
         assert!(looks_like_full_frame(bytes));
         assert!(!frame_has_visible_first_line(bytes));
+    }
+
+    #[test]
+    fn parses_daemon_status_fields() {
+        let status = "\
+workspace: /tmp/demo\n\
+socket: /run/user/1000/waitagent/demo.sock\n\
+key: abc123\n\
+node: local\n\
+child_pid: 4242\n\
+ready: yes\n\
+attached_clients: 2\n\
+screen_size: 24x80\n\
+initial_size: 24x80\n\
+alternate_screen: yes";
+        let parsed =
+            parse_status_fields(status, PathBuf::from("/run/user/1000/waitagent/demo.sock"))
+                .expect("status should parse");
+        assert_eq!(parsed.key, "abc123");
+        assert_eq!(parsed.workspace_dir, PathBuf::from("/tmp/demo"));
+        assert_eq!(parsed.attached_clients, 2);
+        assert_eq!(parsed.rows, 24);
+        assert_eq!(parsed.cols, 80);
+        assert!(parsed.ready);
     }
 
     #[test]

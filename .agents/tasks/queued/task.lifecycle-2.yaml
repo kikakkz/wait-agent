@@ -2,7 +2,7 @@ id: task.lifecycle-2
 kind: task
 version: 1
 title: add workspace-local daemon discovery and single-client attach
-status: not_started
+status: done
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml

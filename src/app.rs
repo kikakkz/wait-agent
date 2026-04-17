@@ -1,6 +1,6 @@
 use crate::cli::{
-    AttachCommand, Cli, Command, DaemonCommand, DetachCommand, RunCommand, ServerCommand,
-    StatusCommand, WorkspaceCommand,
+    AttachCommand, Cli, Command, DaemonCommand, DetachCommand, ListCommand, RunCommand,
+    ServerCommand, StatusCommand, WorkspaceCommand,
 };
 use crate::client::{
     normalize_endpoint, read_delegated_spawn_request, write_delegated_spawn_response,
@@ -58,6 +58,9 @@ pub fn run() -> Result<(), AppError> {
         Command::Attach(command) => {
             return crate::lifecycle::run_attach(command).map_err(AppError::from);
         }
+        Command::List(command) => {
+            return crate::lifecycle::run_list(command).map_err(AppError::from);
+        }
         Command::Status(command) => {
             return crate::lifecycle::run_status(command).map_err(AppError::from);
         }
@@ -96,6 +99,7 @@ impl App {
             }
             Command::Daemon(command) => self.handle_unexpected_daemon(command),
             Command::Attach(command) => self.handle_unexpected_attach(command),
+            Command::List(command) => self.handle_unexpected_list(command),
             Command::Status(command) => self.handle_unexpected_status(command),
             Command::Detach(command) => self.handle_unexpected_detach(command),
             Command::Run(run) => self.handle_run(run),
@@ -124,6 +128,12 @@ impl App {
     fn handle_unexpected_attach(&mut self, _command: AttachCommand) -> Result<(), AppError> {
         Err(AppError::InvalidCommand(
             "attach should be handled before workspace app startup".to_string(),
+        ))
+    }
+
+    fn handle_unexpected_list(&mut self, _command: ListCommand) -> Result<(), AppError> {
+        Err(AppError::InvalidCommand(
+            "ls should be handled before workspace app startup".to_string(),
         ))
     }
 

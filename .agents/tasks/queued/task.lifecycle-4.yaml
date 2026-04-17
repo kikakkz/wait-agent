@@ -2,7 +2,7 @@ id: task.lifecycle-4
 kind: task
 version: 1
 title: validate tmux-style persistence without changing interaction or rendering behavior
-status: not_started
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml

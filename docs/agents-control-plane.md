@@ -31,6 +31,7 @@ The WaitAgent control plane follows these rules:
 - Local workspace acceptance remains the phase gate before resumed network execution
 - Exact execution state, ordering, blockers, and verification now live in `.agents/`
 - Do not create orphan tasks that exist only in chat, scratch notes, or human docs without a matching `.agents/tasks/` entry
+- Implementation state and unified task-source state must move together; when code materially changes task completion, scope, or sequencing, the same work slice must update `.agents/tasks/` and any linked `.agents/state/` entries before the task can be considered synced
 
 ## 3. Directory Layout
 
@@ -99,6 +100,7 @@ Update `.agents/` when any of the following changes:
 - a new reusable assistant workflow appears
 - a new task is introduced, split, deferred, or reordered
 - a human doc was slimmed down and the machine state references need to follow it
+- code implementation materially advances, completes, invalidates, or re-scopes a queued task
 
 Do not use `.agents/` for:
 
@@ -117,3 +119,9 @@ A coding assistant working in this repository should:
 5. Sync human docs when project-visible status changes
 
 If `.agents/` and `docs/` disagree, assistants should treat that as maintenance work rather than silently choosing one and continuing.
+
+Hard rule:
+
+- At any moment, the unified task source must reflect the current implementation truth at task granularity.
+- Assistants must not leave `.agents/tasks/` claiming `not_started`, `ready`, or `in_progress` for work that is already materially implemented.
+- Assistants must not mark a task `done` until implementation, verification evidence, and linked machine state are all synchronized.

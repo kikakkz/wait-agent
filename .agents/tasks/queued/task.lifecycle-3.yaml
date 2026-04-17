@@ -2,7 +2,7 @@ id: task.lifecycle-3
 kind: task
 version: 1
 title: implement detach, reattach, and resize forwarding for the daemon envelope
-status: not_started
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml

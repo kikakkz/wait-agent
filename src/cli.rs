@@ -13,6 +13,7 @@ pub enum Command {
     WorkspaceInternal(WorkspaceCommand),
     Daemon(DaemonCommand),
     Attach(AttachCommand),
+    List(ListCommand),
     Status(StatusCommand),
     Detach(DetachCommand),
     Run(RunCommand),
@@ -66,6 +67,9 @@ pub struct AttachCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ListCommand {}
+
+#[derive(Debug, Clone, Default)]
 pub struct StatusCommand {
     pub workspace_dir: Option<String>,
 }
@@ -111,6 +115,10 @@ impl Cli {
             "attach" => {
                 args.remove(0);
                 Command::Attach(parse_attach(args)?)
+            }
+            "ls" => {
+                args.remove(0);
+                Command::List(parse_list(args)?)
             }
             "status" => {
                 args.remove(0);
@@ -296,6 +304,20 @@ fn parse_status(args: Vec<String>) -> Result<StatusCommand, CliError> {
     Ok(command)
 }
 
+fn parse_list(args: Vec<String>) -> Result<ListCommand, CliError> {
+    let mut iter = args.into_iter();
+    let command = ListCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
 fn parse_detach(args: Vec<String>) -> Result<DetachCommand, CliError> {
     let mut iter = args.into_iter();
     let mut command = DetachCommand::default();
@@ -334,6 +356,7 @@ fn help_text() -> String {
         "Usage:",
         "  waitagent [--node-id <id>] [--connect <addr>]",
         "  waitagent attach",
+        "  waitagent ls",
         "  waitagent status",
         "  waitagent detach",
         "  waitagent run [--node-id <id>] [--connect <addr>] -- <agent-command...>",
@@ -452,6 +475,14 @@ mod tests {
             Command::Attach(command) => {
                 assert!(command.workspace_dir.is_none());
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_list_command() {
+        match parse(&["waitagent", "ls"]) {
+            Command::List(_) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

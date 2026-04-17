@@ -1,9 +1,18 @@
 kind: state
 version: 1
-last_updated_from: cargo test at 2026-04-15T05:17:04Z
+last_updated_from: lifecycle verification refresh at 2026-04-17T00:48:39Z
 checks:
   - id: cargo-test
     command: cargo test
+    status: pass
+  - id: lifecycle-4-real-terminal-validation
+    command: user-validated real-terminal detach and reattach workflow with shell-backed and Codex-like TUI sessions for task.lifecycle-4
+    status: pass
+  - id: lifecycle-5-targeted-build-and-tests
+    command: cargo build --quiet plus targeted lifecycle-5 parser and daemon-status tests
+    status: pass
+  - id: lifecycle-5-multi-attach-and-ls
+    command: manual PTY validation of multi-client attach shared input, single-client exit isolation, and host-wide waitagent ls listing across multiple daemons
     status: pass
   - id: live-surface-switch-back-repro
     command: manual PTY repro of waitagent -> new session -> codex -> switch away -> switch back path plus regression verification for the live-surface reactivation gate
