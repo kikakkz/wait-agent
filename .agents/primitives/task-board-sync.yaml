@@ -6,6 +6,7 @@ use_when:
   - task status changes
   - blocker or verification state changes
   - local acceptance evidence materially improves or regresses
+  - implementation materially advances a queued task even if human docs have not been refreshed yet
 inputs:
   - .agents/tasks/current.yaml
   - .agents/state/current-focus.yaml
@@ -15,11 +16,14 @@ inputs:
   - docs/local-acceptance-checklist.md
 steps:
   - update machine task state first
+  - treat task-source synchronization as part of the same implementation slice, not follow-up cleanup
   - sync blocker and verification state next
   - refresh human docs when project-level visibility changed
   - keep task wording and status names consistent across machine and human files
 verification:
   - task id, task status, and blocker state do not disagree between .agents and docs
+  - queued task status in .agents does not lag behind implemented code reality
 failure_modes:
   - .agents says done while the execution board still says in_progress
   - checklist evidence exists but is not reflected in machine state
+  - code implements lifecycle or UI behavior that the unified task source still claims is not_started or ready

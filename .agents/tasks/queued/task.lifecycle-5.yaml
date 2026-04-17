@@ -1,0 +1,42 @@
+id: task.lifecycle-5
+kind: task
+version: 1
+title: support tmux-style attach workflows with multi-client attach and daemon listing
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.lifecycle-4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.acceptance-check-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one workspace daemon can keep multiple concurrent attached clients for the same live PTY
+  - every attached client can send input to the shared PTY, matching tmux-style attach semantics rather than introducing primary-controller or observer-only modes
+  - PTY output and attach-time screen restore are broadcast consistently to all attached clients so each terminal sees the same live workspace state
+  - detach, terminal loss, or client exit remove only that client and do not disrupt the daemon or other attached clients
+  - a tmux-style `waitagent ls` command exists for listing daemon-backed workspace instances on the current host rather than only showing one background status target
+  - `waitagent ls` output is useful for multi-instance hosts and includes enough machine-visible identity to choose a target for later attach or inspection
+  - status and machine-facing docs describe the multi-attach capability, multi-instance listing flow, and tmux-style shared-input behavior clearly
+verification:
+  - cargo test
+  - manual: attach the same workspace from two terminals, confirm both terminals see the same live shell state, and verify input from either terminal reaches the shared PTY
+  - manual: detach or close one attached terminal and confirm the other attached terminal remains live and interactive
+  - manual: run `waitagent ls` with multiple daemon-backed workspaces present and confirm the listing can distinguish them clearly
+touched_paths:
+  - src/lifecycle.rs
+  - src/cli.rs
+  - src/app.rs
+  - docs/local-acceptance-checklist.md
+  - docs/execution-status-board.md
+  - .agents/tasks/queued/task.lifecycle-5.yaml
+  - .agents/
+notes:
+  - Keep the behavior aligned with tmux attach semantics.
+  - Do not introduce custom controller roles, observer-only clients, or extra user-facing coordination features in this task.
+  - Assume most hosts will run one primary waitagent instance, but the implementation must support and expose multiple daemon-backed workspaces when users choose to run them.

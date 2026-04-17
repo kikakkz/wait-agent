@@ -10,6 +10,12 @@ pub struct Cli {
 #[derive(Debug, Clone)]
 pub enum Command {
     Workspace(WorkspaceCommand),
+    WorkspaceInternal(WorkspaceCommand),
+    Daemon(DaemonCommand),
+    Attach(AttachCommand),
+    List(ListCommand),
+    Status(StatusCommand),
+    Detach(DetachCommand),
     Run(RunCommand),
     Server(ServerCommand),
     Help(String),
@@ -44,6 +50,35 @@ pub struct ServerCommand {
     pub node_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DaemonCommand {
+    pub node_id: Option<String>,
+    pub connect: Option<String>,
+    pub workspace_dir: Option<String>,
+    pub rows: Option<u16>,
+    pub cols: Option<u16>,
+    pub pixel_width: Option<u16>,
+    pub pixel_height: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AttachCommand {
+    pub workspace_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListCommand {}
+
+#[derive(Debug, Clone, Default)]
+pub struct StatusCommand {
+    pub workspace_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DetachCommand {
+    pub workspace_dir: Option<String>,
+}
+
 impl Cli {
     pub fn parse<I>(args: I) -> Result<Self, CliError>
     where
@@ -69,6 +104,30 @@ impl Cli {
         }
 
         let command = match args[0].as_str() {
+            "__workspace-internal" => {
+                args.remove(0);
+                Command::WorkspaceInternal(parse_workspace(args)?)
+            }
+            "daemon" => {
+                args.remove(0);
+                Command::Daemon(parse_daemon(args)?)
+            }
+            "attach" => {
+                args.remove(0);
+                Command::Attach(parse_attach(args)?)
+            }
+            "ls" => {
+                args.remove(0);
+                Command::List(parse_list(args)?)
+            }
+            "status" => {
+                args.remove(0);
+                Command::Status(parse_status(args)?)
+            }
+            "detach" => {
+                args.remove(0);
+                Command::Detach(parse_detach(args)?)
+            }
             "run" => {
                 args.remove(0);
                 Command::Run(parse_run(args)?)
@@ -173,6 +232,109 @@ fn parse_server(args: Vec<String>) -> Result<ServerCommand, CliError> {
 
     Ok(command)
 }
+
+fn parse_daemon(args: Vec<String>) -> Result<DaemonCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = DaemonCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--node-id" => command.node_id = Some(expect_value("--node-id", &mut iter)?),
+            "--connect" => command.connect = Some(expect_value("--connect", &mut iter)?),
+            "--workspace-dir" => {
+                command.workspace_dir = Some(expect_value("--workspace-dir", &mut iter)?)
+            }
+            "--rows" => {
+                command.rows = Some(parse_u16("--rows", expect_value("--rows", &mut iter)?)?)
+            }
+            "--cols" => {
+                command.cols = Some(parse_u16("--cols", expect_value("--cols", &mut iter)?)?)
+            }
+            "--pixel-width" => {
+                command.pixel_width = Some(parse_u16(
+                    "--pixel-width",
+                    expect_value("--pixel-width", &mut iter)?,
+                )?)
+            }
+            "--pixel-height" => {
+                command.pixel_height = Some(parse_u16(
+                    "--pixel-height",
+                    expect_value("--pixel-height", &mut iter)?,
+                )?)
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = AttachCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--workspace-dir" => {
+                command.workspace_dir = Some(expect_value("--workspace-dir", &mut iter)?)
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_status(args: Vec<String>) -> Result<StatusCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = StatusCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--workspace-dir" => {
+                command.workspace_dir = Some(expect_value("--workspace-dir", &mut iter)?)
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_list(args: Vec<String>) -> Result<ListCommand, CliError> {
+    let mut iter = args.into_iter();
+    let command = ListCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_detach(args: Vec<String>) -> Result<DetachCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = DetachCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--workspace-dir" => {
+                command.workspace_dir = Some(expect_value("--workspace-dir", &mut iter)?)
+            }
+            "--help" | "-h" => return Ok(command),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
 fn expect_value<I>(flag: &str, iter: &mut I) -> Result<String, CliError>
 where
     I: Iterator<Item = String>,
@@ -181,13 +343,24 @@ where
         .ok_or_else(|| CliError::MissingValue(flag.to_string()))
 }
 
+fn parse_u16(flag: &str, value: String) -> Result<u16, CliError> {
+    value
+        .parse::<u16>()
+        .map_err(|_| CliError::InvalidValue(flag.to_string(), value))
+}
+
 fn help_text() -> String {
     [
         "WaitAgent",
         "",
         "Usage:",
         "  waitagent [--node-id <id>] [--connect <addr>]",
+        "  waitagent attach",
+        "  waitagent ls",
+        "  waitagent status",
+        "  waitagent detach",
         "  waitagent run [--node-id <id>] [--connect <addr>] -- <agent-command...>",
+        "  waitagent daemon",
         "  waitagent server [--listen <addr>] [--node-id <id>]",
         "",
         "Environment:",
@@ -203,6 +376,7 @@ pub enum CliError {
     UnknownSubcommand(String),
     UnexpectedArgument(String),
     MissingValue(String),
+    InvalidValue(String, String),
 }
 
 impl fmt::Display for CliError {
@@ -211,6 +385,9 @@ impl fmt::Display for CliError {
             Self::UnknownSubcommand(command) => write!(f, "unknown subcommand: {command}"),
             Self::UnexpectedArgument(argument) => write!(f, "unexpected argument: {argument}"),
             Self::MissingValue(flag) => write!(f, "missing value for {flag}"),
+            Self::InvalidValue(flag, value) => {
+                write!(f, "invalid value for {flag}: {value}")
+            }
         }
     }
 }
@@ -287,6 +464,55 @@ mod tests {
             Command::Run(run) => {
                 assert_eq!(run.connect.as_deref(), Some("ws://127.0.0.1:7474"));
                 assert_eq!(run.program, "claude");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_attach_command() {
+        match parse(&["waitagent", "attach"]) {
+            Command::Attach(command) => {
+                assert!(command.workspace_dir.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_list_command() {
+        match parse(&["waitagent", "ls"]) {
+            Command::List(_) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_daemon_command_with_hidden_size_flags() {
+        match parse(&[
+            "waitagent",
+            "daemon",
+            "--workspace-dir",
+            "/tmp/demo",
+            "--rows",
+            "50",
+            "--cols",
+            "120",
+        ]) {
+            Command::Daemon(command) => {
+                assert_eq!(command.workspace_dir.as_deref(), Some("/tmp/demo"));
+                assert_eq!(command.rows, Some(50));
+                assert_eq!(command.cols, Some(120));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_workspace_internal_command() {
+        match parse(&["waitagent", "__workspace-internal", "--node-id", "devbox-1"]) {
+            Command::WorkspaceInternal(command) => {
+                assert_eq!(command.node_id.as_deref(), Some("devbox-1"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

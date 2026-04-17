@@ -1,0 +1,34 @@
+id: task.lifecycle-2
+kind: task
+version: 1
+title: add workspace-local daemon discovery and single-client attach
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.lifecycle-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - a deterministic workspace-local daemon identity and Unix socket path exist so the same project directory reattaches to the same background runtime
+  - `waitagent` attaches to an existing daemon if one is already running for the workspace and otherwise starts one before attaching
+  - the first-phase attach flow supports exactly one foreground client at a time and has explicit reclaim or replacement behavior
+  - attaching restores the current running workspace rather than starting a fresh session set
+verification:
+  - cargo test
+  - manual: run `waitagent` twice from the same workspace and confirm the second launch reattaches instead of spawning a second background runtime
+touched_paths:
+  - src/cli.rs
+  - src/main.rs
+  - src/client.rs
+  - src/server.rs
+  - src/config.rs
+  - .agents/tasks/queued/task.lifecycle-2.yaml
+notes:
+  - Keep this phase local-only; do not merge it with the broader network transport queue.
+  - Single-client attach is sufficient for phase one as long as reclaim behavior is explicit.

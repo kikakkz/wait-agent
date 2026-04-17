@@ -1,8 +1,8 @@
 # WaitAgent Local Acceptance Checklist
 
-Version: `v1.1`  
+Version: `v1.2`  
 Status: `Pending Final Manual Sign-off`  
-Date: `2026-04-12`
+Date: `2026-04-17`
 
 ## 1. Purpose
 
@@ -16,6 +16,8 @@ Use this file for:
 - what a human should validate
 - what counts as acceptance
 - what kinds of failures keep the gate open
+
+Daemon detach and reattach persistence, multi-attach behavior, and host-wide daemon listing are tracked separately in the lifecycle task queue and are not part of this checklist's pass criteria.
 
 Do not use this file as a machine verification ledger.
 

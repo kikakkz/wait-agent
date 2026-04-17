@@ -2,7 +2,7 @@ id: task.display-1
 kind: task
 version: 1
 title: separate focused PTY passthrough from WaitAgent chrome rendering
-status: ready
+status: deferred
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -30,3 +30,4 @@ touched_paths:
 notes:
   - This task exists because app.rs currently appends WaitAgent chrome bytes directly after PTY output chunks.
   - Success is defined by architectural separation first, not by ad hoc escape-sequence filtering.
+  - This task is intentionally deferred while the current display path remains usable and lifecycle work takes priority.

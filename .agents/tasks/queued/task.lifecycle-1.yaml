@@ -1,0 +1,34 @@
+id: task.lifecycle-1
+kind: task
+version: 1
+title: wrap the current workspace runtime in a daemon-owned PTY envelope
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t4-10.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the current workspace runtime can be launched through a hidden internal entrypoint or equivalent daemon-only bootstrap path
+  - a new local daemon process can spawn that internal workspace runtime inside a dedicated PTY and keep it alive after the original client terminal disconnects
+  - the existing interaction loop and rendering path remain behaviorally unchanged aside from the new outer lifecycle envelope
+  - the daemon tracks the child workspace process, PTY handle, and enough screen state to support later attach and reattach work
+verification:
+  - cargo test
+  - manual: start the daemon-owned workspace runtime and confirm it survives client-side process exit
+touched_paths:
+  - src/cli.rs
+  - src/main.rs
+  - src/app.rs
+  - src/pty.rs
+  - src/terminal.rs
+  - .agents/tasks/queued/task.lifecycle-1.yaml
+notes:
+  - Do not refactor the existing workspace interaction loop or stabilized rendering behavior in this task.
+  - Treat the current waitagent workspace as an opaque child runtime that the daemon hosts through a PTY.

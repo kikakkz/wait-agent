@@ -5,21 +5,24 @@ active:
     title: finish local acceptance sign-off for the single-entry workspace UX
     status: in_progress
 next:
-  - id: task.display-1
-    title: separate focused PTY passthrough from WaitAgent chrome rendering
-    status: ready
-  - id: task.display-2
-    title: keep the focused fullscreen TUI on the real terminal size
-    status: ready
-  - id: task.display-3
-    title: collapse screen recovery to one primary restore path
-    status: ready
-  - id: task.runtime-1
-    title: extract a shared console runtime loop for workspace and server surfaces
-    status: ready
-  - id: task.terminal-1
-    title: decide and document the terminal-engine coverage strategy for reliable TUI switching
-    status: ready
+  - id: task.lifecycle-1
+    title: wrap the current workspace runtime in a daemon-owned PTY envelope
+    status: done
+  - id: task.lifecycle-2
+    title: add workspace-local daemon discovery and single-client attach
+    status: done
+  - id: task.lifecycle-3
+    title: implement detach, reattach, and resize forwarding for the daemon envelope
+    status: done
+  - id: task.lifecycle-4
+    title: validate tmux-style persistence without changing interaction or rendering behavior
+    status: done
+  - id: task.lifecycle-5
+    title: support tmux-style attach workflows with multi-client attach and daemon listing
+    status: done
+  - id: task.sidebar-1
+    title: add a right-side session sidebar menu for future interaction
+    status: not_started
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: ready
@@ -32,6 +35,21 @@ next:
   - id: task.t3-07
     title: implement narrow-terminal compaction rules
     status: not_started
+  - id: task.display-1
+    title: separate focused PTY passthrough from WaitAgent chrome rendering
+    status: deferred
+  - id: task.display-2
+    title: keep the focused fullscreen TUI on the real terminal size
+    status: deferred
+  - id: task.display-3
+    title: collapse screen recovery to one primary restore path
+    status: deferred
+  - id: task.runtime-1
+    title: extract a shared console runtime loop for workspace and server surfaces
+    status: deferred
+  - id: task.terminal-1
+    title: decide and document the terminal-engine coverage strategy for reliable TUI switching
+    status: deferred
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
@@ -41,4 +59,6 @@ source_of_truth:
   file: docs/execution-status-board.md
 notes:
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
-  - Post-acceptance work now prioritizes display-architecture convergence before broader network expansion.
+  - Post-acceptance work now prioritizes tmux-style local lifecycle persistence before resumed network expansion.
+  - The lifecycle queue must preserve the existing workspace interaction loop and the stabilized rendering path; daemonization should wrap the current runtime rather than rewrite it.
+  - Display and rendering architecture refactors are intentionally deferred for now because the current display path is usable and should not be churned until lifecycle work is complete and a later redesign is justified.

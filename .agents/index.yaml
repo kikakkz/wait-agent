@@ -29,6 +29,7 @@ required_rules:
   - Read this file before exploring the repo.
   - Use tasks plus primitives to decide the next action.
   - Keep human-facing rationale in docs rather than .agents.
+  - Treat .agents/tasks/ as the unified task source; every real task must appear there and orphan tasks are not allowed.
   - Update .agents whenever task focus, blockers, validation state, or reusable execution knowledge changes.
   - Do not let .agents drift from docs/execution-status-board.md or docs/local-acceptance-checklist.md.
 directories:
@@ -42,7 +43,7 @@ directories:
 active_context:
   project_phase: phase-1
   current_stage: local-workspace-mvp-acceptance
-  current_focus: finish local acceptance sign-off before resuming network aggregation work
+  current_focus: finish local acceptance sign-off before starting tmux-style lifecycle persistence and later network work
 recommended_primitives:
   - primitive.read-current-task
   - primitive.acceptance-check-sync

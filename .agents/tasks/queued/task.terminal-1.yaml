@@ -2,7 +2,7 @@ id: task.terminal-1
 kind: task
 version: 1
 title: decide and document the terminal-engine coverage strategy for reliable TUI switching
-status: ready
+status: deferred
 priority: medium
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -28,3 +28,4 @@ touched_paths:
 notes:
   - This is an AI-facing architecture decision task, not a human-facing narrative doc task.
   - The objective is to stop silent drift between product expectations and terminal-engine capability.
+  - This task is intentionally deferred while the current display path remains usable and lifecycle work takes priority.
