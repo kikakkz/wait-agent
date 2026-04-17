@@ -1,4 +1,7 @@
-use crate::cli::{Cli, Command, RunCommand, ServerCommand, WorkspaceCommand};
+use crate::cli::{
+    AttachCommand, Cli, Command, DaemonCommand, DetachCommand, RunCommand, ServerCommand,
+    StatusCommand, WorkspaceCommand,
+};
 use crate::client::{
     normalize_endpoint, read_delegated_spawn_request, write_delegated_spawn_response,
     ClientRuntime, ClientRuntimeConfig, ClientRuntimeError, DelegatedSpawnRequest,
@@ -43,8 +46,29 @@ const MANAGED_CONSOLE_RESERVED_ROWS: u16 = LIVE_SURFACE_STATUS_ROWS;
 pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
     let config = AppConfig::from_env();
-    let mut app = App::new(config);
 
+    match cli.command {
+        Command::Workspace(workspace) => {
+            return crate::lifecycle::run_workspace_entry(config, workspace)
+                .map_err(AppError::from);
+        }
+        Command::Daemon(command) => {
+            return crate::lifecycle::run_daemon(config, command).map_err(AppError::from);
+        }
+        Command::Attach(command) => {
+            return crate::lifecycle::run_attach(command).map_err(AppError::from);
+        }
+        Command::Status(command) => {
+            return crate::lifecycle::run_status(command).map_err(AppError::from);
+        }
+        Command::Detach(command) => {
+            return crate::lifecycle::run_detach(command).map_err(AppError::from);
+        }
+        Command::WorkspaceInternal(_) | Command::Run(_) | Command::Server(_) | Command::Help(_) => {
+        }
+    }
+
+    let mut app = App::new(config);
     app.execute(cli.command)
 }
 
@@ -67,7 +91,13 @@ impl App {
 
     fn execute(&mut self, command: Command) -> Result<(), AppError> {
         match command {
-            Command::Workspace(workspace) => self.handle_workspace(workspace),
+            Command::Workspace(workspace) | Command::WorkspaceInternal(workspace) => {
+                self.handle_workspace(workspace)
+            }
+            Command::Daemon(command) => self.handle_unexpected_daemon(command),
+            Command::Attach(command) => self.handle_unexpected_attach(command),
+            Command::Status(command) => self.handle_unexpected_status(command),
+            Command::Detach(command) => self.handle_unexpected_detach(command),
             Command::Run(run) => self.handle_run(run),
             Command::Server(server) => self.handle_server(server),
             Command::Help(help) => {
@@ -83,6 +113,30 @@ impl App {
             .config
             .runtime_for_workspace(command.node_id.as_deref(), command.connect.as_deref());
         self.run_local_workspace(&runtime)
+    }
+
+    fn handle_unexpected_daemon(&mut self, _command: DaemonCommand) -> Result<(), AppError> {
+        Err(AppError::InvalidCommand(
+            "daemon should be handled before workspace app startup".to_string(),
+        ))
+    }
+
+    fn handle_unexpected_attach(&mut self, _command: AttachCommand) -> Result<(), AppError> {
+        Err(AppError::InvalidCommand(
+            "attach should be handled before workspace app startup".to_string(),
+        ))
+    }
+
+    fn handle_unexpected_status(&mut self, _command: StatusCommand) -> Result<(), AppError> {
+        Err(AppError::InvalidCommand(
+            "status should be handled before workspace app startup".to_string(),
+        ))
+    }
+
+    fn handle_unexpected_detach(&mut self, _command: DetachCommand) -> Result<(), AppError> {
+        Err(AppError::InvalidCommand(
+            "detach should be handled before workspace app startup".to_string(),
+        ))
     }
 
     fn run_local_workspace(&mut self, runtime: &AppConfig) -> Result<(), AppError> {
@@ -4360,6 +4414,7 @@ pub enum AppError {
     Cli(crate::cli::CliError),
     Client(ClientRuntimeError),
     InvalidCommand(String),
+    Lifecycle(crate::lifecycle::LifecycleError),
     Pty(crate::pty::PtyError),
     Render(RenderError),
     Server(ServerRuntimeError),
@@ -4373,6 +4428,7 @@ impl fmt::Display for AppError {
             Self::Cli(error) => write!(f, "{error}"),
             Self::Client(error) => write!(f, "{error}"),
             Self::InvalidCommand(message) => write!(f, "invalid command: {message}"),
+            Self::Lifecycle(error) => write!(f, "{error}"),
             Self::Pty(error) => write!(f, "{error}"),
             Self::Render(error) => write!(f, "{error}"),
             Self::Server(error) => write!(f, "{error}"),
@@ -4393,6 +4449,12 @@ impl From<crate::cli::CliError> for AppError {
 impl From<crate::pty::PtyError> for AppError {
     fn from(value: crate::pty::PtyError) -> Self {
         Self::Pty(value)
+    }
+}
+
+impl From<crate::lifecycle::LifecycleError> for AppError {
+    fn from(value: crate::lifecycle::LifecycleError) -> Self {
+        Self::Lifecycle(value)
     }
 }
 

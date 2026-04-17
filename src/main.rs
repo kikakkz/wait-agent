@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod console;
 mod event;
+mod lifecycle;
 mod pty;
 mod renderer;
 mod scheduler;
