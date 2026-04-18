@@ -5,8 +5,8 @@ title: polish the default-visible sidebar detail area and enter-to-switch behavi
 status: in_progress
 priority: medium
 source_of_truth:
-  file: docs/execution-status-board.md
-  reference: Current Focus And Next Queue
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.sidebar-3.done
 linked_primitives:
@@ -14,8 +14,6 @@ linked_primitives:
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
-linked_runbooks:
-  - runbook.continue-default-work
 done_criteria:
   - the sidebar is visible by default in framed console mode whenever the terminal is wide enough for the sidebar layout
   - the sidebar can be hidden without losing discoverability, and a collapsed right-edge affordance remains visible so `Right` can reopen it
@@ -29,8 +27,10 @@ verification:
   - manual: move sidebar focus across sessions and confirm the bottom path detail follows the selection, then press `Enter` and confirm the target session becomes focused without losing sidebar alignment
 touched_paths:
   - src/app.rs
+  - .agents/tasks/queued/task.sidebar-4.yaml
   - .agents/
 notes:
-  - The current implementation now renders the sidebar as a separate positioned overlay block instead of appending sidebar content onto the main frame lines.
-  - The selected-session path detail has been moved out of the shared status line and into a fixed sidebar detail row above the bottom info bar.
-  - The remaining follow-up in this slice, if needed after real use, is path-presentation polish for long working directories without destabilizing the stabilized render path.
+  - Future automation rules may live near the sidebar later, but they are intentionally excluded from this task.
+  - `Enter`-to-switch and selection alignment are already live in the current prototype.
+  - The sidebar detail row is now dedicated to the selected-session path instead of reusing the shared status line.
+  - The remaining scope in this slice, if real usage demands it, is better long-path presentation without regressing the stabilized render path.

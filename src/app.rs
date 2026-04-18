@@ -1,3 +1,4 @@
+use crate::agent::live_agent_label as live_command_label;
 use crate::cli::{
     AttachCommand, Cli, Command, DaemonCommand, DetachCommand, ListCommand, RunCommand,
     ServerCommand, StatusCommand, WorkspaceCommand,
@@ -15,16 +16,16 @@ use crate::server::{ServerRuntime, ServerRuntimeConfig, ServerRuntimeError};
 use crate::session::{SessionAddress, SessionRegistry, SessionStatus};
 use crate::terminal::{TerminalEngine, TerminalRuntime};
 use crate::transport::{read_transport_envelope, write_transport_envelope};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EVENT_LOOP_TICK: Duration = Duration::from_millis(50);
 const PICKER_ESCAPE_TIMEOUT_MS: u128 = 150;
@@ -32,6 +33,8 @@ const RESET_FRAME_CURSOR: &str = "\x1b[H";
 const RESTORE_SCREEN: &str = "\x1b[2J\x1b[H\x1b[?25h";
 const SHORTCUT_INTERRUPT_EXIT: u8 = 0x03;
 const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_SYNC_UPDATE_START: &str = "\x1b[?2026h";
+const ANSI_SYNC_UPDATE_END: &str = "\x1b[?2026l";
 const ANSI_FG_ACCENT: &str = "\x1b[38;5;81m";
 const ANSI_FG_NOTICE: &str = "\x1b[38;5;120m";
 const ANSI_BG_BAR: &str = "\x1b[48;5;24m\x1b[38;5;255m";
@@ -40,8 +43,20 @@ const ANSI_BG_KEYS: &str = "\x1b[48;5;236m\x1b[38;5;252m";
 const ANSI_BG_COMMAND: &str = "\x1b[48;5;238m\x1b[38;5;255m";
 const ANSI_BG_PICKER: &str = "\x1b[48;5;235m\x1b[38;5;250m";
 const ANSI_BG_PICKER_ACTIVE: &str = "\x1b[48;5;31m\x1b[38;5;255m";
+const ANSI_BG_SIDEBAR_HEADER: &str = "\x1b[48;5;236m\x1b[1;38;5;255m";
+const ANSI_BG_SIDEBAR_HINT: &str = "\x1b[48;5;235m\x1b[38;5;246m";
+const ANSI_BG_SIDEBAR_ITEM: &str = "\x1b[48;5;234m\x1b[38;5;250m";
+const ANSI_BG_SIDEBAR_ACTIVE: &str = "\x1b[48;5;240m\x1b[1;38;5;255m";
+const ANSI_BG_SIDEBAR_DETAIL: &str = "\x1b[48;5;236m\x1b[38;5;252m";
+const ANSI_FG_SIDEBAR_RUNNING: &str = "\x1b[38;5;121m";
+const ANSI_FG_SIDEBAR_INPUT: &str = "\x1b[38;5;227m";
+const ANSI_FG_SIDEBAR_CONFIRM: &str = "\x1b[38;5;215m";
 const LIVE_SURFACE_STATUS_ROWS: u16 = 3;
 const MANAGED_CONSOLE_RESERVED_ROWS: u16 = LIVE_SURFACE_STATUS_ROWS;
+const SIDEBAR_NAVIGATION_TIMEOUT_MS: u128 = 150;
+const COLLAPSED_SIDEBAR_WIDTH: usize = 2;
+const STARTUP_SHELL_WARMUP: Duration = Duration::from_millis(500);
+const SIDEBAR_STARTUP_FULL_REDRAWS: u8 = 2;
 
 pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
@@ -165,6 +180,7 @@ impl App {
         let mut renderer_state = RendererState::default();
         let mut input_tracker = InputTracker::default();
         let mut command_prompt = CommandPromptState::default();
+        let mut sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
         let mut hosted = HashMap::<SessionAddress, HostedSession>::new();
 
@@ -174,10 +190,13 @@ impl App {
         let initial_session = self.spawn_default_shell_session(
             &runtime.node.node_id,
             terminal_snapshot.size,
+            false,
             &mut hosted,
             &tx,
         )?;
         console.focus(initial_session);
+        sidebar.force_full_redraws = SIDEBAR_STARTUP_FULL_REDRAWS;
+        self.warm_up_shell_session(&rx, &mut hosted, STARTUP_SHELL_WARMUP)?;
 
         self.refresh_surface(
             RenderSurface::Workspace,
@@ -188,13 +207,16 @@ impl App {
             &console,
             &scheduler,
             &command_prompt,
+            &mut sidebar,
         )?;
         let mut last_waiting_count = scheduler.waiting_queue().entries().len();
         let mut last_waiting_addresses = scheduler.waiting_queue().addresses();
         let mut should_exit = false;
+        let mut pending_events = VecDeque::new();
 
         while !should_exit {
-            match rx.recv_timeout(EVENT_LOOP_TICK) {
+            let mut suppress_scheduler_refresh = false;
+            match next_runtime_event(&rx, &mut pending_events) {
                 Ok(RuntimeEvent::Input(bytes)) => {
                     let input_received_at = now_unix_ms();
                     let allow_interrupt_exit =
@@ -217,6 +239,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             PickerNavigationOutcome::Submit => {
@@ -236,6 +259,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 } else {
                                     should_exit = self.apply_workspace_action(
@@ -250,6 +274,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 }
                             }
@@ -276,8 +301,56 @@ impl App {
                             &mut renderer_state,
                             &renderer,
                             &mut command_prompt,
+                            &mut sidebar,
                             RenderSurface::Workspace,
                         )?;
+                    } else if let Some(outcome) = {
+                        let previous_sidebar = sidebar.clone();
+                        sidebar
+                            .handle_navigation(
+                                &bytes,
+                                &self.sessions.list(),
+                                console.focused_session.as_ref(),
+                                console.can_switch(),
+                                &command_prompt,
+                                input_received_at,
+                            )
+                            .map(|outcome| (previous_sidebar, outcome))
+                    } {
+                        let (previous_sidebar, outcome) = outcome;
+                        match outcome {
+                            SidebarNavigationOutcome::Consumed => {}
+                            SidebarNavigationOutcome::Render => {
+                                self.refresh_after_sidebar_navigation(
+                                    RenderSurface::Workspace,
+                                    &previous_sidebar,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                    &mut sidebar,
+                                )?;
+                            }
+                            SidebarNavigationOutcome::Submit(address) => {
+                                should_exit = self.apply_workspace_action(
+                                    ConsoleAction::FocusAddress(address),
+                                    runtime,
+                                    terminal_snapshot.size,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &tx,
+                                    &mut console,
+                                    &mut scheduler,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &mut command_prompt,
+                                    &mut sidebar,
+                                )?;
+                            }
+                        }
                     } else if let Some(action) = parse_console_action(
                         &bytes,
                         command_prompt.wants_escape_dismiss(),
@@ -299,6 +372,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             ConsoleAction::NextSession
@@ -316,6 +390,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             _ => {
@@ -331,6 +406,7 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                         }
@@ -349,6 +425,7 @@ impl App {
                             &mut renderer_state,
                             &renderer,
                             &mut command_prompt,
+                            &mut sidebar,
                         )?;
                     } else if command_prompt.submit_overlay(&bytes) {
                         if let Some(index) = command_prompt.selected_picker_index(
@@ -367,6 +444,7 @@ impl App {
                                 &mut renderer_state,
                                 &renderer,
                                 &mut command_prompt,
+                                &mut sidebar,
                             )?;
                         } else {
                             should_exit = self.apply_workspace_action(
@@ -381,6 +459,7 @@ impl App {
                                 &mut renderer_state,
                                 &renderer,
                                 &mut command_prompt,
+                                &mut sidebar,
                             )?;
                         }
                     } else {
@@ -408,6 +487,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     PickerNavigationOutcome::Submit => {
@@ -427,6 +507,7 @@ impl App {
                                                 &mut renderer_state,
                                                 &renderer,
                                                 &mut command_prompt,
+                                                &mut sidebar,
                                             )?;
                                         } else {
                                             should_exit = self.apply_workspace_action(
@@ -441,6 +522,7 @@ impl App {
                                                 &mut renderer_state,
                                                 &renderer,
                                                 &mut command_prompt,
+                                                &mut sidebar,
                                             )?;
                                         }
                                     }
@@ -459,8 +541,56 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                     RenderSurface::Workspace,
                                 )?;
+                            } else if let Some((previous_sidebar, outcome)) = {
+                                let previous_sidebar = sidebar.clone();
+                                sidebar
+                                    .handle_navigation(
+                                        &single,
+                                        &self.sessions.list(),
+                                        console.focused_session.as_ref(),
+                                        console.can_switch(),
+                                        &command_prompt,
+                                        now_unix_ms(),
+                                    )
+                                    .map(|outcome| (previous_sidebar, outcome))
+                            } {
+                                handled_control = true;
+                                match outcome {
+                                    SidebarNavigationOutcome::Consumed => {}
+                                    SidebarNavigationOutcome::Render => {
+                                        self.refresh_after_sidebar_navigation(
+                                            RenderSurface::Workspace,
+                                            &previous_sidebar,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &console,
+                                            &scheduler,
+                                            &command_prompt,
+                                            &mut sidebar,
+                                        )?;
+                                    }
+                                    SidebarNavigationOutcome::Submit(address) => {
+                                        should_exit = self.apply_workspace_action(
+                                            ConsoleAction::FocusAddress(address),
+                                            runtime,
+                                            terminal_snapshot.size,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &tx,
+                                            &mut console,
+                                            &mut scheduler,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &mut command_prompt,
+                                            &mut sidebar,
+                                        )?;
+                                    }
+                                }
                             } else if let Some(action) = parse_console_action(
                                 &single,
                                 command_prompt.wants_escape_dismiss(),
@@ -483,6 +613,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     ConsoleAction::NextSession
@@ -500,6 +631,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     _ => {
@@ -515,6 +647,7 @@ impl App {
                                             &mut renderer_state,
                                             &renderer,
                                             &mut command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                 }
@@ -534,6 +667,7 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                 )?;
                             } else if command_prompt.submit_overlay(&single) {
                                 handled_control = true;
@@ -553,6 +687,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 } else {
                                     should_exit = self.apply_workspace_action(
@@ -567,6 +702,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 }
                             } else {
@@ -579,7 +715,15 @@ impl App {
                         }
 
                         if !should_exit {
-                            let bytes_to_forward = if handled_control { residual } else { bytes };
+                            let bytes_to_forward = if sidebar.modal_active(&command_prompt) {
+                                Vec::new()
+                            } else if handled_control {
+                                residual
+                            } else {
+                                bytes
+                            };
+                            let mut refresh_after_live_command = false;
+                            let previous_sidebar = sidebar.clone();
                             if let Some(target) = console.input_owner_session().cloned() {
                                 if !bytes_to_forward.is_empty() {
                                     command_prompt
@@ -591,8 +735,17 @@ impl App {
                                         now_unix_ms(),
                                     );
                                     let mut forwarded = Vec::new();
-                                    let mut submitted_live_command = false;
+                                    let mut submitted_live_command = None;
+                                    let mut pending_live_command = None;
                                     if let Some(runtime) = hosted.get_mut(&target) {
+                                        let snapshot_live_command =
+                                            if bytes_include_submit(&bytes_to_forward) {
+                                                live_command_label_from_shell_snapshot(
+                                                    runtime.screen_engine.state().active_snapshot(),
+                                                )
+                                            } else {
+                                                None
+                                            };
                                         forwarded = runtime.input_normalizer.normalize(
                                             &bytes_to_forward,
                                             runtime.screen_engine.application_cursor_keys(),
@@ -601,32 +754,25 @@ impl App {
                                         submitted_live_command = runtime
                                             .command_tracker
                                             .observe(&bytes_to_forward)
-                                            .map(|command| looks_like_live_command(&command))
-                                            .unwrap_or(false);
+                                            .and_then(|command| live_command_label(&command))
+                                            .or(snapshot_live_command);
+                                        pending_live_command =
+                                            runtime.command_tracker.pending_live_command_label();
                                     }
-                                    if submitted_live_command {
+                                    if let Some(command_title) = submitted_live_command {
+                                        self.set_session_title(&target, command_title);
                                         live_surface.mark_known_live_command(target.clone());
                                         live_surface.mark_session_bootstrapping(
                                             target.clone(),
                                             now_unix_ms(),
                                         );
                                         scheduler.on_manual_switch(&mut console);
-                                        self.sync_live_surface(
-                                            &mut live_surface,
-                                            &mut hosted,
-                                            &console,
-                                            &command_prompt,
-                                        )?;
-                                        self.refresh_surface(
-                                            RenderSurface::Workspace,
-                                            &mut live_surface,
-                                            &mut hosted,
-                                            &mut renderer_state,
-                                            &renderer,
-                                            &console,
-                                            &scheduler,
-                                            &command_prompt,
-                                        )?;
+                                        suppress_scheduler_refresh = true;
+                                        refresh_after_live_command = true;
+                                    } else if let Some(command_title) = pending_live_command {
+                                        self.set_session_title(&target, command_title);
+                                    } else if !live_surface.is_known_live_command(&target) {
+                                        self.restore_shell_session_title(&target);
                                     }
                                     if !forwarded.is_empty() {
                                         self.sessions.mark_input(&target);
@@ -634,6 +780,35 @@ impl App {
                                             runtime.handle.write_all(&forwarded)?;
                                         }
                                     }
+                                }
+                            }
+                            if refresh_after_live_command {
+                                if !self.can_redraw_sidebar_only(
+                                    &previous_sidebar,
+                                    &sidebar,
+                                    &live_surface,
+                                    &console,
+                                    &command_prompt,
+                                ) || !self.redraw_sidebar_only(
+                                    &previous_sidebar,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                    &mut sidebar,
+                                )? {
+                                    self.refresh_surface(
+                                        RenderSurface::Workspace,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &console,
+                                        &scheduler,
+                                        &command_prompt,
+                                        &mut sidebar,
+                                    )?;
                                 }
                             }
                         }
@@ -644,28 +819,64 @@ impl App {
                     session: output_session,
                     bytes,
                 }) => {
+                    buffer_pending_runtime_events(&rx, &mut pending_events);
+                    if pending_events.iter().any(runtime_event_is_input_priority) {
+                        pending_events.push_front(RuntimeEvent::Output {
+                            session: output_session,
+                            bytes,
+                        });
+                        continue;
+                    }
                     let mut should_passthrough_output = false;
                     let mut should_refresh_surface = false;
                     let mut snapshot_before_output = None;
+                    let mut snapshot_after_output = None;
+                    let mut first_substantive_output = false;
 
                     if let Some(runtime) = hosted.get_mut(&output_session) {
                         snapshot_before_output =
                             Some(runtime.screen_engine.state().active_snapshot().clone());
                         let substantive_output = output_is_substantive(&bytes);
+                        first_substantive_output = substantive_output
+                            && self
+                                .sessions
+                                .get(&output_session)
+                                .and_then(|record| record.last_output_at_unix_ms)
+                                .is_none();
+                        let mut cleared_live_command = false;
                         if substantive_output {
                             self.sessions.mark_output(&output_session);
                         }
                         let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
+                        snapshot_after_output =
+                            Some(runtime.screen_engine.state().active_snapshot().clone());
+                        let release_detected = looks_like_terminal_release_output(&bytes);
+                        let title_reconciled = self
+                            .reconcile_session_title_with_foreground_process(
+                                &output_session,
+                                runtime,
+                                &mut live_surface,
+                                now_unix_ms(),
+                            )?;
+                        if release_detected {
+                            live_surface.clear_session_bootstrapping(&output_session);
+                            suppress_scheduler_refresh = true;
+                        }
                         if live_surface.is_known_live_command(&output_session)
-                            && looks_like_shell_prompt_output(&bytes)
-                            && !looks_like_terminal_takeover_output(&bytes)
-                            && !looks_like_terminal_probe_output(&bytes)
-                            && !live_surface.is_bootstrapping(&output_session, now_unix_ms())
+                            && ((looks_like_shell_prompt_output(&bytes)
+                                && !looks_like_terminal_takeover_output(&bytes)
+                                && !looks_like_terminal_probe_output(&bytes)
+                                && !live_surface.is_bootstrapping(&output_session, now_unix_ms()))
+                                || release_detected)
                         {
                             live_surface.clear_known_live_command(&output_session);
+                            cleared_live_command = true;
                         }
                         self.sessions
                             .update_screen_state(&output_session, runtime.screen_engine.state());
+                        if cleared_live_command {
+                            self.restore_shell_session_title(&output_session);
+                        }
                         if !replies.is_empty() {
                             runtime.handle.write_all(&replies)?;
                         }
@@ -681,23 +892,32 @@ impl App {
                             &mut hosted,
                             &console,
                             &command_prompt,
+                            &sidebar,
                             &output_session,
                             &bytes,
                         )?;
-                        if self.maybe_deactivate_live_surface_after_output(
-                            &mut live_surface,
-                            &mut hosted,
-                            &console,
-                            &command_prompt,
-                            &output_session,
-                        )? {
-                            should_refresh_surface = true;
-                        } else if live_surface.is_live_for(&output_session) {
+                        let deactivated_live_surface = self
+                            .maybe_deactivate_live_surface_after_output(
+                                &mut live_surface,
+                                &mut hosted,
+                                &console,
+                                &command_prompt,
+                                &sidebar,
+                                &output_session,
+                            )?;
+                        if deactivated_live_surface {
+                            let shell_prompt_detected = looks_like_shell_prompt_output(&bytes);
+                            should_refresh_surface =
+                                !release_detected || substantive_output || shell_prompt_detected;
+                        } else if live_surface.is_live_for(&output_session)
+                            && console.focused_session.as_ref() == Some(&output_session)
+                        {
                             should_passthrough_output = true;
                         } else if focused_passthrough_output(
                             &live_surface,
                             &console,
                             &command_prompt,
+                            &sidebar,
                             &output_session,
                         ) {
                             should_passthrough_output = true;
@@ -706,24 +926,40 @@ impl App {
                         {
                             should_refresh_surface = true;
                         }
+                        if title_reconciled {
+                            should_refresh_surface = true;
+                        }
                     }
 
                     if should_passthrough_output {
+                        let skip_snapshot_redraw = live_output_can_skip_snapshot_redraw(
+                            &live_surface,
+                            &output_session,
+                            &bytes,
+                            now_unix_ms(),
+                        );
                         self.prepare_live_surface_passthrough(
                             &mut live_surface,
                             &mut hosted,
                             snapshot_before_output.as_ref(),
+                            skip_snapshot_redraw,
                         )?;
                         self.write_live_surface_output_with_ui(
                             &bytes,
+                            snapshot_before_output.as_ref(),
+                            snapshot_after_output.as_ref(),
                             &mut live_surface,
                             &command_prompt,
                             &mut renderer_state,
                             &renderer,
                             &console,
                             &scheduler,
+                            &mut sidebar,
                         )?;
                     } else if should_refresh_surface {
+                        if first_substantive_output {
+                            sidebar.rendered_overlay = None;
+                        }
                         self.refresh_surface(
                             RenderSurface::Workspace,
                             &mut live_surface,
@@ -733,6 +969,7 @@ impl App {
                             &console,
                             &scheduler,
                             &command_prompt,
+                            &mut sidebar,
                         )?;
                     }
                 }
@@ -752,6 +989,7 @@ impl App {
                             &console,
                             &scheduler,
                             &command_prompt,
+                            &mut sidebar,
                         )?;
                     }
                 }
@@ -771,6 +1009,21 @@ impl App {
                     &console,
                     &scheduler,
                     &command_prompt,
+                    &mut sidebar,
+                )?;
+            }
+
+            if sidebar.flush_navigation_timeout(&command_prompt, now) {
+                self.refresh_surface(
+                    RenderSurface::Workspace,
+                    &mut live_surface,
+                    &mut hosted,
+                    &mut renderer_state,
+                    &renderer,
+                    &console,
+                    &scheduler,
+                    &command_prompt,
+                    &mut sidebar,
                 )?;
             }
 
@@ -794,12 +1047,22 @@ impl App {
                     &console,
                     &scheduler,
                     &command_prompt,
+                    &mut sidebar,
                 )?;
             }
 
             if !command_prompt.open
                 && !self.focused_session_owns_passthrough_display(&live_surface, &console)
             {
+                let suppress_scheduler_refresh = suppress_scheduler_refresh
+                    || console
+                        .focused_session
+                        .as_ref()
+                        .map(|session| {
+                            live_surface.is_known_live_command(session)
+                                || live_surface.is_bootstrapping(session, now)
+                        })
+                        .unwrap_or(false);
                 let decision =
                     scheduler.decide_auto_switch(&mut console, self.sessions.list(), now_unix_ms());
                 let waiting_count = scheduler.waiting_queue().entries().len();
@@ -814,16 +1077,19 @@ impl App {
                 if !matches!(decision.action, SchedulingAction::None)
                     || waiting_count != last_waiting_count
                 {
-                    self.refresh_surface(
-                        RenderSurface::Workspace,
-                        &mut live_surface,
-                        &mut hosted,
-                        &mut renderer_state,
-                        &renderer,
-                        &console,
-                        &scheduler,
-                        &command_prompt,
-                    )?;
+                    if !suppress_scheduler_refresh {
+                        self.refresh_surface(
+                            RenderSurface::Workspace,
+                            &mut live_surface,
+                            &mut hosted,
+                            &mut renderer_state,
+                            &renderer,
+                            &console,
+                            &scheduler,
+                            &command_prompt,
+                            &mut sidebar,
+                        )?;
+                    }
                 }
                 last_waiting_count = waiting_count;
                 last_waiting_addresses = waiting_addresses;
@@ -838,6 +1104,7 @@ impl App {
         &mut self,
         node_id: &str,
         size: crate::terminal::TerminalSize,
+        sidebar_hidden: bool,
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         tx: &Sender<RuntimeEvent>,
     ) -> Result<SessionAddress, AppError> {
@@ -849,6 +1116,7 @@ impl App {
             program,
             Vec::new(),
             size,
+            sidebar_hidden,
             hosted,
             tx,
         )
@@ -861,6 +1129,7 @@ impl App {
         program: String,
         args: Vec<String>,
         size: crate::terminal::TerminalSize,
+        sidebar_hidden: bool,
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         tx: &Sender<RuntimeEvent>,
     ) -> Result<SessionAddress, AppError> {
@@ -869,7 +1138,7 @@ impl App {
             .sessions
             .create_local_session(node_id, title, command_line);
         let address = session.address().clone();
-        let managed_size = managed_console_size(size);
+        let managed_size = workspace_viewport_size(size, sidebar_hidden);
         let screen_engine = TerminalEngine::new(managed_size);
         let handle = self.pty.spawn(
             address.clone(),
@@ -1018,6 +1287,7 @@ impl App {
             &scheduler,
             Vec::new(),
             None,
+            None,
         )?;
         let mut last_waiting_count = scheduler.waiting_queue().entries().len();
         let mut last_waiting_addresses = scheduler.waiting_queue().addresses();
@@ -1049,6 +1319,7 @@ impl App {
                         &scheduler,
                         Vec::new(),
                         None,
+                        None,
                     )?;
                 }
                 Ok(RuntimeEvent::OutputClosed { session: closed }) => {
@@ -1075,6 +1346,7 @@ impl App {
                     &scheduler,
                     Vec::new(),
                     None,
+                    None,
                 )?;
             }
 
@@ -1096,6 +1368,7 @@ impl App {
                     &console,
                     &scheduler,
                     Vec::new(),
+                    None,
                     None,
                 )?;
                 last_waiting_count = waiting_count;
@@ -1169,7 +1442,21 @@ impl App {
         scheduler: &SchedulerState,
         overlay_lines: Vec<String>,
         command_prompt: Option<&CommandPromptState>,
+        sidebar: Option<&mut SidebarState>,
     ) -> Result<(), AppError> {
+        let mut sidebar = sidebar;
+        let suppress_sidebar_diff = sidebar
+            .as_deref()
+            .map(|state| state.force_full_redraws > 0)
+            .unwrap_or(false);
+        let previous_sidebar_overlay = if suppress_sidebar_diff {
+            None
+        } else {
+            sidebar
+                .as_deref()
+                .and_then(|state| state.rendered_overlay.clone())
+        };
+        let previous_frame_lines = renderer_state.previous_frame_lines().to_vec();
         let frame = renderer.render_with_state(
             renderer_state,
             console,
@@ -1177,10 +1464,38 @@ impl App {
             RenderContext {
                 waiting_count: scheduler.waiting_queue().entries().len(),
                 overlay_lines,
+                footer_width: self.terminal.current_size_or_default().cols as usize,
             },
         )?;
-        let (frame_text, cursor, cursor_visible) = self.decorate_frame(&frame, command_prompt);
-        self.write_full_frame_at(&frame_text, cursor, cursor_visible)
+        let sidebar_state = self.build_sidebar_render_state(
+            sidebar.as_deref_mut(),
+            console,
+            scheduler,
+            command_prompt,
+        );
+        let (frame_text, cursor, cursor_visible, sidebar_overlay) =
+            self.decorate_frame(&frame, command_prompt, sidebar_state.as_ref());
+        let previous_frame_lines_arg =
+            (!previous_frame_lines.is_empty()).then_some(previous_frame_lines.as_slice());
+        let result = self.write_full_frame_at(
+            &frame_text,
+            previous_frame_lines_arg,
+            sidebar_overlay.as_ref(),
+            previous_sidebar_overlay.as_ref(),
+            cursor,
+            cursor_visible,
+        );
+        if result.is_ok() {
+            renderer_state.update_frame_lines(split_frame_lines(&frame_text));
+        }
+        if let Some(sidebar_state) = sidebar.as_deref_mut() {
+            sidebar_state.rendered_overlay = sidebar_overlay;
+            sidebar_state.rendered_cursor_visible = cursor_visible;
+            if result.is_ok() && sidebar_state.force_full_redraws > 0 {
+                sidebar_state.force_full_redraws -= 1;
+            }
+        }
+        result
     }
 
     fn write_live_surface_output(&self, bytes: &[u8]) -> Result<(), AppError> {
@@ -1193,31 +1508,138 @@ impl App {
             .map_err(|error| AppError::Io("failed to flush live surface output".to_string(), error))
     }
 
+    fn write_ui_buffer_with_sync(
+        &self,
+        context: &str,
+        buffer: &str,
+        synchronized_updates: bool,
+    ) -> Result<(), AppError> {
+        let payload = build_ui_write_payload(buffer, synchronized_updates);
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(payload.as_bytes())
+            .map_err(|error| AppError::Io(format!("failed to write {context}"), error))?;
+        stdout
+            .flush()
+            .map_err(|error| AppError::Io(format!("failed to flush {context}"), error))
+    }
+
+    fn write_ui_buffer(&self, context: &str, buffer: &str) -> Result<(), AppError> {
+        self.write_ui_buffer_with_sync(context, buffer, true)
+    }
+
     fn write_live_surface_output_with_ui(
         &self,
         bytes: &[u8],
+        snapshot_before_output: Option<&crate::terminal::ScreenSnapshot>,
+        snapshot_after_output: Option<&crate::terminal::ScreenSnapshot>,
         live_surface: &mut LiveSurfaceState,
         command_prompt: &CommandPromptState,
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         console: &ConsoleState,
         scheduler: &SchedulerState,
+        sidebar: &mut SidebarState,
     ) -> Result<(), AppError> {
-        let needs_ui_redraw =
-            !live_surface.chrome_visible || live_output_needs_chrome_redraw(bytes);
-        self.write_live_surface_output(bytes)?;
-        if needs_ui_redraw {
-            self.write_live_surface_ui(
-                live_surface,
-                command_prompt,
-                renderer_state,
-                renderer,
-                console,
-                scheduler,
-            )
-        } else {
-            Ok(())
+        let batches = extract_live_output_batches(
+            bytes,
+            &mut live_surface.pending_sync_marker_bytes,
+            &mut live_surface.pending_agent_output_batch,
+            &mut live_surface.agent_sync_batch_open,
+        );
+        let filtered_bytes: Vec<u8> = batches.into_iter().flatten().collect();
+        let workspace_buffer =
+            self.build_live_surface_snapshot_delta(snapshot_before_output, snapshot_after_output);
+        if filtered_bytes.is_empty() && workspace_buffer.is_none() {
+            return Ok(());
         }
+
+        // Live passthrough can repaint arbitrary cells, so the cached normal-frame diff
+        // is no longer trustworthy once we hand the terminal to the agent.
+        renderer_state.clear_frame_lines();
+        let force_full_sidebar_redraw = live_output_requires_full_sidebar_redraw(&filtered_bytes)
+            || live_output_requires_full_sidebar_redraw_from_snapshots(
+                snapshot_before_output,
+                snapshot_after_output,
+            );
+        let ui = self.build_live_surface_ui_buffer(
+            live_surface,
+            command_prompt,
+            renderer_state,
+            renderer,
+            console,
+            scheduler,
+            sidebar,
+            live_surface.overlay_rows,
+            force_full_sidebar_redraw,
+            None,
+        )?;
+        let mut payload = workspace_buffer.unwrap_or_default();
+        payload.push_str(&ui.buffer);
+        if !payload.is_empty() {
+            self.write_ui_buffer("live surface snapshot delta with chrome", &payload)?;
+            live_surface.chrome_visible = true;
+            live_surface.overlay_rows = ui.overlay_rows;
+            live_surface.sidebar_overlay = ui.sidebar_overlay;
+            live_surface.separator_line = ui.separator_line;
+            live_surface.keys_line = ui.keys_line;
+            live_surface.status_line = ui.status_line;
+        } else if filtered_bytes.is_empty() {
+            return Ok(());
+        } else {
+            self.write_live_surface_output(&filtered_bytes)?;
+        }
+
+        Ok(())
+    }
+
+    fn build_live_surface_snapshot_delta(
+        &self,
+        before: Option<&crate::terminal::ScreenSnapshot>,
+        after: Option<&crate::terminal::ScreenSnapshot>,
+    ) -> Option<String> {
+        let (before, after) = match (before, after) {
+            (Some(before), Some(after)) => (before, after),
+            _ => return None,
+        };
+
+        let full_redraw = before.size != after.size
+            || before.alternate_screen != after.alternate_screen
+            || before.scroll_top != after.scroll_top
+            || before.scroll_bottom != after.scroll_bottom;
+        let mut buffer = String::from("\x1b[?25l");
+        for (index, line) in after.styled_lines.iter().enumerate() {
+            if !full_redraw
+                && before
+                    .styled_lines
+                    .get(index)
+                    .map(|previous| previous == line)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let row = index.saturating_add(1);
+            buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[0m"));
+        }
+
+        let cursor_row = after.cursor_row.saturating_add(1);
+        let cursor_col = after.cursor_col.saturating_add(1);
+        let cursor_visibility = if after.cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        };
+        let scroll_region = format!(
+            "\x1b[{};{}r",
+            after.scroll_top.saturating_add(1),
+            after.scroll_bottom.saturating_add(1)
+        );
+        buffer.push_str(&format!(
+            "{scroll_region}\x1b[{cursor_row};{cursor_col}H{}{cursor_visibility}",
+            after.active_style_ansi
+        ));
+
+        Some(buffer)
     }
 
     fn write_live_surface_snapshot(
@@ -1225,9 +1647,10 @@ impl App {
         snapshot: &crate::terminal::ScreenSnapshot,
     ) -> Result<(), AppError> {
         let mut buffer = String::from(RESET_FRAME_CURSOR);
+        buffer.push_str("\x1b[?25l");
         for (index, line) in snapshot.styled_lines.iter().enumerate() {
             let row = index.saturating_add(1);
-            buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[0m\x1b[K"));
+            buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[0m"));
         }
         let cursor_row = snapshot.cursor_row.saturating_add(1);
         let cursor_col = snapshot.cursor_col.saturating_add(1);
@@ -1236,40 +1659,32 @@ impl App {
         } else {
             "\x1b[?25l"
         };
-        let scroll_region = if snapshot.scroll_top == 0
-            && snapshot.scroll_bottom.saturating_add(1) == snapshot.size.rows
-        {
-            "\x1b[r".to_string()
-        } else {
-            format!(
-                "\x1b[{};{}r",
-                snapshot.scroll_top.saturating_add(1),
-                snapshot.scroll_bottom.saturating_add(1)
-            )
-        };
+        let scroll_region = format!(
+            "\x1b[{};{}r",
+            snapshot.scroll_top.saturating_add(1),
+            snapshot.scroll_bottom.saturating_add(1)
+        );
         buffer.push_str(&format!(
             "{scroll_region}\x1b[{cursor_row};{cursor_col}H{}{cursor_visibility}",
             snapshot.active_style_ansi
         ));
 
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(buffer.as_bytes()).map_err(|error| {
-            AppError::Io("failed to write live surface snapshot".to_string(), error)
-        })?;
-        stdout.flush().map_err(|error| {
-            AppError::Io("failed to flush live surface snapshot".to_string(), error)
-        })
+        self.write_ui_buffer_with_sync("live surface snapshot", &buffer, false)
     }
 
     fn build_live_surface_ui_buffer(
         &self,
+        live_surface: &LiveSurfaceState,
         command_prompt: &CommandPromptState,
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         console: &ConsoleState,
         scheduler: &SchedulerState,
+        sidebar: &mut SidebarState,
         previous_overlay_rows: usize,
-    ) -> Result<(String, usize), AppError> {
+        force_full_sidebar_redraw: bool,
+        sidebar_damage: Option<(usize, usize)>,
+    ) -> Result<LiveSurfaceUiBuffer, AppError> {
         let frame = renderer.render_with_state(
             renderer_state,
             console,
@@ -1277,6 +1692,7 @@ impl App {
             RenderContext {
                 waiting_count: scheduler.waiting_queue().entries().len(),
                 overlay_lines: Vec::new(),
+                footer_width: self.terminal.current_size_or_default().cols as usize,
             },
         )?;
         let size = self.terminal.current_size_or_default();
@@ -1287,21 +1703,30 @@ impl App {
             console.focused_session.as_ref(),
         );
         let keys_line = style_overlay_line(
-            "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit",
+            "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^Q quit",
             width,
         );
-        let separator_line = style_footer_separator_line(width);
         let status_text = command_prompt.status_line(&frame.bottom_line);
         let status_line = style_status_line(&status_text, width);
         let status_row = size.rows.max(1);
-        let keys_row = status_row.saturating_sub(1).max(1);
-        let cursor = self.frame_cursor(&frame);
-        let cursor_visibility = if frame.cursor_visible {
-            "\x1b[?25h"
+        let previous_sidebar_overlay = if force_full_sidebar_redraw {
+            None
         } else {
-            "\x1b[?25l"
+            live_surface
+                .sidebar_overlay
+                .clone()
+                .or_else(|| sidebar.rendered_overlay.clone())
         };
-        let active_style_ansi = self.focused_live_surface_active_style(console);
+        let sidebar_state = self.build_sidebar_render_state(
+            Some(sidebar),
+            console,
+            scheduler,
+            Some(command_prompt),
+        );
+        let sidebar_overlay = self.build_sidebar_overlay(sidebar_state.as_ref());
+        let previous_sidebar_overlay_ref = previous_sidebar_overlay.as_ref();
+        let separator_line =
+            style_footer_separator_line_for_sidebar(width, sidebar_overlay.as_ref());
 
         let available_overlay_rows = size.rows.saturating_sub(LIVE_SURFACE_STATUS_ROWS) as usize;
         let shown_overlay = if overlay_lines.len() > available_overlay_rows {
@@ -1311,34 +1736,88 @@ impl App {
         };
         let current_footer_rows = shown_overlay.len() + LIVE_SURFACE_STATUS_ROWS as usize;
         let previous_footer_rows = previous_overlay_rows + LIVE_SURFACE_STATUS_ROWS as usize;
-        let clear_footer_rows = current_footer_rows.max(previous_footer_rows);
         let footer_start_row = status_row
             .saturating_sub(current_footer_rows.saturating_sub(1) as u16)
             .max(1);
         let separator_row = footer_start_row;
         let overlay_start_row = separator_row.saturating_add(1);
-        let clear_start_row = status_row
-            .saturating_sub(clear_footer_rows.saturating_sub(1) as u16)
-            .max(1);
         let mut overlay_buffer = String::new();
-        for row in clear_start_row..=status_row {
-            overlay_buffer.push_str(&format!("\x1b[{row};1H{}\x1b[K", " ".repeat(width)));
+        let previous_footer_start_row = status_row
+            .saturating_sub(previous_footer_rows.saturating_sub(1) as u16)
+            .max(1);
+        if previous_footer_start_row < footer_start_row {
+            for row in previous_footer_start_row..footer_start_row {
+                overlay_buffer.push_str(&format!("\x1b[{row};1H\x1b[K"));
+            }
         }
-        overlay_buffer.push_str(&format!("\x1b[{separator_row};1H{separator_line}\x1b[K"));
+        if previous_footer_start_row != footer_start_row
+            || live_surface.separator_line != separator_line
+        {
+            overlay_buffer.push_str(&format!("\x1b[{separator_row};1H{separator_line}"));
+        }
         for (index, line) in shown_overlay.iter().enumerate() {
             let row = overlay_start_row.saturating_add(index as u16);
-            overlay_buffer.push_str(&format!(
-                "\x1b[{row};1H{}\x1b[K",
-                style_overlay_line(line, width)
-            ));
+            overlay_buffer.push_str(&format!("\x1b[{row};1H{}", style_overlay_line(line, width)));
         }
-        overlay_buffer.push_str(&format!(
-            "\x1b[{keys_row};1H{keys_line}\x1b[{status_row};1H{status_line}\x1b[{};{}H{active_style_ansi}{cursor_visibility}",
-            cursor.row.saturating_add(1),
-            cursor.col.saturating_add(1),
-        ));
+        if let Some(overlay) = sidebar_overlay.as_ref() {
+            let sidebar_rows = status_row.saturating_sub(1) as usize;
+            let redraw_all = previous_sidebar_overlay_ref
+                .map(|previous| {
+                    previous.separator_col != overlay.separator_col
+                        || previous.content_col != overlay.content_col
+                        || previous.lines.len() != overlay.lines.len()
+                })
+                .unwrap_or(true);
+            for (index, sidebar_line) in overlay.lines.iter().take(sidebar_rows).enumerate() {
+                let row = index + 1;
+                let row_damaged = sidebar_damage
+                    .map(|(start, end)| row >= start && row <= end)
+                    .unwrap_or(false);
+                if !redraw_all
+                    && !row_damaged
+                    && previous_sidebar_overlay_ref.and_then(|previous| previous.lines.get(index))
+                        == Some(sidebar_line)
+                {
+                    continue;
+                }
+                let fill_style = leading_ansi_style_prefix(sidebar_line);
+                overlay_buffer.push_str(&format!(
+                    "\x1b[{row};{}H{}\x1b[{row};{}H{fill_style}\x1b[K\x1b[{row};{}H{}",
+                    overlay.separator_col,
+                    overlay.divider,
+                    overlay.content_col,
+                    overlay.content_col,
+                    sidebar_line
+                ));
+            }
+            if let Some(previous) = previous_sidebar_overlay_ref {
+                if previous.lines.len() > overlay.lines.len() {
+                    for row in overlay.lines.len() + 1..=previous.lines.len() {
+                        let fill_style = previous
+                            .lines
+                            .get(row - 1)
+                            .map(|line| leading_ansi_style_prefix(line))
+                            .unwrap_or(ANSI_BG_SIDEBAR_ITEM);
+                        overlay_buffer.push_str(&format!(
+                            "\x1b[{row};{}H{}\x1b[{row};{}H{fill_style}\x1b[K",
+                            previous.separator_col, previous.divider, previous.content_col,
+                        ));
+                    }
+                }
+            }
+        }
+        if live_surface.status_line != status_line {
+            overlay_buffer.push_str(&format!("\x1b[{status_row};1H{status_line}"));
+        }
 
-        Ok((overlay_buffer, shown_overlay.len()))
+        Ok(LiveSurfaceUiBuffer {
+            buffer: overlay_buffer,
+            overlay_rows: shown_overlay.len(),
+            sidebar_overlay,
+            separator_line,
+            keys_line,
+            status_line,
+        })
     }
 
     fn write_live_surface_ui(
@@ -1349,27 +1828,30 @@ impl App {
         renderer: &Renderer,
         console: &ConsoleState,
         scheduler: &SchedulerState,
+        sidebar: &mut SidebarState,
+        force_full_sidebar_redraw: bool,
+        sidebar_damage: Option<(usize, usize)>,
     ) -> Result<(), AppError> {
-        let (overlay_buffer, overlay_rows) = self.build_live_surface_ui_buffer(
+        let ui = self.build_live_surface_ui_buffer(
+            live_surface,
             command_prompt,
             renderer_state,
             renderer,
             console,
             scheduler,
+            sidebar,
             live_surface.overlay_rows,
+            force_full_sidebar_redraw,
+            sidebar_damage,
         )?;
 
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(overlay_buffer.as_bytes())
-            .map_err(|error| {
-                AppError::Io("failed to write live surface chrome".to_string(), error)
-            })?;
-        stdout.flush().map_err(|error| {
-            AppError::Io("failed to flush live surface chrome".to_string(), error)
-        })?;
+        self.write_ui_buffer_with_sync("live surface chrome", &ui.buffer, false)?;
         live_surface.chrome_visible = true;
-        live_surface.overlay_rows = overlay_rows;
+        live_surface.overlay_rows = ui.overlay_rows;
+        live_surface.sidebar_overlay = ui.sidebar_overlay;
+        live_surface.separator_line = ui.separator_line;
+        live_surface.keys_line = ui.keys_line;
+        live_surface.status_line = ui.status_line;
         Ok(())
     }
 
@@ -1379,12 +1861,13 @@ impl App {
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
+        sidebar: &SidebarState,
     ) -> Result<(), AppError> {
         let desired_live_session =
-            self.desired_live_surface_session(live_surface, console, command_prompt);
-        let desired_fullscreen_session = desired_live_session
-            .clone()
-            .or_else(|| self.focused_bootstrapping_session(live_surface, console, command_prompt));
+            self.desired_live_surface_session(live_surface, console, command_prompt, sidebar);
+        let desired_fullscreen_session = desired_live_session.clone().or_else(|| {
+            self.focused_bootstrapping_session(live_surface, console, command_prompt, sidebar)
+        });
         let terminal_size = self.terminal.current_size_or_default();
         let now = now_unix_ms();
 
@@ -1392,8 +1875,12 @@ impl App {
             let focused_live_session = desired_live_session.as_ref() == Some(address);
             let keep_fullscreen = desired_fullscreen_session.as_ref() == Some(address)
                 || self.session_prefers_fullscreen_background(live_surface, address);
-            let target_size =
-                live_surface_target_size(focused_live_session, keep_fullscreen, terminal_size);
+            let target_size = live_surface_target_size(
+                focused_live_session,
+                keep_fullscreen,
+                terminal_size,
+                sidebar.hidden,
+            );
             if runtime.viewport_size == target_size {
                 continue;
             }
@@ -1422,6 +1909,7 @@ impl App {
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
+        sidebar: &SidebarState,
         output_session: &SessionAddress,
         bytes: &[u8],
     ) -> Result<bool, AppError> {
@@ -1438,14 +1926,15 @@ impl App {
         if probe_detected || takeover_detected {
             live_surface.mark_session_bootstrapping(output_session.clone(), now);
         }
+        let is_bootstrapping = live_surface.is_bootstrapping(output_session, now);
+
         let prefers_live =
             self.session_prefers_live_surface(live_surface, output_session) || takeover_detected;
-        let is_bootstrapping = live_surface.is_bootstrapping(output_session, now);
         if !prefers_live && !is_bootstrapping {
             return Ok(false);
         }
 
-        self.sync_live_surface(live_surface, hosted, console, command_prompt)?;
+        self.sync_live_surface(live_surface, hosted, console, command_prompt, sidebar)?;
         Ok(takeover_detected)
     }
 
@@ -1477,7 +1966,7 @@ impl App {
             return false;
         };
 
-        screen_state.alternate_screen_active || screen_state.application_cursor_keys
+        screen_state.alternate_screen_active
     }
 
     fn session_prefers_live_surface(
@@ -1502,10 +1991,11 @@ impl App {
         live_surface: &LiveSurfaceState,
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
+        sidebar: &SidebarState,
     ) -> Option<SessionAddress> {
         let desired_live = console.focused_session.is_some()
             && !console.is_peeking()
-            && !live_overlay_visible(command_prompt)
+            && !live_overlay_visible(command_prompt, sidebar)
             && self.focused_session_prefers_live_surface(live_surface, console);
         desired_live
             .then(|| console.focused_session.clone())
@@ -1517,10 +2007,11 @@ impl App {
         live_surface: &LiveSurfaceState,
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
+        sidebar: &SidebarState,
     ) -> Option<SessionAddress> {
         let focused = console.focused_session.as_ref()?;
         if console.is_peeking()
-            || live_overlay_visible(command_prompt)
+            || live_overlay_visible(command_prompt, sidebar)
             || !live_surface.is_bootstrapping(focused, now_unix_ms())
         {
             return None;
@@ -1547,6 +2038,7 @@ impl App {
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
+        sidebar: &SidebarState,
         output_session: &SessionAddress,
     ) -> Result<bool, AppError> {
         if !live_surface.is_live_for(output_session)
@@ -1557,7 +2049,7 @@ impl App {
             return Ok(false);
         }
 
-        self.sync_live_surface(live_surface, hosted, console, command_prompt)?;
+        self.sync_live_surface(live_surface, hosted, console, command_prompt, sidebar)?;
         Ok(true)
     }
 
@@ -1572,9 +2064,19 @@ impl App {
         console: &ConsoleState,
         scheduler: &SchedulerState,
         command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<(), AppError> {
-        self.sync_live_surface(live_surface, hosted, console, command_prompt)?;
-        if self.focused_session_owns_passthrough_display(live_surface, console) {
+        let had_live_surface_display = live_surface.display_may_be_live_owned();
+        self.sync_live_surface(live_surface, hosted, console, command_prompt, sidebar)?;
+        let owns_passthrough_display =
+            self.focused_session_owns_passthrough_display(live_surface, console);
+        if had_live_surface_display && !owns_passthrough_display {
+            renderer_state.clear_frame_lines();
+            sidebar.rendered_overlay = None;
+            sidebar.force_full_redraws = sidebar.force_full_redraws.max(1);
+        }
+        if owns_passthrough_display {
+            renderer_state.clear_frame_lines();
             if live_surface.pending_redraw {
                 self.request_live_surface_redraw(live_surface, hosted)?;
             }
@@ -1585,6 +2087,9 @@ impl App {
                 renderer,
                 console,
                 scheduler,
+                sidebar,
+                true,
+                None,
             )
         } else {
             self.render_surface(
@@ -1594,6 +2099,7 @@ impl App {
                 console,
                 scheduler,
                 command_prompt,
+                sidebar,
             )
         }
     }
@@ -1623,6 +2129,7 @@ impl App {
         self.write_live_surface_snapshot(snapshot)?;
         live_surface.chrome_visible = false;
         live_surface.overlay_rows = 0;
+        live_surface.sidebar_overlay = None;
         live_surface.pending_redraw = false;
         Ok(())
     }
@@ -1632,9 +2139,15 @@ impl App {
         live_surface: &mut LiveSurfaceState,
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         snapshot_before_output: Option<&crate::terminal::ScreenSnapshot>,
+        skip_snapshot_redraw: bool,
     ) -> Result<(), AppError> {
         if live_surface.pending_redraw {
-            if let Some(snapshot) = snapshot_before_output {
+            if skip_snapshot_redraw {
+                live_surface.chrome_visible = false;
+                live_surface.overlay_rows = 0;
+                live_surface.sidebar_overlay = None;
+                live_surface.pending_redraw = false;
+            } else if let Some(snapshot) = snapshot_before_output {
                 self.complete_live_surface_redraw(live_surface, snapshot)?;
             } else {
                 self.request_live_surface_redraw(live_surface, hosted)?;
@@ -1648,8 +2161,10 @@ impl App {
         &self,
         frame: &RenderFrame,
         command_prompt: Option<&CommandPromptState>,
-    ) -> (String, CursorPlacement, bool) {
+        sidebar: Option<&SidebarRenderState>,
+    ) -> (String, CursorPlacement, bool, Option<SidebarOverlay>) {
         let width = self.terminal.current_size_or_default().cols as usize;
+        let sidebar_overlay = self.build_sidebar_overlay(sidebar);
         let mut lines =
             Vec::with_capacity(frame.viewport_lines.len() + frame.overlay_lines.len() + 3);
         if !frame.top_line.is_empty() {
@@ -1657,7 +2172,10 @@ impl App {
         }
         lines.extend(frame.styled_viewport_lines.iter().cloned());
         if !frame.overlay_lines.is_empty() {
-            lines.push(style_footer_separator_line(width));
+            lines.push(style_footer_separator_line_for_sidebar(
+                width,
+                sidebar_overlay.as_ref(),
+            ));
         }
         lines.extend(
             frame
@@ -1673,23 +2191,139 @@ impl App {
             .filter(|prompt| prompt.open)
             .map(|prompt| self.command_bar_cursor(frame, prompt))
             .unwrap_or_else(|| self.frame_cursor(frame));
-        let cursor_visible =
-            command_prompt.map(|prompt| prompt.open).unwrap_or(false) || frame.cursor_visible;
-        (lines.join("\r\n"), cursor, cursor_visible)
+        let cursor_visible = if sidebar.map(|state| state.focused).unwrap_or(false) {
+            false
+        } else {
+            command_prompt.map(|prompt| prompt.open).unwrap_or(false) || frame.cursor_visible
+        };
+        (lines.join("\r\n"), cursor, cursor_visible, sidebar_overlay)
     }
 
-    fn focused_live_surface_active_style(&self, console: &ConsoleState) -> String {
-        console
-            .focused_session
-            .as_ref()
-            .and_then(|session| self.sessions.get(session))
-            .and_then(|record| record.screen_state.as_ref())
-            .map(|state| state.active_snapshot().active_style_ansi.clone())
-            .unwrap_or_else(|| "\x1b[0m".to_string())
+    fn build_sidebar_render_state(
+        &self,
+        sidebar: Option<&mut SidebarState>,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: Option<&CommandPromptState>,
+    ) -> Option<SidebarRenderState> {
+        self.build_sidebar_render_state_at(
+            sidebar,
+            console,
+            scheduler,
+            command_prompt,
+            now_unix_ms(),
+        )
     }
 
-    fn write_full_frame(&self, frame_text: &str) -> Result<(), AppError> {
-        self.write_full_frame_at(frame_text, CursorPlacement { row: 0, col: 0 }, true)
+    fn build_sidebar_render_state_at(
+        &self,
+        sidebar: Option<&mut SidebarState>,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: Option<&CommandPromptState>,
+        now_unix_ms: u128,
+    ) -> Option<SidebarRenderState> {
+        let _command_prompt = command_prompt?;
+        let sidebar = sidebar?;
+        if !sidebar.rendered() {
+            return None;
+        }
+
+        let width = self.terminal.current_size_or_default().cols as usize;
+        let (_, sidebar_width) = sidebar_layout(width, sidebar.hidden)?;
+        let sidebar_render_width = sidebar_width.saturating_sub(1).max(1);
+        let sessions = self.sessions.list();
+        let active_sessions = picker_sessions(&sessions);
+        sidebar.sync_selection(&sessions, console.focused_session.as_ref());
+        let selected = sidebar.selected_session(&sessions, console.focused_session.as_ref());
+        let waiting_addresses = scheduler.waiting_queue().addresses();
+        let waiting = waiting_addresses
+            .iter()
+            .cloned()
+            .collect::<HashSet<SessionAddress>>();
+
+        let row_capacity = self
+            .terminal
+            .current_size_or_default()
+            .rows
+            .saturating_sub(1) as usize;
+
+        let (collapsed, lines) = if sidebar.hidden {
+            (
+                true,
+                build_collapsed_sidebar_lines(row_capacity, sidebar_render_width),
+            )
+        } else {
+            let mut lines = Vec::new();
+            lines.push(style_sidebar_header_line(
+                " Sessions  [h] hide",
+                sidebar_render_width,
+            ));
+            lines.push(style_sidebar_hint_line(
+                " ← back  ↑↓ move  enter switch",
+                sidebar_render_width,
+            ));
+
+            let detail_row = row_capacity.saturating_sub(1);
+            let session_row_capacity = detail_row.saturating_sub(lines.len());
+            for session in active_sessions.into_iter().take(session_row_capacity) {
+                let is_selected = Some(session.address()) == selected.as_ref();
+                lines.push(format_sidebar_item(
+                    session,
+                    is_selected,
+                    waiting.contains(session.address()),
+                    now_unix_ms,
+                    sidebar_render_width,
+                ));
+            }
+
+            while lines.len() < detail_row {
+                lines.push(style_sidebar_item_line("", sidebar_render_width, false));
+            }
+
+            let detail_line = selected
+                .as_ref()
+                .and_then(|address| self.sessions.get(address))
+                .map(|record| {
+                    let detail_source =
+                        build_sidebar_detail_source(record, waiting.contains(record.address()));
+                    let detail = build_sidebar_detail_text(&detail_source, sidebar_render_width);
+                    style_sidebar_detail_line(&detail, sidebar_render_width)
+                })
+                .unwrap_or_else(|| {
+                    let detail = build_sidebar_detail_text("unknown", sidebar_render_width);
+                    style_sidebar_detail_line(&detail, sidebar_render_width)
+                });
+            lines.push(detail_line);
+            (false, lines)
+        };
+
+        Some(SidebarRenderState {
+            collapsed,
+            focused: sidebar.focused,
+            width: sidebar_width,
+            lines,
+        })
+    }
+
+    fn build_sidebar_overlay(
+        &self,
+        sidebar: Option<&SidebarRenderState>,
+    ) -> Option<SidebarOverlay> {
+        let Some(sidebar) = sidebar else {
+            return None;
+        };
+        let width = self.terminal.current_size_or_default().cols as usize;
+        let Some((separator_col, _sidebar_width)) = sidebar_layout(width, sidebar.collapsed) else {
+            return None;
+        };
+        let content_col = separator_col + 1;
+        Some(SidebarOverlay {
+            separator_col,
+            content_col,
+            divider: style_sidebar_divider(),
+            lines: sidebar.lines.clone(),
+        })
     }
 
     fn frame_cursor(&self, frame: &RenderFrame) -> CursorPlacement {
@@ -1726,23 +2360,157 @@ impl App {
     fn write_full_frame_at(
         &self,
         frame_text: &str,
+        previous_frame_lines: Option<&[String]>,
+        sidebar: Option<&SidebarOverlay>,
+        previous_sidebar: Option<&SidebarOverlay>,
         cursor: CursorPlacement,
         cursor_visible: bool,
     ) -> Result<(), AppError> {
-        let buffer = build_full_frame_buffer(
+        let buffer = build_full_frame_buffer_with_sidebar_diff(
             frame_text,
+            previous_frame_lines,
+            sidebar,
+            previous_sidebar,
             cursor,
             cursor_visible,
             self.terminal.current_size_or_default().rows,
         );
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(buffer.as_bytes())
-            .map_err(|error| AppError::Io("failed to write render frame".to_string(), error))?;
-        stdout
-            .flush()
-            .map_err(|error| AppError::Io("failed to flush render frame".to_string(), error))?;
-        Ok(())
+        self.write_ui_buffer("render frame", &buffer)
+    }
+
+    fn write_sidebar_overlay_only(
+        &self,
+        sidebar: &SidebarOverlay,
+        previous_sidebar: Option<&SidebarOverlay>,
+        rendered_cursor_visible: bool,
+    ) -> Result<(), AppError> {
+        let buffer =
+            build_sidebar_overlay_buffer(sidebar, previous_sidebar, rendered_cursor_visible);
+        self.write_ui_buffer("sidebar overlay", &buffer)
+    }
+
+    fn can_redraw_sidebar_only(
+        &self,
+        previous_sidebar: &SidebarState,
+        sidebar: &SidebarState,
+        live_surface: &LiveSurfaceState,
+        console: &ConsoleState,
+        command_prompt: &CommandPromptState,
+    ) -> bool {
+        if self.focused_session_owns_passthrough_display(live_surface, console) {
+            return false;
+        }
+        if previous_sidebar.hidden != sidebar.hidden || sidebar.hidden {
+            return false;
+        }
+        if command_prompt.open || command_prompt.has_blocking_overlay() {
+            return false;
+        }
+
+        let width = self.terminal.current_size_or_default().cols as usize;
+        let previous_layout = sidebar_layout(width, previous_sidebar.hidden);
+        let current_layout = sidebar_layout(width, sidebar.hidden);
+        sidebar.rendered()
+            && previous_layout.is_some()
+            && current_layout.is_some()
+            && previous_layout == current_layout
+    }
+
+    fn redraw_sidebar_only(
+        &self,
+        previous_sidebar: &SidebarState,
+        renderer_state: &mut RendererState,
+        renderer: &Renderer,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
+    ) -> Result<bool, AppError> {
+        let overlay_lines =
+            command_prompt.overlay_lines(self.sessions.list(), console.focused_session.as_ref());
+        let _frame = renderer.render_with_state(
+            renderer_state,
+            console,
+            &self.sessions.list(),
+            RenderContext {
+                waiting_count: scheduler.waiting_queue().entries().len(),
+                overlay_lines,
+                footer_width: self.terminal.current_size_or_default().cols as usize,
+            },
+        )?;
+        let sidebar_state = self.build_sidebar_render_state(
+            Some(sidebar),
+            console,
+            scheduler,
+            Some(command_prompt),
+        );
+        let mut previous_sidebar = previous_sidebar.clone();
+        let previous_sidebar_state = self.build_sidebar_render_state(
+            Some(&mut previous_sidebar),
+            console,
+            scheduler,
+            Some(command_prompt),
+        );
+        let Some(sidebar_overlay) = self.build_sidebar_overlay(sidebar_state.as_ref()) else {
+            return Ok(false);
+        };
+        let previous_sidebar_overlay = self.build_sidebar_overlay(previous_sidebar_state.as_ref());
+        self.write_sidebar_overlay_only(
+            &sidebar_overlay,
+            previous_sidebar_overlay.as_ref(),
+            previous_sidebar.rendered_cursor_visible,
+        )?;
+        sidebar.rendered_overlay = Some(sidebar_overlay);
+        sidebar.rendered_cursor_visible = previous_sidebar.rendered_cursor_visible;
+        if sidebar.force_full_redraws > 0 {
+            sidebar.force_full_redraws -= 1;
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_after_sidebar_navigation(
+        &mut self,
+        surface: RenderSurface,
+        previous_sidebar: &SidebarState,
+        live_surface: &mut LiveSurfaceState,
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+        renderer_state: &mut RendererState,
+        renderer: &Renderer,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
+    ) -> Result<(), AppError> {
+        if self.can_redraw_sidebar_only(
+            previous_sidebar,
+            sidebar,
+            live_surface,
+            console,
+            command_prompt,
+        ) && self.redraw_sidebar_only(
+            previous_sidebar,
+            renderer_state,
+            renderer,
+            console,
+            scheduler,
+            command_prompt,
+            sidebar,
+        )? {
+            return Ok(());
+        }
+
+        self.refresh_surface(
+            surface,
+            live_surface,
+            hosted,
+            renderer_state,
+            renderer,
+            console,
+            scheduler,
+            command_prompt,
+            sidebar,
+        )
     }
 
     fn restore_terminal_screen(&self) -> Result<(), AppError> {
@@ -1822,6 +2590,7 @@ impl App {
         let mut renderer_state = RendererState::default();
         let mut input_tracker = InputTracker::default();
         let mut command_prompt = CommandPromptState::default();
+        let mut sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
         let mut hosted = HashMap::<SessionAddress, HostedSession>::new();
 
@@ -1837,12 +2606,15 @@ impl App {
             &console,
             &scheduler,
             &command_prompt,
+            &mut sidebar,
         )?;
         let mut last_waiting_count = scheduler.waiting_queue().entries().len();
         let mut last_waiting_addresses = scheduler.waiting_queue().addresses();
         let mut should_exit = false;
+        let mut pending_events = VecDeque::new();
 
         while !should_exit {
+            let mut suppress_scheduler_refresh = false;
             for mut connection in server_runtime.accept_pending()? {
                 let registration = register_client_connection(&mut server_runtime, &mut connection);
                 if let Err(error) = registration {
@@ -1876,6 +2648,7 @@ impl App {
                             &console,
                             &scheduler,
                             &command_prompt,
+                            &mut sidebar,
                         )?;
                     }
                     Err(error) => {
@@ -1887,7 +2660,7 @@ impl App {
                 }
             }
 
-            match rx.recv_timeout(EVENT_LOOP_TICK) {
+            match next_runtime_event(&rx, &mut pending_events) {
                 Ok(RuntimeEvent::Input(bytes)) => {
                     let input_received_at = now_unix_ms();
                     let allow_interrupt_exit =
@@ -1910,6 +2683,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             PickerNavigationOutcome::Submit => {
@@ -1929,6 +2703,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 } else {
                                     should_exit = self.apply_host_action(
@@ -1943,6 +2718,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 }
                             }
@@ -1969,8 +2745,56 @@ impl App {
                             &mut renderer_state,
                             &renderer,
                             &mut command_prompt,
+                            &mut sidebar,
                             RenderSurface::Server,
                         )?;
+                    } else if let Some(outcome) = {
+                        let previous_sidebar = sidebar.clone();
+                        sidebar
+                            .handle_navigation(
+                                &bytes,
+                                &self.sessions.list(),
+                                console.focused_session.as_ref(),
+                                console.can_switch(),
+                                &command_prompt,
+                                input_received_at,
+                            )
+                            .map(|outcome| (previous_sidebar, outcome))
+                    } {
+                        let (previous_sidebar, outcome) = outcome;
+                        match outcome {
+                            SidebarNavigationOutcome::Consumed => {}
+                            SidebarNavigationOutcome::Render => {
+                                self.refresh_after_sidebar_navigation(
+                                    RenderSurface::Server,
+                                    &previous_sidebar,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                    &mut sidebar,
+                                )?;
+                            }
+                            SidebarNavigationOutcome::Submit(address) => {
+                                should_exit = self.apply_host_action(
+                                    ConsoleAction::FocusAddress(address),
+                                    runtime,
+                                    terminal_snapshot.size,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &tx,
+                                    &mut console,
+                                    &mut scheduler,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &mut command_prompt,
+                                    &mut sidebar,
+                                )?;
+                            }
+                        }
                     } else if let Some(action) = parse_console_action(
                         &bytes,
                         command_prompt.wants_escape_dismiss(),
@@ -1992,6 +2816,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             ConsoleAction::NextSession
@@ -2009,6 +2834,7 @@ impl App {
                                     &console,
                                     &scheduler,
                                     &command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                             _ => {
@@ -2024,6 +2850,7 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                 )?;
                             }
                         }
@@ -2042,6 +2869,7 @@ impl App {
                             &mut renderer_state,
                             &renderer,
                             &mut command_prompt,
+                            &mut sidebar,
                         )?;
                     } else if command_prompt.submit_overlay(&bytes) {
                         if let Some(index) = command_prompt.selected_picker_index(
@@ -2060,6 +2888,7 @@ impl App {
                                 &mut renderer_state,
                                 &renderer,
                                 &mut command_prompt,
+                                &mut sidebar,
                             )?;
                         } else {
                             should_exit = self.apply_host_action(
@@ -2074,6 +2903,7 @@ impl App {
                                 &mut renderer_state,
                                 &renderer,
                                 &mut command_prompt,
+                                &mut sidebar,
                             )?;
                         }
                     } else {
@@ -2101,6 +2931,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     PickerNavigationOutcome::Submit => {
@@ -2120,6 +2951,7 @@ impl App {
                                                 &mut renderer_state,
                                                 &renderer,
                                                 &mut command_prompt,
+                                                &mut sidebar,
                                             )?;
                                         } else {
                                             should_exit = self.apply_host_action(
@@ -2134,6 +2966,7 @@ impl App {
                                                 &mut renderer_state,
                                                 &renderer,
                                                 &mut command_prompt,
+                                                &mut sidebar,
                                             )?;
                                         }
                                     }
@@ -2152,8 +2985,56 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                     RenderSurface::Server,
                                 )?;
+                            } else if let Some((previous_sidebar, outcome)) = {
+                                let previous_sidebar = sidebar.clone();
+                                sidebar
+                                    .handle_navigation(
+                                        &single,
+                                        &self.sessions.list(),
+                                        console.focused_session.as_ref(),
+                                        console.can_switch(),
+                                        &command_prompt,
+                                        now_unix_ms(),
+                                    )
+                                    .map(|outcome| (previous_sidebar, outcome))
+                            } {
+                                handled_control = true;
+                                match outcome {
+                                    SidebarNavigationOutcome::Consumed => {}
+                                    SidebarNavigationOutcome::Render => {
+                                        self.refresh_after_sidebar_navigation(
+                                            RenderSurface::Server,
+                                            &previous_sidebar,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &console,
+                                            &scheduler,
+                                            &command_prompt,
+                                            &mut sidebar,
+                                        )?;
+                                    }
+                                    SidebarNavigationOutcome::Submit(address) => {
+                                        should_exit = self.apply_host_action(
+                                            ConsoleAction::FocusAddress(address),
+                                            runtime,
+                                            terminal_snapshot.size,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &tx,
+                                            &mut console,
+                                            &mut scheduler,
+                                            &mut renderer_state,
+                                            &renderer,
+                                            &mut command_prompt,
+                                            &mut sidebar,
+                                        )?;
+                                    }
+                                }
                             } else if let Some(action) = parse_console_action(
                                 &single,
                                 command_prompt.wants_escape_dismiss(),
@@ -2176,6 +3057,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     ConsoleAction::NextSession
@@ -2193,6 +3075,7 @@ impl App {
                                             &console,
                                             &scheduler,
                                             &command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                     _ => {
@@ -2208,6 +3091,7 @@ impl App {
                                             &mut renderer_state,
                                             &renderer,
                                             &mut command_prompt,
+                                            &mut sidebar,
                                         )?;
                                     }
                                 }
@@ -2227,6 +3111,7 @@ impl App {
                                     &mut renderer_state,
                                     &renderer,
                                     &mut command_prompt,
+                                    &mut sidebar,
                                 )?;
                             } else if command_prompt.submit_overlay(&single) {
                                 handled_control = true;
@@ -2246,6 +3131,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 } else {
                                     should_exit = self.apply_host_action(
@@ -2260,6 +3146,7 @@ impl App {
                                         &mut renderer_state,
                                         &renderer,
                                         &mut command_prompt,
+                                        &mut sidebar,
                                     )?;
                                 }
                             } else {
@@ -2272,7 +3159,15 @@ impl App {
                         }
 
                         if !should_exit {
-                            let bytes_to_forward = if handled_control { residual } else { bytes };
+                            let bytes_to_forward = if sidebar.modal_active(&command_prompt) {
+                                Vec::new()
+                            } else if handled_control {
+                                residual
+                            } else {
+                                bytes
+                            };
+                            let mut refresh_after_live_command = false;
+                            let previous_sidebar = sidebar.clone();
                             if let Some(target) = console.input_owner_session().cloned() {
                                 if !bytes_to_forward.is_empty() {
                                     command_prompt
@@ -2284,8 +3179,17 @@ impl App {
                                         now_unix_ms(),
                                     );
                                     let mut forwarded = Vec::new();
-                                    let mut submitted_live_command = false;
+                                    let mut submitted_live_command = None;
+                                    let mut pending_live_command = None;
                                     if let Some(runtime) = hosted.get_mut(&target) {
+                                        let snapshot_live_command =
+                                            if bytes_include_submit(&bytes_to_forward) {
+                                                live_command_label_from_shell_snapshot(
+                                                    runtime.screen_engine.state().active_snapshot(),
+                                                )
+                                            } else {
+                                                None
+                                            };
                                         forwarded = runtime.input_normalizer.normalize(
                                             &bytes_to_forward,
                                             runtime.screen_engine.application_cursor_keys(),
@@ -2294,32 +3198,25 @@ impl App {
                                         submitted_live_command = runtime
                                             .command_tracker
                                             .observe(&bytes_to_forward)
-                                            .map(|command| looks_like_live_command(&command))
-                                            .unwrap_or(false);
+                                            .and_then(|command| live_command_label(&command))
+                                            .or(snapshot_live_command);
+                                        pending_live_command =
+                                            runtime.command_tracker.pending_live_command_label();
                                     }
-                                    if submitted_live_command {
+                                    if let Some(command_title) = submitted_live_command {
+                                        self.set_session_title(&target, command_title);
                                         live_surface.mark_known_live_command(target.clone());
                                         live_surface.mark_session_bootstrapping(
                                             target.clone(),
                                             now_unix_ms(),
                                         );
                                         scheduler.on_manual_switch(&mut console);
-                                        self.sync_live_surface(
-                                            &mut live_surface,
-                                            &mut hosted,
-                                            &console,
-                                            &command_prompt,
-                                        )?;
-                                        self.refresh_surface(
-                                            RenderSurface::Server,
-                                            &mut live_surface,
-                                            &mut hosted,
-                                            &mut renderer_state,
-                                            &renderer,
-                                            &console,
-                                            &scheduler,
-                                            &command_prompt,
-                                        )?;
+                                        suppress_scheduler_refresh = true;
+                                        refresh_after_live_command = true;
+                                    } else if let Some(command_title) = pending_live_command {
+                                        self.set_session_title(&target, command_title);
+                                    } else if !live_surface.is_known_live_command(&target) {
+                                        self.restore_shell_session_title(&target);
                                     }
                                     if !forwarded.is_empty() {
                                         self.sessions.mark_input(&target);
@@ -2327,6 +3224,35 @@ impl App {
                                             runtime.handle.write_all(&forwarded)?;
                                         }
                                     }
+                                }
+                            }
+                            if refresh_after_live_command {
+                                if !self.can_redraw_sidebar_only(
+                                    &previous_sidebar,
+                                    &sidebar,
+                                    &live_surface,
+                                    &console,
+                                    &command_prompt,
+                                ) || !self.redraw_sidebar_only(
+                                    &previous_sidebar,
+                                    &mut renderer_state,
+                                    &renderer,
+                                    &console,
+                                    &scheduler,
+                                    &command_prompt,
+                                    &mut sidebar,
+                                )? {
+                                    self.refresh_surface(
+                                        RenderSurface::Server,
+                                        &mut live_surface,
+                                        &mut hosted,
+                                        &mut renderer_state,
+                                        &renderer,
+                                        &console,
+                                        &scheduler,
+                                        &command_prompt,
+                                        &mut sidebar,
+                                    )?;
                                 }
                             }
                         }
@@ -2337,28 +3263,64 @@ impl App {
                     session: output_session,
                     bytes,
                 }) => {
+                    buffer_pending_runtime_events(&rx, &mut pending_events);
+                    if pending_events.iter().any(runtime_event_is_input_priority) {
+                        pending_events.push_front(RuntimeEvent::Output {
+                            session: output_session,
+                            bytes,
+                        });
+                        continue;
+                    }
                     let mut should_passthrough_output = false;
                     let mut should_refresh_surface = false;
                     let mut snapshot_before_output = None;
+                    let mut snapshot_after_output = None;
+                    let mut first_substantive_output = false;
 
                     if let Some(runtime) = hosted.get_mut(&output_session) {
                         snapshot_before_output =
                             Some(runtime.screen_engine.state().active_snapshot().clone());
                         let substantive_output = output_is_substantive(&bytes);
+                        first_substantive_output = substantive_output
+                            && self
+                                .sessions
+                                .get(&output_session)
+                                .and_then(|record| record.last_output_at_unix_ms)
+                                .is_none();
+                        let mut cleared_live_command = false;
                         if substantive_output {
                             self.sessions.mark_output(&output_session);
                         }
                         let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
+                        snapshot_after_output =
+                            Some(runtime.screen_engine.state().active_snapshot().clone());
+                        let release_detected = looks_like_terminal_release_output(&bytes);
+                        let title_reconciled = self
+                            .reconcile_session_title_with_foreground_process(
+                                &output_session,
+                                runtime,
+                                &mut live_surface,
+                                now_unix_ms(),
+                            )?;
+                        if release_detected {
+                            live_surface.clear_session_bootstrapping(&output_session);
+                            suppress_scheduler_refresh = true;
+                        }
                         if live_surface.is_known_live_command(&output_session)
-                            && looks_like_shell_prompt_output(&bytes)
-                            && !looks_like_terminal_takeover_output(&bytes)
-                            && !looks_like_terminal_probe_output(&bytes)
-                            && !live_surface.is_bootstrapping(&output_session, now_unix_ms())
+                            && ((looks_like_shell_prompt_output(&bytes)
+                                && !looks_like_terminal_takeover_output(&bytes)
+                                && !looks_like_terminal_probe_output(&bytes)
+                                && !live_surface.is_bootstrapping(&output_session, now_unix_ms()))
+                                || release_detected)
                         {
                             live_surface.clear_known_live_command(&output_session);
+                            cleared_live_command = true;
                         }
                         self.sessions
                             .update_screen_state(&output_session, runtime.screen_engine.state());
+                        if cleared_live_command {
+                            self.restore_shell_session_title(&output_session);
+                        }
                         if !replies.is_empty() {
                             runtime.handle.write_all(&replies)?;
                         }
@@ -2374,23 +3336,32 @@ impl App {
                             &mut hosted,
                             &console,
                             &command_prompt,
+                            &sidebar,
                             &output_session,
                             &bytes,
                         )?;
-                        if self.maybe_deactivate_live_surface_after_output(
-                            &mut live_surface,
-                            &mut hosted,
-                            &console,
-                            &command_prompt,
-                            &output_session,
-                        )? {
-                            should_refresh_surface = true;
-                        } else if live_surface.is_live_for(&output_session) {
+                        let deactivated_live_surface = self
+                            .maybe_deactivate_live_surface_after_output(
+                                &mut live_surface,
+                                &mut hosted,
+                                &console,
+                                &command_prompt,
+                                &sidebar,
+                                &output_session,
+                            )?;
+                        if deactivated_live_surface {
+                            let shell_prompt_detected = looks_like_shell_prompt_output(&bytes);
+                            should_refresh_surface =
+                                !release_detected || substantive_output || shell_prompt_detected;
+                        } else if live_surface.is_live_for(&output_session)
+                            && console.focused_session.as_ref() == Some(&output_session)
+                        {
                             should_passthrough_output = true;
                         } else if focused_passthrough_output(
                             &live_surface,
                             &console,
                             &command_prompt,
+                            &sidebar,
                             &output_session,
                         ) {
                             should_passthrough_output = true;
@@ -2399,24 +3370,40 @@ impl App {
                         {
                             should_refresh_surface = true;
                         }
+                        if title_reconciled {
+                            should_refresh_surface = true;
+                        }
                     }
 
                     if should_passthrough_output {
+                        let skip_snapshot_redraw = live_output_can_skip_snapshot_redraw(
+                            &live_surface,
+                            &output_session,
+                            &bytes,
+                            now_unix_ms(),
+                        );
                         self.prepare_live_surface_passthrough(
                             &mut live_surface,
                             &mut hosted,
                             snapshot_before_output.as_ref(),
+                            skip_snapshot_redraw,
                         )?;
                         self.write_live_surface_output_with_ui(
                             &bytes,
+                            snapshot_before_output.as_ref(),
+                            snapshot_after_output.as_ref(),
                             &mut live_surface,
                             &command_prompt,
                             &mut renderer_state,
                             &renderer,
                             &console,
                             &scheduler,
+                            &mut sidebar,
                         )?;
                     } else if should_refresh_surface {
+                        if first_substantive_output {
+                            sidebar.rendered_overlay = None;
+                        }
                         self.refresh_surface(
                             RenderSurface::Server,
                             &mut live_surface,
@@ -2426,6 +3413,7 @@ impl App {
                             &console,
                             &scheduler,
                             &command_prompt,
+                            &mut sidebar,
                         )?;
                     }
                 }
@@ -2445,6 +3433,7 @@ impl App {
                             &console,
                             &scheduler,
                             &command_prompt,
+                            &mut sidebar,
                         )?;
                     }
                 }
@@ -2464,6 +3453,21 @@ impl App {
                     &console,
                     &scheduler,
                     &command_prompt,
+                    &mut sidebar,
+                )?;
+            }
+
+            if sidebar.flush_navigation_timeout(&command_prompt, now) {
+                self.refresh_surface(
+                    RenderSurface::Server,
+                    &mut live_surface,
+                    &mut hosted,
+                    &mut renderer_state,
+                    &renderer,
+                    &console,
+                    &scheduler,
+                    &command_prompt,
+                    &mut sidebar,
                 )?;
             }
 
@@ -2489,12 +3493,22 @@ impl App {
                     &console,
                     &scheduler,
                     &command_prompt,
+                    &mut sidebar,
                 )?;
             }
 
             if !command_prompt.open
                 && !self.focused_session_owns_passthrough_display(&live_surface, &console)
             {
+                let suppress_scheduler_refresh = suppress_scheduler_refresh
+                    || console
+                        .focused_session
+                        .as_ref()
+                        .map(|session| {
+                            live_surface.is_known_live_command(session)
+                                || live_surface.is_bootstrapping(session, now)
+                        })
+                        .unwrap_or(false);
                 let decision =
                     scheduler.decide_auto_switch(&mut console, self.sessions.list(), now_unix_ms());
                 let waiting_count = scheduler.waiting_queue().entries().len();
@@ -2509,16 +3523,19 @@ impl App {
                 if !matches!(decision.action, SchedulingAction::None)
                     || waiting_count != last_waiting_count
                 {
-                    self.refresh_surface(
-                        RenderSurface::Server,
-                        &mut live_surface,
-                        &mut hosted,
-                        &mut renderer_state,
-                        &renderer,
-                        &console,
-                        &scheduler,
-                        &command_prompt,
-                    )?;
+                    if !suppress_scheduler_refresh {
+                        self.refresh_surface(
+                            RenderSurface::Server,
+                            &mut live_surface,
+                            &mut hosted,
+                            &mut renderer_state,
+                            &renderer,
+                            &console,
+                            &scheduler,
+                            &command_prompt,
+                            &mut sidebar,
+                        )?;
+                    }
                 }
                 last_waiting_count = waiting_count;
                 last_waiting_addresses = waiting_addresses;
@@ -2542,6 +3559,7 @@ impl App {
             request.program,
             request.args,
             size,
+            false,
             hosted,
             tx,
         )
@@ -2556,6 +3574,103 @@ impl App {
             .collect()
     }
 
+    fn set_session_title(&mut self, address: &SessionAddress, title: impl Into<String>) {
+        let _ = self.sessions.set_title(address, title);
+    }
+
+    fn restore_shell_session_title(&mut self, address: &SessionAddress) {
+        let Some(title) = self
+            .sessions
+            .get(address)
+            .map(|record| shell_title_from_command_line(&record.command_line))
+        else {
+            return;
+        };
+        self.set_session_title(address, title);
+    }
+
+    fn reconcile_session_title_with_foreground_process(
+        &mut self,
+        address: &SessionAddress,
+        runtime: &HostedSession,
+        live_surface: &mut LiveSurfaceState,
+        now_unix_ms: u128,
+    ) -> Result<bool, AppError> {
+        let Some((current_title, command_line)) = self
+            .sessions
+            .get(address)
+            .map(|record| (record.title.clone(), record.command_line.clone()))
+        else {
+            return Ok(false);
+        };
+
+        let foreground_name = runtime.handle.foreground_process_name()?;
+        let bootstrapping = live_surface.is_bootstrapping(address, now_unix_ms);
+
+        match foreground_title_decision(&command_line, foreground_name.as_deref(), bootstrapping) {
+            ForegroundTitleDecision::Keep => Ok(false),
+            ForegroundTitleDecision::SetLive(title) => {
+                let changed =
+                    current_title != title || !live_surface.is_known_live_command(address);
+                self.set_session_title(address, title);
+                live_surface.mark_known_live_command(address.clone());
+                Ok(changed)
+            }
+            ForegroundTitleDecision::RestoreShell(title) => {
+                let changed = current_title != title || live_surface.is_known_live_command(address);
+                self.set_session_title(address, title);
+                live_surface.clear_known_live_command(address);
+                Ok(changed)
+            }
+        }
+    }
+
+    fn warm_up_shell_session(
+        &mut self,
+        rx: &mpsc::Receiver<RuntimeEvent>,
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+        max_wait: Duration,
+    ) -> Result<(), AppError> {
+        let deadline = Instant::now() + max_wait;
+
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            if remaining.is_zero() {
+                break;
+            }
+
+            match rx.recv_timeout(remaining.min(Duration::from_millis(20))) {
+                Ok(RuntimeEvent::Output {
+                    session: output_session,
+                    bytes,
+                }) => {
+                    let Some(runtime) = hosted.get_mut(&output_session) else {
+                        continue;
+                    };
+                    let substantive_output = output_is_substantive(&bytes);
+                    if substantive_output {
+                        self.sessions.mark_output(&output_session);
+                    }
+                    let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
+                    self.sessions
+                        .update_screen_state(&output_session, runtime.screen_engine.state());
+                    if !replies.is_empty() {
+                        runtime.handle.write_all(&replies)?;
+                    }
+                    if looks_like_shell_prompt_output(&bytes) {
+                        break;
+                    }
+                }
+                Ok(RuntimeEvent::OutputClosed { .. }) => break,
+                Ok(RuntimeEvent::InputClosed) => break,
+                Ok(RuntimeEvent::Input(_)) => {}
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        Ok(())
+    }
+
     fn render_workspace_console(
         &self,
         renderer_state: &mut RendererState,
@@ -2563,6 +3678,7 @@ impl App {
         console: &ConsoleState,
         scheduler: &SchedulerState,
         command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<(), AppError> {
         let overlay_lines =
             command_prompt.overlay_lines(self.sessions.list(), console.focused_session.as_ref());
@@ -2575,14 +3691,36 @@ impl App {
                 .count();
             let waiting_count = scheduler.waiting_queue().entries().len();
             let status_line = command_prompt.status_line("focus: none | mode: workspace-idle");
-            let idle_frame = self.render_idle_frame(
+            let (idle_frame, sidebar_overlay) = self.render_idle_frame(
                 "workspace",
                 active_count,
                 waiting_count,
                 &overlay_lines,
                 &status_line,
+                Some(sidebar),
+                console,
+                scheduler,
+                Some(command_prompt),
             );
-            self.write_full_frame(&idle_frame)?;
+            let suppress_sidebar_diff = sidebar.force_full_redraws > 0;
+            let previous_sidebar_overlay = if suppress_sidebar_diff {
+                None
+            } else {
+                sidebar.rendered_overlay.clone()
+            };
+            self.write_full_frame_at(
+                &idle_frame,
+                None,
+                sidebar_overlay.as_ref(),
+                previous_sidebar_overlay.as_ref(),
+                CursorPlacement { row: 0, col: 0 },
+                true,
+            )?;
+            sidebar.rendered_overlay = sidebar_overlay;
+            sidebar.rendered_cursor_visible = true;
+            if sidebar.force_full_redraws > 0 {
+                sidebar.force_full_redraws -= 1;
+            }
             return Ok(());
         }
 
@@ -2593,6 +3731,7 @@ impl App {
             scheduler,
             overlay_lines,
             Some(command_prompt),
+            Some(sidebar),
         )
     }
 
@@ -2603,6 +3742,7 @@ impl App {
         console: &ConsoleState,
         scheduler: &SchedulerState,
         command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<(), AppError> {
         let overlay_lines =
             command_prompt.overlay_lines(self.sessions.list(), console.focused_session.as_ref());
@@ -2615,14 +3755,36 @@ impl App {
                 .count();
             let waiting_count = scheduler.waiting_queue().entries().len();
             let status_line = command_prompt.status_line("focus: none | mode: host-idle");
-            let idle_frame = self.render_idle_frame(
+            let (idle_frame, sidebar_overlay) = self.render_idle_frame(
                 "host",
                 active_count,
                 waiting_count,
                 &overlay_lines,
                 &status_line,
+                Some(sidebar),
+                console,
+                scheduler,
+                Some(command_prompt),
             );
-            self.write_full_frame(&idle_frame)?;
+            let suppress_sidebar_diff = sidebar.force_full_redraws > 0;
+            let previous_sidebar_overlay = if suppress_sidebar_diff {
+                None
+            } else {
+                sidebar.rendered_overlay.clone()
+            };
+            self.write_full_frame_at(
+                &idle_frame,
+                None,
+                sidebar_overlay.as_ref(),
+                previous_sidebar_overlay.as_ref(),
+                CursorPlacement { row: 0, col: 0 },
+                true,
+            )?;
+            sidebar.rendered_overlay = sidebar_overlay;
+            sidebar.rendered_cursor_visible = true;
+            if sidebar.force_full_redraws > 0 {
+                sidebar.force_full_redraws -= 1;
+            }
             return Ok(());
         }
 
@@ -2633,6 +3795,7 @@ impl App {
             scheduler,
             overlay_lines,
             Some(command_prompt),
+            Some(sidebar),
         )
     }
 
@@ -2649,12 +3812,18 @@ impl App {
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         command_prompt: &mut CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<bool, AppError> {
         let active_addresses = self.active_session_addresses();
         let changed = match action {
             ConsoleAction::CreateSession => {
-                let address =
-                    self.spawn_default_shell_session(&runtime.node.node_id, size, hosted, tx)?;
+                let address = self.spawn_default_shell_session(
+                    &runtime.node.node_id,
+                    size,
+                    sidebar.hidden,
+                    hosted,
+                    tx,
+                )?;
                 console.focus(address);
                 command_prompt.set_message("Created new session.");
                 true
@@ -2695,6 +3864,13 @@ impl App {
             }
             ConsoleAction::FocusIndex(index) => {
                 let changed = console.focus_index(&active_addresses, index).is_some();
+                if changed {
+                    command_prompt.clear_overlay();
+                }
+                changed
+            }
+            ConsoleAction::FocusAddress(ref address) => {
+                let changed = console.focus_address(&active_addresses, address).is_some();
                 if changed {
                     command_prompt.clear_overlay();
                 }
@@ -2728,6 +3904,7 @@ impl App {
                 console,
                 scheduler,
                 command_prompt,
+                sidebar,
             )?;
         }
 
@@ -2747,12 +3924,18 @@ impl App {
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         command_prompt: &mut CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<bool, AppError> {
         let active_addresses = self.active_session_addresses();
         let changed = match action {
             ConsoleAction::CreateSession => {
-                let address =
-                    self.spawn_default_shell_session(&runtime.node.node_id, size, hosted, tx)?;
+                let address = self.spawn_default_shell_session(
+                    &runtime.node.node_id,
+                    size,
+                    sidebar.hidden,
+                    hosted,
+                    tx,
+                )?;
                 console.focus(address);
                 command_prompt.set_message("Created new session.");
                 true
@@ -2798,6 +3981,13 @@ impl App {
                 }
                 changed
             }
+            ConsoleAction::FocusAddress(ref address) => {
+                let changed = console.focus_address(&active_addresses, address).is_some();
+                if changed {
+                    command_prompt.clear_overlay();
+                }
+                changed
+            }
             ConsoleAction::TogglePeek => {
                 if console.is_peeking() {
                     console.exit_peek().is_some()
@@ -2826,6 +4016,7 @@ impl App {
                 console,
                 scheduler,
                 command_prompt,
+                sidebar,
             )?;
         }
 
@@ -2845,6 +4036,7 @@ impl App {
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         command_prompt: &mut CommandPromptState,
+        sidebar: &mut SidebarState,
         surface: RenderSurface,
     ) -> Result<bool, AppError> {
         match outcome {
@@ -2858,6 +4050,7 @@ impl App {
                     console,
                     scheduler,
                     command_prompt,
+                    sidebar,
                 )?;
                 Ok(false)
             }
@@ -2873,6 +4066,7 @@ impl App {
                 renderer_state,
                 renderer,
                 command_prompt,
+                sidebar,
                 surface,
             ),
         }
@@ -2892,6 +4086,7 @@ impl App {
         renderer_state: &mut RendererState,
         renderer: &Renderer,
         command_prompt: &mut CommandPromptState,
+        sidebar: &mut SidebarState,
         surface: RenderSurface,
     ) -> Result<bool, AppError> {
         let trimmed = command.trim();
@@ -2902,8 +4097,13 @@ impl App {
         } else if matches!(trimmed, "/h" | "/help") {
             command_prompt.toggle_help();
         } else if trimmed == "/new" {
-            let address =
-                self.spawn_default_shell_session(&runtime.node.node_id, size, hosted, tx)?;
+            let address = self.spawn_default_shell_session(
+                &runtime.node.node_id,
+                size,
+                sidebar.hidden,
+                hosted,
+                tx,
+            )?;
             console.focus(address.clone());
             scheduler.on_manual_switch(console);
             command_prompt.set_message(format!("Created {address}."));
@@ -2970,6 +4170,7 @@ impl App {
             console,
             scheduler,
             command_prompt,
+            sidebar,
         )?;
         Ok(should_exit)
     }
@@ -3029,6 +4230,7 @@ impl App {
         console: &ConsoleState,
         scheduler: &SchedulerState,
         command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
     ) -> Result<(), AppError> {
         match surface {
             RenderSurface::Workspace => self.render_workspace_console(
@@ -3037,6 +4239,7 @@ impl App {
                 console,
                 scheduler,
                 command_prompt,
+                sidebar,
             ),
             RenderSurface::Server => self.render_host_console(
                 renderer_state,
@@ -3044,6 +4247,7 @@ impl App {
                 console,
                 scheduler,
                 command_prompt,
+                sidebar,
             ),
         }
     }
@@ -3055,7 +4259,11 @@ impl App {
         waiting_count: usize,
         overlay_lines: &[String],
         bottom_line: &str,
-    ) -> String {
+        sidebar: Option<&mut SidebarState>,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: Option<&CommandPromptState>,
+    ) -> (String, Option<SidebarOverlay>) {
         let mut lines = workspace_idle_lines(surface, active_count, waiting_count);
         let target_rows = self.terminal.current_size_or_default().rows as usize;
         let show_footer_menu = !overlay_lines.is_empty();
@@ -3070,11 +4278,15 @@ impl App {
         lines.extend(overlay_lines.iter().map(|line| {
             style_overlay_line(line, self.terminal.current_size_or_default().cols as usize)
         }));
+        let status_line = bottom_line.to_string();
+        let sidebar_state =
+            self.build_sidebar_render_state(sidebar, console, scheduler, command_prompt);
         lines.push(style_status_line(
-            bottom_line,
+            &status_line,
             self.terminal.current_size_or_default().cols as usize,
         ));
-        lines.join("\r\n")
+        let sidebar_overlay = self.build_sidebar_overlay(sidebar_state.as_ref());
+        (lines.join("\r\n"), sidebar_overlay)
     }
 
     fn handle_server(&mut self, command: ServerCommand) -> Result<(), AppError> {
@@ -3101,10 +4313,26 @@ struct LiveSurfaceState {
     known_live_command_sessions: HashSet<SessionAddress>,
     chrome_visible: bool,
     overlay_rows: usize,
+    sidebar_overlay: Option<SidebarOverlay>,
+    separator_line: String,
+    keys_line: String,
+    status_line: String,
     pending_redraw: bool,
+    pending_sync_marker_bytes: Vec<u8>,
+    pending_agent_output_batch: Vec<u8>,
+    agent_sync_batch_open: bool,
 }
 
 impl LiveSurfaceState {
+    fn display_may_be_live_owned(&self) -> bool {
+        self.session.is_some()
+            && (self.active
+                || self.chrome_visible
+                || self.overlay_rows > 0
+                || self.sidebar_overlay.is_some()
+                || self.pending_redraw)
+    }
+
     fn is_live_for(&self, session: &SessionAddress) -> bool {
         self.active && self.session.as_ref() == Some(session)
     }
@@ -3124,6 +4352,10 @@ impl LiveSurfaceState {
 
     fn clear_known_live_command(&mut self, session: &SessionAddress) {
         self.known_live_command_sessions.remove(session);
+    }
+
+    fn clear_session_bootstrapping(&mut self, session: &SessionAddress) {
+        self.bootstrapping_sessions.remove(session);
     }
 
     fn is_known_live_command(&self, session: &SessionAddress) -> bool {
@@ -3151,11 +4383,25 @@ impl LiveSurfaceState {
         if !self.active {
             self.chrome_visible = false;
             self.overlay_rows = 0;
+            self.sidebar_overlay = None;
+            self.separator_line.clear();
+            self.keys_line.clear();
+            self.status_line.clear();
+            self.pending_sync_marker_bytes.clear();
+            self.pending_agent_output_batch.clear();
+            self.agent_sync_batch_open = false;
         }
         if self.session.is_none() {
             self.chrome_visible = false;
             self.overlay_rows = 0;
+            self.sidebar_overlay = None;
+            self.separator_line.clear();
+            self.keys_line.clear();
+            self.status_line.clear();
             self.pending_redraw = false;
+            self.pending_sync_marker_bytes.clear();
+            self.pending_agent_output_batch.clear();
+            self.agent_sync_batch_open = false;
         }
     }
 
@@ -3164,6 +4410,13 @@ impl LiveSurfaceState {
         let needs_redraw = self.chrome_visible || self.overlay_rows > 0;
         self.chrome_visible = false;
         self.overlay_rows = 0;
+        self.sidebar_overlay = None;
+        self.separator_line.clear();
+        self.keys_line.clear();
+        self.status_line.clear();
+        self.pending_sync_marker_bytes.clear();
+        self.pending_agent_output_batch.clear();
+        self.agent_sync_batch_open = false;
         if needs_redraw {
             self.pending_redraw = true;
         }
@@ -3177,13 +4430,30 @@ struct CursorPlacement {
     col: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidebarOverlay {
+    separator_col: usize,
+    content_col: usize,
+    divider: String,
+    lines: Vec<String>,
+}
+
+struct LiveSurfaceUiBuffer {
+    buffer: String,
+    overlay_rows: usize,
+    sidebar_overlay: Option<SidebarOverlay>,
+    separator_line: String,
+    keys_line: String,
+    status_line: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderSurface {
     Workspace,
     Server,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConsoleAction {
     CreateSession,
     ListSessions,
@@ -3192,6 +4462,7 @@ enum ConsoleAction {
     NextSession,
     PreviousSession,
     FocusIndex(usize),
+    FocusAddress(SessionAddress),
     TogglePeek,
     QuitHost,
 }
@@ -3544,7 +4815,7 @@ impl CommandPromptState {
             }
         }
 
-        lines.push("keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit".to_string());
+        lines.push("keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^Q quit".to_string());
 
         if self.open {
             lines.push(format!(":{}", self.buffer));
@@ -3623,6 +4894,234 @@ impl CommandPromptState {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SidebarState {
+    focused: bool,
+    hidden: bool,
+    selection: Option<SessionAddress>,
+    rendered_overlay: Option<SidebarOverlay>,
+    rendered_cursor_visible: bool,
+    force_full_redraws: u8,
+    pending_navigation_escape: Vec<u8>,
+    pending_navigation_started_at_unix_ms: Option<u128>,
+}
+
+impl SidebarState {
+    fn rendered(&self) -> bool {
+        true
+    }
+
+    fn modal_active(&self, command_prompt: &CommandPromptState) -> bool {
+        self.focused
+            && !self.hidden
+            && !command_prompt.open
+            && !command_prompt.has_blocking_overlay()
+    }
+
+    fn sync_selection(
+        &mut self,
+        sessions: &[&crate::session::SessionRecord],
+        focused: Option<&SessionAddress>,
+    ) {
+        let active = picker_sessions(sessions);
+        if active.is_empty() {
+            self.selection = None;
+            return;
+        }
+
+        if self
+            .selection
+            .as_ref()
+            .map(|selected| active.iter().any(|session| session.address() == selected))
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        self.selection = focused
+            .filter(|target| active.iter().any(|session| session.address() == *target))
+            .cloned()
+            .or_else(|| active.first().map(|session| session.address().clone()));
+    }
+
+    fn handle_navigation(
+        &mut self,
+        bytes: &[u8],
+        sessions: &[&crate::session::SessionRecord],
+        focused: Option<&SessionAddress>,
+        allow_entry: bool,
+        command_prompt: &CommandPromptState,
+        now_unix_ms: u128,
+    ) -> Option<SidebarNavigationOutcome> {
+        if self.hidden {
+            self.clear_pending_navigation_escape();
+            if !allow_entry || command_prompt.open || command_prompt.has_blocking_overlay() {
+                return None;
+            }
+
+            return match sidebar_escape_action(bytes) {
+                Some(SidebarEscapeAction::Open | SidebarEscapeAction::Close) => {
+                    self.hidden = false;
+                    self.focused = true;
+                    self.sync_selection(sessions, focused);
+                    Some(SidebarNavigationOutcome::Render)
+                }
+                _ => None,
+            };
+        }
+
+        if !self.focused {
+            self.clear_pending_navigation_escape();
+            if !allow_entry || command_prompt.open || command_prompt.has_blocking_overlay() {
+                return None;
+            }
+
+            return match sidebar_escape_action(bytes) {
+                Some(SidebarEscapeAction::Open) => {
+                    self.focused = true;
+                    self.sync_selection(sessions, focused);
+                    Some(SidebarNavigationOutcome::Render)
+                }
+                _ => None,
+            };
+        }
+
+        if !self.modal_active(command_prompt) {
+            self.clear_pending_navigation_escape();
+            return None;
+        }
+
+        let mut combined = self.pending_navigation_escape.clone();
+        combined.extend_from_slice(bytes);
+
+        match sidebar_escape_action(&combined) {
+            Some(SidebarEscapeAction::Open) => {
+                self.clear_pending_navigation_escape();
+                Some(SidebarNavigationOutcome::Consumed)
+            }
+            Some(SidebarEscapeAction::Close) => {
+                self.clear_pending_navigation_escape();
+                self.focused = false;
+                Some(SidebarNavigationOutcome::Render)
+            }
+            Some(SidebarEscapeAction::Hide) => {
+                self.clear_pending_navigation_escape();
+                self.focused = false;
+                self.hidden = true;
+                Some(SidebarNavigationOutcome::Render)
+            }
+            Some(SidebarEscapeAction::Previous) => {
+                self.clear_pending_navigation_escape();
+                let moved = self.move_selection(sessions, focused, -1);
+                Some(if moved {
+                    SidebarNavigationOutcome::Render
+                } else {
+                    SidebarNavigationOutcome::Consumed
+                })
+            }
+            Some(SidebarEscapeAction::Next) => {
+                self.clear_pending_navigation_escape();
+                let moved = self.move_selection(sessions, focused, 1);
+                Some(if moved {
+                    SidebarNavigationOutcome::Render
+                } else {
+                    SidebarNavigationOutcome::Consumed
+                })
+            }
+            Some(SidebarEscapeAction::Submit) => {
+                self.clear_pending_navigation_escape();
+                self.focused = false;
+                self.sync_selection(sessions, focused);
+                self.selection
+                    .clone()
+                    .map(SidebarNavigationOutcome::Submit)
+                    .or(Some(SidebarNavigationOutcome::Consumed))
+            }
+            None if combined.first() == Some(&0x1b)
+                && consume_input_escape(&combined, 0).is_none() =>
+            {
+                self.pending_navigation_escape = combined;
+                self.pending_navigation_started_at_unix_ms = Some(now_unix_ms);
+                Some(SidebarNavigationOutcome::Consumed)
+            }
+            None => {
+                self.clear_pending_navigation_escape();
+                None
+            }
+        }
+    }
+
+    fn flush_navigation_timeout(
+        &mut self,
+        command_prompt: &CommandPromptState,
+        now_unix_ms: u128,
+    ) -> bool {
+        if !self.modal_active(command_prompt) {
+            self.clear_pending_navigation_escape();
+            return false;
+        }
+
+        let Some(started_at) = self.pending_navigation_started_at_unix_ms else {
+            return false;
+        };
+
+        if now_unix_ms.saturating_sub(started_at) < SIDEBAR_NAVIGATION_TIMEOUT_MS {
+            return false;
+        }
+
+        let pending = self.pending_navigation_escape.clone();
+        self.clear_pending_navigation_escape();
+        if pending == [0x1b] {
+            self.focused = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn selected_session(
+        &mut self,
+        sessions: &[&crate::session::SessionRecord],
+        focused: Option<&SessionAddress>,
+    ) -> Option<SessionAddress> {
+        self.sync_selection(sessions, focused);
+        self.selection.clone()
+    }
+
+    fn move_selection(
+        &mut self,
+        sessions: &[&crate::session::SessionRecord],
+        focused: Option<&SessionAddress>,
+        delta: isize,
+    ) -> bool {
+        let active = picker_sessions(sessions);
+        if active.is_empty() {
+            self.selection = None;
+            return false;
+        }
+
+        self.sync_selection(sessions, focused);
+        let current = self
+            .selection
+            .as_ref()
+            .and_then(|selected| {
+                active
+                    .iter()
+                    .position(|session| session.address() == selected)
+            })
+            .unwrap_or(0);
+        let len = active.len() as isize;
+        let next = ((current as isize + delta).rem_euclid(len)) as usize;
+        self.selection = Some(active[next].address().clone());
+        true
+    }
+
+    fn clear_pending_navigation_escape(&mut self) {
+        self.pending_navigation_escape.clear();
+        self.pending_navigation_started_at_unix_ms = None;
+    }
+}
+
 fn live_overlay_lines(
     command_prompt: &CommandPromptState,
     sessions: Vec<&crate::session::SessionRecord>,
@@ -3639,49 +5138,161 @@ fn picker_session_cwd(session: &crate::session::SessionRecord) -> &str {
     session.current_working_dir.as_deref().unwrap_or("unknown")
 }
 
-fn live_overlay_visible(command_prompt: &CommandPromptState) -> bool {
-    command_prompt.open || command_prompt.has_blocking_overlay()
+fn live_overlay_visible(command_prompt: &CommandPromptState, sidebar: &SidebarState) -> bool {
+    command_prompt.open
+        || command_prompt.has_blocking_overlay()
+        || sidebar.modal_active(command_prompt)
 }
 
 #[derive(Debug, Default)]
 struct ShellCommandTracker {
     buffer: String,
+    pending_escape: Vec<u8>,
 }
 
 impl ShellCommandTracker {
     fn observe(&mut self, bytes: &[u8]) -> Option<String> {
-        let mut submitted = None;
+        let mut input = Vec::with_capacity(self.pending_escape.len() + bytes.len());
+        input.extend_from_slice(&self.pending_escape);
+        input.extend_from_slice(bytes);
+        self.pending_escape.clear();
 
-        for &byte in bytes {
-            match byte {
+        let mut submitted = None;
+        let mut index = 0;
+        while index < input.len() {
+            match input[index] {
                 b'\r' | b'\n' => {
                     let command = self.buffer.trim().to_string();
                     self.buffer.clear();
                     if !command.is_empty() {
                         submitted = Some(command);
                     }
+                    index += 1;
                 }
                 0x08 | 0x7f => {
                     self.buffer.pop();
+                    index += 1;
                 }
-                0x03 | 0x04 | 0x1b => {
+                0x03 | 0x04 => {
                     self.buffer.clear();
+                    index += 1;
                 }
+                0x1b => match consume_input_escape(&input, index) {
+                    Some(next_index) => {
+                        if matches_submit_escape(&input[index..next_index]) {
+                            let command = self.buffer.trim().to_string();
+                            self.buffer.clear();
+                            if !command.is_empty() {
+                                submitted = Some(command);
+                            }
+                        }
+                        index = next_index;
+                    }
+                    None => {
+                        self.pending_escape.extend_from_slice(&input[index..]);
+                        break;
+                    }
+                },
                 byte if (0x20..=0x7e).contains(&byte) => {
                     self.buffer.push(byte as char);
+                    index += 1;
                 }
-                _ => {}
+                _ => {
+                    index += 1;
+                }
             }
         }
 
         submitted
     }
+
+    fn pending_live_command_label(&self) -> Option<String> {
+        live_command_label(self.buffer.trim())
+    }
+}
+
+fn bytes_include_submit(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' | b'\n' => return true,
+            0x1b => match consume_input_escape(bytes, index) {
+                Some(next_index) => {
+                    if matches_submit_escape(&bytes[index..next_index]) {
+                        return true;
+                    }
+                    index = next_index;
+                }
+                None => break,
+            },
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn live_command_label_from_shell_snapshot(
+    snapshot: &crate::terminal::ScreenSnapshot,
+) -> Option<String> {
+    if snapshot.alternate_screen {
+        return None;
+    }
+
+    let line = snapshot.lines.get(snapshot.cursor_row as usize)?;
+    let visible_prefix = line
+        .chars()
+        .take(snapshot.cursor_col as usize)
+        .collect::<String>();
+    let submitted_command = extract_shell_prompt_command(&visible_prefix)?;
+    live_command_label(&submitted_command)
+}
+
+fn extract_shell_prompt_command(line: &str) -> Option<String> {
+    let trimmed = line.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    ["$ ", "# ", "% ", "> ", ": "]
+        .iter()
+        .filter_map(|marker| {
+            trimmed
+                .rsplit_once(marker)
+                .map(|(_, command)| command.trim())
+        })
+        .find(|command| !command.is_empty())
+        .map(ToString::to_string)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerNavigationOutcome {
     Consumed,
     Render,
+    Submit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidebarRenderState {
+    collapsed: bool,
+    focused: bool,
+    width: usize,
+    lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarNavigationOutcome {
+    Consumed,
+    Render,
+    Submit(SessionAddress),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarEscapeAction {
+    Open,
+    Close,
+    Hide,
+    Previous,
+    Next,
     Submit,
 }
 
@@ -3715,7 +5326,19 @@ fn picker_escape_action(bytes: &[u8]) -> Option<PickerEscapeAction> {
         b"\x1b[A" | b"\x1bOA" => Some(PickerEscapeAction::Previous),
         b"\x1b[B" | b"\x1bOB" => Some(PickerEscapeAction::Next),
         b"\x1bOM" => Some(PickerEscapeAction::Submit),
-        _ if matches_kitty_enter(bytes) => Some(PickerEscapeAction::Submit),
+        _ if matches_submit_escape(bytes) => Some(PickerEscapeAction::Submit),
+        _ => None,
+    }
+}
+
+fn sidebar_escape_action(bytes: &[u8]) -> Option<SidebarEscapeAction> {
+    match bytes {
+        b"\x1b[C" | b"\x1bOC" => Some(SidebarEscapeAction::Open),
+        b"\x1b[D" | b"\x1bOD" => Some(SidebarEscapeAction::Close),
+        b"h" | b"H" => Some(SidebarEscapeAction::Hide),
+        b"\x1b[A" | b"\x1bOA" => Some(SidebarEscapeAction::Previous),
+        b"\x1b[B" | b"\x1bOB" => Some(SidebarEscapeAction::Next),
+        _ if matches_overlay_submit(bytes) => Some(SidebarEscapeAction::Submit),
         _ => None,
     }
 }
@@ -3730,6 +5353,51 @@ fn matches_kitty_enter(bytes: &[u8]) -> bool {
     let mut parts = payload.split(|byte| *byte == b';');
     matches!(parts.next(), Some(b"13"))
         && parts.all(|part| !part.is_empty() && part.iter().all(|byte| byte.is_ascii_digit()))
+}
+
+fn matches_submit_escape(bytes: &[u8]) -> bool {
+    bytes == b"\x1bOM" || matches_kitty_enter(bytes) || matches_csi_tilde_enter(bytes)
+}
+
+fn matches_csi_tilde_enter(bytes: &[u8]) -> bool {
+    let Some(payload) = bytes.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    let Some(payload) = payload.strip_suffix(b"~") else {
+        return false;
+    };
+    let mut saw_digit = false;
+    let mut last_value = 0_u32;
+    let mut current_value = 0_u32;
+    let mut in_value = false;
+
+    for &byte in payload {
+        match byte {
+            b'0'..=b'9' => {
+                in_value = true;
+                current_value = current_value
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(byte - b'0'));
+            }
+            b';' => {
+                if !in_value {
+                    return false;
+                }
+                saw_digit = true;
+                last_value = current_value;
+                current_value = 0;
+                in_value = false;
+            }
+            _ => return false,
+        }
+    }
+
+    if !in_value && !saw_digit {
+        return false;
+    }
+
+    let final_value = if in_value { current_value } else { last_value };
+    final_value == 13
 }
 
 #[derive(Debug, Default)]
@@ -3896,11 +5564,47 @@ enum RuntimeEvent {
     },
 }
 
+fn runtime_event_is_input_priority(event: &RuntimeEvent) -> bool {
+    matches!(event, RuntimeEvent::Input(_) | RuntimeEvent::InputClosed)
+}
+
+fn buffer_pending_runtime_events(
+    rx: &Receiver<RuntimeEvent>,
+    pending_events: &mut VecDeque<RuntimeEvent>,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(event) => pending_events.push_back(event),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn next_runtime_event(
+    rx: &Receiver<RuntimeEvent>,
+    pending_events: &mut VecDeque<RuntimeEvent>,
+) -> Result<RuntimeEvent, RecvTimeoutError> {
+    if let Some(index) = pending_events
+        .iter()
+        .position(runtime_event_is_input_priority)
+    {
+        return Ok(pending_events
+            .remove(index)
+            .expect("pending input event index must exist"));
+    }
+
+    if let Some(event) = pending_events.pop_front() {
+        return Ok(event);
+    }
+
+    rx.recv_timeout(EVENT_LOOP_TICK)
+}
+
 fn workspace_idle_lines(surface: &str, active_count: usize, waiting_count: usize) -> Vec<String> {
     vec![
         format!("WaitAgent | {surface}"),
         format!("active: {active_count} | waiting: {waiting_count}"),
-        "hint: Ctrl-W command bar | Ctrl-B/Ctrl-F switch | Ctrl-C quit".to_string(),
+        "hint: Ctrl-W command bar | Ctrl-B/Ctrl-F switch | Ctrl-Q quit".to_string(),
     ]
 }
 
@@ -3929,12 +5633,14 @@ fn focused_passthrough_output(
     live_surface: &LiveSurfaceState,
     console: &ConsoleState,
     command_prompt: &CommandPromptState,
+    sidebar: &SidebarState,
     output_session: &SessionAddress,
 ) -> bool {
     console.focused_session.as_ref() == Some(output_session)
         && !console.is_peeking()
         && !command_prompt.open
         && !command_prompt.has_blocking_overlay()
+        && !sidebar.modal_active(command_prompt)
         && live_surface.owns_display(output_session, now_unix_ms())
 }
 
@@ -3947,11 +5653,135 @@ fn looks_like_terminal_takeover_output(bytes: &[u8]) -> bool {
     let has_hide_cursor = contains_escape_sequence(bytes, b"\x1b[?25l");
     let has_cursor_positioning = bytes.contains(&b'H') && contains_escape_sequence(bytes, b"\x1b[");
     let has_clear = contains_escape_sequence(bytes, b"\x1b[2J");
+    let has_sync_takeover = has_private_sync
+        && (has_alt_screen || has_application_cursor || has_hide_cursor || has_clear);
 
     has_alt_screen
         || has_application_cursor
-        || has_private_sync
+        || has_sync_takeover
         || (has_hide_cursor && (has_cursor_positioning || has_clear))
+}
+
+fn build_ui_write_payload(buffer: &str, synchronized_updates: bool) -> String {
+    if synchronized_updates {
+        format!("{ANSI_SYNC_UPDATE_START}{buffer}{ANSI_SYNC_UPDATE_END}")
+    } else {
+        buffer.to_string()
+    }
+}
+
+#[cfg(test)]
+fn strip_sync_update_markers(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(ANSI_SYNC_UPDATE_START.as_bytes()) {
+            index += ANSI_SYNC_UPDATE_START.len();
+            continue;
+        }
+        if bytes[index..].starts_with(ANSI_SYNC_UPDATE_END.as_bytes()) {
+            index += ANSI_SYNC_UPDATE_END.len();
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    output
+}
+
+#[cfg(test)]
+fn strip_sync_update_markers_stream(bytes: &[u8], pending_tail: &mut Vec<u8>) -> Vec<u8> {
+    let mut combined = Vec::with_capacity(pending_tail.len() + bytes.len());
+    combined.extend_from_slice(pending_tail);
+    combined.extend_from_slice(bytes);
+    pending_tail.clear();
+
+    let tail_len = sync_marker_partial_suffix_len(&combined);
+    let split_at = combined.len().saturating_sub(tail_len);
+    if tail_len > 0 {
+        pending_tail.extend_from_slice(&combined[split_at..]);
+    }
+
+    strip_sync_update_markers(&combined[..split_at])
+}
+
+fn extract_live_output_batches(
+    bytes: &[u8],
+    pending_tail: &mut Vec<u8>,
+    pending_batch: &mut Vec<u8>,
+    sync_batch_open: &mut bool,
+) -> Vec<Vec<u8>> {
+    let mut combined = Vec::with_capacity(pending_tail.len() + bytes.len());
+    combined.extend_from_slice(pending_tail);
+    combined.extend_from_slice(bytes);
+    pending_tail.clear();
+
+    let tail_len = sync_marker_partial_suffix_len(&combined);
+    let split_at = combined.len().saturating_sub(tail_len);
+    if tail_len > 0 {
+        pending_tail.extend_from_slice(&combined[split_at..]);
+    }
+
+    let mut batches = Vec::new();
+    let mut immediate = Vec::new();
+    let mut index = 0;
+    while index < split_at {
+        if combined[index..split_at].starts_with(ANSI_SYNC_UPDATE_START.as_bytes()) {
+            if !*sync_batch_open && !immediate.is_empty() {
+                batches.push(std::mem::take(&mut immediate));
+            }
+            *sync_batch_open = true;
+            index += ANSI_SYNC_UPDATE_START.len();
+            continue;
+        }
+        if combined[index..split_at].starts_with(ANSI_SYNC_UPDATE_END.as_bytes()) {
+            if *sync_batch_open {
+                batches.push(std::mem::take(pending_batch));
+                *sync_batch_open = false;
+            }
+            index += ANSI_SYNC_UPDATE_END.len();
+            continue;
+        }
+
+        if *sync_batch_open {
+            pending_batch.push(combined[index]);
+        } else {
+            immediate.push(combined[index]);
+        }
+        index += 1;
+    }
+
+    if !immediate.is_empty() {
+        batches.push(immediate);
+    }
+
+    batches
+}
+
+fn sync_marker_partial_suffix_len(bytes: &[u8]) -> usize {
+    let markers = [
+        ANSI_SYNC_UPDATE_START.as_bytes(),
+        ANSI_SYNC_UPDATE_END.as_bytes(),
+    ];
+    let max_len = markers
+        .iter()
+        .map(|marker| marker.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
+
+    for len in (1..=max_len.min(bytes.len())).rev() {
+        let suffix = &bytes[bytes.len() - len..];
+        if markers
+            .iter()
+            .any(|marker| marker.starts_with(suffix) && marker.len() > len)
+        {
+            return len;
+        }
+    }
+
+    0
 }
 
 fn looks_like_terminal_probe_output(bytes: &[u8]) -> bool {
@@ -3960,6 +5790,12 @@ fn looks_like_terminal_probe_output(bytes: &[u8]) -> bool {
         || contains_escape_sequence(bytes, b"\x1b[>7u")
         || contains_escape_sequence(bytes, b"\x1b[?1004h")
         || contains_escape_sequence(bytes, b"\x1b]10;?")
+}
+
+fn looks_like_terminal_release_output(bytes: &[u8]) -> bool {
+    contains_escape_sequence(bytes, b"\x1b[?1049l")
+        || contains_escape_sequence(bytes, b"\x1b[?1047l")
+        || contains_escape_sequence(bytes, b"\x1b[?1048l")
 }
 
 fn output_is_substantive(bytes: &[u8]) -> bool {
@@ -4016,17 +5852,196 @@ fn output_is_substantive(bytes: &[u8]) -> bool {
     false
 }
 
+#[cfg(test)]
 fn live_output_needs_chrome_redraw(bytes: &[u8]) -> bool {
-    looks_like_terminal_takeover_output(bytes) || looks_like_terminal_probe_output(bytes)
+    looks_like_terminal_release_output(bytes)
+        || looks_like_terminal_destructive_repaint_output(bytes)
+        || live_output_sidebar_damage(bytes).is_some()
 }
 
-fn looks_like_live_command(command: &str) -> bool {
-    let first = command.split_whitespace().next().unwrap_or_default();
-    let name = Path::new(first)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(first);
-    matches!(name, "codex" | "claude" | "claude-code" | "kilo")
+fn live_output_can_skip_snapshot_redraw(
+    live_surface: &LiveSurfaceState,
+    output_session: &SessionAddress,
+    bytes: &[u8],
+    now_unix_ms: u128,
+) -> bool {
+    looks_like_terminal_takeover_output(bytes)
+        || looks_like_terminal_probe_output(bytes)
+        || (live_surface.pending_redraw
+            && live_surface.is_known_live_command(output_session)
+            && live_surface.is_bootstrapping(output_session, now_unix_ms))
+}
+
+#[cfg(test)]
+fn live_output_sidebar_damage(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    let mut cursor_row = 1usize;
+    let mut scroll_region: Option<(usize, usize)> = None;
+    let mut damage: Option<(usize, usize)> = None;
+    let mut cursor_known = false;
+
+    while index + 2 < bytes.len() {
+        if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'M' {
+            let (start, end) = scroll_region.unwrap_or((1, usize::MAX));
+            damage = Some(match damage {
+                Some((previous_start, previous_end)) => {
+                    (previous_start.min(start), previous_end.max(end))
+                }
+                None => (start, end),
+            });
+            index += 2;
+            continue;
+        }
+
+        if bytes[index] != 0x1b || bytes[index + 1] != b'[' {
+            index += 1;
+            continue;
+        }
+
+        let sequence_start = index + 2;
+        let mut sequence_end = sequence_start;
+        while sequence_end < bytes.len() {
+            let byte = bytes[sequence_end];
+            if (0x40..=0x7e).contains(&byte) {
+                break;
+            }
+            sequence_end += 1;
+        }
+        if sequence_end >= bytes.len() {
+            break;
+        }
+
+        let final_byte = bytes[sequence_end];
+        let params = std::str::from_utf8(&bytes[sequence_start..sequence_end]).ok();
+        match final_byte {
+            b'H' | b'f' => {
+                let mut parts = params.unwrap_or("").split(';');
+                let row = parts
+                    .next()
+                    .and_then(|value| {
+                        if value.is_empty() {
+                            Some(1)
+                        } else {
+                            value.parse::<usize>().ok()
+                        }
+                    })
+                    .unwrap_or(1);
+                cursor_row = row.max(1);
+                cursor_known = true;
+            }
+            b'K' => {
+                let row = if cursor_known { cursor_row.max(1) } else { 1 };
+                damage = Some(match damage {
+                    Some((previous_start, previous_end)) => {
+                        (previous_start.min(row), previous_end.max(row))
+                    }
+                    None => (row, row),
+                });
+            }
+            b'J' => {
+                let mode = params
+                    .unwrap_or("")
+                    .split(';')
+                    .next()
+                    .and_then(|value| {
+                        if value.is_empty() {
+                            Some(0)
+                        } else {
+                            value.parse::<usize>().ok()
+                        }
+                    })
+                    .unwrap_or(0);
+                let affected = match mode {
+                    0 => {
+                        if cursor_known {
+                            Some((cursor_row.max(1), usize::MAX))
+                        } else {
+                            Some((1, usize::MAX))
+                        }
+                    }
+                    1 => {
+                        if cursor_known {
+                            Some((1, cursor_row.max(1)))
+                        } else {
+                            Some((1, usize::MAX))
+                        }
+                    }
+                    2 | 3 => Some((1, usize::MAX)),
+                    _ => None,
+                };
+                if let Some((start, end)) = affected {
+                    damage = Some(match damage {
+                        Some((previous_start, previous_end)) => {
+                            (previous_start.min(start), previous_end.max(end))
+                        }
+                        None => (start, end),
+                    });
+                }
+            }
+            b'r' => {
+                let mut parts = params.unwrap_or("").split(';');
+                let top = parts
+                    .next()
+                    .and_then(|value| {
+                        if value.is_empty() {
+                            Some(1)
+                        } else {
+                            value.parse::<usize>().ok()
+                        }
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                let bottom = parts
+                    .next()
+                    .and_then(|value| {
+                        if value.is_empty() {
+                            None
+                        } else {
+                            value.parse::<usize>().ok()
+                        }
+                    })
+                    .unwrap_or(usize::MAX)
+                    .max(top);
+                scroll_region = Some((top, bottom));
+            }
+            _ => {}
+        }
+
+        index = sequence_end + 1;
+    }
+
+    damage
+}
+
+fn live_output_requires_full_sidebar_redraw(bytes: &[u8]) -> bool {
+    looks_like_terminal_takeover_output(bytes)
+        || looks_like_terminal_release_output(bytes)
+        || contains_escape_sequence(bytes, b"\x1b[2J")
+        || contains_escape_sequence(bytes, b"\x1b[1J")
+        || contains_escape_sequence(bytes, b"\x1b[3J")
+}
+
+fn live_output_requires_full_sidebar_redraw_from_snapshots(
+    before: Option<&crate::terminal::ScreenSnapshot>,
+    after: Option<&crate::terminal::ScreenSnapshot>,
+) -> bool {
+    let (before, after) = match (before, after) {
+        (Some(before), Some(after)) => (before, after),
+        _ => return false,
+    };
+
+    before.size != after.size
+        || before.alternate_screen != after.alternate_screen
+        || before.scroll_top != after.scroll_top
+        || before.scroll_bottom != after.scroll_bottom
+}
+
+#[cfg(test)]
+fn looks_like_terminal_destructive_repaint_output(bytes: &[u8]) -> bool {
+    contains_escape_sequence(bytes, b"\x1b[J")
+        || contains_escape_sequence(bytes, b"\x1b[0J")
+        || contains_escape_sequence(bytes, b"\x1b[1J")
+        || contains_escape_sequence(bytes, b"\x1b[2J")
 }
 
 fn looks_like_shell_prompt_output(bytes: &[u8]) -> bool {
@@ -4164,6 +6179,217 @@ fn is_typing_byte(byte: u8) -> bool {
     byte >= 0x20 && byte != 0x7f
 }
 
+fn sidebar_layout(width: usize, collapsed: bool) -> Option<(usize, usize)> {
+    if width < 64 {
+        return None;
+    }
+
+    let sidebar_width = if collapsed {
+        COLLAPSED_SIDEBAR_WIDTH
+    } else if width >= 120 {
+        36
+    } else if width >= 96 {
+        32
+    } else {
+        28
+    };
+    let separator_col = width.checked_sub(sidebar_width)?;
+    (separator_col > 20).then_some((separator_col, sidebar_width))
+}
+
+fn style_sidebar_divider() -> String {
+    format!("{ANSI_FG_FOOTER_DIVIDER}┃{ANSI_RESET}")
+}
+
+fn style_sidebar_header_line(line: &str, width: usize) -> String {
+    format!(
+        "{ANSI_BG_SIDEBAR_HEADER}{}{ANSI_RESET}",
+        pad_line(line, width)
+    )
+}
+
+fn style_sidebar_hint_line(line: &str, width: usize) -> String {
+    format!(
+        "{ANSI_BG_SIDEBAR_HINT}{}{ANSI_RESET}",
+        pad_line(line, width)
+    )
+}
+
+fn style_sidebar_item_line(line: &str, width: usize, active: bool) -> String {
+    let style = if active {
+        ANSI_BG_SIDEBAR_ACTIVE
+    } else {
+        ANSI_BG_SIDEBAR_ITEM
+    };
+    format!("{style}{}{ANSI_RESET}", pad_line(line, width))
+}
+
+fn style_sidebar_detail_line(line: &str, width: usize) -> String {
+    format!(
+        "{ANSI_BG_SIDEBAR_DETAIL}{}{ANSI_RESET}",
+        pad_line(line, width)
+    )
+}
+
+fn build_collapsed_sidebar_lines(row_capacity: usize, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if row_capacity == 0 {
+        return lines;
+    }
+
+    lines.push(style_sidebar_hint_line("←", width));
+    while lines.len() < row_capacity {
+        lines.push(style_sidebar_item_line("", width, false));
+    }
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarDisplayStatus {
+    Running,
+    Input,
+    Confirm,
+}
+
+fn sidebar_display_status(
+    session: &crate::session::SessionRecord,
+    waiting: bool,
+) -> SidebarDisplayStatus {
+    if waiting || matches!(session.status, SessionStatus::WaitingInput) {
+        if session_requires_confirmation(session) {
+            SidebarDisplayStatus::Confirm
+        } else {
+            SidebarDisplayStatus::Input
+        }
+    } else {
+        SidebarDisplayStatus::Running
+    }
+}
+
+fn sidebar_status_badge(status: SidebarDisplayStatus, now_unix_ms: u128) -> &'static str {
+    match status {
+        SidebarDisplayStatus::Running => match ((now_unix_ms / 500) % 3) as usize {
+            0 => "🍳R",
+            1 => "🍲R",
+            _ => "🔥R",
+        },
+        SidebarDisplayStatus::Input => "🔊I",
+        SidebarDisplayStatus::Confirm => "📢C",
+    }
+}
+
+fn sidebar_item_style(active: bool) -> &'static str {
+    if active {
+        ANSI_BG_SIDEBAR_ACTIVE
+    } else {
+        ANSI_BG_SIDEBAR_ITEM
+    }
+}
+
+fn style_sidebar_badge(
+    status: SidebarDisplayStatus,
+    now_unix_ms: u128,
+    active: bool,
+) -> (String, usize) {
+    let badge = sidebar_status_badge(status, now_unix_ms);
+    let color = match status {
+        SidebarDisplayStatus::Running => ANSI_FG_SIDEBAR_RUNNING,
+        SidebarDisplayStatus::Input => ANSI_FG_SIDEBAR_INPUT,
+        SidebarDisplayStatus::Confirm => ANSI_FG_SIDEBAR_CONFIRM,
+    };
+    let base_style = sidebar_item_style(active);
+    (
+        format!("{color}{badge}{base_style}"),
+        display_width(badge.chars()) as usize,
+    )
+}
+
+fn sidebar_status_label(status: SidebarDisplayStatus) -> &'static str {
+    match status {
+        SidebarDisplayStatus::Running => "RUNNING",
+        SidebarDisplayStatus::Input => "INPUT",
+        SidebarDisplayStatus::Confirm => "CONFIRM",
+    }
+}
+
+fn sidebar_base_label(session: &crate::session::SessionRecord) -> String {
+    let title = session.title.trim();
+    if !title.is_empty() {
+        return title.to_string();
+    }
+
+    session
+        .command_line
+        .split_whitespace()
+        .next()
+        .and_then(|value| Path::new(value).file_name().and_then(|name| name.to_str()))
+        .filter(|value| !value.is_empty())
+        .unwrap_or("bash")
+        .to_string()
+}
+
+fn sidebar_session_label(session: &crate::session::SessionRecord) -> String {
+    format!(
+        "{}@{}",
+        sidebar_base_label(session),
+        session.address().node_id()
+    )
+}
+
+fn session_requires_confirmation(session: &crate::session::SessionRecord) -> bool {
+    let Some(screen_state) = session.screen_state.as_ref() else {
+        return false;
+    };
+    let snapshot = screen_state.active_snapshot();
+    snapshot.lines.iter().any(|line| {
+        let visible = line.trim().to_ascii_lowercase();
+        !visible.is_empty()
+            && (visible.contains("approve")
+                || visible.contains("approval")
+                || visible.contains("confirm")
+                || visible.contains("continue?")
+                || visible.contains("allow")
+                || visible.contains("permission")
+                || visible.contains("[y/n]")
+                || visible.contains("(y/n)")
+                || visible.contains("yes/no"))
+    })
+}
+
+fn build_sidebar_detail_source(session: &crate::session::SessionRecord, waiting: bool) -> String {
+    let status = sidebar_display_status(session, waiting);
+    format!(
+        "{} | {}",
+        sidebar_session_label(session),
+        sidebar_status_label(status),
+    )
+}
+
+fn build_sidebar_detail_text(detail: &str, width: usize) -> String {
+    let text = take_display_width(detail.chars(), width);
+    let padding = width.saturating_sub(display_width(text.chars()) as usize);
+    format!("{}{}", " ".repeat(padding), text)
+}
+
+fn format_sidebar_item(
+    session: &crate::session::SessionRecord,
+    selected: bool,
+    waiting: bool,
+    now_unix_ms: u128,
+    width: usize,
+) -> String {
+    let status = sidebar_display_status(session, waiting);
+    let (badge, badge_width) = style_sidebar_badge(status, now_unix_ms, selected);
+    let label = sidebar_session_label(session);
+    let available_label_width = width.saturating_sub(2 + badge_width);
+    let mut label = take_display_width(label.chars(), available_label_width);
+    let padding = available_label_width.saturating_sub(display_width(label.chars()) as usize);
+    label.push_str(&" ".repeat(padding));
+    let marker = if selected { ">" } else { " " };
+    let style = sidebar_item_style(selected);
+    format!("{style}{marker} {label} {badge}{ANSI_RESET}")
+}
+
 fn style_overlay_line(line: &str, width: usize) -> String {
     let padded = pad_line(line, width);
     if line.starts_with(':') {
@@ -4190,28 +6416,129 @@ fn style_footer_separator_line(width: usize) -> String {
     format!("{ANSI_FG_FOOTER_DIVIDER}{line}{ANSI_RESET}")
 }
 
+fn style_footer_separator_line_for_sidebar(
+    width: usize,
+    sidebar: Option<&SidebarOverlay>,
+) -> String {
+    let Some(sidebar) = sidebar else {
+        return style_footer_separator_line(width);
+    };
+
+    let main_width = sidebar.separator_col.saturating_sub(1);
+    let divider = "┃";
+    let tail_width = width.saturating_sub(main_width + divider.chars().count());
+    format!(
+        "{ANSI_FG_FOOTER_DIVIDER}{}{ANSI_RESET}{}{ANSI_BG_SIDEBAR_ITEM}{}{ANSI_RESET}",
+        "━".repeat(main_width),
+        divider,
+        " ".repeat(tail_width)
+    )
+}
+
+#[cfg(test)]
 fn build_full_frame_buffer(
     frame_text: &str,
     cursor: CursorPlacement,
     cursor_visible: bool,
     terminal_rows: u16,
 ) -> String {
+    build_full_frame_buffer_with_sidebar(frame_text, None, cursor, cursor_visible, terminal_rows)
+}
+
+#[cfg(test)]
+fn build_full_frame_buffer_with_sidebar(
+    frame_text: &str,
+    sidebar: Option<&SidebarOverlay>,
+    cursor: CursorPlacement,
+    cursor_visible: bool,
+    terminal_rows: u16,
+) -> String {
+    build_full_frame_buffer_with_sidebar_diff(
+        frame_text,
+        None,
+        sidebar,
+        None,
+        cursor,
+        cursor_visible,
+        terminal_rows,
+    )
+}
+
+fn build_full_frame_buffer_with_sidebar_diff(
+    frame_text: &str,
+    previous_frame_lines: Option<&[String]>,
+    sidebar: Option<&SidebarOverlay>,
+    previous_sidebar: Option<&SidebarOverlay>,
+    cursor: CursorPlacement,
+    cursor_visible: bool,
+    terminal_rows: u16,
+) -> String {
     let mut buffer = String::from(RESET_FRAME_CURSOR);
+    buffer.push_str("\x1b[?25l");
     let lines = if frame_text.is_empty() {
         Vec::new()
     } else {
         frame_text.split("\r\n").collect::<Vec<_>>()
     };
+    let total_rows = sidebar
+        .map(|overlay| overlay.lines.len().max(lines.len()))
+        .unwrap_or(lines.len());
 
-    for (index, line) in lines.iter().enumerate() {
-        let row = index + 1;
-        buffer.push_str(&format!("\x1b[{row};1H{line}\x1b[K"));
+    for row in 1..=total_rows {
+        let line = lines.get(row - 1).copied().unwrap_or("");
+        let previous_main_line = previous_frame_lines
+            .and_then(|previous| previous.get(row - 1))
+            .map(String::as_str)
+            .unwrap_or("");
+        let redraw_main_row = previous_frame_lines.is_none() || previous_main_line != line;
+        if let Some(overlay) = sidebar {
+            if let Some(sidebar_line) = overlay.lines.get(row - 1) {
+                let separator_col = overlay.separator_col;
+                let content_col = overlay.content_col;
+                let main_width = separator_col.saturating_sub(1);
+                let main_line = truncate_ansi_line(line, main_width);
+                if redraw_main_row {
+                    buffer.push_str(&format!(
+                        "\x1b[{row};1H{ANSI_RESET}{}\x1b[{row};1H{main_line}",
+                        " ".repeat(main_width),
+                    ));
+                }
+                let previous_sidebar_line =
+                    previous_sidebar.and_then(|previous| previous.lines.get(row - 1));
+                let redraw_sidebar_row = previous_sidebar_line != Some(sidebar_line)
+                    || previous_sidebar
+                        .map(|previous| {
+                            previous.separator_col != separator_col
+                                || previous.content_col != content_col
+                        })
+                        .unwrap_or(true);
+                if redraw_sidebar_row {
+                    let fill_style = leading_ansi_style_prefix(sidebar_line);
+                    buffer.push_str(&format!(
+                        "\x1b[{row};{separator_col}H{}\x1b[{row};{content_col}H{fill_style}\x1b[K\x1b[{row};{content_col}H{sidebar_line}",
+                        overlay.divider,
+                    ));
+                }
+                continue;
+            }
+        }
+        if redraw_main_row {
+            buffer.push_str(&format!("\x1b[{row};1H\x1b[K\x1b[{row};1H{line}"));
+        }
     }
 
-    let terminal_rows = terminal_rows.max(1) as usize;
-    let clear_start_row = if lines.is_empty() { 1 } else { lines.len() + 1 };
-    if clear_start_row <= terminal_rows {
-        for row in clear_start_row..=terminal_rows {
+    let previous_total_rows = previous_frame_lines
+        .filter(|previous| !previous.is_empty())
+        .map(|previous| previous.len())
+        .unwrap_or(terminal_rows.max(1) as usize)
+        .max(
+            previous_sidebar
+                .map(|previous| previous.lines.len())
+                .unwrap_or(0),
+        );
+    let clear_start_row = if total_rows == 0 { 1 } else { total_rows + 1 };
+    if clear_start_row <= previous_total_rows {
+        for row in clear_start_row..=previous_total_rows {
             buffer.push_str(&format!("\x1b[{row};1H\x1b[K"));
         }
     }
@@ -4229,14 +6556,236 @@ fn build_full_frame_buffer(
     buffer
 }
 
+fn split_frame_lines(frame_text: &str) -> Vec<String> {
+    if frame_text.is_empty() {
+        Vec::new()
+    } else {
+        frame_text.split("\r\n").map(ToOwned::to_owned).collect()
+    }
+}
+
+fn build_sidebar_overlay_buffer(
+    sidebar: &SidebarOverlay,
+    previous_sidebar: Option<&SidebarOverlay>,
+    cursor_visible: bool,
+) -> String {
+    let mut buffer = String::from("\x1b7\x1b[?25l");
+    let redraw_all = previous_sidebar
+        .map(|previous| {
+            previous.separator_col != sidebar.separator_col
+                || previous.content_col != sidebar.content_col
+                || previous.lines.len() != sidebar.lines.len()
+        })
+        .unwrap_or(true);
+
+    for (index, sidebar_line) in sidebar.lines.iter().enumerate() {
+        if !redraw_all
+            && previous_sidebar.and_then(|previous| previous.lines.get(index)) == Some(sidebar_line)
+        {
+            continue;
+        }
+
+        let row = index + 1;
+        let fill_style = leading_ansi_style_prefix(sidebar_line);
+        buffer.push_str(&format!(
+            "\x1b[{row};{}H{}\x1b[{row};{}H{fill_style}\x1b[K\x1b[{row};{}H{}",
+            sidebar.separator_col,
+            sidebar.divider,
+            sidebar.content_col,
+            sidebar.content_col,
+            sidebar_line
+        ));
+    }
+
+    if let Some(previous) = previous_sidebar {
+        if previous.lines.len() > sidebar.lines.len() {
+            for row in sidebar.lines.len() + 1..=previous.lines.len() {
+                let fill_style = previous
+                    .lines
+                    .get(row - 1)
+                    .map(|line| leading_ansi_style_prefix(line))
+                    .unwrap_or(ANSI_BG_SIDEBAR_ITEM);
+                buffer.push_str(&format!(
+                    "\x1b[{row};{}H{}\x1b[{row};{}H{fill_style}\x1b[K",
+                    previous.separator_col, previous.divider, previous.content_col
+                ));
+            }
+        }
+    }
+
+    buffer.push_str("\x1b8");
+    buffer.push_str(if cursor_visible {
+        "\x1b[?25h"
+    } else {
+        "\x1b[?25l"
+    });
+
+    buffer
+}
+
 fn style_status_line(line: &str, width: usize) -> String {
     format!("{ANSI_BG_BAR}{}{ANSI_RESET}", pad_line(line, width))
 }
 
+fn leading_ansi_style_prefix(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() && bytes[index] == 0x1b {
+        index += 1;
+        if index >= bytes.len() {
+            break;
+        }
+        match bytes[index] {
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            b']' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        0x07 => {
+                            index += 1;
+                            break;
+                        }
+                        0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
+                            index += 2;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    &line[..index.min(line.len())]
+}
+
 fn pad_line(line: &str, width: usize) -> String {
-    let truncated = line.chars().take(width).collect::<String>();
-    let padding = width.saturating_sub(truncated.chars().count());
+    let truncated = take_display_width(line.chars(), width);
+    let padding = width.saturating_sub(display_width(truncated.chars()) as usize);
     format!("{truncated}{}", " ".repeat(padding))
+}
+
+fn truncate_ansi_line(line: &str, width: usize) -> String {
+    if width == 0 || line.is_empty() {
+        return ANSI_RESET.to_string();
+    }
+
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut visible = 0;
+    let mut output = String::new();
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            let escape_start = index;
+            index += 1;
+            if index >= bytes.len() {
+                break;
+            }
+            match bytes[index] {
+                b'[' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        let byte = bytes[index];
+                        index += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        match bytes[index] {
+                            0x07 => {
+                                index += 1;
+                                break;
+                            }
+                            0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'\\' => {
+                                index += 2;
+                                break;
+                            }
+                            _ => index += 1,
+                        }
+                    }
+                }
+                _ => {
+                    index += 1;
+                }
+            }
+            output.push_str(&line[escape_start..index.min(bytes.len())]);
+            continue;
+        }
+
+        let Some(character) = line[index..].chars().next() else {
+            break;
+        };
+        let next = char_display_width(character) as usize;
+        if visible + next > width {
+            break;
+        }
+        output.push(character);
+        visible += next;
+        index += character.len_utf8();
+    }
+
+    output.push_str(ANSI_RESET);
+    output
+}
+
+fn take_display_width(chars: impl IntoIterator<Item = char>, width: usize) -> String {
+    let mut rendered = String::new();
+    let mut used = 0;
+
+    for ch in chars {
+        let next = char_display_width(ch) as usize;
+        if used + next > width {
+            break;
+        }
+        rendered.push(ch);
+        used += next;
+    }
+
+    rendered
+}
+
+fn display_width(chars: impl IntoIterator<Item = char>) -> u16 {
+    chars.into_iter().map(char_display_width).sum()
+}
+
+fn char_display_width(ch: char) -> u16 {
+    if ch.is_control() {
+        0
+    } else if matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 fn spawn_stdin_reader(tx: Sender<RuntimeEvent>) {
@@ -4302,6 +6851,39 @@ fn render_command_line(program: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn shell_title_from_command_line(command_line: &str) -> String {
+    command_line
+        .split_whitespace()
+        .next()
+        .map(shell_title)
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForegroundTitleDecision {
+    Keep,
+    SetLive(String),
+    RestoreShell(String),
+}
+
+fn foreground_title_decision(
+    shell_command_line: &str,
+    foreground_name: Option<&str>,
+    bootstrapping: bool,
+) -> ForegroundTitleDecision {
+    let shell_title = shell_title_from_command_line(shell_command_line);
+    if let Some(name) = foreground_name {
+        if let Some(live_title) = live_command_label(name) {
+            return ForegroundTitleDecision::SetLive(live_title);
+        }
+        if !bootstrapping && name == shell_title {
+            return ForegroundTitleDecision::RestoreShell(shell_title);
+        }
+    }
+
+    ForegroundTitleDecision::Keep
+}
+
 fn managed_console_size(size: crate::terminal::TerminalSize) -> crate::terminal::TerminalSize {
     crate::terminal::TerminalSize {
         rows: size
@@ -4312,12 +6894,26 @@ fn managed_console_size(size: crate::terminal::TerminalSize) -> crate::terminal:
     }
 }
 
+fn workspace_viewport_size(
+    size: crate::terminal::TerminalSize,
+    sidebar_hidden: bool,
+) -> crate::terminal::TerminalSize {
+    let mut managed = managed_console_size(size);
+    if let Some((separator_col, _sidebar_width)) =
+        sidebar_layout(size.cols as usize, sidebar_hidden)
+    {
+        managed.cols = separator_col.saturating_sub(1) as u16;
+    }
+    managed
+}
+
 fn live_surface_target_size(
     _focused_live_session: bool,
     _keep_fullscreen: bool,
     terminal_size: crate::terminal::TerminalSize,
+    sidebar_hidden: bool,
 ) -> crate::terminal::TerminalSize {
-    managed_console_size(terminal_size)
+    workspace_viewport_size(terminal_size, sidebar_hidden)
 }
 
 fn default_shell_program() -> String {
@@ -4495,13 +7091,29 @@ impl From<crate::terminal::TerminalError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::{
-        background_wait_notice, build_full_frame_buffer, default_shell_program,
-        live_output_needs_chrome_redraw, live_overlay_visible, live_surface_target_size,
-        looks_like_shell_prompt_output, looks_like_terminal_takeover_output, output_is_substantive,
-        parse_console_action, shell_title, style_footer_separator_line, App, CommandOverlay,
-        CommandPromptState, ConsoleAction, CursorPlacement, ForwardInputNormalizer, InputTracker,
-        LiveSurfaceState, PickerNavigationOutcome, PICKER_ESCAPE_TIMEOUT_MS,
-        SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
+        background_wait_notice, buffer_pending_runtime_events, build_full_frame_buffer,
+        build_full_frame_buffer_with_sidebar, build_full_frame_buffer_with_sidebar_diff,
+        build_sidebar_detail_source, build_sidebar_detail_text, build_ui_write_payload,
+        bytes_include_submit, default_shell_program, extract_live_output_batches,
+        extract_shell_prompt_command, foreground_title_decision, format_sidebar_item,
+        live_command_label, live_command_label_from_shell_snapshot,
+        live_output_can_skip_snapshot_redraw, live_output_needs_chrome_redraw,
+        live_output_requires_full_sidebar_redraw,
+        live_output_requires_full_sidebar_redraw_from_snapshots, live_output_sidebar_damage,
+        live_overlay_visible, live_surface_target_size, looks_like_shell_prompt_output,
+        looks_like_terminal_release_output, looks_like_terminal_takeover_output,
+        next_runtime_event, now_unix_ms, output_is_substantive, parse_console_action, shell_title,
+        shell_title_from_command_line, sidebar_display_status, strip_sync_update_markers,
+        strip_sync_update_markers_stream, style_footer_separator_line, style_sidebar_badge,
+        style_sidebar_divider, style_sidebar_header_line, style_sidebar_item_line, App,
+        CommandOverlay, CommandPromptState, ConsoleAction, CursorPlacement,
+        ForegroundTitleDecision, ForwardInputNormalizer, InputTracker, LiveSurfaceState,
+        PickerNavigationOutcome, RuntimeEvent, ShellCommandTracker, SidebarDisplayStatus,
+        SidebarNavigationOutcome, SidebarOverlay, SidebarState, ANSI_BG_SIDEBAR_ACTIVE,
+        ANSI_FG_SIDEBAR_CONFIRM, ANSI_FG_SIDEBAR_INPUT, ANSI_FG_SIDEBAR_RUNNING,
+        ANSI_SYNC_UPDATE_END, ANSI_SYNC_UPDATE_START, LIVE_SURFACE_STATUS_ROWS,
+        PICKER_ESCAPE_TIMEOUT_MS, SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION,
+        SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
     use crate::config::AppConfig;
@@ -4510,7 +7122,8 @@ mod tests {
     use crate::scheduler::{SchedulerPhase, SchedulerState};
     use crate::session::{SessionAddress, SessionRegistry};
     use crate::terminal::{TerminalEngine, TerminalSize};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::mpsc;
 
     #[test]
     fn input_tracker_enters_typing_and_submitted_states() {
@@ -4805,12 +7418,13 @@ mod tests {
     #[test]
     fn passive_message_does_not_trigger_live_overlay_visibility() {
         let mut prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
         prompt.set_passive_message("session-2 is waiting");
 
-        assert!(!live_overlay_visible(&prompt));
+        assert!(!live_overlay_visible(&prompt, &sidebar));
 
         prompt.toggle_help();
-        assert!(live_overlay_visible(&prompt));
+        assert!(live_overlay_visible(&prompt, &sidebar));
     }
 
     #[test]
@@ -4864,6 +7478,262 @@ mod tests {
             "   2. local/session-2 | codex | cwd: /opt/data/workspace/test"
         );
         assert!(lines[3].starts_with("keys:"));
+    }
+
+    #[test]
+    fn sidebar_opens_moves_and_submits_selected_session() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let sessions = registry.list();
+        let focused = Some(first.address());
+        let prompt = CommandPromptState::default();
+        let mut sidebar = SidebarState::default();
+
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[C", &sessions, focused, true, &prompt, 100),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[B", &sessions, focused, true, &prompt, 110),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert_eq!(
+            sidebar.handle_navigation(b"\r", &sessions, focused, true, &prompt, 120),
+            Some(SidebarNavigationOutcome::Submit(second.address().clone()))
+        );
+        assert!(!sidebar.focused);
+    }
+
+    #[test]
+    fn sidebar_hides_and_reopens_without_losing_selection() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let second = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let sessions = registry.list();
+        let focused = Some(first.address());
+        let prompt = CommandPromptState::default();
+        let mut sidebar = SidebarState::default();
+
+        assert!(!sidebar.hidden);
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[C", &sessions, focused, true, &prompt, 100),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[B", &sessions, focused, true, &prompt, 110),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert_eq!(
+            sidebar.selected_session(&sessions, focused),
+            Some(second.address().clone())
+        );
+
+        assert_eq!(
+            sidebar.handle_navigation(b"h", &sessions, focused, true, &prompt, 120),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert!(sidebar.hidden);
+        assert!(!sidebar.focused);
+
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[D", &sessions, focused, true, &prompt, 130),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert!(!sidebar.hidden);
+        assert!(sidebar.focused);
+        assert_eq!(
+            sidebar.selected_session(&sessions, focused),
+            Some(second.address().clone())
+        );
+    }
+
+    #[test]
+    fn sidebar_item_renders_title_with_node_and_running_badge() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "/bin/bash".to_string(),
+        );
+
+        let line = format_sidebar_item(&session, true, false, 0, 24);
+
+        assert!(line.contains("bash@local"));
+        assert!(line.contains("🍳R"));
+    }
+
+    #[test]
+    fn sidebar_running_badge_uses_running_color() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "/bin/bash".to_string(),
+        );
+
+        let line = format_sidebar_item(&session, false, false, 0, 24);
+
+        assert!(line.contains(ANSI_FG_SIDEBAR_RUNNING));
+        assert!(line.contains("🍳R"));
+    }
+
+    #[test]
+    fn sidebar_input_badge_uses_input_color() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "/bin/bash".to_string(),
+        );
+
+        let line = format_sidebar_item(&session, false, true, 0, 24);
+
+        assert!(line.contains(ANSI_FG_SIDEBAR_INPUT));
+        assert!(line.contains("🔊I"));
+    }
+
+    #[test]
+    fn sidebar_emoji_badge_reports_terminal_display_width() {
+        let (_running_badge, running_width) =
+            style_sidebar_badge(SidebarDisplayStatus::Running, 0, false);
+        let (_input_badge, input_width) =
+            style_sidebar_badge(SidebarDisplayStatus::Input, 0, false);
+        let (_confirm_badge, confirm_width) =
+            style_sidebar_badge(SidebarDisplayStatus::Confirm, 0, false);
+
+        assert_eq!(running_width, 3);
+        assert_eq!(input_width, 3);
+        assert_eq!(confirm_width, 3);
+    }
+
+    #[test]
+    fn sidebar_confirm_badge_uses_confirm_color() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"Approve command? [y/n]");
+        registry.update_screen_state(&address, engine.state());
+        let record = registry.get(&address).expect("session should exist");
+
+        let line = format_sidebar_item(record, false, true, 0, 24);
+
+        assert!(line.contains(ANSI_FG_SIDEBAR_CONFIRM));
+        assert!(line.contains("📢C"));
+    }
+
+    #[test]
+    fn sidebar_display_status_detects_confirmation_prompt_from_visible_text() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"Approve command? [y/n]");
+        registry.update_screen_state(&address, engine.state());
+
+        let status =
+            sidebar_display_status(registry.get(&address).expect("session should exist"), true);
+
+        assert_eq!(status, SidebarDisplayStatus::Confirm);
+    }
+
+    #[test]
+    fn sidebar_detail_text_truncates_full_label_and_status_without_animation() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "very-long-session-name".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b]0;/opt/data/workspace/wait-agent/projects/demo\x07");
+        registry.update_screen_state(&address, engine.state());
+        let record = registry.get(&address).expect("session should exist");
+
+        let detail = build_sidebar_detail_source(record, false);
+        let first = build_sidebar_detail_text(&detail, 18);
+        let second = build_sidebar_detail_text(&detail, 18);
+
+        assert_eq!(first.chars().count(), 18);
+        assert_eq!(second.chars().count(), 18);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn sidebar_detail_text_right_aligns_within_available_width() {
+        let detail = build_sidebar_detail_text("RUNNING", 10);
+
+        assert_eq!(detail, "   RUNNING");
+    }
+
+    #[test]
+    fn sidebar_diff_frame_keeps_main_prompt_visible_when_fed_back_into_terminal_engine() {
+        let frame_text = [
+            "k@k:/opt/data/workspace/wait-agent$ ",
+            "",
+            "WaitAgent | bash | local/session-1                      active | 0 waiting | 1/1",
+        ]
+        .join("\r\n");
+        let sidebar = SidebarOverlay {
+            separator_col: 52,
+            content_col: 53,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line(" Sessions  [h] hide", 28),
+                style_sidebar_item_line("> bash@local             🔊I", 28, true),
+            ],
+        };
+        let buffer = build_full_frame_buffer_with_sidebar_diff(
+            &frame_text,
+            None,
+            Some(&sidebar),
+            None,
+            CursorPlacement { row: 0, col: 36 },
+            true,
+            24,
+        );
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        let wrapped = format!("{ANSI_SYNC_UPDATE_START}{buffer}{ANSI_SYNC_UPDATE_END}");
+
+        engine.feed(wrapped.as_bytes());
+        let snapshot = engine.snapshot();
+
+        assert!(
+            snapshot.lines[0].starts_with("k@k:/opt/data/workspace/wait-agent$"),
+            "row1={:?}",
+            snapshot.lines[0]
+        );
     }
 
     #[test]
@@ -5005,28 +7875,37 @@ mod tests {
         };
 
         assert_eq!(
-            live_surface_target_size(true, false, terminal_size),
+            live_surface_target_size(true, false, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 80,
+                cols: 51,
                 pixel_width: 0,
                 pixel_height: 0,
             }
         );
         assert_eq!(
-            live_surface_target_size(false, true, terminal_size),
+            live_surface_target_size(false, true, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 80,
+                cols: 51,
                 pixel_width: 0,
                 pixel_height: 0,
             }
         );
         assert_eq!(
-            live_surface_target_size(false, false, terminal_size),
+            live_surface_target_size(false, false, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 80,
+                cols: 51,
+                pixel_width: 0,
+                pixel_height: 0,
+            }
+        );
+        assert_eq!(
+            live_surface_target_size(false, false, terminal_size, true),
+            TerminalSize {
+                rows: 21,
+                cols: 77,
                 pixel_width: 0,
                 pixel_height: 0,
             }
@@ -5050,9 +7929,9 @@ mod tests {
             4,
         );
 
-        assert!(buffer.starts_with("\x1b[H"));
-        assert!(buffer.contains("\x1b[1;1Hsession-2\x1b[K"));
-        assert!(buffer.contains("\x1b[2;1Hprompt$ \x1b[K"));
+        assert!(buffer.starts_with("\x1b[H\x1b[?25l"));
+        assert!(buffer.contains("\x1b[1;1H\x1b[K\x1b[1;1Hsession-2"));
+        assert!(buffer.contains("\x1b[2;1H\x1b[K\x1b[2;1Hprompt$ "));
         assert!(buffer.contains("\x1b[3;1H\x1b[K"));
         assert!(buffer.contains("\x1b[4;1H\x1b[K"));
         assert!(buffer.ends_with("\x1b[2;8H\x1b[?25h"));
@@ -5067,12 +7946,226 @@ mod tests {
             3,
         );
 
-        assert!(buffer.contains("\x1b[1;1Hline 1\x1b[K"));
-        assert!(buffer.contains("\x1b[2;1Hline 2\x1b[K"));
-        assert!(buffer.contains("\x1b[3;1Hline 3\x1b[K"));
+        assert!(buffer.contains("\x1b[1;1H\x1b[K\x1b[1;1Hline 1"));
+        assert!(buffer.contains("\x1b[2;1H\x1b[K\x1b[2;1Hline 2"));
+        assert!(buffer.contains("\x1b[3;1H\x1b[K\x1b[3;1Hline 3"));
         assert!(!buffer.contains("\x1b[4;1H"));
         assert!(!buffer.contains("\x1b[J"));
         assert!(buffer.ends_with("\x1b[3;7H\x1b[?25h"));
+    }
+
+    #[test]
+    fn full_frame_buffer_positions_sidebar_without_extending_main_line_text() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+            ],
+        };
+
+        let buffer = build_full_frame_buffer_with_sidebar(
+            "left\r\nbody",
+            Some(&sidebar),
+            CursorPlacement { row: 1, col: 2 },
+            true,
+            3,
+        );
+
+        assert!(buffer.contains("\x1b[1;1H\x1b[0m       \x1b[1;1Hleft"));
+        assert!(buffer.contains("\x1b[1;8H"));
+        assert!(buffer.contains("\x1b[1;9H"));
+        assert!(buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1Hbody"));
+        assert!(buffer.contains("\x1b[2;8H"));
+        assert!(buffer.ends_with("\x1b[2;3H\x1b[?25h"));
+    }
+
+    #[test]
+    fn full_frame_buffer_does_not_clear_entire_sidebar_rows_before_redraw() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+            ],
+        };
+
+        let buffer = build_full_frame_buffer_with_sidebar(
+            "left\r\nbody",
+            Some(&sidebar),
+            CursorPlacement { row: 1, col: 2 },
+            true,
+            3,
+        );
+
+        assert!(!buffer.contains("\x1b[1;1Hleft\x1b[K"));
+        assert!(!buffer.contains("\x1b[2;1Hbody\x1b[K"));
+        assert!(buffer.contains("\x1b[1;1H\x1b[0m       "));
+        assert!(buffer.contains("\x1b[2;1H\x1b[0m       "));
+        assert!(buffer.contains("\x1b[1;8H"));
+        assert!(buffer.contains("\x1b[2;8H"));
+    }
+
+    #[test]
+    fn sidebar_overlay_buffer_skips_unchanged_rows_for_focus_only_updates() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+            ],
+        };
+
+        let buffer = crate::app::build_sidebar_overlay_buffer(&sidebar, Some(&sidebar), false);
+
+        assert_eq!(buffer, "\x1b7\x1b[?25l\x1b8\x1b[?25l");
+    }
+
+    #[test]
+    fn sidebar_overlay_buffer_updates_only_changed_rows() {
+        let previous = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+                crate::app::style_sidebar_detail_line("one", 4),
+            ],
+        };
+        let current = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("next", 4, false),
+                crate::app::style_sidebar_detail_line("two", 4),
+            ],
+        };
+
+        let buffer = crate::app::build_sidebar_overlay_buffer(&current, Some(&previous), true);
+
+        assert!(!buffer.contains("\x1b[1;8H"));
+        assert!(buffer.contains("\x1b[2;8H"));
+        assert!(buffer.contains("\x1b[3;8H"));
+        assert!(buffer.starts_with("\x1b7\x1b[?25l"));
+        assert!(buffer.ends_with("\x1b8\x1b[?25h"));
+    }
+
+    #[test]
+    fn sidebar_overlay_buffer_clears_trailing_safe_column_with_sidebar_style() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![style_sidebar_item_line("item", 4, true)],
+        };
+
+        let buffer = crate::app::build_sidebar_overlay_buffer(&sidebar, None, false);
+
+        assert!(buffer.contains(&format!("\x1b[1;9H{ANSI_BG_SIDEBAR_ACTIVE}\x1b[K")));
+    }
+
+    #[test]
+    fn full_frame_buffer_does_not_draw_sidebar_on_bottom_status_row() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![style_sidebar_header_line("menu", 4)],
+        };
+
+        let buffer = build_full_frame_buffer_with_sidebar(
+            "line 1\r\nstatus",
+            Some(&sidebar),
+            CursorPlacement { row: 1, col: 1 },
+            true,
+            2,
+        );
+
+        assert!(buffer.contains("\x1b[1;8H"));
+        assert!(!buffer.contains("\x1b[2;8H"));
+        assert!(!buffer.contains("\x1b[2;9H"));
+    }
+
+    #[test]
+    fn full_frame_buffer_diff_skips_unchanged_sidebar_rows() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+            ],
+        };
+
+        let buffer = crate::app::build_full_frame_buffer_with_sidebar_diff(
+            "left\r\nbody",
+            None,
+            Some(&sidebar),
+            Some(&sidebar),
+            CursorPlacement { row: 1, col: 2 },
+            true,
+            2,
+        );
+
+        assert!(buffer.starts_with("\x1b[H\x1b[?25l"));
+        assert!(!buffer.contains("\x1b[1;8H"));
+        assert!(!buffer.contains("\x1b[2;8H"));
+        assert!(buffer.ends_with("\x1b[2;3H\x1b[?25h"));
+    }
+
+    #[test]
+    fn full_frame_buffer_diff_treats_empty_previous_frame_as_full_redraw() {
+        let previous: Vec<String> = Vec::new();
+
+        let buffer = crate::app::build_full_frame_buffer_with_sidebar_diff(
+            "next session",
+            Some(previous.as_slice()),
+            None,
+            None,
+            CursorPlacement { row: 0, col: 0 },
+            true,
+            4,
+        );
+
+        assert!(buffer.contains("\x1b[2;1H\x1b[K"));
+        assert!(buffer.contains("\x1b[3;1H\x1b[K"));
+        assert!(buffer.contains("\x1b[4;1H\x1b[K"));
+    }
+
+    #[test]
+    fn full_frame_buffer_diff_clears_empty_main_rows_when_previous_frame_is_unknown() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+                style_sidebar_item_line("", 4, false),
+            ],
+        };
+
+        let buffer = crate::app::build_full_frame_buffer_with_sidebar_diff(
+            "prompt$ \r\n\r\nstatus",
+            None,
+            Some(&sidebar),
+            None,
+            CursorPlacement { row: 0, col: 7 },
+            true,
+            3,
+        );
+
+        assert!(buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1H"));
     }
 
     #[test]
@@ -5114,6 +8207,25 @@ mod tests {
     }
 
     #[test]
+    fn live_surface_stays_off_for_application_cursor_without_alt_screen() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1h");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        assert!(!app.focused_session_supports_live_surface(&console));
+    }
+
+    #[test]
     fn known_live_command_keeps_live_surface_without_alt_screen_state() {
         let mut app = App::new(AppConfig::from_env());
         let session = app.sessions.create_local_session(
@@ -5125,6 +8237,7 @@ mod tests {
         let mut console = ConsoleState::new("console-1");
         console.focus(address.clone());
         let command_prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
         let mut hosted = HashMap::new();
 
@@ -5142,9 +8255,44 @@ mod tests {
                 &mut hosted,
                 &console,
                 &command_prompt,
+                &sidebar,
                 &address,
             )
             .expect("known live command should remain active"));
+    }
+
+    #[test]
+    fn bootstrapping_live_command_activates_live_surface_before_takeover_sequences() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+        let mut hosted = HashMap::new();
+
+        live_surface.mark_known_live_command(address.clone());
+        live_surface.mark_session_bootstrapping(address.clone(), now_unix_ms());
+
+        assert!(!app
+            .maybe_activate_live_surface_for_output(
+                &mut live_surface,
+                &mut hosted,
+                &console,
+                &command_prompt,
+                &sidebar,
+                &address,
+                b"OpenAI Codex\r\n",
+            )
+            .expect("plain startup banner should not require takeover markers"));
+        assert!(live_surface.is_live_for(&address));
+        assert!(app.focused_session_owns_passthrough_display(&live_surface, &console));
     }
 
     #[test]
@@ -5184,6 +8332,7 @@ mod tests {
         let mut console = ConsoleState::new("console-1");
         console.focus(address.clone());
         let command_prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
         let mut hosted = HashMap::new();
 
@@ -5204,6 +8353,7 @@ mod tests {
                 &mut hosted,
                 &console,
                 &command_prompt,
+                &sidebar,
                 &address,
             )
             .expect("live surface deactivation should succeed"));
@@ -5222,6 +8372,7 @@ mod tests {
         let mut console = ConsoleState::new("console-1");
         console.focus(address.clone());
         let command_prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
         let mut hosted = HashMap::new();
 
@@ -5238,10 +8389,56 @@ mod tests {
                 &mut hosted,
                 &console,
                 &command_prompt,
+                &sidebar,
                 &address,
             )
             .expect("alternate-screen output should remain live"));
         assert!(app.focused_session_owns_passthrough_display(&live_surface, &console));
+    }
+
+    #[test]
+    fn live_surface_deactivates_after_terminal_release_even_if_app_cursor_lingers() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+        let mut hosted = HashMap::new();
+
+        let mut fullscreen = TerminalEngine::new(TerminalSize::default());
+        fullscreen.feed(b"\x1b[?1h\x1b[?1049hHELLO");
+        app.sessions
+            .update_screen_state(&address, fullscreen.state());
+        live_surface.mark_known_live_command(address.clone());
+        live_surface.mark_session_bootstrapping(address.clone(), now_unix_ms());
+        live_surface.set_display_session(Some(address.clone()), true, 100);
+        live_surface.pending_redraw = false;
+
+        let mut shell = TerminalEngine::new(TerminalSize::default());
+        shell.feed(b"\x1b[?1h\x1b[?1049lprompt$ ");
+        app.sessions.update_screen_state(&address, shell.state());
+        live_surface.clear_known_live_command(&address);
+        live_surface.clear_session_bootstrapping(&address);
+
+        assert!(!app.focused_session_prefers_live_surface(&live_surface, &console));
+        assert!(app
+            .maybe_deactivate_live_surface_after_output(
+                &mut live_surface,
+                &mut hosted,
+                &console,
+                &command_prompt,
+                &sidebar,
+                &address,
+            )
+            .expect("terminal release should deactivate live surface"));
+        assert!(!app.focused_session_owns_passthrough_display(&live_surface, &console));
     }
 
     #[test]
@@ -5290,29 +8487,376 @@ mod tests {
         let scheduler = SchedulerState::new();
         let renderer = Renderer::new();
         let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
 
         let mut engine = TerminalEngine::new(TerminalSize::default());
         engine.feed(b"\x1b[38;5;196mred");
         app.sessions.update_screen_state(&address, engine.state());
 
-        let (buffer, _) = app
+        let ui = app
             .build_live_surface_ui_buffer(
+                &LiveSurfaceState::default(),
                 &command_prompt,
                 &mut renderer_state,
                 &renderer,
                 &console,
                 &scheduler,
+                &mut sidebar,
                 0,
+                true,
+                None,
+            )
+            .expect("overlay buffer should build");
+        let buffer = ui.buffer;
+
+        assert!(buffer.contains("Sessions  [h] hide"));
+        assert!(!buffer.contains("\x1b[s"));
+        assert!(!buffer.contains("\x1b[u"));
+    }
+
+    #[test]
+    fn live_surface_overlay_hides_cursor_while_bootstrapping() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "/bin/bash".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+        live_surface.mark_known_live_command(address.clone());
+        live_surface.mark_session_bootstrapping(address.clone(), now_unix_ms());
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[38;5;196mred");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("overlay buffer should build");
+        let buffer = ui.buffer;
+
+        assert!(buffer.contains("Sessions  [h] hide"));
+        assert!(!buffer.contains("\x1b[?25h"));
+        assert!(!buffer.contains("\x1b[?25l"));
+    }
+
+    #[test]
+    fn live_surface_overlay_skips_unchanged_sidebar_rows_when_not_forced() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1049hcodex");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let initial_ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("initial overlay should build");
+        live_surface.chrome_visible = true;
+        live_surface.overlay_rows = initial_ui.overlay_rows;
+        live_surface.sidebar_overlay = initial_ui.sidebar_overlay;
+        live_surface.separator_line = initial_ui.separator_line;
+        live_surface.keys_line = initial_ui.keys_line;
+        live_surface.status_line = initial_ui.status_line;
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                false,
+                None,
+            )
+            .expect("follow-up overlay should build");
+        let buffer = ui.buffer;
+
+        assert!(!buffer.contains("Sessions  [h] hide"));
+        assert!(!buffer.contains("> codex"));
+    }
+
+    #[test]
+    fn live_surface_overlay_redraws_sidebar_rows_marked_as_damaged() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1049hcodex");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let initial_ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("initial overlay should build");
+        live_surface.chrome_visible = true;
+        live_surface.overlay_rows = initial_ui.overlay_rows;
+        live_surface.sidebar_overlay = initial_ui.sidebar_overlay;
+        live_surface.separator_line = initial_ui.separator_line;
+        live_surface.keys_line = initial_ui.keys_line;
+        live_surface.status_line = initial_ui.status_line;
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                false,
+                Some((1, usize::MAX)),
+            )
+            .expect("damaged overlay should build");
+        let buffer = ui.buffer;
+
+        assert!(buffer.contains("Sessions  [h] hide"));
+        assert!(buffer.contains("> codex"));
+    }
+
+    #[test]
+    fn live_surface_overlay_forces_sidebar_redraw_after_full_clear() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+        let mut live_surface = LiveSurfaceState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1049hcodex");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let initial_ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("initial overlay should build");
+        live_surface.chrome_visible = true;
+        live_surface.overlay_rows = initial_ui.overlay_rows;
+        live_surface.sidebar_overlay = initial_ui.sidebar_overlay;
+        live_surface.separator_line = initial_ui.separator_line;
+        live_surface.keys_line = initial_ui.keys_line;
+        live_surface.status_line = initial_ui.status_line;
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &live_surface,
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("forced redraw overlay should build");
+        let buffer = ui.buffer;
+
+        assert!(buffer.contains("Sessions  [h] hide"));
+        assert!(buffer.contains("> codex"));
+    }
+
+    #[test]
+    fn live_surface_overlay_does_not_clear_separator_with_default_background() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1049hcodex");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &LiveSurfaceState::default(),
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
             )
             .expect("overlay buffer should build");
 
-        assert!(
-            buffer.ends_with("\x1b[1;4H\x1b[0;38;5;196m\x1b[?25h"),
-            "overlay should restore the tracked cursor and active style after drawing the footer: {:?}",
-            buffer
+        let separator_row = app
+            .terminal
+            .current_size_or_default()
+            .rows
+            .saturating_sub(LIVE_SURFACE_STATUS_ROWS.saturating_sub(1));
+        let separator_write = format!("\x1b[{separator_row};1H{}", ui.separator_line);
+        assert!(ui.buffer.contains(&separator_write));
+        assert!(!ui.buffer.contains(&format!("{separator_write}\x1b[K")));
+    }
+
+    #[test]
+    fn live_surface_overlay_does_not_redraw_keys_row_over_sidebar_detail() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
         );
-        assert!(!buffer.contains("\x1b[s"));
-        assert!(!buffer.contains("\x1b[u"));
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let command_prompt = CommandPromptState::default();
+        let scheduler = SchedulerState::new();
+        let renderer = Renderer::new();
+        let mut renderer_state = RendererState::default();
+        let mut sidebar = SidebarState::default();
+
+        let mut engine = TerminalEngine::new(TerminalSize::default());
+        engine.feed(b"\x1b[?1049hcodex");
+        app.sessions.update_screen_state(&address, engine.state());
+
+        let ui = app
+            .build_live_surface_ui_buffer(
+                &LiveSurfaceState::default(),
+                &command_prompt,
+                &mut renderer_state,
+                &renderer,
+                &console,
+                &scheduler,
+                &mut sidebar,
+                0,
+                true,
+                None,
+            )
+            .expect("overlay buffer should build");
+
+        let status_row = app.terminal.current_size_or_default().rows;
+        let duplicate_keys_row = status_row.saturating_sub(1);
+        let duplicate_keys_write = format!("\x1b[{duplicate_keys_row};1H{}", ui.keys_line);
+        assert!(!ui.buffer.contains(&duplicate_keys_write));
+        assert!(ui.buffer.contains("codex@local | RUNNING"));
+    }
+
+    #[test]
+    fn restores_shell_session_title_after_live_command_finishes() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "/bin/bash".to_string(),
+        );
+        let address = session.address().clone();
+
+        app.set_session_title(&address, "codex");
+        app.restore_shell_session_title(&address);
+
+        assert_eq!(
+            app.sessions
+                .get(&address)
+                .expect("session should exist")
+                .title,
+            "bash"
+        );
     }
 
     #[test]
@@ -5357,6 +8901,20 @@ mod tests {
     }
 
     #[test]
+    fn leaving_live_surface_requires_full_workspace_redraw() {
+        let session = SessionAddress::new("local", "session-1");
+        let mut live_surface = LiveSurfaceState::default();
+
+        assert!(!live_surface.display_may_be_live_owned());
+
+        live_surface.set_display_session(Some(session), true, 100);
+        assert!(live_surface.display_may_be_live_owned());
+
+        live_surface.set_display_session(None, false, 110);
+        assert!(!live_surface.display_may_be_live_owned());
+    }
+
+    #[test]
     fn takeover_detection_stays_off_for_plain_shell_output() {
         assert!(!looks_like_terminal_takeover_output(
             b"\x1b[?2004hk@k:/tmp$ "
@@ -5365,18 +8923,304 @@ mod tests {
     }
 
     #[test]
-    fn live_output_redraws_chrome_for_probe_and_takeover_sequences() {
-        assert!(live_output_needs_chrome_redraw(b"\x1b[6n"));
-        assert!(live_output_needs_chrome_redraw(b"\x1b[?2026h\x1b[1;55H"));
+    fn live_output_redraws_chrome_only_for_release_or_sidebar_damage() {
+        assert!(!live_output_needs_chrome_redraw(b"\x1b[6n"));
+        assert!(!live_output_needs_chrome_redraw(b"\x1b[?25l\x1b[16;3H"));
+        assert!(live_output_needs_chrome_redraw(b"\x1b[4;1H\x1b[K"));
+        assert!(live_output_needs_chrome_redraw(b"\x1b[13;1H\x1b[J"));
+        assert!(live_output_needs_chrome_redraw(b"\x1b[?1049lprompt$ "));
+        assert!(!live_output_needs_chrome_redraw(
+            b"\x1b[?2026h\x1b[1;16r\x1b[1S\x1b[r"
+        ));
         assert!(!live_output_needs_chrome_redraw(b"plain output line\r\n"));
+    }
+
+    #[test]
+    fn live_output_only_forces_full_sidebar_redraw_for_global_damage() {
+        assert!(!live_output_requires_full_sidebar_redraw(
+            b"\x1b[22;1H\x1b[J"
+        ));
+        assert!(!live_output_requires_full_sidebar_redraw(
+            b"\x1b[?2026h\x1b[1;16r\x1b[1S\x1b[r"
+        ));
+        assert!(live_output_requires_full_sidebar_redraw(b"\x1b[2J"));
+        assert!(live_output_requires_full_sidebar_redraw(
+            b"\x1b[?1049lprompt$ "
+        ));
+    }
+
+    #[test]
+    fn live_output_forces_full_sidebar_redraw_when_snapshot_switches_screen_mode() {
+        let size = TerminalSize {
+            rows: 6,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let before = TerminalEngine::new(size).state().active_snapshot().clone();
+        let mut engine = TerminalEngine::new(size);
+        engine.feed(b"\x1b[?1049h");
+        let after = engine.state().active_snapshot().clone();
+
+        assert!(live_output_requires_full_sidebar_redraw_from_snapshots(
+            Some(&before),
+            Some(&after),
+        ));
+    }
+
+    #[test]
+    fn live_output_tracks_sidebar_damage_rows_for_clear_to_end_of_screen() {
+        assert_eq!(
+            live_output_sidebar_damage(b"\x1b[1;1H\x1b[J"),
+            Some((1, usize::MAX))
+        );
+        assert_eq!(
+            live_output_sidebar_damage(b"\x1b[13;1H\x1b[J"),
+            Some((13, usize::MAX))
+        );
+        assert_eq!(
+            live_output_sidebar_damage(b"\x1b[13;1H\x1b[1J"),
+            Some((1, 13))
+        );
+        assert_eq!(live_output_sidebar_damage(b"\x1b[4;1H\x1b[K"), Some((4, 4)));
+        assert_eq!(
+            live_output_sidebar_damage(b"\x1b[2;21r\x1bM\x1bM"),
+            Some((2, 21))
+        );
+        assert_eq!(live_output_sidebar_damage(b"\x1b[6n"), None);
+    }
+
+    #[test]
+    fn live_surface_snapshot_delta_replays_final_workspace_without_screen_clear_sequences() {
+        let size = TerminalSize {
+            rows: 6,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let mut engine = TerminalEngine::new(size);
+        engine.feed(b"hello\r\nworld");
+        let before = engine.snapshot();
+        engine.feed(b"\x1b[1;1H\x1b[JAAA");
+        let after = engine.snapshot();
+        let app = App::new(AppConfig::from_env());
+
+        let buffer = app
+            .build_live_surface_snapshot_delta(Some(&before), Some(&after))
+            .expect("snapshot delta should exist");
+
+        assert!(!buffer.contains("\x1b[J"));
+        assert!(!buffer.contains("\x1b[2J"));
+        assert!(buffer.contains("\x1b[1;6r"));
+        assert!(!buffer.contains("\x1b[r"));
+        assert!(buffer.contains(&after.styled_lines[0]));
+    }
+
+    #[test]
+    fn live_surface_snapshot_delta_only_redraws_changed_rows() {
+        let size = TerminalSize {
+            rows: 4,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let mut engine = TerminalEngine::new(size);
+        engine.feed(b"row1\r\nrow2");
+        let before = engine.snapshot();
+        engine.feed(b"\x1b[2;1HROW2");
+        let after = engine.snapshot();
+        let app = App::new(AppConfig::from_env());
+
+        let buffer = app
+            .build_live_surface_snapshot_delta(Some(&before), Some(&after))
+            .expect("snapshot delta should exist");
+
+        assert!(!buffer.contains(&format!("\x1b[1;1H{}", after.styled_lines[0])));
+        assert!(buffer.contains(&format!("\x1b[2;1H{}", after.styled_lines[1])));
+    }
+
+    #[test]
+    fn live_output_skips_snapshot_redraw_for_bootstrapping_known_live_command() {
+        let session = SessionAddress::new("local", "session-1");
+        let mut live_surface = LiveSurfaceState::default();
+        live_surface.pending_redraw = true;
+        live_surface.mark_known_live_command(session.clone());
+        live_surface.mark_session_bootstrapping(session.clone(), now_unix_ms());
+
+        assert!(live_output_can_skip_snapshot_redraw(
+            &live_surface,
+            &session,
+            b"codex\r\n",
+            now_unix_ms(),
+        ));
+    }
+
+    #[test]
+    fn live_output_keeps_snapshot_redraw_for_non_bootstrapping_shell_echo() {
+        let session = SessionAddress::new("local", "session-1");
+        let mut live_surface = LiveSurfaceState::default();
+        live_surface.pending_redraw = true;
+
+        assert!(!live_output_can_skip_snapshot_redraw(
+            &live_surface,
+            &session,
+            b"plain shell\r\n",
+            now_unix_ms(),
+        ));
+    }
+
+    #[test]
+    fn ui_write_payload_wraps_standard_frame_updates_in_sync_markers() {
+        assert_eq!(
+            build_ui_write_payload("frame", true),
+            format!("{ANSI_SYNC_UPDATE_START}frame{ANSI_SYNC_UPDATE_END}")
+        );
+    }
+
+    #[test]
+    fn ui_write_payload_leaves_live_passthrough_chrome_unwrapped() {
+        assert_eq!(build_ui_write_payload("frame", false), "frame");
+    }
+
+    #[test]
+    fn strip_sync_update_markers_removes_nested_agent_batches() {
+        let bytes = format!("pre{ANSI_SYNC_UPDATE_START}mid{ANSI_SYNC_UPDATE_END}post");
+        assert_eq!(strip_sync_update_markers(bytes.as_bytes()), b"premidpost");
+    }
+
+    #[test]
+    fn strip_sync_update_markers_stream_handles_chunk_split_markers() {
+        let mut pending = Vec::new();
+        let first = strip_sync_update_markers_stream(b"pre\x1b[?20", &mut pending);
+        let second = strip_sync_update_markers_stream(b"26hmid\x1b[?2026lpost", &mut pending);
+
+        assert_eq!(first, b"pre");
+        assert_eq!(second, b"midpost");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn extract_live_output_batches_emits_plain_output_immediately() {
+        let mut pending_tail = Vec::new();
+        let mut pending_batch = Vec::new();
+        let mut sync_batch_open = false;
+
+        let batches = extract_live_output_batches(
+            b"plain output",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+
+        assert_eq!(batches, vec![b"plain output".to_vec()]);
+        assert!(pending_tail.is_empty());
+        assert!(pending_batch.is_empty());
+        assert!(!sync_batch_open);
+    }
+
+    #[test]
+    fn extract_live_output_batches_buffers_until_sync_batch_closes() {
+        let mut pending_tail = Vec::new();
+        let mut pending_batch = Vec::new();
+        let mut sync_batch_open = false;
+
+        let first = extract_live_output_batches(
+            b"pre\x1b[?2026hmid",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+        let second = extract_live_output_batches(
+            b"dle\x1b[?2026lpost",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+
+        assert_eq!(first, vec![b"pre".to_vec()]);
+        assert_eq!(second, vec![b"middle".to_vec(), b"post".to_vec()]);
+        assert!(pending_tail.is_empty());
+        assert!(pending_batch.is_empty());
+        assert!(!sync_batch_open);
+    }
+
+    #[test]
+    fn extract_live_output_batches_handles_marker_split_across_chunks() {
+        let mut pending_tail = Vec::new();
+        let mut pending_batch = Vec::new();
+        let mut sync_batch_open = false;
+
+        let first = extract_live_output_batches(
+            b"\x1b[?20",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+        let second = extract_live_output_batches(
+            b"26hframe\x1b[?202",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+        let third = extract_live_output_batches(
+            b"6l",
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert_eq!(third, vec![b"frame".to_vec()]);
+        assert!(pending_tail.is_empty());
+        assert!(pending_batch.is_empty());
+        assert!(!sync_batch_open);
+    }
+
+    #[test]
+    fn extract_live_output_batches_handles_multiple_sync_batches_in_one_chunk() {
+        let mut pending_tail = Vec::new();
+        let mut pending_batch = Vec::new();
+        let mut sync_batch_open = false;
+
+        let bytes = format!(
+            "pre{ANSI_SYNC_UPDATE_START}one{ANSI_SYNC_UPDATE_END}mid{ANSI_SYNC_UPDATE_START}two{ANSI_SYNC_UPDATE_END}post"
+        );
+        let batches = extract_live_output_batches(
+            bytes.as_bytes(),
+            &mut pending_tail,
+            &mut pending_batch,
+            &mut sync_batch_open,
+        );
+
+        assert_eq!(
+            batches,
+            vec![
+                b"pre".to_vec(),
+                b"one".to_vec(),
+                b"mid".to_vec(),
+                b"two".to_vec(),
+                b"post".to_vec(),
+            ]
+        );
+        assert!(pending_tail.is_empty());
+        assert!(pending_batch.is_empty());
+        assert!(!sync_batch_open);
     }
 
     #[test]
     fn takeover_detection_turns_on_for_codex_style_bootstrap_output() {
         assert!(looks_like_terminal_takeover_output(
-            b"\x1b[?2026h\x1b[1;55H"
+            b"\x1b[?2026h\x1b[?25l\x1b[1;55H"
         ));
         assert!(looks_like_terminal_takeover_output(b"\x1b[?25l\x1b[1;55H"));
+    }
+
+    #[test]
+    fn takeover_detection_stays_off_for_codex_incremental_sync_output() {
+        assert!(!looks_like_terminal_takeover_output(
+            b"\x1b[?2026h\x1b[1;16r\x1b[1S\x1b[r"
+        ));
     }
 
     #[test]
@@ -5384,6 +9228,13 @@ mod tests {
         assert!(!looks_like_terminal_takeover_output(
             b"\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\"
         ));
+    }
+
+    #[test]
+    fn terminal_release_detection_turns_on_for_alt_screen_exit_sequences() {
+        assert!(looks_like_terminal_release_output(b"\x1b[?1049l"));
+        assert!(looks_like_terminal_release_output(b"\x1b[?1047l"));
+        assert!(!looks_like_terminal_release_output(b"\x1b[?1049h"));
     }
 
     #[test]
@@ -5410,5 +9261,181 @@ mod tests {
             b"\x1b[?2026h\x1b[1;55H\x1b[0m\x1b[m\x1b[K\x1b[?25l\x1b[?2026l"
         ));
         assert!(!output_is_substantive(b"\x1b]10;?\x1b\\\x1b[6n"));
+    }
+
+    #[test]
+    fn next_runtime_event_prioritizes_pending_input_over_output() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RuntimeEvent::Output {
+            session: SessionAddress::new("local", "session-1"),
+            bytes: b"old-output".to_vec(),
+        })
+        .expect("output should enqueue");
+        tx.send(RuntimeEvent::Input(vec![SHORTCUT_PREVIOUS_SESSION]))
+            .expect("input should enqueue");
+
+        let mut pending_events = VecDeque::new();
+        buffer_pending_runtime_events(&rx, &mut pending_events);
+
+        let event =
+            next_runtime_event(&rx, &mut pending_events).expect("pending input should be returned");
+
+        assert!(matches!(
+            event,
+            RuntimeEvent::Input(bytes) if bytes == vec![SHORTCUT_PREVIOUS_SESSION]
+        ));
+        assert!(matches!(
+            pending_events.front(),
+            Some(RuntimeEvent::Output { .. })
+        ));
+    }
+
+    #[test]
+    fn next_runtime_event_returns_pending_output_when_no_input_is_waiting() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RuntimeEvent::Output {
+            session: SessionAddress::new("local", "session-1"),
+            bytes: b"only-output".to_vec(),
+        })
+        .expect("output should enqueue");
+
+        let mut pending_events = VecDeque::new();
+        buffer_pending_runtime_events(&rx, &mut pending_events);
+
+        let event = next_runtime_event(&rx, &mut pending_events)
+            .expect("pending output should be returned");
+
+        assert!(matches!(
+            event,
+            RuntimeEvent::Output { bytes, .. } if bytes == b"only-output".to_vec()
+        ));
+        assert!(pending_events.is_empty());
+    }
+
+    #[test]
+    fn derives_shell_title_from_command_line_and_live_command_label() {
+        assert_eq!(shell_title_from_command_line("/bin/bash -l"), "bash");
+        assert_eq!(
+            live_command_label("codex --model gpt-5.4"),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            live_command_label("/tmp/claude-code --dangerously-skip-permissions"),
+            Some("claude-code".to_string())
+        );
+        assert_eq!(live_command_label("bash -lc pwd"), None);
+    }
+
+    #[test]
+    fn foreground_title_decision_prefers_foreground_live_agent_and_restores_shell() {
+        assert_eq!(
+            foreground_title_decision("/bin/bash -l", Some("codex"), false),
+            ForegroundTitleDecision::SetLive("codex".to_string())
+        );
+        assert_eq!(
+            foreground_title_decision("/bin/bash -l", Some("bash"), false),
+            ForegroundTitleDecision::RestoreShell("bash".to_string())
+        );
+        assert_eq!(
+            foreground_title_decision("/bin/bash -l", Some("bash"), true),
+            ForegroundTitleDecision::Keep
+        );
+        assert_eq!(
+            foreground_title_decision("/bin/bash -l", Some("python3"), false),
+            ForegroundTitleDecision::Keep
+        );
+    }
+
+    #[test]
+    fn shell_command_tracker_submits_on_plain_enter() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(tracker.observe(b"codex\r"), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn shell_command_tracker_submits_on_kitty_enter_without_losing_buffer() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(tracker.observe(b"codex\x1b[13u"), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn shell_command_tracker_submits_on_split_kitty_enter_sequence() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(tracker.observe(b"codex\x1b["), None);
+        assert_eq!(tracker.observe(b"13u"), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn shell_command_tracker_submits_on_application_keypad_enter() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(tracker.observe(b"codex\x1bOM"), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn shell_command_tracker_submits_on_modify_other_keys_enter() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(
+            tracker.observe(b"codex\x1b[27;13;13~"),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn shell_command_tracker_exposes_pending_live_command_label() {
+        let mut tracker = ShellCommandTracker::default();
+
+        assert_eq!(tracker.observe(b"cod"), None);
+        assert_eq!(tracker.pending_live_command_label(), None);
+
+        assert_eq!(tracker.observe(b"ex"), None);
+        assert_eq!(
+            tracker.pending_live_command_label(),
+            Some("codex".to_string())
+        );
+
+        assert_eq!(tracker.observe(b"x"), None);
+        assert_eq!(tracker.pending_live_command_label(), None);
+    }
+
+    #[test]
+    fn submit_detection_matches_plain_and_escape_enter_sequences() {
+        assert!(bytes_include_submit(b"\r"));
+        assert!(bytes_include_submit(b"\x1bOM"));
+        assert!(bytes_include_submit(b"\x1b[13u"));
+        assert!(!bytes_include_submit(b"\x1b[A"));
+    }
+
+    #[test]
+    fn extracts_command_from_shell_prompt_line() {
+        assert_eq!(
+            extract_shell_prompt_command("k@k:/opt/data/workspace/wait-agent$ codex"),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            extract_shell_prompt_command("user@host % claude --continue"),
+            Some("claude --continue".to_string())
+        );
+        assert_eq!(extract_shell_prompt_command("prompt$ "), None);
+    }
+
+    #[test]
+    fn snapshot_command_inference_detects_live_agent_recalled_from_history() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"k@k:/opt/data/workspace/wait-agent$ codex");
+
+        assert_eq!(
+            live_command_label_from_shell_snapshot(engine.state().active_snapshot()),
+            Some("codex".to_string())
+        );
     }
 }

@@ -163,6 +163,16 @@ impl SessionRegistry {
         Some(record)
     }
 
+    pub fn set_title(
+        &mut self,
+        address: &SessionAddress,
+        title: impl Into<String>,
+    ) -> Option<&SessionRecord> {
+        let record = self.sessions.get_mut(address)?;
+        record.title = title.into();
+        Some(record)
+    }
+
     pub fn update_screen_state(
         &mut self,
         address: &SessionAddress,
@@ -298,5 +308,22 @@ mod tests {
             Some("~/project")
         );
         assert_eq!(extract_working_dir_from_title("codex"), None);
+    }
+
+    #[test]
+    fn updates_title_without_touching_command_line() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "devbox-1".to_string(),
+            "bash".to_string(),
+            "/bin/bash".to_string(),
+        );
+
+        let updated = registry
+            .set_title(session.address(), "codex")
+            .expect("session should update");
+
+        assert_eq!(updated.title, "codex");
+        assert_eq!(updated.command_line, "/bin/bash");
     }
 }

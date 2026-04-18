@@ -1,0 +1,30 @@
+id: task.sidebar-3
+kind: task
+version: 1
+title: render one-line sidebar session rows with agent labels and wait-state badges
+status: done
+priority: medium
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.sidebar-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the right sidebar renders all known sessions as one row per session
+  - each row uses the detected agent name for agent-backed sessions and `bash` for ordinary shell sessions
+  - each row shows a wait-state badge chosen from `INPUT`, `CONFIRM`, or `UNKNOWN`
+  - the currently focused sidebar item is visually distinct from unfocused rows
+verification:
+  - manual: create a mix of shell and agent sessions and confirm the sidebar row labels and wait-state badges render correctly without breaking the one-row-per-session rule
+touched_paths:
+  - src/app.rs
+  - .agents/tasks/queued/task.sidebar-3.yaml
+  - .agents/
+notes:
+  - If a stable session wait state cannot yet be derived, the row must show `UNKNOWN` rather than guessing.
+  - The current prototype renders one line per session, uses the detected agent or shell label, and maps unknown wait states to `UNKNOWN`.

@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.t4-10
+  default_task: task.sidebar-4
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -42,14 +42,11 @@ directories:
   generated: .agents/generated
 active_context:
   project_phase: phase-1
-  current_stage: local-workspace-mvp-acceptance
-  current_focus: finish local acceptance sign-off before starting tmux-style lifecycle persistence and later network work
+  current_stage: local-workspace-post-acceptance-follow-on
+  current_focus: validate and polish the first right-sidebar prototype with a default-visible collapsible layout, dedicated detail row, and isolated bottom info bar
 recommended_primitives:
   - primitive.read-current-task
-  - primitive.acceptance-check-sync
-  - primitive.local-workspace-validation
   - primitive.verification-refresh
-  - primitive.blocker-record
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.task-switch-current
@@ -57,7 +54,6 @@ recommended_primitives:
   - primitive.agents-self-maintenance
 recommended_runbooks:
   - runbook.continue-default-work
-  - runbook.close-local-acceptance
   - runbook.select-next-task
   - runbook.instantiate-task-from-template
   - runbook.update-agents-control-plane

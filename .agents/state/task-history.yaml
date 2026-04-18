@@ -8,8 +8,26 @@ history:
       file: docs/execution-status-board.md
       reference: Track Summary
   - task_id: task.t4-10
+    status: done
+    summary: local acceptance sign-off was completed through user-confirmed manual validation in the preferred real terminal workflow
+    source_of_truth:
+      file: docs/execution-status-board.md
+      reference: Current Focus And Next Queue
+  - task_id: task.sidebar-2
+    status: done
+    summary: unified sidebar focus navigation is implemented, including real-PTY verified `Right`, `Left`, `Up`, and `Down` behavior without widening shell passthrough ownership
+    source_of_truth:
+      file: docs/execution-status-board.md
+      reference: Current Focus And Next Queue
+  - task_id: task.sidebar-3
+    status: done
+    summary: the sidebar now renders one-line session rows with detected agent labels plus wait-state badges, using `UNKNOWN` when a stable wait state is not available
+    source_of_truth:
+      file: docs/execution-status-board.md
+      reference: Current Focus And Next Queue
+  - task_id: task.sidebar-4
     status: in_progress
-    summary: final local acceptance sign-off is active and remains the gate before resumed network implementation
+    summary: the sidebar is now default-visible and collapsible, `Enter` switching stays aligned, and the selected-session path lives in a dedicated bottom sidebar detail row above the isolated info bar; remaining work is only follow-up polish if real use exposes long-path presentation issues
     source_of_truth:
       file: docs/execution-status-board.md
       reference: Current Focus And Next Queue

@@ -173,8 +173,8 @@ impl TerminalRuntime {
 
         let winsize = unsafe { winsize.assume_init() };
         Ok(TerminalSize {
-            rows: winsize.ws_row,
-            cols: winsize.ws_col,
+            rows: winsize.ws_row.max(1),
+            cols: winsize.ws_col.max(1),
             pixel_width: winsize.ws_xpixel,
             pixel_height: winsize.ws_ypixel,
         })
@@ -720,6 +720,7 @@ struct ScreenBuffer {
     cells: Vec<Vec<ScreenCell>>,
     cursor_row: u16,
     cursor_col: u16,
+    pending_wrap: bool,
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: Vec<String>,
@@ -734,6 +735,7 @@ impl ScreenBuffer {
             cells: blank_cells(size),
             cursor_row: 0,
             cursor_col: 0,
+            pending_wrap: false,
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             scrollback: Vec::new(),
@@ -755,6 +757,7 @@ impl ScreenBuffer {
         self.cells = next;
         self.cursor_row = self.cursor_row.min(size.rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
+        self.pending_wrap = false;
         self.scroll_top = self.scroll_top.min(size.rows.saturating_sub(1));
         self.scroll_bottom = self
             .scroll_bottom
@@ -811,6 +814,12 @@ impl ScreenBuffer {
             return;
         }
 
+        if self.pending_wrap {
+            self.cursor_col = 0;
+            self.line_feed();
+            self.pending_wrap = false;
+        }
+
         let row = self.cursor_row as usize;
         let col = self.cursor_col as usize;
         self.clear_wide_overlap(row, col);
@@ -833,32 +842,44 @@ impl ScreenBuffer {
                     ch: WIDE_CONTINUATION,
                     style: self.current_style,
                 };
-                self.cursor_col += 2;
+                if self.cursor_col + 2 >= self.size.cols {
+                    self.cursor_col = self.size.cols.saturating_sub(1);
+                    self.pending_wrap = true;
+                } else {
+                    self.cursor_col += 2;
+                }
             } else {
                 self.cells[row][col + 1] = ScreenCell {
                     ch: WIDE_CONTINUATION,
                     style: self.current_style,
                 };
-                self.cursor_col += 2;
+                if self.cursor_col + 2 >= self.size.cols {
+                    self.cursor_col = self.size.cols.saturating_sub(1);
+                    self.pending_wrap = true;
+                } else {
+                    self.cursor_col += 2;
+                }
             }
         } else {
-            self.cursor_col += 1;
-        }
-
-        if self.cursor_col >= self.size.cols {
-            self.cursor_col = 0;
-            self.line_feed();
+            if self.cursor_col + 1 >= self.size.cols {
+                self.cursor_col = self.size.cols.saturating_sub(1);
+                self.pending_wrap = true;
+            } else {
+                self.cursor_col += 1;
+            }
         }
     }
 
     fn carriage_return(&mut self) {
         self.cursor_col = 0;
+        self.pending_wrap = false;
     }
 
     fn line_feed(&mut self) {
         if self.size.rows == 0 {
             return;
         }
+        self.pending_wrap = false;
 
         if self.cursor_row >= self.scroll_bottom {
             self.scroll_up_in_region(1);
@@ -872,6 +893,7 @@ impl ScreenBuffer {
         if self.size.rows == 0 {
             return;
         }
+        self.pending_wrap = false;
 
         if self.cursor_row <= self.scroll_top {
             self.scroll_down_in_region(1);
@@ -883,6 +905,7 @@ impl ScreenBuffer {
 
     fn backspace(&mut self) {
         self.cursor_col = self.cursor_col.saturating_sub(1);
+        self.pending_wrap = false;
     }
 
     fn tab(&mut self) {
@@ -892,11 +915,13 @@ impl ScreenBuffer {
 
         let next_tab_stop = ((self.cursor_col / 8) + 1) * 8;
         self.cursor_col = next_tab_stop.min(self.size.cols.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     fn move_cursor_to(&mut self, row: u16, col: u16) {
         self.cursor_row = row.min(self.size.rows.saturating_sub(1));
         self.cursor_col = col.min(self.size.cols.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     fn move_cursor_relative(&mut self, row_delta: isize, col_delta: isize) {
@@ -906,6 +931,7 @@ impl ScreenBuffer {
             .clamp(0, self.size.cols.saturating_sub(1) as isize) as u16;
         self.cursor_row = next_row;
         self.cursor_col = next_col;
+        self.pending_wrap = false;
     }
 
     fn save_cursor(&mut self) {
@@ -925,6 +951,7 @@ impl ScreenBuffer {
         self.cursor_row = self.saved_cursor.row.min(self.size.rows.saturating_sub(1));
         self.cursor_col = self.saved_cursor.col.min(self.size.cols.saturating_sub(1));
         self.current_style = self.saved_cursor.style;
+        self.pending_wrap = false;
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -943,6 +970,7 @@ impl ScreenBuffer {
         self.scroll_bottom = bottom;
         self.cursor_row = top;
         self.cursor_col = 0;
+        self.pending_wrap = false;
     }
 
     fn reset_scroll_region(&mut self) {
@@ -1085,6 +1113,9 @@ impl ScreenBuffer {
     }
 
     fn clear_screen(&mut self, mode: u16) {
+        if self.cells.is_empty() || self.size.rows == 0 {
+            return;
+        }
         match mode {
             0 => {
                 for row in self.cursor_row as usize..self.cells.len() {
@@ -1114,12 +1145,19 @@ impl ScreenBuffer {
                 self.cells = blank_cells_with_style(self.size, self.current_style);
                 self.cursor_row = 0;
                 self.cursor_col = 0;
+                self.pending_wrap = false;
             }
         }
     }
 
     fn clear_line(&mut self, mode: u16) {
+        if self.cells.is_empty() || self.size.rows == 0 {
+            return;
+        }
         let row = self.cursor_row as usize;
+        if row >= self.cells.len() {
+            return;
+        }
         match mode {
             0 => {
                 for col in self.cursor_col as usize..self.cells[row].len() {
@@ -1552,6 +1590,34 @@ mod tests {
 
         assert_eq!(snapshot.lines[0], "echo ab         ");
         assert_eq!(snapshot.cursor_col, 7);
+    }
+
+    #[test]
+    fn engine_does_not_scroll_immediately_after_filling_last_cell() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 3,
+            cols: 4,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[3;1HABCD");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "    ");
+        assert_eq!(snapshot.lines[1], "    ");
+        assert_eq!(snapshot.lines[2], "ABCD");
+        assert_eq!(snapshot.cursor_row, 2);
+        assert_eq!(snapshot.cursor_col, 3);
+
+        engine.feed(b"Z");
+        let wrapped = engine.snapshot();
+
+        assert_eq!(wrapped.lines[0], "    ");
+        assert_eq!(wrapped.lines[1], "ABCD");
+        assert_eq!(wrapped.lines[2], "Z   ");
+        assert_eq!(wrapped.cursor_row, 2);
+        assert_eq!(wrapped.cursor_col, 1);
     }
 
     #[test]

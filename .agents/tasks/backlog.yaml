@@ -1,8 +1,8 @@
 kind: task_backlog
 version: 1
 active:
-  - id: task.t4-10
-    title: finish local acceptance sign-off for the single-entry workspace UX
+  - id: task.sidebar-4
+    title: polish the default-visible sidebar detail area and enter-to-switch behavior
     status: in_progress
 next:
   - id: task.lifecycle-1
@@ -21,8 +21,17 @@ next:
     title: support tmux-style attach workflows with multi-client attach and daemon listing
     status: done
   - id: task.sidebar-1
-    title: add a right-side session sidebar menu for future interaction
-    status: not_started
+    title: finalize the v1 right-side session sidebar contract and split the rollout into implementation slices
+    status: done
+  - id: task.sidebar-2
+    title: implement sidebar focus mode with unified left-right navigation
+    status: done
+  - id: task.sidebar-3
+    title: render one-line sidebar session rows with agent labels and wait-state badges
+    status: done
+  - id: task.sidebar-4
+    title: polish the default-visible sidebar detail area and enter-to-switch behavior
+    status: in_progress
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: ready

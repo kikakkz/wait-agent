@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t4-10
-focus_statement: finish local acceptance sign-off before starting tmux-style lifecycle persistence and later network work
+current_task: task.sidebar-4
+focus_statement: validate and polish the default-visible collapsible sidebar so its dedicated bottom detail area, hide affordance, enter-to-switch flow, and bottom info-bar isolation remain stable without reopening render-path churn
 last_updated_from:
   file: docs/execution-status-board.md
   reference: Current Focus And Next Queue

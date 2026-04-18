@@ -1,0 +1,30 @@
+id: task.sidebar-2
+kind: task
+version: 1
+title: implement sidebar focus mode with unified left-right navigation
+status: done
+priority: medium
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.sidebar-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `Right` moves focus from the main workspace view into the right sidebar focus mode
+  - `Left` returns focus from the sidebar to the main workspace view
+  - `Up` and `Down` move the focused sidebar item when the sidebar owns focus
+  - the sidebar navigation keys use the unified WaitAgent navigation model rather than introducing a separate menu-only shortcut scheme
+  - the implementation preserves the existing passthrough gating and does not widen key interception beyond the current WaitAgent-owned navigation path
+verification:
+  - manual: enter the sidebar with `Right`, move focus with `Up` and `Down`, and return to the main view with `Left` while normal shell and agent sessions still behave correctly
+touched_paths:
+  - src/app.rs
+  - .agents/tasks/queued/task.sidebar-2.yaml
+  - .agents/
+notes:
+  - Verified in a real PTY run: `Right` opens the sidebar, `Up` and `Down` move selection, and `Left` returns to the main view without widening general shell passthrough interception.
