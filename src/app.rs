@@ -1809,6 +1809,16 @@ impl App {
         if live_surface.status_line != status_line {
             overlay_buffer.push_str(&format!("\x1b[{status_row};1H{status_line}"));
         }
+        if !overlay_buffer.is_empty() {
+            if let Some(snapshot) = self
+                .sessions
+                .get(&frame.input_owner_session)
+                .and_then(|record| record.screen_state.as_ref())
+                .map(|screen_state| screen_state.active_snapshot())
+            {
+                overlay_buffer.push_str(&live_surface_overlay_cursor_restore(snapshot));
+            }
+        }
 
         Ok(LiveSurfaceUiBuffer {
             buffer: overlay_buffer,
@@ -2382,10 +2392,17 @@ impl App {
         &self,
         sidebar: &SidebarOverlay,
         previous_sidebar: Option<&SidebarOverlay>,
+        cursor: CursorPlacement,
+        active_style_ansi: &str,
         rendered_cursor_visible: bool,
     ) -> Result<(), AppError> {
-        let buffer =
-            build_sidebar_overlay_buffer(sidebar, previous_sidebar, rendered_cursor_visible);
+        let buffer = build_sidebar_overlay_buffer(
+            sidebar,
+            previous_sidebar,
+            cursor,
+            active_style_ansi,
+            rendered_cursor_visible,
+        );
         self.write_ui_buffer("sidebar overlay", &buffer)
     }
 
@@ -2428,7 +2445,7 @@ impl App {
     ) -> Result<bool, AppError> {
         let overlay_lines =
             command_prompt.overlay_lines(self.sessions.list(), console.focused_session.as_ref());
-        let _frame = renderer.render_with_state(
+        let frame = renderer.render_with_state(
             renderer_state,
             console,
             &self.sessions.list(),
@@ -2455,9 +2472,18 @@ impl App {
             return Ok(false);
         };
         let previous_sidebar_overlay = self.build_sidebar_overlay(previous_sidebar_state.as_ref());
+        let cursor = self.frame_cursor(&frame);
+        let active_style_ansi = self
+            .sessions
+            .get(&frame.rendered_session)
+            .and_then(|record| record.screen_state.as_ref())
+            .map(|screen_state| screen_state.active_snapshot().active_style_ansi.as_str())
+            .unwrap_or(ANSI_RESET);
         self.write_sidebar_overlay_only(
             &sidebar_overlay,
             previous_sidebar_overlay.as_ref(),
+            cursor,
+            active_style_ansi,
             previous_sidebar.rendered_cursor_visible,
         )?;
         sidebar.rendered_overlay = Some(sidebar_overlay);
@@ -3604,7 +3630,11 @@ impl App {
             return Ok(false);
         };
 
-        let foreground_name = runtime.handle.foreground_process_name()?;
+        let foreground_name = match runtime.handle.foreground_process_name() {
+            Ok(name) => name,
+            Err(error) if nonfatal_foreground_process_inspection_error(&error) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
         let bootstrapping = live_surface.is_bootstrapping(address, now_unix_ms);
 
         match foreground_title_decision(&command_line, foreground_name.as_deref(), bootstrapping) {
@@ -6567,9 +6597,11 @@ fn split_frame_lines(frame_text: &str) -> Vec<String> {
 fn build_sidebar_overlay_buffer(
     sidebar: &SidebarOverlay,
     previous_sidebar: Option<&SidebarOverlay>,
+    cursor: CursorPlacement,
+    active_style_ansi: &str,
     cursor_visible: bool,
 ) -> String {
-    let mut buffer = String::from("\x1b7\x1b[?25l");
+    let mut buffer = String::from("\x1b[?25l");
     let redraw_all = previous_sidebar
         .map(|previous| {
             previous.separator_col != sidebar.separator_col
@@ -6613,14 +6645,48 @@ fn build_sidebar_overlay_buffer(
         }
     }
 
-    buffer.push_str("\x1b8");
-    buffer.push_str(if cursor_visible {
-        "\x1b[?25h"
-    } else {
-        "\x1b[?25l"
-    });
+    buffer.push_str(&cursor_restore_sequence_with_visibility(
+        cursor,
+        active_style_ansi,
+        cursor_visible,
+    ));
 
     buffer
+}
+
+fn live_surface_overlay_cursor_restore(snapshot: &crate::terminal::ScreenSnapshot) -> String {
+    cursor_restore_sequence(
+        CursorPlacement {
+            row: snapshot.cursor_row,
+            col: snapshot.cursor_col,
+        },
+        &snapshot.active_style_ansi,
+    )
+}
+
+fn cursor_restore_sequence(cursor: CursorPlacement, active_style_ansi: &str) -> String {
+    format!(
+        "\x1b[{};{}H{}",
+        cursor.row.saturating_add(1),
+        cursor.col.saturating_add(1),
+        active_style_ansi
+    )
+}
+
+fn cursor_restore_sequence_with_visibility(
+    cursor: CursorPlacement,
+    active_style_ansi: &str,
+    cursor_visible: bool,
+) -> String {
+    format!(
+        "{}{}",
+        cursor_restore_sequence(cursor, active_style_ansi),
+        if cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        }
+    )
 }
 
 fn style_status_line(line: &str, width: usize) -> String {
@@ -6884,6 +6950,10 @@ fn foreground_title_decision(
     ForegroundTitleDecision::Keep
 }
 
+fn nonfatal_foreground_process_inspection_error(error: &crate::pty::PtyError) -> bool {
+    matches!(error, crate::pty::PtyError::Inspect(_))
+}
+
 fn managed_console_size(size: crate::terminal::TerminalSize) -> crate::terminal::TerminalSize {
     crate::terminal::TerminalSize {
         rows: size
@@ -7102,27 +7172,29 @@ mod tests {
         live_output_requires_full_sidebar_redraw_from_snapshots, live_output_sidebar_damage,
         live_overlay_visible, live_surface_target_size, looks_like_shell_prompt_output,
         looks_like_terminal_release_output, looks_like_terminal_takeover_output,
-        next_runtime_event, now_unix_ms, output_is_substantive, parse_console_action, shell_title,
-        shell_title_from_command_line, sidebar_display_status, strip_sync_update_markers,
-        strip_sync_update_markers_stream, style_footer_separator_line, style_sidebar_badge,
-        style_sidebar_divider, style_sidebar_header_line, style_sidebar_item_line, App,
-        CommandOverlay, CommandPromptState, ConsoleAction, CursorPlacement,
-        ForegroundTitleDecision, ForwardInputNormalizer, InputTracker, LiveSurfaceState,
-        PickerNavigationOutcome, RuntimeEvent, ShellCommandTracker, SidebarDisplayStatus,
-        SidebarNavigationOutcome, SidebarOverlay, SidebarState, ANSI_BG_SIDEBAR_ACTIVE,
-        ANSI_FG_SIDEBAR_CONFIRM, ANSI_FG_SIDEBAR_INPUT, ANSI_FG_SIDEBAR_RUNNING,
-        ANSI_SYNC_UPDATE_END, ANSI_SYNC_UPDATE_START, LIVE_SURFACE_STATUS_ROWS,
-        PICKER_ESCAPE_TIMEOUT_MS, SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION,
-        SHORTCUT_PREVIOUS_SESSION,
+        next_runtime_event, nonfatal_foreground_process_inspection_error, now_unix_ms,
+        output_is_substantive, parse_console_action, shell_title, shell_title_from_command_line,
+        sidebar_display_status, strip_sync_update_markers, strip_sync_update_markers_stream,
+        style_footer_separator_line, style_sidebar_badge, style_sidebar_divider,
+        style_sidebar_header_line, style_sidebar_item_line, App, CommandOverlay,
+        CommandPromptState, ConsoleAction, CursorPlacement, ForegroundTitleDecision,
+        ForwardInputNormalizer, InputTracker, LiveSurfaceState, PickerNavigationOutcome,
+        RuntimeEvent, ShellCommandTracker, SidebarDisplayStatus, SidebarNavigationOutcome,
+        SidebarOverlay, SidebarState, ANSI_BG_SIDEBAR_ACTIVE, ANSI_FG_SIDEBAR_CONFIRM,
+        ANSI_FG_SIDEBAR_INPUT, ANSI_FG_SIDEBAR_RUNNING, ANSI_SYNC_UPDATE_END,
+        ANSI_SYNC_UPDATE_START, LIVE_SURFACE_STATUS_ROWS, PICKER_ESCAPE_TIMEOUT_MS,
+        SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
     use crate::config::AppConfig;
     use crate::console::ConsoleState;
+    use crate::pty::PtyError;
     use crate::renderer::{Renderer, RendererState};
     use crate::scheduler::{SchedulerPhase, SchedulerState};
     use crate::session::{SessionAddress, SessionRegistry};
     use crate::terminal::{TerminalEngine, TerminalSize};
     use std::collections::{HashMap, VecDeque};
+    use std::io;
     use std::sync::mpsc;
 
     #[test]
@@ -8022,9 +8094,15 @@ mod tests {
             ],
         };
 
-        let buffer = crate::app::build_sidebar_overlay_buffer(&sidebar, Some(&sidebar), false);
+        let buffer = crate::app::build_sidebar_overlay_buffer(
+            &sidebar,
+            Some(&sidebar),
+            CursorPlacement { row: 1, col: 2 },
+            "\x1b[0m",
+            false,
+        );
 
-        assert_eq!(buffer, "\x1b7\x1b[?25l\x1b8\x1b[?25l");
+        assert_eq!(buffer, "\x1b[?25l\x1b[2;3H\x1b[0m\x1b[?25l");
     }
 
     #[test]
@@ -8050,13 +8128,19 @@ mod tests {
             ],
         };
 
-        let buffer = crate::app::build_sidebar_overlay_buffer(&current, Some(&previous), true);
+        let buffer = crate::app::build_sidebar_overlay_buffer(
+            &current,
+            Some(&previous),
+            CursorPlacement { row: 1, col: 2 },
+            "\x1b[0m",
+            true,
+        );
 
         assert!(!buffer.contains("\x1b[1;8H"));
         assert!(buffer.contains("\x1b[2;8H"));
         assert!(buffer.contains("\x1b[3;8H"));
-        assert!(buffer.starts_with("\x1b7\x1b[?25l"));
-        assert!(buffer.ends_with("\x1b8\x1b[?25h"));
+        assert!(buffer.starts_with("\x1b[?25l"));
+        assert!(buffer.ends_with("\x1b[2;3H\x1b[0m\x1b[?25h"));
     }
 
     #[test]
@@ -8068,9 +8152,45 @@ mod tests {
             lines: vec![style_sidebar_item_line("item", 4, true)],
         };
 
-        let buffer = crate::app::build_sidebar_overlay_buffer(&sidebar, None, false);
+        let buffer = crate::app::build_sidebar_overlay_buffer(
+            &sidebar,
+            None,
+            CursorPlacement { row: 1, col: 2 },
+            "\x1b[0m",
+            false,
+        );
 
         assert!(buffer.contains(&format!("\x1b[1;9H{ANSI_BG_SIDEBAR_ACTIVE}\x1b[K")));
+    }
+
+    #[test]
+    fn sidebar_overlay_buffer_restores_cursor_position_and_style() {
+        let sidebar = SidebarOverlay {
+            separator_col: 8,
+            content_col: 9,
+            divider: style_sidebar_divider(),
+            lines: vec![
+                style_sidebar_header_line("menu", 4),
+                style_sidebar_item_line("item", 4, true),
+            ],
+        };
+        let buffer = crate::app::build_sidebar_overlay_buffer(
+            &sidebar,
+            None,
+            CursorPlacement { row: 0, col: 3 },
+            "\x1b[0;38;5;196m",
+            true,
+        );
+        let mut terminal = TerminalEngine::new(TerminalSize::default());
+
+        terminal.feed(b"\x1b[38;5;196mred");
+        terminal.feed(buffer.as_bytes());
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 3);
+        assert_eq!(snapshot.active_style_ansi, "\x1b[0;38;5;196m");
+        assert!(snapshot.cursor_visible);
     }
 
     #[test]
@@ -8508,10 +8628,17 @@ mod tests {
             )
             .expect("overlay buffer should build");
         let buffer = ui.buffer;
+        let mut terminal = TerminalEngine::new(TerminalSize::default());
+        terminal.feed(b"\x1b[38;5;196mred");
+        terminal.feed(buffer.as_bytes());
+        let snapshot = terminal.snapshot();
 
         assert!(buffer.contains("Sessions  [h] hide"));
         assert!(!buffer.contains("\x1b[s"));
         assert!(!buffer.contains("\x1b[u"));
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 3);
+        assert_eq!(snapshot.active_style_ansi, "\x1b[0;38;5;196m");
     }
 
     #[test]
@@ -9344,6 +9471,16 @@ mod tests {
             foreground_title_decision("/bin/bash -l", Some("python3"), false),
             ForegroundTitleDecision::Keep
         );
+    }
+
+    #[test]
+    fn foreground_process_inspection_errors_are_nonfatal() {
+        assert!(nonfatal_foreground_process_inspection_error(
+            &PtyError::Inspect(io::Error::new(io::ErrorKind::NotFound, "missing process"),)
+        ));
+        assert!(!nonfatal_foreground_process_inspection_error(
+            &PtyError::Read(io::Error::new(io::ErrorKind::BrokenPipe, "pty read failed"),)
+        ));
     }
 
     #[test]
