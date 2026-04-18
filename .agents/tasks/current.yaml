@@ -19,18 +19,19 @@ linked_runbooks:
 done_criteria:
   - the sidebar is visible by default in framed console mode whenever the terminal is wide enough for the sidebar layout
   - the sidebar can be hidden without losing discoverability, and a collapsed right-edge affordance remains visible so `Right` can reopen it
-  - the selected session path/detail is rendered in a dedicated fixed bottom sidebar area above the bottom info bar rather than in the shared status line
+  - the selected session label and status are rendered in a dedicated fixed bottom sidebar area above the bottom info bar rather than in the shared status line
   - pressing `Enter` while the sidebar owns focus switches to the focused session
   - after switching, the sidebar focus and selection remain aligned to the switched session rather than dropping focus back to the main view automatically
+  - the current session working directory is rendered at the far right of the full-width bottom info bar rather than in the sidebar detail row
   - the bottom info bar remains full-width and is not widened, overwritten, or vertically covered by the sidebar overlay
   - no automation-rule UI or execution logic is introduced in this slice
 verification:
   - manual: start the workspace UI, confirm the sidebar is visible by default, move focus with `Right`, hide it with `h`, reopen it with `Right`, and confirm the collapsed hint remains visible while the bottom info bar stays intact
-  - manual: move sidebar focus across sessions and confirm the bottom path detail follows the selection, then press `Enter` and confirm the target session becomes focused without losing sidebar alignment
+  - manual: move sidebar focus across sessions and confirm the bottom sidebar detail follows the selection with session label and status while the bottom info bar keeps the current working directory on the far right, then press `Enter` and confirm the target session becomes focused without losing sidebar alignment
 touched_paths:
   - src/app.rs
   - .agents/
 notes:
   - The current implementation now renders the sidebar as a separate positioned overlay block instead of appending sidebar content onto the main frame lines.
-  - The selected-session path detail has been moved out of the shared status line and into a fixed sidebar detail row above the bottom info bar.
-  - The remaining follow-up in this slice, if needed after real use, is path-presentation polish for long working directories without destabilizing the stabilized render path.
+  - The selected-session path detail has been split so the sidebar detail row now shows the selected session label and status, while the current working directory is rendered on the far right of the shared bottom info bar.
+  - The remaining follow-up in this slice, if needed after real use, is footer and sidebar presentation polish without destabilizing the stabilized render path.

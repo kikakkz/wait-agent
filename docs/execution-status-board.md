@@ -40,7 +40,7 @@ Current gate:
 Why this is the current gate:
 
 - local acceptance has been signed off, so the next bounded local UX slice can proceed without reopening the old acceptance gate
-- the first sidebar prototype now already covers unified focus navigation, one-line rows, wait-state badges, `Enter`-to-switch, a dedicated bottom detail area, and a default-visible collapsible affordance, so the remaining bounded slice is to stabilize and validate that layout without reopening the stabilized rendering path
+- the first sidebar prototype now already covers unified focus navigation, one-line rows, wait-state badges, `Enter`-to-switch, a dedicated bottom detail row for selected-session label and status, footer-aligned current-working-directory display, and a default-visible collapsible affordance, so the remaining bounded slice is to stabilize and validate that layout without reopening the stabilized rendering path
 - mirrored-network work still remains behind the current post-acceptance local UX follow-on queue
 
 ## 3. Current Snapshot
@@ -52,7 +52,7 @@ Project status at a glance:
 - Local PTY ownership, console focus, scheduling, Peek, renderer, and VT screen-state handling exist
 - Local multi-session workspace behavior has passed the main implementation and live validation loops, and the final local acceptance sign-off has been manually confirmed
 - The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
-- The right-sidebar prototype now has unified focus navigation, one-line session rows with labels and wait-state badges, `Enter`-to-switch behavior, a default-visible collapsible rail, and a dedicated bottom detail row for the selected session path
+- The right-sidebar prototype now has unified focus navigation, one-line session rows with labels and wait-state badges, `Enter`-to-switch behavior, a default-visible collapsible rail, a dedicated bottom detail row for the selected session label and status, and current-working-directory display on the far right of the shared bottom info bar
 - The remaining local UX follow-on in this rollout is validation and polish for long-path presentation and layout stability rather than a new sidebar interaction model
 - Network foundations up through client/server registration and remote session publication baselines also exist
 - The current focus is no longer acceptance sign-off; it is the stabilization slice for the first sidebar prototype
@@ -88,8 +88,9 @@ Current focus:
 What remains for the current sidebar rollout:
 
 - keep the new unified `Right`/`Left`/`Up`/`Down` sidebar navigation intact
-- keep the one-line session rows, detected labels, and `INPUT` or `UNKNOWN` badges intact
-- keep the selected-session path/detail in a dedicated fixed sidebar detail area above the bottom info bar
+- keep the one-line session rows, detected labels, and `RUNNING` / `INPUT` / `CONFIRM` badges intact
+- keep the selected-session label and status in a dedicated fixed sidebar detail area above the bottom info bar
+- keep the current session working directory on the far right of the full-width bottom info bar rather than in the sidebar detail row
 - keep the sidebar default-visible when width allows, with a hide path that still leaves a visible collapsed affordance on the right edge
 - keep the bottom info bar full-width and visually independent from sidebar rendering
 - validate whether long-path presentation needs more polish after real use
