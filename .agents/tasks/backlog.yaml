@@ -32,6 +32,9 @@ next:
   - id: task.sidebar-4
     title: polish the default-visible sidebar detail area and enter-to-switch behavior
     status: in_progress
+  - id: task.scroll-1
+    title: add a mouse-draggable shell-history scrollbar for the focused session
+    status: ready
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: ready

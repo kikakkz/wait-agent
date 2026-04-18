@@ -1,0 +1,40 @@
+id: task.scroll-1
+kind: task
+version: 1
+title: add a mouse-draggable shell-history scrollbar for the focused session
+status: ready
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.sidebar-4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - framed console mode renders a visible one-column scrollbar gutter between the main shell viewport and the sidebar whenever the focused session has scrollback beyond the visible viewport
+  - dragging the scrollbar thumb with the mouse scrolls the focused session through its own shell-history viewport without changing session focus or input ownership
+  - WaitAgent only interprets mouse press, drag, and release events that land inside the scrollbar gutter; clicks and drags in the shell body, footer, and sidebar remain ignored by WaitAgent
+  - the implementation does not introduce generic mouse-focus capture, click-to-focus semantics, or content-area mouse handling beyond the scrollbar gutter
+  - when the user starts typing any forwarded keyboard input, the focused session viewport snaps back to the live tail before the input is forwarded
+  - switching focus to another session snaps the newly focused session viewport back to the live tail immediately
+  - live fullscreen passthrough sessions such as Codex do not regress; WaitAgent either disables the framed scrollbar path there or keeps the gutter interaction from interfering with the child application
+verification:
+  - manual: in framed shell mode, produce enough output to create scrollback, drag the scrollbar thumb upward, and confirm the focused session scrolls through older history while session focus and input ownership stay unchanged
+  - manual: after dragging away from the tail, type a key destined for the focused session and confirm the viewport returns to the bottom before the input takes effect
+  - manual: drag away from the tail in one session, switch to another session, and confirm the newly focused session opens at its live bottom rather than inheriting the previous scroll offset
+  - manual: run Codex in the focused session and confirm WaitAgent does not interfere with the child application's mouse behavior outside the dedicated scrollbar gutter
+touched_paths:
+  - src/app.rs
+  - src/renderer.rs
+  - src/console.rs
+  - src/terminal.rs
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.scroll-1.yaml
+notes:
+  - This task intentionally prefers direct mouse dragging over keyboard scroll mode because the shell and Codex input areas already use keyboard history navigation semantics.
+  - The desired interaction is deliberately narrow: a dedicated gutter-only scrollbar, no generic content clicks, and no proactive mouse ownership model.
+  - The viewport model should consume session scrollback plus the visible screen buffer rather than relying only on the current on-screen rows.
