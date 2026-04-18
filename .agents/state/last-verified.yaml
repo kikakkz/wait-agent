@@ -1,9 +1,15 @@
 kind: state
 version: 1
-last_updated_from: lifecycle verification refresh at 2026-04-17T00:48:39Z
+last_updated_from: sidebar-4 default-visible layout refresh at 2026-04-17
 checks:
   - id: cargo-test
     command: cargo test
+    status: pass
+  - id: sidebar-default-visible-build-and-test
+    command: cargo test --quiet after the default-visible collapsible sidebar layout refresh
+    status: pass
+  - id: sidebar-default-visible-real-pty
+    command: manual PTY validation of the default-visible sidebar, `h` hide, `Right` reopen, dedicated sidebar detail row, and isolated bottom info bar
     status: pass
   - id: lifecycle-4-real-terminal-validation
     command: user-validated real-terminal detach and reattach workflow with shell-backed and Codex-like TUI sessions for task.lifecycle-4
@@ -34,4 +40,13 @@ checks:
     status: pass
   - id: local-acceptance-final-signoff
     command: manual rerun of docs/local-acceptance-checklist.md sections 5 and 6 in the user's daily-use terminal environment
-    status: pending
+    status: pass
+  - id: sidebar-v1-spec-approval
+    command: user-approved sidebar v1 interaction review defining unified navigation, one-line session rows, label rules, wait-state badges, and bottom path detail
+    status: pass
+  - id: sidebar-prototype-build-and-test
+    command: cargo build --quiet plus cargo test --quiet after the first sidebar prototype implementation
+    status: pass
+  - id: sidebar-prototype-real-pty
+    command: manual PTY validation of `Ctrl-N`, `Right`, `Down`, `Enter`, and `Left` against `target/debug/waitagent __workspace-internal`
+    status: pass

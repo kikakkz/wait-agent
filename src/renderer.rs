@@ -41,6 +41,7 @@ impl RenderFrame {
 pub struct RenderContext {
     pub waiting_count: usize,
     pub overlay_lines: Vec<String>,
+    pub footer_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,21 @@ pub enum RenderMode {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RendererState {
     last_focused_session: Option<SessionAddress>,
+    last_frame_lines: Vec<String>,
+}
+
+impl RendererState {
+    pub fn previous_frame_lines(&self) -> &[String] {
+        &self.last_frame_lines
+    }
+
+    pub fn update_frame_lines(&mut self, lines: Vec<String>) {
+        self.last_frame_lines = lines;
+    }
+
+    pub fn clear_frame_lines(&mut self) {
+        self.last_frame_lines.clear();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -132,7 +148,7 @@ impl Renderer {
                 focused,
                 sessions,
                 context.waiting_count,
-                snapshot.size.cols as usize,
+                context.footer_width.max(snapshot.size.cols as usize),
             ),
             cursor_row,
             cursor_col,
@@ -180,7 +196,7 @@ impl Renderer {
                 focused,
                 sessions,
                 context.waiting_count,
-                snapshot.size.cols as usize,
+                context.footer_width.max(snapshot.size.cols as usize),
             ),
             cursor_row,
             cursor_col,
@@ -232,22 +248,9 @@ fn render_bottom_line(
         "active"
     };
     let session_label = if console.is_peeking() {
-        if let Some(working_dir) = rendered.current_working_dir.as_deref() {
-            format!(
-                "peek {} <- {} | {}",
-                rendered.address(),
-                focused,
-                working_dir
-            )
-        } else {
-            format!("peek {} <- {}", rendered.address(), focused)
-        }
+        format!("peek {} <- {}", rendered.address(), focused)
     } else {
-        if let Some(working_dir) = rendered.current_working_dir.as_deref() {
-            format!("{} | {} | {}", rendered.title, focused, working_dir)
-        } else {
-            format!("{} | {}", rendered.title, focused)
-        }
+        format!("{} | {}", rendered.title, focused)
     };
     let mut parts = vec![
         visual_mode.to_string(),
@@ -256,6 +259,9 @@ fn render_bottom_line(
     ];
     if !matches!(console.switch_lock, SwitchLock::Clear) {
         parts.push(format!("lock {}", render_lock(console.switch_lock)));
+    }
+    if let Some(working_dir) = rendered.current_working_dir.as_deref() {
+        parts.push(working_dir.to_string());
     }
 
     compose_bar(
@@ -592,6 +598,7 @@ mod tests {
         RenderContext {
             waiting_count,
             overlay_lines: Vec::new(),
+            footer_width: 0,
         }
     }
 
@@ -665,6 +672,48 @@ mod tests {
         assert!(lines[1].trim().is_empty());
         assert!(lines[2].starts_with("WaitAgent | claude | devbox-1/session-1"));
         assert!(lines[2].ends_with("active | 1 waiting | 1/1"));
+    }
+
+    #[test]
+    fn renders_current_working_dir_at_far_right_of_bottom_line() {
+        let mut registry = SessionRegistry::new();
+        let session = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let address = session.address().clone();
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 64,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        engine.feed(b"\x1b]0;/opt/data/workspace/wait-agent/projects/demo\x07");
+        registry.update_screen_state(&address, engine.state());
+
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address);
+
+        let sessions = registry.list();
+        let frame = Renderer::new()
+            .render(
+                &console,
+                &sessions,
+                RenderContext {
+                    waiting_count: 0,
+                    overlay_lines: Vec::new(),
+                    footer_width: 120,
+                },
+            )
+            .expect("render should succeed");
+
+        assert!(frame
+            .bottom_line
+            .starts_with("WaitAgent | bash | local/session-1"));
+        assert!(frame
+            .bottom_line
+            .ends_with("active | 0 waiting | 1/1 | /opt/data/workspace/wait-agent/projects/demo"));
     }
 
     #[test]
@@ -886,6 +935,7 @@ mod tests {
                 RenderContext {
                     waiting_count: 0,
                     overlay_lines: vec![":/new".to_string()],
+                    footer_width: 0,
                 },
             )
             .expect("render should succeed");
@@ -966,6 +1016,7 @@ mod tests {
                 RenderContext {
                     waiting_count: 0,
                     overlay_lines: vec![":/sessions".to_string()],
+                    footer_width: 0,
                 },
             )
             .expect("render should succeed");
@@ -1008,6 +1059,7 @@ mod tests {
                         "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^C quit"
                             .to_string(),
                     ],
+                    footer_width: 0,
                 },
             )
             .expect("render should succeed");

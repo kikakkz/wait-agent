@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.0`  
+Version: `v1.1`  
 Status: `Active`  
-Date: `2026-04-12`
+Date: `2026-04-17`
 
 ## 1. Purpose
 
@@ -13,7 +13,7 @@ It exists to make coding assistants behave more like disciplined project operato
 - Read the current task before exploring widely
 - Route work through reusable primitives and runbooks
 - Keep machine state aligned with the human execution board
-- Avoid drifting into premature network work while the local acceptance gate is still open
+- Avoid drifting into premature network work while the current post-acceptance local UX queue is still active
 
 This file is human-facing.
 The machine-facing control plane lives under `.agents/`.
@@ -28,7 +28,7 @@ The WaitAgent control plane follows these rules:
 - `.agents/index.yaml` is the single assistant entrypoint
 - `docs/execution-status-board.md` remains the human-facing status summary
 - `docs/local-acceptance-checklist.md` remains the human-facing acceptance checklist
-- Local workspace acceptance remains the phase gate before resumed network execution
+- After local acceptance closes, the post-acceptance local UX queue becomes the execution gate before resumed network execution
 - Exact execution state, ordering, blockers, and verification now live in `.agents/`
 - Do not create orphan tasks that exist only in chat, scratch notes, or human docs without a matching `.agents/tasks/` entry
 - Implementation state and unified task-source state must move together; when code materially changes task completion, scope, or sequencing, the same work slice must update `.agents/tasks/` and any linked `.agents/state/` entries before the task can be considered synced
@@ -70,24 +70,21 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.t4-10`:
+The current default task is `task.sidebar-2`:
 
-> Finish local acceptance sign-off for the single-entry workspace UX.
+> Implement sidebar focus mode with unified left-right navigation.
 
 That task intentionally routes assistants through:
 
-- `primitive.acceptance-check-sync`
-- `primitive.local-workspace-validation`
 - `primitive.verification-refresh`
-- `primitive.blocker-record`
+- `primitive.task-switch-current`
 - `primitive.task-board-sync`
 
 This keeps assistants focused on:
 
-- real terminal validation
-- explicit acceptance evidence
-- blocker capture
-- consistency between `.agents` and `docs/`
+- the approved sidebar v1 interaction contract
+- unified task-source synchronization after the acceptance gate closed
+- a bounded first implementation slice before wider sidebar rendering work
 
 ## 5. Maintenance Rules
 

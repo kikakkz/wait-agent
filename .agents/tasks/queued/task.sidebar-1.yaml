@@ -1,30 +1,35 @@
 id: task.sidebar-1
 kind: task
 version: 1
-title: add a right-side session sidebar menu for future interaction
-status: not_started
+title: finalize the v1 right-side session sidebar contract and split the rollout into implementation slices
+status: done
 priority: medium
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.lifecycle-4.done_or_in_progress
+  - task.lifecycle-5.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - a right-side sidebar surface exists for showing the full session list
-  - the sidebar is suitable as the future home for session-focused interaction affordances
-  - the concrete interaction model, rendering tradeoffs, and rollout order are explicitly refined before implementation starts
+  - the sidebar v1 navigation contract is fixed to unified WaitAgent-owned arrow-key navigation with `Right` entering the sidebar focus and `Left` returning to the main view
+  - the sidebar v1 list contract is fixed to one row per session, using the detected agent name for agent-backed sessions and `bash` for ordinary shell sessions
+  - the sidebar v1 state contract is fixed to `INPUT`, `CONFIRM`, and `UNKNOWN` wait-state badges without inventing extra automation behavior in this slice
+  - the sidebar v1 detail contract is fixed to a bottom path detail area rather than a floating tooltip
+  - the sidebar rollout is split into bounded implementation tasks so the future work does not depend on this placeholder file alone
 verification:
-  - manual: future design review before implementation scope is activated
+  - user-approved design review defining unified navigation, row content, wait-state badges, bottom path detail, and the initial sidebar rollout split
 touched_paths:
-  - src/app.rs
-  - src/renderer.rs
-  - docs/ui-design.md
+  - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.sidebar-1.yaml
+  - .agents/tasks/queued/task.sidebar-2.yaml
+  - .agents/tasks/queued/task.sidebar-3.yaml
+  - .agents/tasks/queued/task.sidebar-4.yaml
+  - .agents/state/current-focus.yaml
+  - docs/execution-status-board.md
 notes:
-  - This is an intentionally deferred placeholder task.
-  - Do not start implementation from this file alone; the detailed interaction model should be discussed and narrowed first.
+  - Future automation rules such as commit-policy handling or auto-confirm rules are intentionally out of scope for this first sidebar rollout.
+  - The approved v1 keeps the current rendering architecture in place and only narrows the sidebar interaction contract.

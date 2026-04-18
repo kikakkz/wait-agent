@@ -51,6 +51,12 @@ pub fn run_workspace_entry(
     let workspace_dir = resolve_workspace_dir(None)?;
     let paths = WorkspacePaths::from_dir(&workspace_dir);
     ensure_daemon_running(&runtime, &paths, snapshot.size)?;
+    if !wait_for_existing_daemon_ready(&paths, DAEMON_START_TIMEOUT, true) {
+        return Err(LifecycleError::Protocol(format!(
+            "waitagent daemon did not become ready at {}",
+            paths.socket_path.display()
+        )));
+    }
     run_attach_client(&paths, snapshot.size)
 }
 
@@ -270,7 +276,7 @@ fn ensure_daemon_running(
     paths: &WorkspacePaths,
     size: TerminalSize,
 ) -> Result<(), LifecycleError> {
-    if daemon_is_reachable(paths) {
+    if daemon_accepts_connections(paths) {
         return Ok(());
     }
 
@@ -328,7 +334,7 @@ fn ensure_daemon_running(
         LifecycleError::Io("failed to spawn waitagent daemon".to_string(), error)
     })?;
 
-    if wait_for_existing_daemon_ready(paths, DAEMON_START_TIMEOUT, true) {
+    if wait_for_existing_daemon_socket(paths, DAEMON_START_TIMEOUT, true) {
         return Ok(());
     }
 
@@ -353,6 +359,10 @@ fn daemon_is_reachable(paths: &WorkspacePaths) -> bool {
     }
 }
 
+fn daemon_accepts_connections(paths: &WorkspacePaths) -> bool {
+    UnixStream::connect(&paths.socket_path).is_ok()
+}
+
 fn wait_for_existing_daemon_ready(
     paths: &WorkspacePaths,
     timeout: Duration,
@@ -363,6 +373,29 @@ fn wait_for_existing_daemon_ready(
 
     while started_at.elapsed() < timeout {
         if daemon_is_reachable(paths) {
+            return true;
+        }
+        if paths.socket_path.exists() {
+            saw_socket = true;
+        } else if !saw_socket && !wait_for_socket_creation {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    false
+}
+
+fn wait_for_existing_daemon_socket(
+    paths: &WorkspacePaths,
+    timeout: Duration,
+    wait_for_socket_creation: bool,
+) -> bool {
+    let started_at = Instant::now();
+    let mut saw_socket = paths.socket_path.exists();
+
+    while started_at.elapsed() < timeout {
+        if daemon_accepts_connections(paths) {
             return true;
         }
         if paths.socket_path.exists() {
@@ -466,19 +499,50 @@ fn parse_screen_size(value: &str) -> Option<(u16, u16)> {
 }
 
 fn workspace_snapshot_ready(snapshot: &ScreenSnapshot) -> bool {
+    workspace_snapshot_has_visible_workspace(snapshot) && workspace_snapshot_has_chrome(snapshot)
+}
+
+fn workspace_snapshot_has_visible_workspace(snapshot: &ScreenSnapshot) -> bool {
     let work_rows = snapshot.lines.len().saturating_sub(WORKSPACE_STATUS_ROWS);
     snapshot.lines[..work_rows]
         .iter()
-        .any(|line| line.chars().any(|ch| !ch.is_whitespace()))
+        .map(|line| visible_workspace_main_text(line))
+        .any(line_has_visible_workspace_content)
+}
+
+fn workspace_snapshot_has_chrome(snapshot: &ScreenSnapshot) -> bool {
+    let mut saw_keys = false;
+    let mut saw_status = false;
+
+    for line in &snapshot.lines {
+        let visible = visible_workspace_main_text(line).trim();
+        if visible.starts_with("keys:") {
+            saw_keys = true;
+        } else if visible.starts_with("WaitAgent |") {
+            saw_status = true;
+        }
+    }
+
+    saw_keys && saw_status
 }
 
 fn looks_like_full_frame(bytes: &[u8]) -> bool {
-    bytes.starts_with(FRAME_START)
-        && bytes
-            .windows(ROW_ONE_START.len())
-            .any(|window| window == ROW_ONE_START)
+    let Some(frame_start) = full_frame_start_offset(bytes) else {
+        return false;
+    };
+
+    bytes[frame_start..]
+        .windows(ROW_ONE_START.len())
+        .any(|window| window == ROW_ONE_START)
 }
 
+fn full_frame_start_offset(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(FRAME_START.len())
+        .position(|window| window == FRAME_START)
+}
+
+#[cfg(test)]
 fn frame_has_visible_first_line(bytes: &[u8]) -> bool {
     let Some(start) = bytes
         .windows(ROW_ONE_START.len())
@@ -492,13 +556,118 @@ fn frame_has_visible_first_line(bytes: &[u8]) -> bool {
         .position(|window| window == CLEAR_TO_LINE_END)
         .map(|offset| content_start + offset)
         .unwrap_or(bytes.len());
-    ansi_visible_text(&bytes[content_start..content_end])
+    ansi_visible_text(visible_workspace_main_bytes(
+        &bytes[content_start..content_end],
+    ))
+    .chars()
+    .any(|ch| !ch.is_whitespace())
+}
+
+fn visible_workspace_main_text(line: &str) -> &str {
+    line.split_once('┃').map(|(main, _)| main).unwrap_or(line)
+}
+
+fn visible_workspace_main_bytes(bytes: &[u8]) -> &[u8] {
+    let divider = "┃".as_bytes();
+    bytes
+        .windows(divider.len())
+        .position(|window| window == divider)
+        .map(|index| &bytes[..index])
+        .unwrap_or(bytes)
+}
+
+fn attach_frame_has_visible_workspace(bytes: &[u8]) -> bool {
+    if looks_like_full_frame(bytes) {
+        return full_frame_has_visible_workspace(bytes);
+    }
+
+    ansi_visible_text(visible_workspace_main_bytes(bytes))
         .chars()
         .any(|ch| !ch.is_whitespace())
 }
 
+fn full_frame_has_visible_workspace(bytes: &[u8]) -> bool {
+    let mut saw_visible_workspace = false;
+
+    for visible in full_frame_main_lines(bytes) {
+        if line_has_visible_workspace_content(&visible) {
+            saw_visible_workspace = true;
+            break;
+        }
+    }
+
+    saw_visible_workspace
+}
+
+fn full_frame_has_chrome(bytes: &[u8]) -> bool {
+    let mut saw_keys = false;
+    let mut saw_status = false;
+
+    for visible in full_frame_main_lines(bytes) {
+        let trimmed = visible.trim();
+        if trimmed.starts_with("keys:") {
+            saw_keys = true;
+        } else if trimmed.starts_with("WaitAgent |") {
+            saw_status = true;
+        }
+    }
+
+    saw_keys && saw_status
+}
+
+fn full_frame_main_lines(bytes: &[u8]) -> Vec<String> {
+    let mut index = 0;
+    let mut lines = Vec::new();
+
+    while index < bytes.len() {
+        let Some(row_start_offset) = bytes[index..]
+            .windows(2)
+            .position(|window| window == b"\x1b[")
+        else {
+            break;
+        };
+        index += row_start_offset + 2;
+
+        let row_digits_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if row_digits_start == index || index + 2 >= bytes.len() {
+            continue;
+        }
+        if bytes[index] != b';' || bytes[index + 1] != b'1' || bytes[index + 2] != b'H' {
+            continue;
+        }
+        index += 3;
+
+        let content_start = index;
+        let Some(clear_offset) = bytes[index..]
+            .windows(CLEAR_TO_LINE_END.len())
+            .position(|window| window == CLEAR_TO_LINE_END)
+        else {
+            break;
+        };
+        let content_end = index + clear_offset;
+        index = content_end + CLEAR_TO_LINE_END.len();
+
+        lines.push(ansi_visible_text(visible_workspace_main_bytes(
+            &bytes[content_start..content_end],
+        )));
+    }
+
+    lines
+}
+
+fn line_has_visible_workspace_content(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with("keys:")
+        && !trimmed.starts_with("WaitAgent |")
+        && !trimmed.chars().all(|ch| ch == '━')
+}
+
 fn ansi_visible_text(bytes: &[u8]) -> String {
-    let mut visible = String::new();
+    let mut visible = Vec::new();
     let mut index = 0;
 
     while index < bytes.len() {
@@ -537,18 +706,14 @@ fn ansi_visible_text(bytes: &[u8]) -> String {
                     _ => index += 2,
                 }
             }
-            byte if byte.is_ascii() => {
-                visible.push(byte as char);
-                index += 1;
-            }
-            _ => {
-                visible.push(char::REPLACEMENT_CHARACTER);
+            byte => {
+                visible.push(byte);
                 index += 1;
             }
         }
     }
 
-    visible
+    String::from_utf8_lossy(&visible).into_owned()
 }
 
 fn run_attach_client(paths: &WorkspacePaths, size: TerminalSize) -> Result<(), LifecycleError> {
@@ -580,6 +745,8 @@ fn run_attach_client(paths: &WorkspacePaths, size: TerminalSize) -> Result<(), L
     let mut writer = stream;
     let mut stdout = io::stdout().lock();
     let mut first_message_seen = false;
+    let mut workspace_visible = false;
+    let mut requested_startup_refresh = false;
 
     loop {
         match rx.recv_timeout(CLIENT_TICK) {
@@ -592,6 +759,16 @@ fn run_attach_client(paths: &WorkspacePaths, size: TerminalSize) -> Result<(), L
                 }
                 Frame::Snapshot(bytes) | Frame::Output(bytes) => {
                     first_message_seen = true;
+                    if !workspace_visible {
+                        if !attach_frame_has_visible_workspace(&bytes) {
+                            if !requested_startup_refresh {
+                                request_attach_startup_refresh(&mut writer, size)?;
+                                requested_startup_refresh = true;
+                            }
+                            continue;
+                        }
+                        workspace_visible = true;
+                    }
                     stdout.write_all(&bytes).map_err(|error| {
                         LifecycleError::Io("failed to write attach output".to_string(), error)
                     })?;
@@ -612,6 +789,10 @@ fn run_attach_client(paths: &WorkspacePaths, size: TerminalSize) -> Result<(), L
             },
             Ok(AttachClientEvent::SocketClosed) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if first_message_seen && !workspace_visible && !requested_startup_refresh {
+                    request_attach_startup_refresh(&mut writer, size)?;
+                    requested_startup_refresh = true;
+                }
                 if first_message_seen {
                     if let Some(resized) = terminal_runtime.capture_resize()? {
                         write_frame(&mut writer, &Frame::Resize(resized.into()))?;
@@ -623,6 +804,21 @@ fn run_attach_client(paths: &WorkspacePaths, size: TerminalSize) -> Result<(), L
     }
 
     Ok(())
+}
+
+fn request_attach_startup_refresh(
+    writer: &mut UnixStream,
+    size: TerminalSize,
+) -> Result<(), LifecycleError> {
+    let mut bumped = size;
+    if bumped.rows < u16::MAX {
+        bumped.rows += 1;
+    } else if bumped.cols < u16::MAX {
+        bumped.cols += 1;
+    }
+    write_frame(writer, &Frame::Resize(bumped.into()))?;
+    write_frame(writer, &Frame::Resize(size.into()))?;
+    write_frame(writer, &Frame::SnapshotRequest)
 }
 
 struct DaemonRuntime {
@@ -727,10 +923,15 @@ impl DaemonRuntime {
                 DaemonEvent::PtyOutput(bytes) => {
                     self.engine.feed(&bytes);
                     if looks_like_full_frame(&bytes) {
-                        self.workspace_ready |= frame_has_visible_first_line(&bytes);
-                        self.latest_frame_bytes = Some(bytes.clone());
+                        let frame_ready = full_frame_has_visible_workspace(&bytes)
+                            && full_frame_has_chrome(&bytes);
+                        self.workspace_ready |= frame_ready;
+                        if frame_ready {
+                            self.latest_frame_bytes = Some(bytes.clone());
+                        }
                     } else {
-                        self.workspace_ready |= workspace_snapshot_ready(&self.engine.snapshot());
+                        let snapshot_ready = workspace_snapshot_ready(&self.engine.snapshot());
+                        self.workspace_ready |= snapshot_ready;
                     }
                     self.broadcast_frame(Frame::Output(bytes));
                 }
@@ -752,6 +953,15 @@ impl DaemonRuntime {
                         Frame::Resize(size) => {
                             self.pty.resize(size)?;
                             self.engine.resize(size.into());
+                        }
+                        Frame::SnapshotRequest => {
+                            if let Some(client) = self.attached_clients.get_mut(&client_id) {
+                                let snapshot_bytes =
+                                    self.latest_frame_bytes.clone().unwrap_or_else(|| {
+                                        render_snapshot_bytes(&self.engine.snapshot()).into_bytes()
+                                    });
+                                write_frame(&mut client.stream, &Frame::Snapshot(snapshot_bytes))?;
+                            }
                         }
                         _ => {}
                     }
@@ -1013,6 +1223,7 @@ enum Frame {
     Attach(PtySize),
     Input(Vec<u8>),
     Resize(PtySize),
+    SnapshotRequest,
     StatusRequest,
     DetachRequest,
     Ack(String),
@@ -1025,8 +1236,9 @@ enum Frame {
 const FRAME_ATTACH: u8 = 1;
 const FRAME_INPUT: u8 = 2;
 const FRAME_RESIZE: u8 = 3;
-const FRAME_STATUS_REQUEST: u8 = 4;
-const FRAME_DETACH_REQUEST: u8 = 5;
+const FRAME_SNAPSHOT_REQUEST: u8 = 4;
+const FRAME_STATUS_REQUEST: u8 = 5;
+const FRAME_DETACH_REQUEST: u8 = 6;
 const FRAME_ACK: u8 = 101;
 const FRAME_SNAPSHOT: u8 = 102;
 const FRAME_OUTPUT: u8 = 103;
@@ -1038,6 +1250,7 @@ fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<(), LifecycleEr
         Frame::Attach(size) => (FRAME_ATTACH, encode_size(*size)),
         Frame::Input(bytes) => (FRAME_INPUT, bytes.clone()),
         Frame::Resize(size) => (FRAME_RESIZE, encode_size(*size)),
+        Frame::SnapshotRequest => (FRAME_SNAPSHOT_REQUEST, Vec::new()),
         Frame::StatusRequest => (FRAME_STATUS_REQUEST, Vec::new()),
         Frame::DetachRequest => (FRAME_DETACH_REQUEST, Vec::new()),
         Frame::Ack(text) => (FRAME_ACK, text.as_bytes().to_vec()),
@@ -1082,6 +1295,7 @@ fn read_frame(stream: &mut UnixStream) -> Result<Frame, LifecycleError> {
         FRAME_ATTACH => Ok(Frame::Attach(decode_size(&payload)?)),
         FRAME_INPUT => Ok(Frame::Input(payload)),
         FRAME_RESIZE => Ok(Frame::Resize(decode_size(&payload)?)),
+        FRAME_SNAPSHOT_REQUEST => Ok(Frame::SnapshotRequest),
         FRAME_STATUS_REQUEST => Ok(Frame::StatusRequest),
         FRAME_DETACH_REQUEST => Ok(Frame::DetachRequest),
         FRAME_ACK => Ok(Frame::Ack(String::from_utf8(payload).map_err(|_| {
@@ -1197,8 +1411,8 @@ impl From<TerminalError> for LifecycleError {
 #[cfg(test)]
 mod tests {
     use super::{
-        daemon_status_ready, frame_has_visible_first_line, looks_like_full_frame,
-        parse_status_fields, workspace_snapshot_ready,
+        attach_frame_has_visible_workspace, daemon_status_ready, frame_has_visible_first_line,
+        looks_like_full_frame, parse_status_fields, workspace_snapshot_ready,
     };
     use crate::terminal::{ScreenSnapshot, TerminalSize};
     use std::path::PathBuf;
@@ -1252,6 +1466,45 @@ mod tests {
     }
 
     #[test]
+    fn ignores_sidebar_only_first_line_in_full_frame_bytes() {
+        let bytes =
+            "\x1b[H\x1b[1;1H                                                   ┃ Sessions\x1b[K"
+                .as_bytes();
+        assert!(looks_like_full_frame(bytes));
+        assert!(!frame_has_visible_first_line(bytes));
+        assert!(!attach_frame_has_visible_workspace(bytes));
+    }
+
+    #[test]
+    fn attach_frame_detects_visible_workspace_text_in_non_frame_output() {
+        assert!(attach_frame_has_visible_workspace(b"prompt$ "));
+        assert!(!attach_frame_has_visible_workspace(
+            "   ┃ Sessions".as_bytes()
+        ));
+    }
+
+    #[test]
+    fn attach_frame_detects_visible_workspace_text_below_first_row() {
+        let bytes = b"\x1b[H\x1b[1;1H                                                   \x1b[K\x1b[2;1Hprompt$ \x1b[K\x1b[3;1Hkeys: demo\x1b[K";
+        assert!(attach_frame_has_visible_workspace(bytes));
+    }
+
+    #[test]
+    fn full_frame_detection_accepts_leading_terminal_mode_prefixes() {
+        let bytes = b"\x1b[?1049h\x1b[H\x1b[?2026h\x1b[H\x1b[1;1Hprompt$ \x1b[K";
+        assert!(looks_like_full_frame(bytes));
+        assert!(frame_has_visible_first_line(bytes));
+        assert!(attach_frame_has_visible_workspace(bytes));
+    }
+
+    #[test]
+    fn sidebar_only_diff_is_not_treated_as_full_frame() {
+        let bytes = "\x1b[?2026h\x1b[H\x1b[3;52H┃\x1b[3;53H> bash@local 🔊I\x1b[K".as_bytes();
+        assert!(!looks_like_full_frame(bytes));
+        assert!(!attach_frame_has_visible_workspace(bytes));
+    }
+
+    #[test]
     fn parses_daemon_status_fields() {
         let status = "\
 workspace: /tmp/demo\n\
@@ -1278,7 +1531,7 @@ alternate_screen: yes";
     #[test]
     fn workspace_snapshot_ready_when_cursor_has_moved() {
         assert!(!workspace_snapshot_ready(&snapshot(
-            &["", "", "", "divider", "keys", "status"],
+            &["", "", "", "━━━━━━━━", "keys: demo", "WaitAgent | bash",],
             0,
             12,
         )));
@@ -1287,7 +1540,14 @@ alternate_screen: yes";
     #[test]
     fn workspace_snapshot_ready_when_work_area_has_content() {
         assert!(workspace_snapshot_ready(&snapshot(
-            &["prompt line", "", "", "divider", "keys", "status"],
+            &[
+                "prompt line",
+                "",
+                "",
+                "━━━━━━━━",
+                "keys: demo",
+                "WaitAgent | bash",
+            ],
             0,
             0,
         )));
@@ -1296,7 +1556,48 @@ alternate_screen: yes";
     #[test]
     fn workspace_snapshot_not_ready_for_footer_only_frame() {
         assert!(!workspace_snapshot_ready(&snapshot(
-            &["", "", "", "divider", "keys", "status"],
+            &["", "", "", "━━━━━━━━", "keys: demo", "WaitAgent | bash",],
+            0,
+            0,
+        )));
+    }
+
+    #[test]
+    fn workspace_snapshot_not_ready_when_prompt_is_present_without_chrome() {
+        assert!(!workspace_snapshot_ready(&snapshot(
+            &["prompt line", "", "", "", "", ""],
+            0,
+            0,
+        )));
+    }
+
+    #[test]
+    fn attach_frame_ignores_footer_only_snapshot_without_prompt() {
+        let bytes = concat!(
+            "\x1b[H",
+            "\x1b[1;1H                                                   ┃ ← back  ↑↓ move  enter swi \x1b[K",
+            "\x1b[2;1H                                                   ┃> bash@local             🔊I\x1b[K",
+            "\x1b[20;1H━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┃                            \x1b[K",
+            "\x1b[21;1Hkeys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X c┃                            \x1b[K",
+            "\x1b[22;1HWaitAgent | bash | local/session-1                 ┃bash@local | INPUT | unknow \x1b[K",
+            "\x1b[23;1HWaitAgent | bash | local/session-1                      active | 1 waiting | 1/1\x1b[K",
+            "\x1b[24;1H                                                                                \x1b[K",
+        )
+        .as_bytes();
+
+        assert!(!attach_frame_has_visible_workspace(bytes));
+    }
+
+    #[test]
+    fn workspace_snapshot_not_ready_for_sidebar_only_work_rows() {
+        assert!(!workspace_snapshot_ready(&snapshot(
+            &[
+                "                                                   ┃ Sessions",
+                "",
+                "divider",
+                "keys",
+                "status"
+            ],
             0,
             0,
         )));

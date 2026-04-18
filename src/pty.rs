@@ -1,16 +1,20 @@
 #![allow(dead_code)]
 
+use crate::agent::live_agent_label;
 use crate::session::SessionAddress;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, NulError};
 use std::fmt;
+use std::fs;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::raw::{c_char, c_int, c_ulong};
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::path::Path;
 
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
+const TIOCGPGRP: c_ulong = 0x540f;
 const TIOCSWINSZ: c_ulong = 0x5414;
 pub const PTY_EOF_ERRNO: i32 = 5;
 const SIGKILL: c_int = 9;
@@ -128,6 +132,15 @@ impl PtyHandle {
 
     pub fn size(&self) -> PtySize {
         self.size
+    }
+
+    pub fn foreground_process_name(&self) -> Result<Option<String>, PtyError> {
+        let Some(process_group) = foreground_process_group(self.master.as_raw_fd())? else {
+            return Ok(None);
+        };
+
+        let processes = read_process_snapshots()?;
+        Ok(select_foreground_process_name(process_group, &processes))
     }
 
     pub fn resize(&mut self, size: PtySize) -> Result<(), PtyError> {
@@ -268,6 +281,7 @@ impl PtyManager {
 pub enum PtyError {
     Open(io::Error),
     Spawn(NulError),
+    Inspect(io::Error),
     CloneReader(std::io::Error),
     TakeWriter(std::io::Error),
     Read(std::io::Error),
@@ -282,6 +296,7 @@ impl fmt::Display for PtyError {
         match self {
             Self::Open(error) => write!(f, "failed to open PTY: {error}"),
             Self::Spawn(error) => write!(f, "failed to build PTY command: {error}"),
+            Self::Inspect(error) => write!(f, "failed to inspect PTY foreground process: {error}"),
             Self::CloneReader(error) => write!(f, "failed to clone PTY reader: {error}"),
             Self::TakeWriter(error) => write!(f, "failed to take PTY writer: {error}"),
             Self::Read(error) => write!(f, "failed to read PTY output: {error}"),
@@ -294,6 +309,194 @@ impl fmt::Display for PtyError {
 }
 
 impl std::error::Error for PtyError {}
+
+fn foreground_process_group(fd: c_int) -> Result<Option<u32>, PtyError> {
+    let mut process_group = 0_i32;
+    let result = unsafe { ioctl(fd, TIOCGPGRP, &mut process_group) };
+    if result != 0 {
+        return Err(PtyError::Inspect(io::Error::last_os_error()));
+    }
+
+    Ok((process_group > 0).then_some(process_group as u32))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessSnapshot {
+    pid: u32,
+    parent_id: u32,
+    process_group: u32,
+    cmdline_name: Option<String>,
+    comm_name: Option<String>,
+}
+
+fn read_process_snapshots() -> Result<Vec<ProcessSnapshot>, PtyError> {
+    let mut processes = Vec::new();
+    let entries = fs::read_dir("/proc").map_err(PtyError::Inspect)?;
+    for entry in entries {
+        let entry = entry.map_err(PtyError::Inspect)?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+
+        let Some((parent_id, process_group)) = read_process_stat(pid)? else {
+            continue;
+        };
+
+        processes.push(ProcessSnapshot {
+            pid,
+            parent_id,
+            process_group,
+            cmdline_name: read_process_name_from_cmdline(pid)?,
+            comm_name: read_process_name_from_comm(pid)?,
+        });
+    }
+
+    Ok(processes)
+}
+
+fn read_process_stat(process_id: u32) -> Result<Option<(u32, u32)>, PtyError> {
+    let path = format!("/proc/{process_id}/stat");
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PtyError::Inspect(error)),
+    };
+
+    let Some(close_paren) = contents.rfind(')') else {
+        return Ok(None);
+    };
+    let Some(fields) = contents.get(close_paren + 2..) else {
+        return Ok(None);
+    };
+    let mut parts = fields.split_whitespace();
+    let _state = parts.next();
+    let Some(parent_id) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+        return Ok(None);
+    };
+    let Some(process_group) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+        return Ok(None);
+    };
+
+    Ok(Some((parent_id, process_group)))
+}
+
+fn select_foreground_process_name(
+    process_group: u32,
+    processes: &[ProcessSnapshot],
+) -> Option<String> {
+    let by_pid = processes
+        .iter()
+        .map(|process| (process.pid, process))
+        .collect::<HashMap<_, _>>();
+
+    if let Some(leader) = by_pid.get(&process_group) {
+        if let Some(live_name) = live_agent_name(leader) {
+            return Some(live_name);
+        }
+
+        let mut children_by_parent = HashMap::<u32, Vec<&ProcessSnapshot>>::new();
+        for process in processes {
+            children_by_parent
+                .entry(process.parent_id)
+                .or_default()
+                .push(process);
+        }
+        for children in children_by_parent.values_mut() {
+            children.sort_by_key(|process| process.pid);
+        }
+
+        let mut visited = HashSet::from([leader.pid]);
+        let mut queue = children_by_parent
+            .get(&leader.pid)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<VecDeque<_>>();
+
+        while let Some(process) = queue.pop_front() {
+            if !visited.insert(process.pid) {
+                continue;
+            }
+            if let Some(live_name) = live_agent_name(process) {
+                return Some(live_name);
+            }
+            if let Some(children) = children_by_parent.get(&process.pid) {
+                queue.extend(children.iter().copied());
+            }
+        }
+
+        if let Some(name) = display_process_name(leader) {
+            return Some(name);
+        }
+    }
+
+    let mut group_members = processes
+        .iter()
+        .filter(|process| process.process_group == process_group)
+        .collect::<Vec<_>>();
+    group_members.sort_by_key(|process| process.pid);
+
+    for process in &group_members {
+        if let Some(live_name) = live_agent_name(process) {
+            return Some(live_name);
+        }
+    }
+
+    group_members.into_iter().find_map(display_process_name)
+}
+
+fn live_agent_name(process: &ProcessSnapshot) -> Option<String> {
+    process
+        .cmdline_name
+        .as_deref()
+        .and_then(live_agent_label)
+        .or_else(|| process.comm_name.as_deref().and_then(live_agent_label))
+}
+
+fn display_process_name(process: &ProcessSnapshot) -> Option<String> {
+    process
+        .cmdline_name
+        .clone()
+        .or_else(|| process.comm_name.clone())
+}
+
+fn read_process_name_from_cmdline(process_id: u32) -> Result<Option<String>, PtyError> {
+    let path = format!("/proc/{process_id}/cmdline");
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PtyError::Inspect(error)),
+    };
+    Ok(process_name_from_cmdline_bytes(&bytes))
+}
+
+fn read_process_name_from_comm(process_id: u32) -> Result<Option<String>, PtyError> {
+    let path = format!("/proc/{process_id}/comm");
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PtyError::Inspect(error)),
+    };
+    let trimmed = contents.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+fn process_name_from_cmdline_bytes(bytes: &[u8]) -> Option<String> {
+    let first = bytes
+        .split(|byte| *byte == 0)
+        .find(|segment| !segment.is_empty())?;
+    let command = std::str::from_utf8(first).ok()?;
+    let name = Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(command);
+    Some(name.to_string())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitStatus {
@@ -352,7 +555,10 @@ fn build_argv(program: &str, args: &[String]) -> Result<Vec<CString>, PtyError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{PtyManager, PtySize, SpawnRequest};
+    use super::{
+        process_name_from_cmdline_bytes, select_foreground_process_name, ProcessSnapshot,
+        PtyManager, PtySize, SpawnRequest,
+    };
     use crate::session::SessionAddress;
 
     #[test]
@@ -427,5 +633,59 @@ mod tests {
 
         assert!(status.success());
         assert!(String::from_utf8_lossy(&output).contains("ack:hello from test"));
+    }
+
+    #[test]
+    fn derives_process_name_from_proc_cmdline_bytes() {
+        assert_eq!(
+            process_name_from_cmdline_bytes(b"/usr/bin/codex\0--model\0gpt-5.4\0"),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            process_name_from_cmdline_bytes(b"claude-code\0--dangerously-skip-permissions\0"),
+            Some("claude-code".to_string())
+        );
+        assert_eq!(process_name_from_cmdline_bytes(b"\0"), None);
+    }
+
+    #[test]
+    fn foreground_process_selection_prefers_live_agent_descendant_of_wrapper() {
+        let processes = vec![
+            ProcessSnapshot {
+                pid: 400,
+                parent_id: 1,
+                process_group: 400,
+                cmdline_name: Some("node".to_string()),
+                comm_name: Some("node".to_string()),
+            },
+            ProcessSnapshot {
+                pid: 401,
+                parent_id: 400,
+                process_group: 400,
+                cmdline_name: Some("codex".to_string()),
+                comm_name: Some("codex".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            select_foreground_process_name(400, &processes),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn foreground_process_selection_falls_back_to_group_leader_name() {
+        let processes = vec![ProcessSnapshot {
+            pid: 900,
+            parent_id: 1,
+            process_group: 900,
+            cmdline_name: Some("bash".to_string()),
+            comm_name: Some("bash".to_string()),
+        }];
+
+        assert_eq!(
+            select_foreground_process_name(900, &processes),
+            Some("bash".to_string())
+        );
     }
 }
