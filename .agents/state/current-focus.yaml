@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.architecture-1
-focus_statement: the fullscreen-history acceptance slice is closed, and the remaining architecture-cleanup work is intentionally parked as deferred debt so later execution starts from the accepted baseline instead of from stale sidebar-era assumptions
+current_task: task.t5-06
+focus_statement: the fullscreen-history acceptance slice is closed, the deferred architecture cleanup remains visible in backlog, and the next active delivery work resumes on the aggregate server session registry
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

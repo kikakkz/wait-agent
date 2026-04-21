@@ -29,8 +29,8 @@ touched_paths:
   - src/session.rs
   - src/transport.rs
   - src/app.rs
-  - .agents/tasks/backlog.yaml
   - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.t5-06.yaml
   - .agents/state/current-focus.yaml
 notes:

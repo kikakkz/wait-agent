@@ -34,3 +34,4 @@ notes:
   - This slice exists so the architecture and implementation can be accepted against real user flows instead of closing the track on unit tests alone.
   - Shell-path validation is complete on a clean daemon-backed `./waitagent` repro: fullscreen replay widened wrapped history correctly once the stale daemon and command-bar repaint were removed from the experiment.
   - Codex-style validation is also complete on a real resume repro: old history replays at full terminal width, `/fullscreen` no longer repaints dashboard chrome over the handoff, and raw `Ctrl-O` returns cleanly to the dashboard.
+  - A later clean release PTY rerun on 2026-04-21 also confirmed that alternate-screen history now seeds native fullscreen from transcript replay instead of dropping old rows behind the former sidebar-width snapshot.

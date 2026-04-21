@@ -1,6 +1,12 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-06
+    status: ready
+    summary: with the fullscreen-history acceptance work closed, active delivery focus returns to the aggregate server session registry as the next bounded network slice
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: task.t5-06
   - task_id: task.architecture-1
     status: deferred
     summary: a broader runtime and module-boundary cleanup task is now parked as deferred follow-up so it remains visible without displacing the accepted fullscreen baseline
@@ -15,7 +21,7 @@ history:
       reference: status
   - task_id: task.display-2b
     status: done
-    summary: native fullscreen now seeds normal-screen history from transcript replay, resize follows the same replay path, and shell-path acceptance confirmed that fullscreen no longer preserves the dashboard sidebar-width layout
+    summary: native fullscreen now seeds active-screen history from transcript replay, resize follows the same replay path, and shell-path acceptance confirmed that fullscreen no longer preserves the dashboard sidebar-width layout
     source_of_truth:
       file: .agents/tasks/queued/task.display-2b.yaml
       reference: status

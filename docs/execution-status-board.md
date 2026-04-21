@@ -2,7 +2,7 @@
 
 Version: `v1.3`  
 Status: `Active`  
-Date: `2026-04-20`
+Date: `2026-04-21`
 
 ## 1. Purpose
 
@@ -35,13 +35,13 @@ Current phase:
 
 Current gate:
 
-- `display-2c` fullscreen-history acceptance is closed; the broader architecture cleanup remains explicitly deferred rather than silently becoming in-progress work
+- `display-2c` fullscreen-history acceptance is closed; active delivery focus now returns to `t5-06` while the broader architecture cleanup remains explicitly deferred
 
 Why this is the current gate:
 
 - the fullscreen-first display direction has now been accepted against both shell-style sessions and a real Codex-style resume flow, which closes the old dashboard-scroll direction as a product path
 - the broader module cleanup debt is real, but it is intentionally parked as deferred work instead of being treated as an unbounded implicit gate
-- with the fullscreen acceptance slice closed, the next ready delivery queue returns to the queued network work unless the user explicitly reprioritizes cleanup
+- with the fullscreen acceptance slice closed, the next bounded delivery work is the aggregate server session registry rather than another local display follow-up
 
 ## 3. Current Snapshot
 
@@ -53,10 +53,10 @@ Project status at a glance:
 - Local multi-session workspace behavior has passed the main implementation and live validation loops, and the final local acceptance sign-off has been manually confirmed
 - The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
 - The right-sidebar prototype remains part of the accepted baseline, but it is no longer the active project gate
-- Native fullscreen history now replays normal-screen output from transcript data at the real terminal width, preserves alternate-screen ownership for fullscreen TUIs, and returns cleanly to the dashboard
+- Native fullscreen history now replays active-screen transcript data at the real terminal width, including alternate-screen history, and returns cleanly to the dashboard
 - The command-bar `/fullscreen` path no longer repaints dashboard chrome over the native fullscreen handoff
 - Network foundations up through client/server registration and remote session publication baselines also exist
-- The current machine focus is only the deferred architecture-cleanup note; the next ready delivery work is back on the network queue
+- The current machine focus is `t5-06`, while the architecture-cleanup note remains visible only as deferred follow-up
 
 ## 4. Milestone Summary
 
@@ -84,11 +84,11 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `architecture-1` Keep the broader runtime and module-boundary cleanup visible as deferred work without implicitly starting it
+- `t5-06` Resume active delivery on the aggregate server session registry without destabilizing the accepted local fullscreen-history baseline
 
 What remains from the accepted fullscreen rollout:
 
-- keep transcript replay as the authoritative normal-screen fullscreen seed instead of reviving snapshot-copy assumptions
+- keep transcript replay as the authoritative active-screen fullscreen seed instead of reviving snapshot-copy assumptions
 - keep fullscreen handoff native so desktop terminals and remote clients retain their own scrollback, selection, and IME behavior
 - keep the accepted dashboard return path stable after `/fullscreen` and `Ctrl-O`
 - treat broader module cleanup as a later bounded refactor rather than as permission to reopen the fullscreen direction itself

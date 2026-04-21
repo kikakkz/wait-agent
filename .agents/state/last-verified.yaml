@@ -1,7 +1,13 @@
 kind: state
 version: 1
-last_updated_from: display-2c fullscreen-history acceptance closure at 2026-04-20
+last_updated_from: fullscreen transcript replay and task-source resync at 2026-04-21
 checks:
+  - id: fullscreen-release-build
+    command: cargo build --release --quiet after the unified fullscreen transcript replay change
+    status: pass
+  - id: fullscreen-clean-release-pty-validation
+    command: manual clean-release PTY validation that native fullscreen replays alternate-screen history at full width and no longer drops old session rows behind the former sidebar width
+    status: pass
   - id: display-2c-cargo-test
     command: cargo test --quiet after the fullscreen-history acceptance bug fix
     status: pass
