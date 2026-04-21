@@ -2906,10 +2906,15 @@ impl App {
         console: &ConsoleState,
         command_prompt: &CommandPromptState,
     ) -> bool {
-        if self.focused_session_owns_passthrough_display(live_surface, console) {
+        if live_surface.display_may_be_live_owned()
+            || self.focused_session_owns_passthrough_display(live_surface, console)
+        {
             return false;
         }
-        if previous_sidebar.hidden != sidebar.hidden || sidebar.hidden {
+        if previous_sidebar.hidden != sidebar.hidden
+            || previous_sidebar.focused != sidebar.focused
+            || sidebar.hidden
+        {
             return false;
         }
         if command_prompt.open || command_prompt.has_blocking_overlay() {
@@ -5639,6 +5644,7 @@ struct SidebarState {
     force_full_redraws: u8,
     pending_navigation_escape: Vec<u8>,
     pending_navigation_started_at_unix_ms: Option<u128>,
+    recovering_navigation_escape: bool,
 }
 
 impl SidebarState {
@@ -5688,6 +5694,27 @@ impl SidebarState {
         command_prompt: &CommandPromptState,
         now_unix_ms: u128,
     ) -> Option<SidebarNavigationOutcome> {
+        if self.recovering_navigation_escape {
+            let mut combined = self.pending_navigation_escape.clone();
+            combined.extend_from_slice(bytes);
+            match sidebar_escape_action(&combined) {
+                Some(SidebarEscapeAction::Close) => {
+                    self.clear_pending_navigation_escape();
+                    return Some(SidebarNavigationOutcome::Consumed);
+                }
+                None if combined.first() == Some(&0x1b)
+                    && consume_input_escape(&combined, 0).is_none() =>
+                {
+                    self.pending_navigation_escape = combined;
+                    self.pending_navigation_started_at_unix_ms = Some(now_unix_ms);
+                    return Some(SidebarNavigationOutcome::Consumed);
+                }
+                _ => {
+                    self.clear_pending_navigation_escape();
+                }
+            }
+        }
+
         if self.hidden {
             self.clear_pending_navigation_escape();
             if !allow_entry || command_prompt.open || command_prompt.has_blocking_overlay() {
@@ -5792,6 +5819,13 @@ impl SidebarState {
         now_unix_ms: u128,
     ) -> bool {
         if !self.modal_active(command_prompt) {
+            if self.recovering_navigation_escape {
+                if let Some(started_at) = self.pending_navigation_started_at_unix_ms {
+                    if now_unix_ms.saturating_sub(started_at) < SIDEBAR_NAVIGATION_TIMEOUT_MS {
+                        return false;
+                    }
+                }
+            }
             self.clear_pending_navigation_escape();
             return false;
         }
@@ -5805,11 +5839,14 @@ impl SidebarState {
         }
 
         let pending = self.pending_navigation_escape.clone();
-        self.clear_pending_navigation_escape();
         if pending == [0x1b] {
             self.focused = false;
+            self.recovering_navigation_escape = true;
+            self.pending_navigation_escape = pending;
+            self.pending_navigation_started_at_unix_ms = Some(now_unix_ms);
             true
         } else {
+            self.clear_pending_navigation_escape();
             false
         }
     }
@@ -5854,6 +5891,7 @@ impl SidebarState {
     fn clear_pending_navigation_escape(&mut self) {
         self.pending_navigation_escape.clear();
         self.pending_navigation_started_at_unix_ms = None;
+        self.recovering_navigation_escape = false;
     }
 }
 
@@ -7358,11 +7396,11 @@ fn build_full_frame_buffer_with_sidebar_diff(
                 let separator_col = overlay.separator_col;
                 let content_col = overlay.content_col;
                 let main_width = separator_col.saturating_sub(1);
-                let main_line = truncate_ansi_line(line, main_width);
+                let (main_line, main_line_width) = truncate_ansi_line_with_width(line, main_width);
                 if redraw_main_row {
+                    let padding = " ".repeat(main_width.saturating_sub(main_line_width));
                     buffer.push_str(&format!(
-                        "\x1b[{row};1H{ANSI_RESET}{}\x1b[{row};1H{main_line}",
-                        " ".repeat(main_width),
+                        "\x1b[{row};1H{main_line}{padding}",
                     ));
                 }
                 let previous_sidebar_line =
@@ -7576,9 +7614,9 @@ fn pad_line(line: &str, width: usize) -> String {
     format!("{truncated}{}", " ".repeat(padding))
 }
 
-fn truncate_ansi_line(line: &str, width: usize) -> String {
+fn truncate_ansi_line_with_width(line: &str, width: usize) -> (String, usize) {
     if width == 0 || line.is_empty() {
-        return ANSI_RESET.to_string();
+        return (ANSI_RESET.to_string(), 0);
     }
 
     let bytes = line.as_bytes();
@@ -7641,7 +7679,7 @@ fn truncate_ansi_line(line: &str, width: usize) -> String {
     }
 
     output.push_str(ANSI_RESET);
-    output
+    (output, visible)
 }
 
 fn take_display_width(chars: impl IntoIterator<Item = char>, width: usize) -> String {
@@ -8016,6 +8054,7 @@ mod tests {
         SidebarOverlay, SidebarState, ANSI_BG_SIDEBAR_ACTIVE, ANSI_FG_SIDEBAR_CONFIRM,
         ANSI_FG_SIDEBAR_INPUT, ANSI_FG_SIDEBAR_RUNNING, ANSI_SYNC_UPDATE_END,
         ANSI_SYNC_UPDATE_START, LIVE_SURFACE_STATUS_ROWS, PICKER_ESCAPE_TIMEOUT_MS,
+        SIDEBAR_NAVIGATION_TIMEOUT_MS,
         SHORTCUT_FULLSCREEN, SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION,
         SHORTCUT_PREVIOUS_SESSION,
     };
@@ -8539,6 +8578,78 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_consumes_split_left_arrow_tail_after_escape_timeout() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let sessions = registry.list();
+        let focused = Some(first.address());
+        let prompt = CommandPromptState::default();
+        let mut sidebar = SidebarState::default();
+
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b[C", &sessions, focused, true, &prompt, 100),
+            Some(SidebarNavigationOutcome::Render)
+        );
+        assert!(sidebar.focused);
+        assert_eq!(
+            sidebar.handle_navigation(b"\x1b", &sessions, focused, true, &prompt, 110),
+            Some(SidebarNavigationOutcome::Consumed)
+        );
+        assert!(sidebar.flush_navigation_timeout(
+            &prompt,
+            110 + SIDEBAR_NAVIGATION_TIMEOUT_MS + 1
+        ));
+        assert!(!sidebar.focused);
+        assert_eq!(
+            sidebar.handle_navigation(
+                b"[",
+                &sessions,
+                focused,
+                true,
+                &prompt,
+                110 + SIDEBAR_NAVIGATION_TIMEOUT_MS + 10,
+            ),
+            Some(SidebarNavigationOutcome::Consumed)
+        );
+        assert_eq!(
+            sidebar.handle_navigation(
+                b"D",
+                &sessions,
+                focused,
+                true,
+                &prompt,
+                110 + SIDEBAR_NAVIGATION_TIMEOUT_MS + 20,
+            ),
+            Some(SidebarNavigationOutcome::Consumed)
+        );
+        assert!(!sidebar.focused);
+        assert!(sidebar.pending_navigation_escape.is_empty());
+    }
+
+    #[test]
+    fn sidebar_leaves_unfocused_left_arrow_available_for_session_passthrough() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.create_local_session(
+            "local".to_string(),
+            "bash".to_string(),
+            "bash".to_string(),
+        );
+        let sessions = registry.list();
+        let focused = Some(first.address());
+        let prompt = CommandPromptState::default();
+        let sidebar = SidebarState::default();
+
+        assert_eq!(
+            sidebar.clone().handle_navigation(b"\x1b[D", &sessions, focused, true, &prompt, 100),
+            None
+        );
+    }
+
+    #[test]
     fn sidebar_item_renders_title_with_node_and_running_badge() {
         let mut registry = SessionRegistry::new();
         let session = registry.create_local_session(
@@ -8948,10 +9059,10 @@ mod tests {
             3,
         );
 
-        assert!(buffer.contains("\x1b[1;1H\x1b[0m       \x1b[1;1Hleft"));
+        assert!(buffer.contains("\x1b[1;1Hleft\x1b[0m   "));
         assert!(buffer.contains("\x1b[1;8H"));
         assert!(buffer.contains("\x1b[1;9H"));
-        assert!(buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1Hbody"));
+        assert!(buffer.contains("\x1b[2;1Hbody\x1b[0m   "));
         assert!(buffer.contains("\x1b[2;8H"));
         assert!(buffer.ends_with("\x1b[2;3H\x1b[?25h"));
     }
@@ -8978,8 +9089,10 @@ mod tests {
 
         assert!(!buffer.contains("\x1b[1;1Hleft\x1b[K"));
         assert!(!buffer.contains("\x1b[2;1Hbody\x1b[K"));
-        assert!(buffer.contains("\x1b[1;1H\x1b[0m       "));
-        assert!(buffer.contains("\x1b[2;1H\x1b[0m       "));
+        assert!(!buffer.contains("\x1b[1;1H\x1b[0m       \x1b[1;1H"));
+        assert!(!buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1H"));
+        assert!(buffer.contains("\x1b[1;1Hleft\x1b[0m   "));
+        assert!(buffer.contains("\x1b[2;1Hbody\x1b[0m   "));
         assert!(buffer.contains("\x1b[1;8H"));
         assert!(buffer.contains("\x1b[2;8H"));
     }
@@ -9187,7 +9300,8 @@ mod tests {
             3,
         );
 
-        assert!(buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1H"));
+        assert!(buffer.contains("\x1b[2;1H\x1b[0m       "));
+        assert!(!buffer.contains("\x1b[2;1H\x1b[0m       \x1b[2;1H"));
     }
 
     #[test]
@@ -9941,6 +10055,74 @@ mod tests {
 
         live_surface.set_display_session(None, false, 110);
         assert!(!live_surface.display_may_be_live_owned());
+    }
+
+    #[test]
+    fn sidebar_only_redraw_stays_off_while_live_surface_cleanup_is_pending() {
+        let mut app = App::new(AppConfig::from_env());
+        let session = app.sessions.create_local_session(
+            "local".to_string(),
+            "codex".to_string(),
+            "codex".to_string(),
+        );
+        let address = session.address().clone();
+        let mut console = ConsoleState::new("console-1");
+        console.focus(address.clone());
+        let previous_sidebar = SidebarState::default();
+        let sidebar = SidebarState::default();
+        let command_prompt = CommandPromptState::default();
+        let mut live_surface = LiveSurfaceState::default();
+
+        live_surface.set_display_session(Some(address), false, 100);
+
+        assert!(live_surface.display_may_be_live_owned());
+        assert!(!app.focused_session_owns_passthrough_display(&live_surface, &console));
+        assert!(!app.can_redraw_sidebar_only(
+            &previous_sidebar,
+            &sidebar,
+            &live_surface,
+            &console,
+            &command_prompt,
+        ));
+    }
+
+    #[test]
+    fn sidebar_only_redraw_stays_off_when_sidebar_focus_changes() {
+        let app = App::new(AppConfig::from_env());
+        let previous_sidebar = SidebarState {
+            focused: true,
+            ..SidebarState::default()
+        };
+        let sidebar = SidebarState::default();
+        let live_surface = LiveSurfaceState::default();
+        let console = ConsoleState::new("console-1");
+        let command_prompt = CommandPromptState::default();
+
+        assert!(!app.can_redraw_sidebar_only(
+            &previous_sidebar,
+            &sidebar,
+            &live_surface,
+            &console,
+            &command_prompt,
+        ));
+    }
+
+    #[test]
+    fn sidebar_only_redraw_remains_available_without_live_surface_damage() {
+        let app = App::new(AppConfig::from_env());
+        let previous_sidebar = SidebarState::default();
+        let sidebar = SidebarState::default();
+        let live_surface = LiveSurfaceState::default();
+        let console = ConsoleState::new("console-1");
+        let command_prompt = CommandPromptState::default();
+
+        assert!(app.can_redraw_sidebar_only(
+            &previous_sidebar,
+            &sidebar,
+            &live_surface,
+            &console,
+            &command_prompt,
+        ));
     }
 
     #[test]
