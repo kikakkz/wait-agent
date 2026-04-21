@@ -1,8 +1,8 @@
 id: task.display-1
 kind: task
 version: 1
-title: separate focused PTY passthrough from WaitAgent chrome rendering
-status: deferred
+title: establish an explicit dashboard vs native-fullscreen display boundary
+status: done
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -15,19 +15,22 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - focused fullscreen TUI output is never concatenated with WaitAgent UI escape sequences in the same terminal write path
-  - live display mode chooses either raw PTY passthrough or explicit redraw, but not both at once
-  - any status or overlay chrome for a live fullscreen session is emitted through a separate, bounded path with explicit quiet-time or overlay conditions
-  - the new display boundary is documented in task notes or code comments where the control flow would otherwise be ambiguous
+  - WaitAgent names two primary interactive display states with clear ownership boundaries: `dashboard` for framed multi-session chrome and `native fullscreen` for direct terminal passthrough of the focused session
+  - entering native fullscreen no longer depends on terminal mouse reporting, gutter-only drag logic, or dashboard viewport scrolling semantics
+  - the attach path no longer unconditionally forces mouse mode on the real user terminal, so remote terminals such as Xshell and PuTTY are not globally pushed into application-owned mouse capture just to make dashboard scrolling work
+  - focused-session display control flow chooses one of two explicit paths at a time: framed dashboard rendering or native fullscreen passthrough, not a hybrid path that mixes the two ownership models
+  - the mode boundary, ownership rules, and why dashboard scrolling was retired are documented in task notes or succinct code comments where the control flow would otherwise remain ambiguous
 verification:
   - cargo test
-  - targeted review of src/app.rs live-surface output paths
+  - manual: in a desktop terminal, attach or resume into the workspace and confirm the dashboard remains usable without forcing terminal-wide mouse capture
+  - manual: in a remote terminal client such as Xshell or PuTTY, attach or resume into the workspace and confirm WaitAgent does not globally steal normal selection behavior merely to render the dashboard
+  - targeted review of `src/app.rs`, `src/lifecycle.rs`, and `src/terminal.rs` to confirm the new display boundary is explicit
 touched_paths:
   - src/app.rs
-  - src/renderer.rs
+  - src/lifecycle.rs
   - src/terminal.rs
   - .agents/tasks/queued/task.display-1.yaml
 notes:
-  - This task exists because app.rs currently appends WaitAgent chrome bytes directly after PTY output chunks.
-  - Success is defined by architectural separation first, not by ad hoc escape-sequence filtering.
-  - This task is intentionally deferred while the current display path remains usable and lifecycle work takes priority.
+  - This slice supersedes the previous scrollbar-first direction as the architectural entry point for the new fullscreen product model.
+  - Success is defined by explicit ownership and attach-path correctness first, not by ad hoc escape-sequence filtering or by preserving the gutter-scroll prototype.
+  - Code baseline cleanup is complete: the dashboard scrollbar path, mouse parsing, and attach-side forced mouse mode have been removed.

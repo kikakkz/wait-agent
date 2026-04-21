@@ -1,32 +1,34 @@
 id: task.display-2
 kind: task
 version: 1
-title: keep the focused fullscreen TUI on the real terminal size
-status: deferred
+title: implement user-facing entry into native fullscreen and a reliable return shortcut
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.t4-10.done
-  - task.display-1.done_or_in_progress
+  - task.display-1.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
 done_criteria:
-  - the focused fullscreen TUI always receives the user's real terminal size
-  - WaitAgent chrome no longer reserves rows by resizing the focused PTY viewport
-  - background-session sizing rules are explicit and do not distort the active fullscreen session
-  - any remaining chrome behavior for fullscreen sessions is compatible with the display split introduced in task.display-1
+  - while the dashboard owns the terminal, a documented shortcut enters native fullscreen for the currently focused session without changing focus semantics or session ownership
+  - while native fullscreen owns the terminal, a documented escape sequence returns the user to the dashboard without requiring daemon restart, detach, or external shell commands
+  - native fullscreen preserves direct terminal behavior for scrollback, selection, IME, copy, and mouse handling because WaitAgent is no longer trying to emulate shell scrolling in dashboard mode
+  - entering and leaving native fullscreen restores the focused session, redraw state, and dashboard chrome deterministically
 verification:
   - cargo test
-  - targeted review of viewport sizing and resize propagation in src/app.rs
+  - manual: from the dashboard, enter native fullscreen for a shell session, use the terminal's own scroll and selection behavior, then return to the dashboard with the chosen escape sequence
+  - manual: run `codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7`, enter native fullscreen, verify the session behaves like a direct terminal view, then return to the dashboard
+  - targeted review of input interception and return-path control flow in `src/app.rs`
 touched_paths:
   - src/app.rs
   - src/terminal.rs
   - docs/local-acceptance-checklist.md
   - .agents/tasks/queued/task.display-2.yaml
 notes:
-  - The primary product requirement is that a one-key handoff into Codex-like TUIs must not trigger layout churn or clipped viewports.
-  - This task is intentionally deferred while the current display path remains usable and lifecycle work takes priority.
+  - The preferred user interaction remains a fullscreen handoff rather than dashboard-local shell scrolling.
+  - Entry and return foundations landed here, but the task is superseded because snapshot-based fullscreen history cannot satisfy the accepted old-history contract.
+  - Remaining work is split into `task.display-2a`, `task.display-2b`, and `task.display-2c` so the replay model, fullscreen integration, and acceptance evidence can evolve on explicit boundaries.

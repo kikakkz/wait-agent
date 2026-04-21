@@ -1,10 +1,22 @@
 kind: task_backlog
 version: 1
 active:
-  - id: task.sidebar-4
-    title: polish the default-visible sidebar detail area and enter-to-switch behavior
-    status: in_progress
+  - id: task.architecture-1
+    title: refactor the runtime and module architecture for clearer boundaries and cleaner code
+    status: deferred
 next:
+  - id: task.display-2a
+    title: establish a replayable normal-screen transcript model for native fullscreen history
+    status: done
+  - id: task.display-2b
+    title: switch native fullscreen history seeding and resize redraw to transcript replay
+    status: done
+  - id: task.display-2
+    title: implement user-facing entry into native fullscreen and a reliable return shortcut
+    status: superseded
+  - id: task.display-2c
+    title: validate native fullscreen history handoff across shell and Codex-style sessions
+    status: done
   - id: task.lifecycle-1
     title: wrap the current workspace runtime in a daemon-owned PTY envelope
     status: done
@@ -31,10 +43,10 @@ next:
     status: done
   - id: task.sidebar-4
     title: polish the default-visible sidebar detail area and enter-to-switch behavior
-    status: in_progress
+    status: deferred
   - id: task.scroll-1
-    title: add a mouse-draggable shell-history scrollbar for the focused session
-    status: ready
+    title: implement tmux-style pane history with mouse-draggable gutter scrolling
+    status: superseded
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: ready
@@ -47,14 +59,8 @@ next:
   - id: task.t3-07
     title: implement narrow-terminal compaction rules
     status: not_started
-  - id: task.display-1
-    title: separate focused PTY passthrough from WaitAgent chrome rendering
-    status: deferred
-  - id: task.display-2
-    title: keep the focused fullscreen TUI on the real terminal size
-    status: deferred
   - id: task.display-3
-    title: collapse screen recovery to one primary restore path
+    title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
     status: deferred
   - id: task.runtime-1
     title: extract a shared console runtime loop for workspace and server surfaces
@@ -68,9 +74,14 @@ templates:
   - id: task-template.network-implementation-slice
     title: bounded network implementation slice
 source_of_truth:
-  file: docs/execution-status-board.md
+  file: .agents/tasks/backlog.yaml
 notes:
+  - `.agents/tasks/*` is the unified task source; task status changes must update backlog, the current task pointer, queued task files, and task/state mirrors in the same change.
+  - Replacement work must clean up superseded code paths as it lands; old fullscreen-history logic should not be left in place behind the new architecture unless a named compatibility reason is documented in the active task.
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
   - Post-acceptance work now prioritizes tmux-style local lifecycle persistence before resumed network expansion.
   - The lifecycle queue must preserve the existing workspace interaction loop and the stabilized rendering path; daemonization should wrap the current runtime rather than rewrite it.
-  - Display and rendering architecture refactors are intentionally deferred for now because the current display path is usable and should not be churned until lifecycle work is complete and a later redesign is justified.
+  - The old gutter-scroll direction is intentionally retired in favor of a fullscreen-first interaction model because dashboard-local mouse scrolling is not robust across desktop terminals and remote terminal clients.
+  - Display work is no longer deferred: it is now the active track because the fullscreen handoff model is the cleanest way to restore native terminal scroll, selection, and IME behavior.
+  - The original fullscreen task was split because entry/exit controls landed, but snapshot-based history reconstruction is not an acceptable architectural base for fullscreen old-history viewing.
+  - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

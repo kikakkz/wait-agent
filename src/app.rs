@@ -14,13 +14,14 @@ use crate::renderer::{RenderContext, RenderError, RenderFrame, Renderer, Rendere
 use crate::scheduler::{SchedulerState, SchedulingAction};
 use crate::server::{ServerRuntime, ServerRuntimeConfig, ServerRuntimeError};
 use crate::session::{SessionAddress, SessionRegistry, SessionStatus};
-use crate::terminal::{TerminalEngine, TerminalRuntime};
+use crate::terminal::{AlternateScreenGuard, TerminalEngine, TerminalRuntime};
+use crate::transcript::TerminalTranscript;
 use crate::transport::{read_transport_envelope, write_transport_envelope};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -31,7 +32,9 @@ const EVENT_LOOP_TICK: Duration = Duration::from_millis(50);
 const PICKER_ESCAPE_TIMEOUT_MS: u128 = 150;
 const RESET_FRAME_CURSOR: &str = "\x1b[H";
 const RESTORE_SCREEN: &str = "\x1b[2J\x1b[H\x1b[?25h";
+const CLEAR_SCROLLBACK_AND_SCREEN: &str = "\x1b[3J\x1b[2J\x1b[H";
 const SHORTCUT_INTERRUPT_EXIT: u8 = 0x03;
+const SHORTCUT_NATIVE_FULLSCREEN: u8 = 0x0f;
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_SYNC_UPDATE_START: &str = "\x1b[?2026h";
 const ANSI_SYNC_UPDATE_END: &str = "\x1b[?2026l";
@@ -95,15 +98,135 @@ struct App {
     sessions: SessionRegistry,
     pty: PtyManager,
     terminal: TerminalRuntime,
+    input_trace: Option<InputTrace>,
+    output_trace: Option<OutputTrace>,
+}
+
+struct InputTrace {
+    file: File,
+}
+
+struct OutputTrace {
+    file: File,
+}
+
+impl InputTrace {
+    fn from_path(path: Option<&str>) -> Option<Self> {
+        let path = path?.trim();
+        if path.is_empty() {
+            return None;
+        }
+
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Some(Self { file }),
+            Err(error) => {
+                eprintln!("waitagent: failed to open input trace file `{path}`: {error}");
+                None
+            }
+        }
+    }
+
+    fn record(
+        &mut self,
+        surface: &str,
+        bytes: &[u8],
+        command_prompt: &CommandPromptState,
+        native_fullscreen_active: bool,
+        passthrough_display: bool,
+    ) {
+        let hex = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let escaped = escape_input_bytes(bytes);
+        let shortcuts = describe_shortcut_matches(bytes);
+        let _ = writeln!(
+            self.file,
+            "t={} surface={} bytes=[{}] text=\"{}\" shortcuts={} prompt_open={} native_fullscreen={} passthrough={}",
+            now_unix_ms(),
+            surface,
+            hex,
+            escaped,
+            shortcuts,
+            command_prompt.open,
+            native_fullscreen_active,
+            passthrough_display,
+        );
+        let _ = self.file.flush();
+    }
+}
+
+impl OutputTrace {
+    fn from_path(path: Option<&str>) -> Option<Self> {
+        let path = path?.trim();
+        if path.is_empty() {
+            return None;
+        }
+
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Some(Self { file }),
+            Err(error) => {
+                eprintln!("waitagent: failed to open output trace file `{path}`: {error}");
+                None
+            }
+        }
+    }
+
+    fn record(&mut self, surface: &str, session: &SessionAddress, bytes: &[u8]) {
+        let hex = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let escaped = escape_input_bytes(bytes);
+        let _ = writeln!(
+            self.file,
+            "t={} surface={} session={} bytes=[{}] text=\"{}\"",
+            now_unix_ms(),
+            surface,
+            session,
+            hex,
+            escaped,
+        );
+        let _ = self.file.flush();
+    }
 }
 
 impl App {
     fn new(config: AppConfig) -> Self {
         Self {
+            input_trace: InputTrace::from_path(config.debug.input_trace_path.as_deref()),
+            output_trace: OutputTrace::from_path(config.debug.output_trace_path.as_deref()),
             config,
             sessions: SessionRegistry::new(),
             pty: PtyManager::new(),
             terminal: TerminalRuntime::stdio(),
+        }
+    }
+
+    fn trace_input(
+        &mut self,
+        surface: &str,
+        bytes: &[u8],
+        command_prompt: &CommandPromptState,
+        native_fullscreen_active: bool,
+        passthrough_display: bool,
+    ) {
+        if let Some(trace) = self.input_trace.as_mut() {
+            trace.record(
+                surface,
+                bytes,
+                command_prompt,
+                native_fullscreen_active,
+                passthrough_display,
+            );
+        }
+    }
+
+    fn trace_output(&mut self, surface: &str, session: &SessionAddress, bytes: &[u8]) {
+        if let Some(trace) = self.output_trace.as_mut() {
+            trace.record(surface, session, bytes);
         }
     }
 
@@ -172,7 +295,7 @@ impl App {
             )));
         }
 
-        let _alternate_screen = self.terminal.enter_alternate_screen()?;
+        let mut alternate_screen = self.terminal.enter_alternate_screen()?;
         let _raw_mode = self.terminal.enter_raw_mode()?;
         let mut console = ConsoleState::new("workspace-console");
         let mut scheduler = SchedulerState::new();
@@ -182,6 +305,7 @@ impl App {
         let mut command_prompt = CommandPromptState::default();
         let mut sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
+        let mut native_fullscreen = NativeFullscreenState::default();
         let mut hosted = HashMap::<SessionAddress, HostedSession>::new();
 
         let (tx, rx) = mpsc::channel();
@@ -219,6 +343,82 @@ impl App {
             match next_runtime_event(&rx, &mut pending_events) {
                 Ok(RuntimeEvent::Input(bytes)) => {
                     let input_received_at = now_unix_ms();
+                    let passthrough_display =
+                        self.focused_session_owns_passthrough_display(&live_surface, &console);
+                    self.trace_input(
+                        "workspace",
+                        &bytes,
+                        &command_prompt,
+                        native_fullscreen.is_active(),
+                        passthrough_display,
+                    );
+                    if native_fullscreen.is_active() {
+                        let fullscreen_input = native_fullscreen.handle_input(&bytes);
+                        if let Some(target) = native_fullscreen.session().cloned() {
+                            self.forward_native_fullscreen_input(
+                                &target,
+                                &fullscreen_input.forwarded,
+                                &mut hosted,
+                                &mut console,
+                                &mut scheduler,
+                                &mut input_tracker,
+                                &mut command_prompt,
+                                &mut live_surface,
+                            )?;
+                        }
+                        if fullscreen_input.exit_requested {
+                            self.exit_native_fullscreen(
+                                RenderSurface::Workspace,
+                                &mut native_fullscreen,
+                                &mut alternate_screen,
+                                &mut live_surface,
+                                &mut hosted,
+                                &mut renderer_state,
+                                &renderer,
+                                &console,
+                                &scheduler,
+                                &command_prompt,
+                                &mut sidebar,
+                            )?;
+                        }
+                        continue;
+                    }
+                    if shortcut_matches(bytes.as_slice(), SHORTCUT_FULLSCREEN) {
+                        if self.enter_native_fullscreen(
+                            &mut native_fullscreen,
+                            &mut alternate_screen,
+                            &mut live_surface,
+                            &mut hosted,
+                            &console,
+                        )? {
+                            command_prompt.clear_overlay();
+                        }
+                        continue;
+                    }
+                    if shortcut_matches(bytes.as_slice(), COMMAND_BAR_PREFIX)
+                        || shortcut_matches(bytes.as_slice(), COMMAND_BAR_PREFIX_FALLBACK)
+                    {
+                        if let Some(outcome) = command_prompt.handle_input(&bytes) {
+                            should_exit = self.apply_command_outcome(
+                                outcome,
+                                runtime,
+                                terminal_snapshot.size,
+                                &mut native_fullscreen,
+                                &mut alternate_screen,
+                                &mut live_surface,
+                                &mut hosted,
+                                &tx,
+                                &mut console,
+                                &mut scheduler,
+                                &mut renderer_state,
+                                &renderer,
+                                &mut command_prompt,
+                                &mut sidebar,
+                                RenderSurface::Workspace,
+                            )?;
+                        }
+                        continue;
+                    }
                     let allow_interrupt_exit =
                         !self.focused_session_owns_passthrough_display(&live_surface, &console);
                     if let Some(outcome) = command_prompt.handle_picker_navigation(
@@ -293,6 +493,8 @@ impl App {
                             outcome,
                             runtime,
                             terminal_snapshot.size,
+                            &mut native_fullscreen,
+                            &mut alternate_screen,
                             &mut live_surface,
                             &mut hosted,
                             &tx,
@@ -392,6 +594,17 @@ impl App {
                                     &command_prompt,
                                     &mut sidebar,
                                 )?;
+                            }
+                            ConsoleAction::EnterNativeFullscreen => {
+                                if self.enter_native_fullscreen(
+                                    &mut native_fullscreen,
+                                    &mut alternate_screen,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &console,
+                                )? {
+                                    command_prompt.clear_overlay();
+                                }
                             }
                             _ => {
                                 should_exit = self.apply_workspace_action(
@@ -533,6 +746,8 @@ impl App {
                                     outcome,
                                     runtime,
                                     terminal_snapshot.size,
+                                    &mut native_fullscreen,
+                                    &mut alternate_screen,
                                     &mut live_surface,
                                     &mut hosted,
                                     &tx,
@@ -633,6 +848,18 @@ impl App {
                                             &command_prompt,
                                             &mut sidebar,
                                         )?;
+                                    }
+                                    ConsoleAction::EnterNativeFullscreen => {
+                                        handled_control = true;
+                                        if self.enter_native_fullscreen(
+                                            &mut native_fullscreen,
+                                            &mut alternate_screen,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &console,
+                                        )? {
+                                            command_prompt.clear_overlay();
+                                        }
                                     }
                                     _ => {
                                         should_exit = self.apply_workspace_action(
@@ -819,6 +1046,7 @@ impl App {
                     session: output_session,
                     bytes,
                 }) => {
+                    self.trace_output("workspace", &output_session, &bytes);
                     buffer_pending_runtime_events(&rx, &mut pending_events);
                     if pending_events.iter().any(runtime_event_is_input_priority) {
                         pending_events.push_front(RuntimeEvent::Output {
@@ -847,6 +1075,7 @@ impl App {
                         if substantive_output {
                             self.sessions.mark_output(&output_session);
                         }
+                        runtime.transcript.record_output(&bytes);
                         let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
                         snapshot_after_output =
                             Some(runtime.screen_engine.state().active_snapshot().clone());
@@ -909,6 +1138,10 @@ impl App {
                             let shell_prompt_detected = looks_like_shell_prompt_output(&bytes);
                             should_refresh_surface =
                                 !release_detected || substantive_output || shell_prompt_detected;
+                        } else if native_fullscreen.is_active_for(&output_session) {
+                            should_passthrough_output = true;
+                        } else if native_fullscreen.is_active() {
+                            should_refresh_surface = false;
                         } else if live_surface.is_live_for(&output_session)
                             && console.focused_session.as_ref() == Some(&output_session)
                         {
@@ -926,12 +1159,14 @@ impl App {
                         {
                             should_refresh_surface = true;
                         }
-                        if title_reconciled {
+                        if title_reconciled && !native_fullscreen.is_active() {
                             should_refresh_surface = true;
                         }
                     }
 
-                    if should_passthrough_output {
+                    if native_fullscreen.is_active_for(&output_session) {
+                        self.write_live_surface_output(&bytes)?;
+                    } else if should_passthrough_output {
                         let skip_snapshot_redraw = live_output_can_skip_snapshot_redraw(
                             &live_surface,
                             &output_session,
@@ -980,6 +1215,21 @@ impl App {
                         self.pty.release(&session);
                         let active_addresses = self.active_session_addresses();
                         console.handle_focus_loss(&active_addresses);
+                        if native_fullscreen.is_active_for(&session) {
+                            self.exit_native_fullscreen(
+                                RenderSurface::Workspace,
+                                &mut native_fullscreen,
+                                &mut alternate_screen,
+                                &mut live_surface,
+                                &mut hosted,
+                                &mut renderer_state,
+                                &renderer,
+                                &console,
+                                &scheduler,
+                                &command_prompt,
+                                &mut sidebar,
+                            )?;
+                        }
                         self.refresh_surface(
                             RenderSurface::Workspace,
                             &mut live_surface,
@@ -999,7 +1249,8 @@ impl App {
 
             let now = now_unix_ms();
 
-            if command_prompt.flush_picker_navigation_timeout(now) {
+            if !native_fullscreen.is_active() && command_prompt.flush_picker_navigation_timeout(now)
+            {
                 self.refresh_surface(
                     RenderSurface::Workspace,
                     &mut live_surface,
@@ -1013,7 +1264,9 @@ impl App {
                 )?;
             }
 
-            if sidebar.flush_navigation_timeout(&command_prompt, now) {
+            if !native_fullscreen.is_active()
+                && sidebar.flush_navigation_timeout(&command_prompt, now)
+            {
                 self.refresh_surface(
                     RenderSurface::Workspace,
                     &mut live_surface,
@@ -1028,7 +1281,8 @@ impl App {
             }
 
             if let Some(target) = console.input_owner_session().cloned() {
-                if let Some(runtime) = hosted.get_mut(&target) {
+                if native_fullscreen.is_active_for(&target) {
+                } else if let Some(runtime) = hosted.get_mut(&target) {
                     let flushed = runtime.input_normalizer.flush_pending_escape_timeout(now);
                     if !flushed.is_empty() {
                         self.sessions.mark_input(&target);
@@ -1038,21 +1292,29 @@ impl App {
             }
 
             if self.terminal.capture_resize()?.is_some() {
-                self.refresh_surface(
-                    RenderSurface::Workspace,
-                    &mut live_surface,
-                    &mut hosted,
-                    &mut renderer_state,
-                    &renderer,
-                    &console,
-                    &scheduler,
-                    &command_prompt,
-                    &mut sidebar,
-                )?;
+                if let Some(target) = native_fullscreen.session().cloned() {
+                    let terminal_size = self.terminal.current_size_or_default();
+                    if self.resize_hosted_session(&target, terminal_size, &mut hosted)? {
+                        self.write_native_fullscreen_seed(&target, &hosted, terminal_size)?;
+                    }
+                } else {
+                    self.refresh_surface(
+                        RenderSurface::Workspace,
+                        &mut live_surface,
+                        &mut hosted,
+                        &mut renderer_state,
+                        &renderer,
+                        &console,
+                        &scheduler,
+                        &command_prompt,
+                        &mut sidebar,
+                    )?;
+                }
             }
 
             if !command_prompt.open
                 && !self.focused_session_owns_passthrough_display(&live_surface, &console)
+                && !native_fullscreen.is_active()
             {
                 let suppress_scheduler_refresh = suppress_scheduler_refresh
                     || console
@@ -1096,6 +1358,9 @@ impl App {
             }
         }
 
+        if native_fullscreen.is_active() {
+            alternate_screen.resume()?;
+        }
         self.restore_terminal_screen()?;
         Ok(())
     }
@@ -1157,6 +1422,7 @@ impl App {
             HostedSession {
                 handle,
                 screen_engine,
+                transcript: TerminalTranscript::default(),
                 input_normalizer: ForwardInputNormalizer::default(),
                 command_tracker: ShellCommandTracker::default(),
                 viewport_size: managed_size,
@@ -1646,7 +1912,20 @@ impl App {
         &self,
         snapshot: &crate::terminal::ScreenSnapshot,
     ) -> Result<(), AppError> {
-        let mut buffer = String::from(RESET_FRAME_CURSOR);
+        self.write_terminal_snapshot("live surface snapshot", snapshot, false)
+    }
+
+    fn write_terminal_snapshot(
+        &self,
+        context: &str,
+        snapshot: &crate::terminal::ScreenSnapshot,
+        clear_screen: bool,
+    ) -> Result<(), AppError> {
+        let mut buffer = if clear_screen {
+            CLEAR_SCROLLBACK_AND_SCREEN.to_string()
+        } else {
+            RESET_FRAME_CURSOR.to_string()
+        };
         buffer.push_str("\x1b[?25l");
         for (index, line) in snapshot.styled_lines.iter().enumerate() {
             let row = index.saturating_add(1);
@@ -1669,7 +1948,49 @@ impl App {
             snapshot.active_style_ansi
         ));
 
-        self.write_ui_buffer_with_sync("live surface snapshot", &buffer, false)
+        self.write_ui_buffer_with_sync(context, &buffer, false)
+    }
+
+    fn write_native_fullscreen_snapshot_seed(
+        &self,
+        snapshot: &crate::terminal::ScreenSnapshot,
+    ) -> Result<(), AppError> {
+        let buffer = self.build_native_fullscreen_snapshot_seed(snapshot)?;
+        self.write_ui_buffer_with_sync("native fullscreen replay seed", &buffer, false)
+    }
+
+    fn build_native_fullscreen_snapshot_seed(
+        &self,
+        snapshot: &crate::terminal::ScreenSnapshot,
+    ) -> Result<String, AppError> {
+        let mut buffer = format!("{CLEAR_SCROLLBACK_AND_SCREEN}\x1b[?25l");
+        let seeded_lines = snapshot
+            .styled_scrollback
+            .iter()
+            .cloned()
+            .chain(snapshot.styled_lines.iter().cloned())
+            .collect::<Vec<_>>();
+        if !seeded_lines.is_empty() {
+            buffer.push_str(&seeded_lines.join("\r\n"));
+        }
+        let cursor_row = snapshot.cursor_row.saturating_add(1);
+        let cursor_col = snapshot.cursor_col.saturating_add(1);
+        let cursor_visibility = if snapshot.cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        };
+        let scroll_region = format!(
+            "\x1b[{};{}r",
+            snapshot.scroll_top.saturating_add(1),
+            snapshot.scroll_bottom.saturating_add(1)
+        );
+        buffer.push_str(&format!(
+            "{scroll_region}\x1b[{cursor_row};{cursor_col}H{}{cursor_visibility}",
+            snapshot.active_style_ansi
+        ));
+
+        Ok(buffer)
     }
 
     fn build_live_surface_ui_buffer(
@@ -1703,7 +2024,7 @@ impl App {
             console.focused_session.as_ref(),
         );
         let keys_line = style_overlay_line(
-            "keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^Q quit",
+            "keys: ^W cmd  ^B/^F switch  ^N new  ^O full on/off  ^L picker  ^X close  ^Q quit",
             width,
         );
         let status_text = command_prompt.status_line(&frame.bottom_line);
@@ -1741,6 +2062,7 @@ impl App {
             .max(1);
         let separator_row = footer_start_row;
         let overlay_start_row = separator_row.saturating_add(1);
+        let keys_row = status_row.saturating_sub(1);
         let mut overlay_buffer = String::new();
         let previous_footer_start_row = status_row
             .saturating_sub(previous_footer_rows.saturating_sub(1) as u16)
@@ -1758,6 +2080,9 @@ impl App {
         for (index, line) in shown_overlay.iter().enumerate() {
             let row = overlay_start_row.saturating_add(index as u16);
             overlay_buffer.push_str(&format!("\x1b[{row};1H{}", style_overlay_line(line, width)));
+        }
+        if previous_footer_start_row != footer_start_row || live_surface.keys_line != keys_line {
+            overlay_buffer.push_str(&format!("\x1b[{keys_row};1H{keys_line}"));
         }
         if let Some(overlay) = sidebar_overlay.as_ref() {
             let sidebar_rows = status_row.saturating_sub(1) as usize;
@@ -2100,7 +2425,7 @@ impl App {
                 sidebar,
                 true,
                 None,
-            )
+            )?;
         } else {
             self.render_surface(
                 surface,
@@ -2110,8 +2435,9 @@ impl App {
                 scheduler,
                 command_prompt,
                 sidebar,
-            )
+            )?;
         }
+        Ok(())
     }
 
     fn request_live_surface_redraw(
@@ -2167,6 +2493,172 @@ impl App {
         Ok(())
     }
 
+    fn resize_hosted_session(
+        &mut self,
+        session: &SessionAddress,
+        size: crate::terminal::TerminalSize,
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+    ) -> Result<bool, AppError> {
+        let Some(runtime) = hosted.get_mut(session) else {
+            return Ok(false);
+        };
+        if runtime.viewport_size == size {
+            return Ok(true);
+        }
+
+        runtime.handle.resize(PtySize::from(size))?;
+        runtime.screen_engine = runtime.transcript.rebuild_engine(size);
+        runtime.viewport_size = size;
+        self.sessions
+            .update_screen_state(session, runtime.screen_engine.state());
+        Ok(true)
+    }
+
+    fn write_native_fullscreen_seed(
+        &self,
+        session: &SessionAddress,
+        hosted: &HashMap<SessionAddress, HostedSession>,
+        terminal_size: crate::terminal::TerminalSize,
+    ) -> Result<(), AppError> {
+        if let Some(snapshot) = hosted
+            .get(session)
+            .map(|runtime| native_fullscreen_seed_snapshot(&runtime.transcript, terminal_size))
+        {
+            self.write_native_fullscreen_snapshot_seed(&snapshot)
+        } else {
+            self.write_ui_buffer_with_sync(
+                "native fullscreen clear",
+                "\x1b[2J\x1b[H\x1b[?25h",
+                false,
+            )
+        }
+    }
+
+    fn enter_native_fullscreen(
+        &mut self,
+        native_fullscreen: &mut NativeFullscreenState,
+        alternate_screen: &mut AlternateScreenGuard,
+        live_surface: &mut LiveSurfaceState,
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+        console: &ConsoleState,
+    ) -> Result<bool, AppError> {
+        let Some(session) = console.focused_session.clone() else {
+            return Ok(false);
+        };
+        if native_fullscreen.is_active_for(&session) {
+            return Ok(false);
+        }
+
+        live_surface.set_display_session(None, false, now_unix_ms());
+        let terminal_size = self.terminal.current_size_or_default();
+        if !self.resize_hosted_session(&session, terminal_size, hosted)? {
+            return Ok(false);
+        }
+        alternate_screen.suspend()?;
+        self.write_native_fullscreen_seed(&session, hosted, terminal_size)?;
+        native_fullscreen.activate(session.clone());
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exit_native_fullscreen(
+        &mut self,
+        surface: RenderSurface,
+        native_fullscreen: &mut NativeFullscreenState,
+        alternate_screen: &mut AlternateScreenGuard,
+        live_surface: &mut LiveSurfaceState,
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+        renderer_state: &mut RendererState,
+        renderer: &Renderer,
+        console: &ConsoleState,
+        scheduler: &SchedulerState,
+        command_prompt: &CommandPromptState,
+        sidebar: &mut SidebarState,
+    ) -> Result<bool, AppError> {
+        if !native_fullscreen.is_active() {
+            return Ok(false);
+        }
+
+        native_fullscreen.deactivate();
+        alternate_screen.resume()?;
+        renderer_state.clear_frame_lines();
+        sidebar.rendered_overlay = None;
+        sidebar.force_full_redraws = sidebar.force_full_redraws.max(1);
+        self.refresh_surface(
+            surface,
+            live_surface,
+            hosted,
+            renderer_state,
+            renderer,
+            console,
+            scheduler,
+            command_prompt,
+            sidebar,
+        )?;
+        Ok(true)
+    }
+
+    fn forward_native_fullscreen_input(
+        &mut self,
+        session: &SessionAddress,
+        bytes: &[u8],
+        hosted: &mut HashMap<SessionAddress, HostedSession>,
+        console: &mut ConsoleState,
+        scheduler: &mut SchedulerState,
+        input_tracker: &mut InputTracker,
+        command_prompt: &mut CommandPromptState,
+        live_surface: &mut LiveSurfaceState,
+    ) -> Result<(), AppError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        command_prompt.clear_message_on_forwarded_input(bytes);
+        input_tracker.observe(bytes, console, scheduler, now_unix_ms());
+
+        let mut forwarded = Vec::new();
+        let mut submitted_live_command = None;
+        let mut pending_live_command = None;
+        if let Some(runtime) = hosted.get_mut(session) {
+            let snapshot_live_command = if bytes_include_submit(bytes) {
+                live_command_label_from_shell_snapshot(
+                    runtime.screen_engine.state().active_snapshot(),
+                )
+            } else {
+                None
+            };
+            forwarded = runtime.input_normalizer.normalize(
+                bytes,
+                runtime.screen_engine.application_cursor_keys(),
+                now_unix_ms(),
+            );
+            submitted_live_command = runtime
+                .command_tracker
+                .observe(bytes)
+                .and_then(|command| live_command_label(&command))
+                .or(snapshot_live_command);
+            pending_live_command = runtime.command_tracker.pending_live_command_label();
+        }
+        if let Some(command_title) = submitted_live_command {
+            self.set_session_title(session, command_title);
+            live_surface.mark_known_live_command(session.clone());
+            live_surface.mark_session_bootstrapping(session.clone(), now_unix_ms());
+            scheduler.on_manual_switch(console);
+        } else if let Some(command_title) = pending_live_command {
+            self.set_session_title(session, command_title);
+        } else if !live_surface.is_known_live_command(session) {
+            self.restore_shell_session_title(session);
+        }
+        if !forwarded.is_empty() {
+            self.sessions.mark_input(session);
+            if let Some(runtime) = hosted.get_mut(session) {
+                runtime.handle.write_all(&forwarded)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn decorate_frame(
         &self,
         frame: &RenderFrame,
@@ -2176,7 +2668,7 @@ impl App {
         let width = self.terminal.current_size_or_default().cols as usize;
         let sidebar_overlay = self.build_sidebar_overlay(sidebar);
         let mut lines =
-            Vec::with_capacity(frame.viewport_lines.len() + frame.overlay_lines.len() + 3);
+            Vec::with_capacity(frame.styled_viewport_lines.len() + frame.overlay_lines.len() + 3);
         if !frame.top_line.is_empty() {
             lines.push(frame.top_line.clone());
         }
@@ -2539,7 +3031,7 @@ impl App {
         )
     }
 
-    fn restore_terminal_screen(&self) -> Result<(), AppError> {
+    fn restore_terminal_screen(&mut self) -> Result<(), AppError> {
         let mut stdout = io::stdout().lock();
         stdout
             .write_all(RESTORE_SCREEN.as_bytes())
@@ -2608,7 +3100,7 @@ impl App {
         let mut server_runtime =
             ServerRuntime::bind(ServerRuntimeConfig::new(listen_addr.clone()))?;
 
-        let _alternate_screen = self.terminal.enter_alternate_screen()?;
+        let mut alternate_screen = self.terminal.enter_alternate_screen()?;
         let _raw_mode = self.terminal.enter_raw_mode()?;
         let mut console = ConsoleState::new("server-console");
         let mut scheduler = SchedulerState::new();
@@ -2618,6 +3110,7 @@ impl App {
         let mut command_prompt = CommandPromptState::default();
         let mut sidebar = SidebarState::default();
         let mut live_surface = LiveSurfaceState::default();
+        let mut native_fullscreen = NativeFullscreenState::default();
         let mut hosted = HashMap::<SessionAddress, HostedSession>::new();
 
         let (tx, rx) = mpsc::channel();
@@ -2665,17 +3158,19 @@ impl App {
                             &mut connection.stream,
                             Ok(address.to_string()),
                         )?;
-                        self.refresh_surface(
-                            RenderSurface::Server,
-                            &mut live_surface,
-                            &mut hosted,
-                            &mut renderer_state,
-                            &renderer,
-                            &console,
-                            &scheduler,
-                            &command_prompt,
-                            &mut sidebar,
-                        )?;
+                        if !native_fullscreen.is_active() {
+                            self.refresh_surface(
+                                RenderSurface::Server,
+                                &mut live_surface,
+                                &mut hosted,
+                                &mut renderer_state,
+                                &renderer,
+                                &console,
+                                &scheduler,
+                                &command_prompt,
+                                &mut sidebar,
+                            )?;
+                        }
                     }
                     Err(error) => {
                         let _ = write_delegated_spawn_response(
@@ -2689,6 +3184,46 @@ impl App {
             match next_runtime_event(&rx, &mut pending_events) {
                 Ok(RuntimeEvent::Input(bytes)) => {
                     let input_received_at = now_unix_ms();
+                    let passthrough_display =
+                        self.focused_session_owns_passthrough_display(&live_surface, &console);
+                    self.trace_input(
+                        "server",
+                        &bytes,
+                        &command_prompt,
+                        native_fullscreen.is_active(),
+                        passthrough_display,
+                    );
+                    if native_fullscreen.is_active() {
+                        let fullscreen_input = native_fullscreen.handle_input(&bytes);
+                        if let Some(target) = native_fullscreen.session().cloned() {
+                            self.forward_native_fullscreen_input(
+                                &target,
+                                &fullscreen_input.forwarded,
+                                &mut hosted,
+                                &mut console,
+                                &mut scheduler,
+                                &mut input_tracker,
+                                &mut command_prompt,
+                                &mut live_surface,
+                            )?;
+                        }
+                        if fullscreen_input.exit_requested {
+                            self.exit_native_fullscreen(
+                                RenderSurface::Server,
+                                &mut native_fullscreen,
+                                &mut alternate_screen,
+                                &mut live_surface,
+                                &mut hosted,
+                                &mut renderer_state,
+                                &renderer,
+                                &console,
+                                &scheduler,
+                                &command_prompt,
+                                &mut sidebar,
+                            )?;
+                        }
+                        continue;
+                    }
                     let allow_interrupt_exit =
                         !self.focused_session_owns_passthrough_display(&live_surface, &console);
                     if let Some(outcome) = command_prompt.handle_picker_navigation(
@@ -2763,6 +3298,8 @@ impl App {
                             outcome,
                             runtime,
                             terminal_snapshot.size,
+                            &mut native_fullscreen,
+                            &mut alternate_screen,
                             &mut live_surface,
                             &mut hosted,
                             &tx,
@@ -2862,6 +3399,17 @@ impl App {
                                     &command_prompt,
                                     &mut sidebar,
                                 )?;
+                            }
+                            ConsoleAction::EnterNativeFullscreen => {
+                                if self.enter_native_fullscreen(
+                                    &mut native_fullscreen,
+                                    &mut alternate_screen,
+                                    &mut live_surface,
+                                    &mut hosted,
+                                    &console,
+                                )? {
+                                    command_prompt.clear_overlay();
+                                }
                             }
                             _ => {
                                 should_exit = self.apply_host_action(
@@ -3003,6 +3551,8 @@ impl App {
                                     outcome,
                                     runtime,
                                     terminal_snapshot.size,
+                                    &mut native_fullscreen,
+                                    &mut alternate_screen,
                                     &mut live_surface,
                                     &mut hosted,
                                     &tx,
@@ -3103,6 +3653,18 @@ impl App {
                                             &command_prompt,
                                             &mut sidebar,
                                         )?;
+                                    }
+                                    ConsoleAction::EnterNativeFullscreen => {
+                                        handled_control = true;
+                                        if self.enter_native_fullscreen(
+                                            &mut native_fullscreen,
+                                            &mut alternate_screen,
+                                            &mut live_surface,
+                                            &mut hosted,
+                                            &console,
+                                        )? {
+                                            command_prompt.clear_overlay();
+                                        }
                                     }
                                     _ => {
                                         should_exit = self.apply_host_action(
@@ -3289,6 +3851,7 @@ impl App {
                     session: output_session,
                     bytes,
                 }) => {
+                    self.trace_output("server", &output_session, &bytes);
                     buffer_pending_runtime_events(&rx, &mut pending_events);
                     if pending_events.iter().any(runtime_event_is_input_priority) {
                         pending_events.push_front(RuntimeEvent::Output {
@@ -3317,6 +3880,7 @@ impl App {
                         if substantive_output {
                             self.sessions.mark_output(&output_session);
                         }
+                        runtime.transcript.record_output(&bytes);
                         let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
                         snapshot_after_output =
                             Some(runtime.screen_engine.state().active_snapshot().clone());
@@ -3379,6 +3943,10 @@ impl App {
                             let shell_prompt_detected = looks_like_shell_prompt_output(&bytes);
                             should_refresh_surface =
                                 !release_detected || substantive_output || shell_prompt_detected;
+                        } else if native_fullscreen.is_active_for(&output_session) {
+                            should_passthrough_output = true;
+                        } else if native_fullscreen.is_active() {
+                            should_refresh_surface = false;
                         } else if live_surface.is_live_for(&output_session)
                             && console.focused_session.as_ref() == Some(&output_session)
                         {
@@ -3396,12 +3964,14 @@ impl App {
                         {
                             should_refresh_surface = true;
                         }
-                        if title_reconciled {
+                        if title_reconciled && !native_fullscreen.is_active() {
                             should_refresh_surface = true;
                         }
                     }
 
-                    if should_passthrough_output {
+                    if native_fullscreen.is_active_for(&output_session) {
+                        self.write_live_surface_output(&bytes)?;
+                    } else if should_passthrough_output {
                         let skip_snapshot_redraw = live_output_can_skip_snapshot_redraw(
                             &live_surface,
                             &output_session,
@@ -3450,6 +4020,21 @@ impl App {
                         self.pty.release(&session);
                         let active_addresses = self.active_session_addresses();
                         console.handle_focus_loss(&active_addresses);
+                        if native_fullscreen.is_active_for(&session) {
+                            self.exit_native_fullscreen(
+                                RenderSurface::Server,
+                                &mut native_fullscreen,
+                                &mut alternate_screen,
+                                &mut live_surface,
+                                &mut hosted,
+                                &mut renderer_state,
+                                &renderer,
+                                &console,
+                                &scheduler,
+                                &command_prompt,
+                                &mut sidebar,
+                            )?;
+                        }
                         self.refresh_surface(
                             RenderSurface::Server,
                             &mut live_surface,
@@ -3469,7 +4054,8 @@ impl App {
 
             let now = now_unix_ms();
 
-            if command_prompt.flush_picker_navigation_timeout(now) {
+            if !native_fullscreen.is_active() && command_prompt.flush_picker_navigation_timeout(now)
+            {
                 self.refresh_surface(
                     RenderSurface::Server,
                     &mut live_surface,
@@ -3483,7 +4069,9 @@ impl App {
                 )?;
             }
 
-            if sidebar.flush_navigation_timeout(&command_prompt, now) {
+            if !native_fullscreen.is_active()
+                && sidebar.flush_navigation_timeout(&command_prompt, now)
+            {
                 self.refresh_surface(
                     RenderSurface::Server,
                     &mut live_surface,
@@ -3498,7 +4086,8 @@ impl App {
             }
 
             if let Some(target) = console.input_owner_session().cloned() {
-                if let Some(runtime) = hosted.get_mut(&target) {
+                if native_fullscreen.is_active_for(&target) {
+                } else if let Some(runtime) = hosted.get_mut(&target) {
                     let flushed = runtime.input_normalizer.flush_pending_escape_timeout(now);
                     if !flushed.is_empty() {
                         self.sessions.mark_input(&target);
@@ -3510,21 +4099,29 @@ impl App {
             server_runtime.expire_stale_nodes(now_unix_ms());
 
             if self.terminal.capture_resize()?.is_some() {
-                self.refresh_surface(
-                    RenderSurface::Server,
-                    &mut live_surface,
-                    &mut hosted,
-                    &mut renderer_state,
-                    &renderer,
-                    &console,
-                    &scheduler,
-                    &command_prompt,
-                    &mut sidebar,
-                )?;
+                if let Some(target) = native_fullscreen.session().cloned() {
+                    let terminal_size = self.terminal.current_size_or_default();
+                    if self.resize_hosted_session(&target, terminal_size, &mut hosted)? {
+                        self.write_native_fullscreen_seed(&target, &hosted, terminal_size)?;
+                    }
+                } else {
+                    self.refresh_surface(
+                        RenderSurface::Server,
+                        &mut live_surface,
+                        &mut hosted,
+                        &mut renderer_state,
+                        &renderer,
+                        &console,
+                        &scheduler,
+                        &command_prompt,
+                        &mut sidebar,
+                    )?;
+                }
             }
 
             if !command_prompt.open
                 && !self.focused_session_owns_passthrough_display(&live_surface, &console)
+                && !native_fullscreen.is_active()
             {
                 let suppress_scheduler_refresh = suppress_scheduler_refresh
                     || console
@@ -3568,6 +4165,9 @@ impl App {
             }
         }
 
+        if native_fullscreen.is_active() {
+            alternate_screen.resume()?;
+        }
         self.restore_terminal_screen()?;
         Ok(())
     }
@@ -3680,6 +4280,7 @@ impl App {
                     if substantive_output {
                         self.sessions.mark_output(&output_session);
                     }
+                    runtime.transcript.record_output(&bytes);
                     let replies = runtime.screen_engine.feed_and_collect_replies(&bytes);
                     self.sessions
                         .update_screen_state(&output_session, runtime.screen_engine.state());
@@ -3863,6 +4464,7 @@ impl App {
                     .toggle_sessions(&self.sessions.list(), console.focused_session.as_ref());
                 true
             }
+            ConsoleAction::EnterNativeFullscreen => false,
             ConsoleAction::DismissOverlay => command_prompt.dismiss(),
             ConsoleAction::CloseCurrentSession => {
                 if let Some(target) = console.focused_session.clone() {
@@ -3975,6 +4577,7 @@ impl App {
                     .toggle_sessions(&self.sessions.list(), console.focused_session.as_ref());
                 true
             }
+            ConsoleAction::EnterNativeFullscreen => false,
             ConsoleAction::DismissOverlay => command_prompt.dismiss(),
             ConsoleAction::CloseCurrentSession => {
                 if let Some(target) = console.focused_session.clone() {
@@ -4058,6 +4661,8 @@ impl App {
         outcome: CommandPromptOutcome,
         runtime: &AppConfig,
         size: crate::terminal::TerminalSize,
+        native_fullscreen: &mut NativeFullscreenState,
+        alternate_screen: &mut AlternateScreenGuard,
         live_surface: &mut LiveSurfaceState,
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         tx: &Sender<RuntimeEvent>,
@@ -4088,6 +4693,8 @@ impl App {
                 command.as_str(),
                 runtime,
                 size,
+                native_fullscreen,
+                alternate_screen,
                 live_surface,
                 hosted,
                 tx,
@@ -4108,6 +4715,8 @@ impl App {
         command: &str,
         runtime: &AppConfig,
         size: crate::terminal::TerminalSize,
+        native_fullscreen: &mut NativeFullscreenState,
+        alternate_screen: &mut AlternateScreenGuard,
         live_surface: &mut LiveSurfaceState,
         hosted: &mut HashMap<SessionAddress, HostedSession>,
         tx: &Sender<RuntimeEvent>,
@@ -4121,6 +4730,7 @@ impl App {
     ) -> Result<bool, AppError> {
         let trimmed = command.trim();
         let mut should_exit = false;
+        let mut refresh_surface_after_command = true;
 
         if trimmed.is_empty() {
             command_prompt.set_message("Empty command. Try /h.");
@@ -4139,6 +4749,19 @@ impl App {
             command_prompt.set_message(format!("Created {address}."));
         } else if matches!(trimmed, "/sessions" | "/ls") {
             command_prompt.toggle_sessions(&self.sessions.list(), console.focused_session.as_ref());
+        } else if matches!(trimmed, "/fullscreen" | "/full" | "/f") {
+            if self.enter_native_fullscreen(
+                native_fullscreen,
+                alternate_screen,
+                live_surface,
+                hosted,
+                console,
+            )? {
+                command_prompt.clear_overlay();
+                refresh_surface_after_command = false;
+            } else {
+                command_prompt.set_message("Fullscreen unavailable for current focus.");
+            }
         } else if matches!(trimmed, "/clear" | "/dismiss") {
             command_prompt.clear_overlay();
         } else if matches!(trimmed, "/close" | "/kill") {
@@ -4191,17 +4814,19 @@ impl App {
             command_prompt.set_message(format!("Unknown command: {trimmed}"));
         }
 
-        self.refresh_surface(
-            surface,
-            live_surface,
-            hosted,
-            renderer_state,
-            renderer,
-            console,
-            scheduler,
-            command_prompt,
-            sidebar,
-        )?;
+        if refresh_surface_after_command {
+            self.refresh_surface(
+                surface,
+                live_surface,
+                hosted,
+                renderer_state,
+                renderer,
+                console,
+                scheduler,
+                command_prompt,
+                sidebar,
+            )?;
+        }
         Ok(should_exit)
     }
 
@@ -4330,6 +4955,7 @@ impl App {
 struct HostedSession {
     handle: PtyHandle,
     screen_engine: TerminalEngine,
+    transcript: TerminalTranscript,
     input_normalizer: ForwardInputNormalizer,
     command_tracker: ShellCommandTracker,
     viewport_size: crate::terminal::TerminalSize,
@@ -4454,6 +5080,65 @@ impl LiveSurfaceState {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct NativeFullscreenState {
+    session: Option<SessionAddress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeFullscreenInputOutcome {
+    forwarded: Vec<u8>,
+    exit_requested: bool,
+}
+
+impl NativeFullscreenState {
+    fn is_active(&self) -> bool {
+        self.session.is_some()
+    }
+
+    fn session(&self) -> Option<&SessionAddress> {
+        self.session.as_ref()
+    }
+
+    fn is_active_for(&self, session: &SessionAddress) -> bool {
+        self.session.as_ref() == Some(session)
+    }
+
+    fn activate(&mut self, session: SessionAddress) {
+        self.session = Some(session);
+    }
+
+    fn deactivate(&mut self) -> Option<SessionAddress> {
+        self.session.take()
+    }
+
+    fn handle_input(&mut self, bytes: &[u8]) -> NativeFullscreenInputOutcome {
+        if shortcut_matches(bytes, SHORTCUT_FULLSCREEN) {
+            return NativeFullscreenInputOutcome {
+                forwarded: Vec::new(),
+                exit_requested: true,
+            };
+        }
+
+        let mut forwarded = Vec::new();
+        let mut exit_requested = false;
+
+        for &byte in bytes {
+            if byte == SHORTCUT_FULLSCREEN {
+                exit_requested = true;
+                break;
+            } else {
+                forwarded.push(byte);
+            }
+        }
+
+        NativeFullscreenInputOutcome {
+            forwarded,
+            exit_requested,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CursorPlacement {
     row: u16,
@@ -4468,6 +5153,7 @@ struct SidebarOverlay {
     lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LiveSurfaceUiBuffer {
     buffer: String,
     overlay_rows: usize,
@@ -4488,6 +5174,7 @@ enum ConsoleAction {
     CreateSession,
     ListSessions,
     CloseCurrentSession,
+    EnterNativeFullscreen,
     DismissOverlay,
     NextSession,
     PreviousSession,
@@ -4502,6 +5189,7 @@ const COMMAND_BAR_PREFIX_FALLBACK: u8 = 0x07;
 const SHORTCUT_PREVIOUS_SESSION: u8 = 0x02;
 const SHORTCUT_NEXT_SESSION: u8 = 0x06;
 const SHORTCUT_NEW_SESSION: u8 = 0x0e;
+const SHORTCUT_FULLSCREEN: u8 = SHORTCUT_NATIVE_FULLSCREEN;
 const SHORTCUT_LIST_SESSIONS: u8 = 0x0c;
 const SHORTCUT_CLOSE_SESSION: u8 = 0x18;
 const SHORTCUT_QUIT: u8 = 0x11;
@@ -4538,6 +5226,16 @@ struct CommandPromptState {
 
 impl CommandPromptState {
     fn handle_input(&mut self, bytes: &[u8]) -> Option<CommandPromptOutcome> {
+        if !self.open
+            && (shortcut_matches(bytes, COMMAND_BAR_PREFIX)
+                || shortcut_matches(bytes, COMMAND_BAR_PREFIX_FALLBACK))
+        {
+            self.open = true;
+            self.buffer.clear();
+            self.clear_pending_picker_escape();
+            return Some(CommandPromptOutcome::RenderOnly);
+        }
+
         let mut changed = false;
 
         for byte in bytes {
@@ -4811,11 +5509,15 @@ impl CommandPromptState {
             CommandOverlay::None => {}
             CommandOverlay::Message(_) => {}
             CommandOverlay::Help => {
-                lines.push("help: /new /sessions /focus <n|id> /close /quit /clear".to_string());
+                lines.push(
+                    "help: /new /sessions /focus <n|id> /fullscreen /close /quit /clear"
+                        .to_string(),
+                );
                 lines.push(
                     "help: Esc hide | Ctrl-B prev | Ctrl-F next | Ctrl-L picker | Ctrl-N new"
                         .to_string(),
                 );
+                lines.push("help: Ctrl-O enter/exit fullscreen | /fullscreen".to_string());
             }
             CommandOverlay::Sessions => {
                 lines.push(
@@ -4845,7 +5547,10 @@ impl CommandPromptState {
             }
         }
 
-        lines.push("keys: ^W cmd  ^B/^F switch  ^N new  ^L picker  ^X close  ^Q quit".to_string());
+        lines.push(
+            "keys: ^W cmd  ^B/^F switch  ^N new  ^O full on/off  ^L picker  ^X close  ^Q quit"
+                .to_string(),
+        );
 
         if self.open {
             lines.push(format!(":{}", self.buffer));
@@ -5294,6 +5999,13 @@ fn extract_shell_prompt_command(line: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn native_fullscreen_seed_snapshot(
+    transcript: &TerminalTranscript,
+    terminal_size: crate::terminal::TerminalSize,
+) -> crate::terminal::ScreenSnapshot {
+    transcript.replay_active_snapshot(terminal_size)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerNavigationOutcome {
     Consumed,
@@ -5634,7 +6346,8 @@ fn workspace_idle_lines(surface: &str, active_count: usize, waiting_count: usize
     vec![
         format!("WaitAgent | {surface}"),
         format!("active: {active_count} | waiting: {waiting_count}"),
-        "hint: Ctrl-W command bar | Ctrl-B/Ctrl-F switch | Ctrl-Q quit".to_string(),
+        "hint: Ctrl-W command bar | Ctrl-B/Ctrl-F switch | Ctrl-O fullscreen on/off | Ctrl-Q quit"
+            .to_string(),
     ]
 }
 
@@ -6164,23 +6877,142 @@ fn parse_console_action(
     allow_escape_dismiss: bool,
     allow_interrupt_exit: bool,
 ) -> Option<ConsoleAction> {
+    if shortcut_matches(bytes, SHORTCUT_INTERRUPT_EXIT) && allow_interrupt_exit {
+        return Some(ConsoleAction::QuitHost);
+    }
+    if bytes == [0x1b] && allow_escape_dismiss {
+        return Some(ConsoleAction::DismissOverlay);
+    }
+    if shortcut_matches(bytes, SHORTCUT_PREVIOUS_SESSION) || bytes == b"\x1bp" || bytes == b"\x1b[Z"
+    {
+        return Some(ConsoleAction::PreviousSession);
+    }
+    if shortcut_matches(bytes, SHORTCUT_NEXT_SESSION) || bytes == b"\x1bn" || bytes == b"\x1b[1;5I"
+    {
+        return Some(ConsoleAction::NextSession);
+    }
+    if shortcut_matches(bytes, SHORTCUT_NEW_SESSION) || bytes == b"\x1bc" {
+        return Some(ConsoleAction::CreateSession);
+    }
+    if shortcut_matches(bytes, SHORTCUT_FULLSCREEN) {
+        return Some(ConsoleAction::EnterNativeFullscreen);
+    }
+    if shortcut_matches(bytes, SHORTCUT_LIST_SESSIONS) {
+        return Some(ConsoleAction::ListSessions);
+    }
+    if shortcut_matches(bytes, SHORTCUT_CLOSE_SESSION) {
+        return Some(ConsoleAction::CloseCurrentSession);
+    }
+    if shortcut_matches(bytes, SHORTCUT_QUIT) || bytes == b"\x1bx" {
+        return Some(ConsoleAction::QuitHost);
+    }
+    if bytes == b"\x1bv" {
+        return Some(ConsoleAction::TogglePeek);
+    }
     match bytes {
-        [SHORTCUT_INTERRUPT_EXIT] if allow_interrupt_exit => Some(ConsoleAction::QuitHost),
-        [0x1b] if allow_escape_dismiss => Some(ConsoleAction::DismissOverlay),
-        [SHORTCUT_PREVIOUS_SESSION] => Some(ConsoleAction::PreviousSession),
-        [SHORTCUT_NEXT_SESSION] => Some(ConsoleAction::NextSession),
-        [SHORTCUT_NEW_SESSION] => Some(ConsoleAction::CreateSession),
-        [SHORTCUT_LIST_SESSIONS] => Some(ConsoleAction::ListSessions),
-        [SHORTCUT_CLOSE_SESSION] => Some(ConsoleAction::CloseCurrentSession),
-        [SHORTCUT_QUIT] => Some(ConsoleAction::QuitHost),
-        b"\x1bc" => Some(ConsoleAction::CreateSession),
-        b"\x1bn" | b"\x1b[1;5I" => Some(ConsoleAction::NextSession),
-        b"\x1bp" | b"\x1b[Z" => Some(ConsoleAction::PreviousSession),
-        b"\x1bv" => Some(ConsoleAction::TogglePeek),
-        b"\x1bx" => Some(ConsoleAction::QuitHost),
         [0x1b, digit @ b'1'..=b'9'] => Some(ConsoleAction::FocusIndex((digit - b'0') as usize)),
         _ => None,
     }
+}
+
+fn describe_shortcut_matches(bytes: &[u8]) -> String {
+    let mut labels = Vec::new();
+    if shortcut_matches(bytes, COMMAND_BAR_PREFIX)
+        || shortcut_matches(bytes, COMMAND_BAR_PREFIX_FALLBACK)
+    {
+        labels.push("command_bar");
+    }
+    if shortcut_matches(bytes, SHORTCUT_FULLSCREEN) {
+        labels.push("fullscreen");
+    }
+    if shortcut_matches(bytes, SHORTCUT_NEW_SESSION) {
+        labels.push("new_session");
+    }
+    if shortcut_matches(bytes, SHORTCUT_NEXT_SESSION) {
+        labels.push("next_session");
+    }
+    if shortcut_matches(bytes, SHORTCUT_PREVIOUS_SESSION) {
+        labels.push("previous_session");
+    }
+    if shortcut_matches(bytes, SHORTCUT_LIST_SESSIONS) {
+        labels.push("list_sessions");
+    }
+    if shortcut_matches(bytes, SHORTCUT_CLOSE_SESSION) {
+        labels.push("close_session");
+    }
+    if shortcut_matches(bytes, SHORTCUT_QUIT) {
+        labels.push("quit");
+    }
+    if shortcut_matches(bytes, SHORTCUT_INTERRUPT_EXIT) {
+        labels.push("interrupt");
+    }
+    if labels.is_empty() {
+        "none".to_string()
+    } else {
+        labels.join(",")
+    }
+}
+
+fn escape_input_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            0x1b => escaped.push_str("\\e"),
+            0x20..=0x7e => escaped.push(byte as char),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    escaped
+}
+
+fn shortcut_matches(bytes: &[u8], shortcut: u8) -> bool {
+    bytes == [shortcut] || decode_encoded_control_shortcut(bytes) == Some(shortcut)
+}
+
+fn decode_encoded_control_shortcut(bytes: &[u8]) -> Option<u8> {
+    decode_csi_u_control_shortcut(bytes)
+        .or_else(|| decode_modify_other_keys_control_shortcut(bytes))
+}
+
+fn decode_csi_u_control_shortcut(bytes: &[u8]) -> Option<u8> {
+    let body = bytes.strip_prefix(b"\x1b[")?.strip_suffix(b"u")?;
+    let split = body.iter().position(|byte| *byte == b';')?;
+    let codepoint = std::str::from_utf8(&body[..split])
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    let modifier = std::str::from_utf8(&body[split + 1..])
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    decode_control_shortcut_from_parts(codepoint, modifier)
+}
+
+fn decode_modify_other_keys_control_shortcut(bytes: &[u8]) -> Option<u8> {
+    let body = bytes.strip_prefix(b"\x1b[27;")?.strip_suffix(b"~")?;
+    let split = body.iter().position(|byte| *byte == b';')?;
+    let modifier = std::str::from_utf8(&body[..split])
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    let codepoint = std::str::from_utf8(&body[split + 1..])
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    decode_control_shortcut_from_parts(codepoint, modifier)
+}
+
+fn decode_control_shortcut_from_parts(codepoint: u32, modifier: u32) -> Option<u8> {
+    let ctrl_active = modifier > 0 && ((modifier - 1) & 0b100) != 0;
+    if !ctrl_active {
+        return None;
+    }
+    let ascii = u8::try_from(codepoint).ok()?;
+    let letter = ascii.to_ascii_lowercase();
+    letter.is_ascii_lowercase().then_some(letter & 0x1f)
 }
 
 fn consume_input_escape(bytes: &[u8], index: usize) -> Option<usize> {
@@ -6972,7 +7804,7 @@ fn workspace_viewport_size(
     if let Some((separator_col, _sidebar_width)) =
         sidebar_layout(size.cols as usize, sidebar_hidden)
     {
-        managed.cols = separator_col.saturating_sub(1) as u16;
+        managed.cols = separator_col.saturating_sub(2) as u16;
     }
     managed
 }
@@ -7172,18 +8004,20 @@ mod tests {
         live_output_requires_full_sidebar_redraw_from_snapshots, live_output_sidebar_damage,
         live_overlay_visible, live_surface_target_size, looks_like_shell_prompt_output,
         looks_like_terminal_release_output, looks_like_terminal_takeover_output,
-        next_runtime_event, nonfatal_foreground_process_inspection_error, now_unix_ms,
-        output_is_substantive, parse_console_action, shell_title, shell_title_from_command_line,
-        sidebar_display_status, strip_sync_update_markers, strip_sync_update_markers_stream,
-        style_footer_separator_line, style_sidebar_badge, style_sidebar_divider,
-        style_sidebar_header_line, style_sidebar_item_line, App, CommandOverlay,
-        CommandPromptState, ConsoleAction, CursorPlacement, ForegroundTitleDecision,
-        ForwardInputNormalizer, InputTracker, LiveSurfaceState, PickerNavigationOutcome,
+        native_fullscreen_seed_snapshot, next_runtime_event,
+        nonfatal_foreground_process_inspection_error, now_unix_ms, output_is_substantive,
+        parse_console_action, shell_title, shell_title_from_command_line, sidebar_display_status,
+        strip_sync_update_markers, strip_sync_update_markers_stream, style_footer_separator_line,
+        style_sidebar_badge, style_sidebar_divider, style_sidebar_header_line,
+        style_sidebar_item_line, App, CommandOverlay, CommandPromptOutcome, CommandPromptState,
+        ConsoleAction, CursorPlacement, ForegroundTitleDecision, ForwardInputNormalizer,
+        InputTracker, LiveSurfaceState, NativeFullscreenState, PickerNavigationOutcome,
         RuntimeEvent, ShellCommandTracker, SidebarDisplayStatus, SidebarNavigationOutcome,
         SidebarOverlay, SidebarState, ANSI_BG_SIDEBAR_ACTIVE, ANSI_FG_SIDEBAR_CONFIRM,
         ANSI_FG_SIDEBAR_INPUT, ANSI_FG_SIDEBAR_RUNNING, ANSI_SYNC_UPDATE_END,
         ANSI_SYNC_UPDATE_START, LIVE_SURFACE_STATUS_ROWS, PICKER_ESCAPE_TIMEOUT_MS,
-        SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION, SHORTCUT_PREVIOUS_SESSION,
+        SHORTCUT_FULLSCREEN, SHORTCUT_INTERRUPT_EXIT, SHORTCUT_NEXT_SESSION,
+        SHORTCUT_PREVIOUS_SESSION,
     };
     use crate::client::normalize_endpoint;
     use crate::config::AppConfig;
@@ -7193,6 +8027,7 @@ mod tests {
     use crate::scheduler::{SchedulerPhase, SchedulerState};
     use crate::session::{SessionAddress, SessionRegistry};
     use crate::terminal::{TerminalEngine, TerminalSize};
+    use crate::transcript::TerminalTranscript;
     use std::collections::{HashMap, VecDeque};
     use std::io;
     use std::sync::mpsc;
@@ -7259,6 +8094,18 @@ mod tests {
             Some(ConsoleAction::NextSession)
         );
         assert_eq!(
+            parse_console_action(&[SHORTCUT_FULLSCREEN], false, true),
+            Some(ConsoleAction::EnterNativeFullscreen)
+        );
+        assert_eq!(
+            parse_console_action(b"\x1b[111;5u", false, true),
+            Some(ConsoleAction::EnterNativeFullscreen)
+        );
+        assert_eq!(
+            parse_console_action(b"\x1b[27;5;111~", false, true),
+            Some(ConsoleAction::EnterNativeFullscreen)
+        );
+        assert_eq!(
             parse_console_action(&[SHORTCUT_PREVIOUS_SESSION], false, true),
             Some(ConsoleAction::PreviousSession)
         );
@@ -7283,6 +8130,61 @@ mod tests {
             Some(ConsoleAction::QuitHost)
         );
         assert_eq!(parse_console_action(b"plain input", false, true), None);
+    }
+
+    #[test]
+    fn command_prompt_opens_for_encoded_ctrl_w_shortcuts() {
+        let mut prompt = CommandPromptState::default();
+
+        assert_eq!(
+            prompt.handle_input(b"\x1b[119;5u"),
+            Some(CommandPromptOutcome::RenderOnly)
+        );
+        assert!(prompt.open);
+
+        let mut prompt = CommandPromptState::default();
+        assert_eq!(
+            prompt.handle_input(b"\x1b[27;5;119~"),
+            Some(CommandPromptOutcome::RenderOnly)
+        );
+        assert!(prompt.open);
+    }
+
+    #[test]
+    fn native_fullscreen_allows_ctrl_o_toggle_exit() {
+        let mut fullscreen = NativeFullscreenState::default();
+        fullscreen.activate(SessionAddress::new("local", "session-1"));
+
+        let outcome = fullscreen.handle_input(&[SHORTCUT_FULLSCREEN]);
+        assert!(outcome.exit_requested);
+        assert!(outcome.forwarded.is_empty());
+    }
+
+    #[test]
+    fn native_fullscreen_forwards_non_toggle_input() {
+        let mut fullscreen = NativeFullscreenState::default();
+        fullscreen.activate(SessionAddress::new("local", "session-1"));
+
+        let outcome = fullscreen.handle_input(b"a");
+        assert!(!outcome.exit_requested);
+        assert_eq!(outcome.forwarded, vec![b'a']);
+    }
+
+    #[test]
+    fn native_fullscreen_allows_encoded_ctrl_o_toggle_exit() {
+        let mut fullscreen = NativeFullscreenState::default();
+        fullscreen.activate(SessionAddress::new("local", "session-1"));
+
+        let csi_u = fullscreen.handle_input(b"\x1b[111;5u");
+        assert!(csi_u.exit_requested);
+        assert!(csi_u.forwarded.is_empty());
+
+        let mut fullscreen = NativeFullscreenState::default();
+        fullscreen.activate(SessionAddress::new("local", "session-1"));
+
+        let modify_other_keys = fullscreen.handle_input(b"\x1b[27;5;111~");
+        assert!(modify_other_keys.exit_requested);
+        assert!(modify_other_keys.forwarded.is_empty());
     }
 
     #[test]
@@ -7950,7 +8852,7 @@ mod tests {
             live_surface_target_size(true, false, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 51,
+                cols: 50,
                 pixel_width: 0,
                 pixel_height: 0,
             }
@@ -7959,7 +8861,7 @@ mod tests {
             live_surface_target_size(false, true, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 51,
+                cols: 50,
                 pixel_width: 0,
                 pixel_height: 0,
             }
@@ -7968,7 +8870,7 @@ mod tests {
             live_surface_target_size(false, false, terminal_size, false),
             TerminalSize {
                 rows: 21,
-                cols: 51,
+                cols: 50,
                 pixel_width: 0,
                 pixel_height: 0,
             }
@@ -7977,7 +8879,7 @@ mod tests {
             live_surface_target_size(false, false, terminal_size, true),
             TerminalSize {
                 rows: 21,
-                cols: 77,
+                cols: 76,
                 pixel_width: 0,
                 pixel_height: 0,
             }
@@ -8922,7 +9824,7 @@ mod tests {
     }
 
     #[test]
-    fn live_surface_overlay_does_not_redraw_keys_row_over_sidebar_detail() {
+    fn live_surface_overlay_draws_keys_row_and_keeps_sidebar_detail() {
         let mut app = App::new(AppConfig::from_env());
         let session = app.sessions.create_local_session(
             "local".to_string(),
@@ -8958,9 +9860,9 @@ mod tests {
             .expect("overlay buffer should build");
 
         let status_row = app.terminal.current_size_or_default().rows;
-        let duplicate_keys_row = status_row.saturating_sub(1);
-        let duplicate_keys_write = format!("\x1b[{duplicate_keys_row};1H{}", ui.keys_line);
-        assert!(!ui.buffer.contains(&duplicate_keys_write));
+        let keys_row = status_row.saturating_sub(1);
+        let keys_write = format!("\x1b[{keys_row};1H{}", ui.keys_line);
+        assert!(ui.buffer.contains(&keys_write));
         assert!(ui.buffer.contains("codex@local | RUNNING"));
     }
 
@@ -9164,6 +10066,41 @@ mod tests {
 
         assert!(!buffer.contains(&format!("\x1b[1;1H{}", after.styled_lines[0])));
         assert!(buffer.contains(&format!("\x1b[2;1H{}", after.styled_lines[1])));
+    }
+
+    #[test]
+    fn native_fullscreen_snapshot_seed_populates_history_before_repainting_screen() {
+        let snapshot = crate::terminal::ScreenSnapshot {
+            size: TerminalSize {
+                rows: 2,
+                cols: 5,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            lines: vec!["two  ".to_string(), "three".to_string()],
+            styled_lines: vec!["two  ".to_string(), "three".to_string()],
+            active_style_ansi: "\x1b[0m".to_string(),
+            scrollback: vec!["one  ".to_string()],
+            styled_scrollback: vec!["one  ".to_string()],
+            scroll_top: 0,
+            scroll_bottom: 1,
+            window_title: None,
+            cursor_row: 1,
+            cursor_col: 5,
+            cursor_visible: true,
+            alternate_screen: false,
+        };
+        let app = App::new(AppConfig::from_env());
+
+        let buffer = app
+            .build_native_fullscreen_snapshot_seed(&snapshot)
+            .expect("replayed fullscreen buffer should build");
+
+        assert!(buffer.starts_with("\x1b[3J\x1b[2J\x1b[H\x1b[?25l"));
+        assert!(buffer.contains("one"));
+        assert!(buffer.contains("two"));
+        assert!(buffer.contains("three"));
+        assert!(buffer.contains("\x1b[2;6H"));
     }
 
     #[test]
@@ -9574,5 +10511,90 @@ mod tests {
             live_command_label_from_shell_snapshot(engine.state().active_snapshot()),
             Some("codex".to_string())
         );
+    }
+
+    #[test]
+    fn native_fullscreen_seed_replays_normal_screen_history_at_target_width() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        let mut transcript = TerminalTranscript::default();
+        transcript.record_output(b"1234567890");
+        engine.feed(b"1234567890");
+
+        let seed = native_fullscreen_seed_snapshot(
+            &transcript,
+            TerminalSize {
+                rows: 2,
+                cols: 12,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        );
+
+        assert_eq!(engine.state().active_snapshot().lines[0], "12345678");
+        assert_eq!(seed.lines[0], "1234567890  ");
+        assert_eq!(seed.lines[1], "            ");
+        assert!(!seed.alternate_screen);
+    }
+
+    #[test]
+    fn native_fullscreen_seed_replays_alternate_screen_history_at_target_width() {
+        let mut transcript = TerminalTranscript::default();
+        transcript.record_output(b"prompt$ \x1b[?1049hone\r\ntwo\r\nthree");
+
+        let seed = native_fullscreen_seed_snapshot(
+            &transcript,
+            TerminalSize {
+                rows: 2,
+                cols: 12,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        );
+
+        assert!(seed.alternate_screen);
+        assert_eq!(seed.scrollback, vec!["one         ".to_string()]);
+        assert_eq!(seed.lines[0], "two         ");
+        assert_eq!(seed.lines[1], "three       ");
+    }
+
+    #[test]
+    fn native_fullscreen_seed_replays_normal_screen_app_history_without_shell_heuristics() {
+        let narrow_size = TerminalSize {
+            rows: 3,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let wide_size = TerminalSize {
+            rows: 3,
+            cols: 16,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        let app_output =
+            b"codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7\r\nprogress: replay me";
+
+        let mut transcript = TerminalTranscript::default();
+        transcript.record_output(app_output);
+
+        let mut engine = TerminalEngine::new(narrow_size);
+        engine.feed(app_output);
+        let narrow_snapshot = engine.state().active_snapshot().clone();
+
+        let seed = native_fullscreen_seed_snapshot(&transcript, wide_size);
+
+        assert!(!narrow_snapshot.alternate_screen);
+        assert_eq!(narrow_snapshot.scrollback[0], "codex re");
+        assert_eq!(narrow_snapshot.lines[0], "progress");
+        assert_eq!(seed.scrollback[0], "codex resume 019");
+        assert_eq!(seed.scrollback[1], "d9f0f-fd40-77e2-");
+        assert_ne!(seed.lines, narrow_snapshot.lines);
+        assert_ne!(seed.scrollback, narrow_snapshot.scrollback);
     }
 }

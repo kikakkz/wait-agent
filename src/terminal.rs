@@ -248,6 +248,20 @@ pub struct AlternateScreenGuard {
 }
 
 impl AlternateScreenGuard {
+    pub fn suspend(&mut self) -> Result<(), TerminalError> {
+        self.restore()
+    }
+
+    pub fn resume(&mut self) -> Result<(), TerminalError> {
+        if self.active {
+            return Ok(());
+        }
+
+        write_escape(self.fd, ENTER_ALTERNATE_SCREEN)?;
+        self.active = true;
+        Ok(())
+    }
+
     pub fn restore(&mut self) -> Result<(), TerminalError> {
         if !self.active {
             return Ok(());
@@ -272,6 +286,7 @@ pub struct ScreenSnapshot {
     pub styled_lines: Vec<String>,
     pub active_style_ansi: String,
     pub scrollback: Vec<String>,
+    pub styled_scrollback: Vec<String>,
     pub scroll_top: u16,
     pub scroll_bottom: u16,
     pub window_title: Option<String>,
@@ -586,6 +601,7 @@ impl TerminalEngine {
             }
             'J' => self.active_buffer_mut().clear_screen(first_or(&numbers, 0)),
             'K' => self.active_buffer_mut().clear_line(first_or(&numbers, 0)),
+            'P' => self.active_buffer_mut().delete_chars(first_or(&numbers, 1)),
             'S' => self
                 .active_buffer_mut()
                 .scroll_up_in_region(first_or(&numbers, 1)),
@@ -724,6 +740,7 @@ struct ScreenBuffer {
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: Vec<String>,
+    styled_scrollback: Vec<String>,
     current_style: TextStyle,
     saved_cursor: SavedCursorState,
 }
@@ -739,6 +756,7 @@ impl ScreenBuffer {
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             scrollback: Vec::new(),
+            styled_scrollback: Vec::new(),
             current_style: TextStyle::default(),
             saved_cursor: SavedCursorState::default(),
         }
@@ -777,16 +795,7 @@ impl ScreenBuffer {
     ) -> ScreenSnapshot {
         ScreenSnapshot {
             size: self.size,
-            lines: self
-                .cells
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .filter(|cell| cell.ch != WIDE_CONTINUATION)
-                        .map(|cell| cell.ch)
-                        .collect::<String>()
-                })
-                .collect(),
+            lines: self.cells.iter().map(|row| render_plain_row(row)).collect(),
             styled_lines: self
                 .cells
                 .iter()
@@ -794,6 +803,7 @@ impl ScreenBuffer {
                 .collect(),
             active_style_ansi: self.current_style.to_ansi(),
             scrollback: self.scrollback.clone(),
+            styled_scrollback: self.styled_scrollback.clone(),
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
             window_title,
@@ -1074,13 +1084,8 @@ impl ScreenBuffer {
         for _ in 0..count {
             let removed = self.cells.remove(top);
             if full_screen_region {
-                self.scrollback.push(
-                    removed
-                        .into_iter()
-                        .filter(|cell| cell.ch != WIDE_CONTINUATION)
-                        .map(|cell| cell.ch)
-                        .collect(),
-                );
+                self.scrollback.push(render_plain_row(&removed));
+                self.styled_scrollback.push(render_styled_row(&removed));
             }
             self.cells.insert(
                 bottom,
@@ -1175,6 +1180,32 @@ impl ScreenBuffer {
                 }
             }
         }
+    }
+
+    fn delete_chars(&mut self, count: u16) {
+        if self.cells.is_empty() || self.size.rows == 0 || self.size.cols == 0 {
+            return;
+        }
+
+        let row = self.cursor_row as usize;
+        if row >= self.cells.len() {
+            return;
+        }
+
+        let start = self.cursor_col as usize;
+        if start >= self.cells[row].len() {
+            return;
+        }
+
+        let count = usize::max(1, count as usize).min(self.cells[row].len() - start);
+        let row_cells = &mut self.cells[row];
+        let fill_start = row_cells.len() - count;
+        row_cells.copy_within(start + count.., start);
+        for cell in &mut row_cells[fill_start..] {
+            *cell = blank_cell_with_style(self.current_style);
+        }
+
+        self.pending_wrap = false;
     }
 
     fn clear_wide_overlap(&mut self, row: usize, col: usize) {
@@ -1293,6 +1324,13 @@ fn blank_cell() -> ScreenCell {
 
 fn blank_cell_with_style(style: TextStyle) -> ScreenCell {
     ScreenCell { ch: ' ', style }
+}
+
+fn render_plain_row(row: &[ScreenCell]) -> String {
+    row.iter()
+        .filter(|cell| cell.ch != WIDE_CONTINUATION)
+        .map(|cell| cell.ch)
+        .collect::<String>()
 }
 
 fn render_styled_row(row: &[ScreenCell]) -> String {
@@ -1572,6 +1610,44 @@ mod tests {
         );
         assert_eq!(cleared.cursor_row, 0);
         assert_eq!(cleared.cursor_col, 0);
+    }
+
+    #[test]
+    fn engine_handles_delete_character_csi() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 8,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"abcdef");
+        engine.feed(b"\r\x1b[3C\x1b[1P");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.lines[0], "abcef   ");
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 3);
+    }
+
+    #[test]
+    fn engine_replays_real_bash_reverse_search_backspace_sequence() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(
+            b"\r(reverse-i-search)`': \x1b[K\x08\x08\x081': echo abcdef\x1b[3m1\x1b[23m2345\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\
+2': echo abcdef\x1b[3m12\x1b[23m345\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\
+3': echo abcdef\x1b[3m123\x1b[23m45\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\
+\x1b[1P': echo abcdef\x1b[3m12\x1b[23m345\x08\x08\x08\x08\x08",
+        );
+        let snapshot = engine.snapshot();
+
+        assert!(snapshot.lines[0].starts_with("(reverse-i-search)`12': echo abcdef12345"));
     }
 
     #[test]
@@ -1942,11 +2018,30 @@ mod tests {
         engine.feed(b"one\r\ntwo\r\nthree");
         let snapshot = engine.snapshot();
 
-        assert_eq!(
-            snapshot.scrollback,
-            vec!["one  ".to_string(), "two  ".to_string()]
+        assert_eq!(snapshot.scrollback, vec!["one  ".to_string()]);
+        assert_eq!(snapshot.styled_scrollback, vec!["one  ".to_string()]);
+        assert_eq!(snapshot.lines[0], "two  ");
+        assert_eq!(snapshot.lines[1], "three");
+    }
+
+    #[test]
+    fn engine_tracks_styled_scrollback_when_screen_overflows() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            rows: 2,
+            cols: 5,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+        engine.feed(b"\x1b[31mred\r\nplain\r\nnext");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.scrollback, vec!["red  ".to_string()]);
+        assert!(
+            snapshot.styled_scrollback[0].starts_with("\x1b[0;38;5;1mred"),
+            "expected styled scrollback to retain foreground color, got {:?}",
+            snapshot.styled_scrollback
         );
-        assert_eq!(snapshot.lines[0], "three");
     }
 
     #[test]

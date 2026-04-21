@@ -1,37 +1,31 @@
-id: task.sidebar-4
+id: task.architecture-1
 kind: task
 version: 1
-title: polish the default-visible sidebar detail area and enter-to-switch behavior
-status: in_progress
+title: refactor the runtime and module architecture for clearer boundaries and cleaner code
+status: deferred
 priority: medium
 source_of_truth:
-  file: docs/execution-status-board.md
-  reference: Current Focus And Next Queue
-depends_on:
-  - task.sidebar-3.done
+  file: .agents/tasks/backlog.yaml
+  reference: active
 linked_primitives:
-  - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
-linked_runbooks:
-  - runbook.continue-default-work
 done_criteria:
-  - the sidebar is visible by default in framed console mode whenever the terminal is wide enough for the sidebar layout
-  - the sidebar can be hidden without losing discoverability, and a collapsed right-edge affordance remains visible so `Right` can reopen it
-  - the selected session label and status are rendered in a dedicated fixed bottom sidebar area above the bottom info bar rather than in the shared status line
-  - pressing `Enter` while the sidebar owns focus switches to the focused session
-  - after switching, the sidebar focus and selection remain aligned to the switched session rather than dropping focus back to the main view automatically
-  - the current session working directory is rendered at the far right of the full-width bottom info bar rather than in the sidebar detail row
-  - the bottom info bar remains full-width and is not widened, overwritten, or vertically covered by the sidebar overlay
-  - no automation-rule UI or execution logic is introduced in this slice
+  - runtime, display, renderer, and terminal responsibilities are split along stable boundaries rather than accumulating more fullscreen-specific coupling in `src/app.rs`
+  - the primary ownership lines for dashboard rendering, fullscreen handoff, lifecycle wrapping, and transcript replay are documented and enforced by module structure
+  - superseded glue paths are removed as part of refactor slices instead of being left behind as parallel compatibility branches
 verification:
-  - manual: start the workspace UI, confirm the sidebar is visible by default, move focus with `Right`, hide it with `h`, reopen it with `Right`, and confirm the collapsed hint remains visible while the bottom info bar stays intact
-  - manual: move sidebar focus across sessions and confirm the bottom sidebar detail follows the selection with session label and status while the bottom info bar keeps the current working directory on the far right, then press `Enter` and confirm the target session becomes focused without losing sidebar alignment
+  - targeted architecture review before implementation starts
+  - cargo test after each bounded refactor slice
 touched_paths:
   - src/app.rs
-  - .agents/
+  - src/lifecycle.rs
+  - src/renderer.rs
+  - src/terminal.rs
+  - src/transcript.rs
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
 notes:
-  - The current implementation now renders the sidebar as a separate positioned overlay block instead of appending sidebar content onto the main frame lines.
-  - The selected-session path detail has been split so the sidebar detail row now shows the selected session label and status, while the current working directory is rendered on the far right of the shared bottom info bar.
-  - The remaining follow-up in this slice, if needed after real use, is footer and sidebar presentation polish without destabilizing the stabilized render path.
+  - This task is intentionally deferred; recording it here keeps the cleanup debt visible without claiming that implementation has started.
+  - Future refactor work must preserve the accepted fullscreen-history baseline and must not reintroduce dashboard-local mouse scrolling as a fallback.

@@ -1,7 +1,16 @@
 kind: state
 version: 1
-last_updated_from: sidebar-4 default-visible layout refresh at 2026-04-17
+last_updated_from: display-2c fullscreen-history acceptance closure at 2026-04-20
 checks:
+  - id: display-2c-cargo-test
+    command: cargo test --quiet after the fullscreen-history acceptance bug fix
+    status: pass
+  - id: display-2c-shell-fullscreen-acceptance
+    command: manual daemon-backed validation that fullscreen replays old shell history at full width and returns cleanly to the dashboard
+    status: pass
+  - id: display-2c-codex-resume-acceptance
+    command: manual tmux-backed validation of `env ALL_PROXY=socks5://192.168.31.178:7897 codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7`, `/fullscreen`, full-width old-history replay, and raw `Ctrl-O` dashboard return
+    status: pass
   - id: cargo-test
     command: cargo test
     status: pass

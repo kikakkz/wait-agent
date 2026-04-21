@@ -1430,6 +1430,7 @@ mod tests {
             styled_lines: lines.iter().map(|line| line.to_string()).collect(),
             active_style_ansi: "\x1b[0m".to_string(),
             scrollback: Vec::new(),
+            styled_scrollback: Vec::new(),
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
             window_title: None,

@@ -2,7 +2,7 @@ id: task.sidebar-4
 kind: task
 version: 1
 title: polish the default-visible sidebar detail area and enter-to-switch behavior
-status: in_progress
+status: deferred
 priority: medium
 source_of_truth:
   file: .agents/tasks/backlog.yaml

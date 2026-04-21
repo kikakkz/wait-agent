@@ -8,6 +8,7 @@ const DEFAULT_NODE_ID: &str = "local";
 pub struct AppConfig {
     pub node: NodeConfig,
     pub network: NetworkConfig,
+    pub debug: DebugConfig,
 }
 
 impl AppConfig {
@@ -22,12 +23,18 @@ impl AppConfig {
         let access_point = read_env(env_map, "WAITAGENT_ACCESS_POINT");
         let listen_addr = read_env(env_map, "WAITAGENT_LISTEN_ADDR")
             .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_string());
+        let input_trace_path = read_env(env_map, "WAITAGENT_INPUT_TRACE_PATH");
+        let output_trace_path = read_env(env_map, "WAITAGENT_OUTPUT_TRACE_PATH");
 
         Self {
             node: NodeConfig { node_id },
             network: NetworkConfig {
                 access_point,
                 listen_addr,
+            },
+            debug: DebugConfig {
+                input_trace_path,
+                output_trace_path,
             },
         }
     }
@@ -85,6 +92,12 @@ pub struct NetworkConfig {
     pub listen_addr: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct DebugConfig {
+    pub input_trace_path: Option<String>,
+    pub output_trace_path: Option<String>,
+}
+
 impl NetworkConfig {
     pub fn access_point_display(&self) -> &str {
         self.access_point.as_deref().unwrap_or("disabled")
@@ -112,6 +125,36 @@ mod tests {
         assert_eq!(
             config.network.access_point.as_deref(),
             Some("ws://127.0.0.1:7474")
+        );
+    }
+
+    #[test]
+    fn reads_input_trace_path_from_env_map() {
+        let mut env_map = HashMap::new();
+        env_map.insert(
+            "WAITAGENT_INPUT_TRACE_PATH".to_string(),
+            "/tmp/waitagent-input.log".to_string(),
+        );
+
+        let config = AppConfig::from_env_map(&env_map);
+        assert_eq!(
+            config.debug.input_trace_path.as_deref(),
+            Some("/tmp/waitagent-input.log")
+        );
+    }
+
+    #[test]
+    fn reads_output_trace_path_from_env_map() {
+        let mut env_map = HashMap::new();
+        env_map.insert(
+            "WAITAGENT_OUTPUT_TRACE_PATH".to_string(),
+            "/tmp/waitagent-output.log".to_string(),
+        );
+
+        let config = AppConfig::from_env_map(&env_map);
+        assert_eq!(
+            config.debug.output_trace_path.as_deref(),
+            Some("/tmp/waitagent-output.log")
         );
     }
 }

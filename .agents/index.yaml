@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.sidebar-4
+  default_task: task.architecture-1
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -43,7 +43,7 @@ directories:
 active_context:
   project_phase: phase-1
   current_stage: local-workspace-post-acceptance-follow-on
-  current_focus: validate and polish the first right-sidebar prototype with a default-visible collapsible layout, dedicated detail row, and isolated bottom info bar
+  current_focus: keep the accepted fullscreen-history baseline stable while the broader architecture-cleanup task remains explicitly deferred for later reprioritization
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

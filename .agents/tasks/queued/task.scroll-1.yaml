@@ -1,8 +1,8 @@
 id: task.scroll-1
 kind: task
 version: 1
-title: add a mouse-draggable shell-history scrollbar for the focused session
-status: ready
+title: implement tmux-style pane history with mouse-draggable gutter scrolling
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -15,18 +15,24 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - framed console mode renders a visible one-column scrollbar gutter between the main shell viewport and the sidebar whenever the focused session has scrollback beyond the visible viewport
-  - dragging the scrollbar thumb with the mouse scrolls the focused session through its own shell-history viewport without changing session focus or input ownership
+  - WaitAgent maintains per-session pane history at the terminal parsing layer whenever output scrolls lines off the visible screen, so older content remains available even after live child sessions such as `codex resume` repaint the current viewport
+  - framed console mode renders the focused session from pane history plus the current visible screen and shows a visible one-column scrollbar gutter between the main shell viewport and the sidebar whenever older pane history exists beyond the visible viewport
+  - dragging the scrollbar thumb with the mouse scrolls the focused session through its own pane-history viewport without changing session focus or input ownership
   - WaitAgent only interprets mouse press, drag, and release events that land inside the scrollbar gutter; clicks and drags in the shell body, footer, and sidebar remain ignored by WaitAgent
   - the implementation does not introduce generic mouse-focus capture, click-to-focus semantics, or content-area mouse handling beyond the scrollbar gutter
   - when the user starts typing any forwarded keyboard input, the focused session viewport snaps back to the live tail before the input is forwarded
   - switching focus to another session snaps the newly focused session viewport back to the live tail immediately
-  - live fullscreen passthrough sessions such as Codex do not regress; WaitAgent either disables the framed scrollbar path there or keeps the gutter interaction from interfering with the child application
+  - live fullscreen passthrough sessions such as Codex do not regress; when framed output is still visible, WaitAgent may render the same gutter and thumb, but non-gutter mouse input continues to be forwarded to the child application instead of being consumed by WaitAgent
 verification:
-  - manual: in framed shell mode, produce enough output to create scrollback, drag the scrollbar thumb upward, and confirm the focused session scrolls through older history while session focus and input ownership stay unchanged
+  - manual: in framed shell mode, produce enough output to push lines off-screen, drag the scrollbar thumb upward, and confirm the focused session scrolls through older pane history while session focus and input ownership stay unchanged
   - manual: after dragging away from the tail, type a key destined for the focused session and confirm the viewport returns to the bottom before the input takes effect
   - manual: drag away from the tail in one session, switch to another session, and confirm the newly focused session opens at its live bottom rather than inheriting the previous scroll offset
+  - manual: run `codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7`, allow output to truly scroll earlier lines off-screen, then drag the gutter and confirm those older lines are reachable; same-line or same-cell redraw history is not expected to be preserved
   - manual: run Codex in the focused session and confirm WaitAgent does not interfere with the child application's mouse behavior outside the dedicated scrollbar gutter
+verification_notes:
+  - real PTY validation confirmed gutter drag can move the framed viewport from `scroll-061`..`scroll-080` to `scroll-001`..`scroll-021`
+  - real PTY validation confirmed typing after an upward drag snaps back to the tail before the forwarded key takes effect
+  - real PTY validation confirmed a live child app receives non-gutter SGR mouse packets unchanged while the dedicated gutter path remains reserved for WaitAgent scrolling
 touched_paths:
   - src/app.rs
   - src/renderer.rs
@@ -35,6 +41,6 @@ touched_paths:
   - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.scroll-1.yaml
 notes:
-  - This task intentionally prefers direct mouse dragging over keyboard scroll mode because the shell and Codex input areas already use keyboard history navigation semantics.
-  - The desired interaction is deliberately narrow: a dedicated gutter-only scrollbar, no generic content clicks, and no proactive mouse ownership model.
-  - The viewport model should consume session scrollback plus the visible screen buffer rather than relying only on the current on-screen rows.
+  - The prototype produced useful viewport and pane-history work, but the product direction has changed.
+  - xterm-style mouse reporting is not a robust foundation for dashboard scrolling in remote terminals such as Xshell and PuTTY because it conflicts with native selection, copy, and terminal-owned scroll behavior.
+  - The follow-up direction is fullscreen handoff, where the real terminal owns scrollback and mouse behavior.
