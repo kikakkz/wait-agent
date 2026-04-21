@@ -1,6 +1,54 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-06
+    status: ready
+    summary: with the fullscreen-history acceptance work closed, active delivery focus returns to the aggregate server session registry as the next bounded network slice
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: task.t5-06
+  - task_id: task.architecture-1
+    status: deferred
+    summary: a broader runtime and module-boundary cleanup task is now parked as deferred follow-up so it remains visible without displacing the accepted fullscreen baseline
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: task.architecture-1
+  - task_id: task.display-2c
+    status: done
+    summary: native fullscreen history handoff is accepted for both shell-style sessions and the real `codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7` flow, including clean dashboard return after fullscreen entry
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-2c.yaml
+      reference: status
+  - task_id: task.display-2b
+    status: done
+    summary: native fullscreen now seeds active-screen history from transcript replay, resize follows the same replay path, and shell-path acceptance confirmed that fullscreen no longer preserves the dashboard sidebar-width layout
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-2b.yaml
+      reference: status
+  - task_id: task.display-2a
+    status: done
+    summary: hosted sessions now retain replayable transcript data in a dedicated module, and terminal snapshots can carry styled scrollback needed for wider-width reconstruction
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-2a.yaml
+      reference: task.display-2a
+  - task_id: task.display-2
+    status: superseded
+    summary: native-fullscreen entry and return foundations landed, but the original monolithic task was split because replayable fullscreen history needs its own architecture-first implementation slices
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-2.yaml
+      reference: task.display-2
+  - task_id: task.display-1
+    status: done
+    summary: the display baseline now has a clean dashboard boundary, no attach-side forced mouse capture, and no leftover dashboard scrollbar experiment code
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-1.yaml
+      reference: status
+  - task_id: task.scroll-1
+    status: superseded
+    summary: the gutter-scroll prototype and related validation are preserved as implementation history, but the task is no longer accepted as the product direction because remote-terminal compatibility requires native fullscreen handoff instead of dashboard mouse capture
+    source_of_truth:
+      file: .agents/tasks/queued/task.scroll-1.yaml
+      reference: status
   - task_id: task.t4-09
     status: done
     summary: shell-backed session defaults and working-directory handling were completed for reusable local sessions
@@ -26,8 +74,8 @@ history:
       file: docs/execution-status-board.md
       reference: Current Focus And Next Queue
   - task_id: task.sidebar-4
-    status: in_progress
-    summary: the sidebar is now default-visible and collapsible, `Enter` switching stays aligned, and the selected-session path lives in a dedicated bottom sidebar detail row above the isolated info bar; remaining work is only follow-up polish if real use exposes long-path presentation issues
+    status: deferred
+    summary: the sidebar polish slice is intentionally paused while fullscreen-first display work takes priority; the remaining scope is non-blocking presentation follow-up
     source_of_truth:
-      file: docs/execution-status-board.md
-      reference: Current Focus And Next Queue
+      file: .agents/tasks/queued/task.sidebar-4.yaml
+      reference: status

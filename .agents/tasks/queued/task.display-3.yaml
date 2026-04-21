@@ -1,7 +1,7 @@
 id: task.display-3
 kind: task
 version: 1
-title: collapse screen recovery to one primary restore path
+title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
 status: deferred
 priority: high
 source_of_truth:
@@ -16,19 +16,22 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - one restore strategy is named as the primary path for session handoff and focus restoration
-  - replay_buffer and resize-nudge behavior are either removed, demoted to explicit fallback, or bounded behind clear trigger conditions
-  - the chosen restore path is consistent across shell sessions and fullscreen TUI sessions
-  - assistants can identify the restore strategy from machine docs without reverse-engineering app.rs
+  - dashboard rendering no longer includes the obsolete gutter scrollbar, dashboard scroll offsets, or mouse-drag session-history control path that was introduced for `task.scroll-1`
+  - restore, resize, and redraw behavior after exiting native fullscreen follow one named primary path rather than a mixed set of dashboard-scroll and fullscreen-specific fallbacks
+  - any retained pane-history support is justified by fullscreen restore needs or session persistence, not by dashboard-local mouse scrolling
+  - assistants can identify the primary restore strategy and the reason the scrollbar experiment was retired from machine docs without reverse-engineering `src/app.rs`
 verification:
   - cargo test
-  - targeted review of redraw, replay, and snapshot restore control flow
+  - manual: enter and exit native fullscreen repeatedly across shell and Codex-like sessions and confirm the dashboard restores cleanly without scroll-specific artifacts
+  - targeted review of redraw, replay, snapshot restore, and removed scrollbar control flow
 touched_paths:
   - src/app.rs
   - src/renderer.rs
+  - src/console.rs
   - src/session.rs
+  - src/lifecycle.rs
+  - src/terminal.rs
   - .agents/tasks/queued/task.display-3.yaml
 notes:
-  - The current implementation mixes snapshot restore, replay_buffer replay, and resize-driven redraw probes.
-  - This task is about architectural convergence, not only visual symptom suppression.
-  - This task is intentionally deferred while the current display path remains usable and lifecycle work takes priority.
+  - The rejected scrollbar experiment and attach-side mouse capture have already been removed from the baseline.
+  - This task is now only about restore-path convergence after fullscreen handoff exists, not about preserving partial compatibility of the retired scrollbar design.

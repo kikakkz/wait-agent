@@ -2,7 +2,7 @@
 
 Version: `v1.3`  
 Status: `Active`  
-Date: `2026-04-17`
+Date: `2026-04-21`
 
 ## 1. Purpose
 
@@ -35,13 +35,13 @@ Current phase:
 
 Current gate:
 
-- `sidebar-4` validate and polish the first sidebar prototype after the default-visible collapsible detail-area rollout
+- `display-2c` fullscreen-history acceptance is closed; active delivery focus now returns to `t5-06` while the broader architecture cleanup remains explicitly deferred
 
 Why this is the current gate:
 
-- local acceptance has been signed off, so the next bounded local UX slice can proceed without reopening the old acceptance gate
-- the first sidebar prototype now already covers unified focus navigation, one-line rows, wait-state badges, `Enter`-to-switch, a dedicated bottom detail row for selected-session label and status, footer-aligned current-working-directory display, and a default-visible collapsible affordance, so the remaining bounded slice is to stabilize and validate that layout without reopening the stabilized rendering path
-- mirrored-network work still remains behind the current post-acceptance local UX follow-on queue
+- the fullscreen-first display direction has now been accepted against both shell-style sessions and a real Codex-style resume flow, which closes the old dashboard-scroll direction as a product path
+- the broader module cleanup debt is real, but it is intentionally parked as deferred work instead of being treated as an unbounded implicit gate
+- with the fullscreen acceptance slice closed, the next bounded delivery work is the aggregate server session registry rather than another local display follow-up
 
 ## 3. Current Snapshot
 
@@ -52,10 +52,11 @@ Project status at a glance:
 - Local PTY ownership, console focus, scheduling, Peek, renderer, and VT screen-state handling exist
 - Local multi-session workspace behavior has passed the main implementation and live validation loops, and the final local acceptance sign-off has been manually confirmed
 - The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
-- The right-sidebar prototype now has unified focus navigation, one-line session rows with labels and wait-state badges, `Enter`-to-switch behavior, a default-visible collapsible rail, a dedicated bottom detail row for the selected session label and status, and current-working-directory display on the far right of the shared bottom info bar
-- The remaining local UX follow-on in this rollout is validation and polish for long-path presentation and layout stability rather than a new sidebar interaction model
+- The right-sidebar prototype remains part of the accepted baseline, but it is no longer the active project gate
+- Native fullscreen history now replays active-screen transcript data at the real terminal width, including alternate-screen history, and returns cleanly to the dashboard
+- The command-bar `/fullscreen` path no longer repaints dashboard chrome over the native fullscreen handoff
 - Network foundations up through client/server registration and remote session publication baselines also exist
-- The current focus is no longer acceptance sign-off; it is the stabilization slice for the first sidebar prototype
+- The current machine focus is `t5-06`, while the architecture-cleanup note remains visible only as deferred follow-up
 
 ## 4. Milestone Summary
 
@@ -74,8 +75,8 @@ Execution tracks at human-summary level:
 - `T1` Local runtime foundation: complete
 - `T2` Console interaction and scheduler: complete
 - `T3` Terminal UI and rendering: functionally complete for the local gate, with `T3-07` still optional until acceptance evidence says otherwise
-- `T4` Local workspace UX and validation: done, including the final local acceptance sign-off
-- `T5` Network transport and registration: complete through the current foundations; resumed network work now sits behind the queued lifecycle and UI follow-on tasks after local acceptance closes
+- `T4` Local workspace UX and validation: done, including the final local acceptance sign-off plus the fullscreen-history acceptance closure
+- `T5` Network transport and registration: complete through the current foundations; resumed network work is the next ready delivery queue
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
 
@@ -83,27 +84,23 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `sidebar-4` Validate and polish the default-visible collapsible sidebar while preserving the working prototype
+- `t5-06` Resume active delivery on the aggregate server session registry without destabilizing the accepted local fullscreen-history baseline
 
-What remains for the current sidebar rollout:
+What remains from the accepted fullscreen rollout:
 
-- keep the new unified `Right`/`Left`/`Up`/`Down` sidebar navigation intact
-- keep the one-line session rows, detected labels, and `RUNNING` / `INPUT` / `CONFIRM` badges intact
-- keep the selected-session label and status in a dedicated fixed sidebar detail area above the bottom info bar
-- keep the current session working directory on the far right of the full-width bottom info bar rather than in the sidebar detail row
-- keep the sidebar default-visible when width allows, with a hide path that still leaves a visible collapsed affordance on the right edge
-- keep the bottom info bar full-width and visually independent from sidebar rendering
-- validate whether long-path presentation needs more polish after real use
-- continue to keep future automation rules explicitly out of scope for this rollout
+- keep transcript replay as the authoritative active-screen fullscreen seed instead of reviving snapshot-copy assumptions
+- keep fullscreen handoff native so desktop terminals and remote clients retain their own scrollback, selection, and IME behavior
+- keep the accepted dashboard return path stable after `/fullscreen` and `Ctrl-O`
+- treat broader module cleanup as a later bounded refactor rather than as permission to reopen the fullscreen direction itself
 
-Current sidebar queue:
+Accepted display queue:
 
-1. `sidebar-1` Finalize the v1 sidebar contract and rollout split
-2. `sidebar-2` Implement unified sidebar focus navigation (`done`)
-3. `sidebar-3` Render one-line session rows with labels and wait-state badges (`done`)
-4. `sidebar-4` Polish the default-visible sidebar detail area and `Enter`-to-switch behavior (`in_progress`)
+1. `display-1` Establish the explicit dashboard versus native-fullscreen boundary (`done`)
+2. `display-2a` Establish replayable transcript-backed normal-screen history (`done`)
+3. `display-2b` Switch fullscreen history seeding and resize redraw to replay (`done`)
+4. `display-2c` Validate fullscreen history handoff on shell and Codex-style sessions (`done`)
 
-Next queue after the current sidebar rollout:
+Next queue after the accepted display rollout:
 
 1. `T5-06` Implement aggregate server session registry
 2. `T5-07` Implement remote resize and input routing
@@ -114,8 +111,7 @@ The exact machine ordering for that queue now lives in `.agents/tasks/backlog.ya
 
 Deferred refactor queue for later reconsideration:
 
-- `display-1` Separate focused PTY passthrough from WaitAgent chrome rendering
-- `display-2` Keep the focused fullscreen TUI on the real terminal size
+- `architecture-1` Refactor the runtime and module architecture for clearer boundaries and cleaner code
 - `display-3` Collapse screen recovery to one primary restore path
 - `runtime-1` Extract a shared console runtime loop for workspace and server surfaces
 - `terminal-1` Decide and document the terminal-engine coverage strategy for reliable TUI switching
@@ -124,10 +120,11 @@ Deferred refactor queue for later reconsideration:
 
 Local acceptance is now treated as closed after user-confirmed manual sign-off.
 
-The current local UX follow-on should still preserve:
+The current local baseline should still preserve:
 
 - shell-backed sessions still feel like real reusable shell contexts
 - Codex-like TUI behavior remains trustworthy inside WaitAgent
+- native fullscreen old-history remains readable in both shell and Codex-style resume flows
 - UTF-8 and Chinese input remain readable in practical use
 - auto-switch behavior is predictable enough for daily use
 - no remaining UX issue is likely to distort subsequent network debugging

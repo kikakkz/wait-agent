@@ -1,7 +1,22 @@
 kind: state
 version: 1
-last_updated_from: sidebar-4 default-visible layout refresh at 2026-04-17
+last_updated_from: fullscreen transcript replay and task-source resync at 2026-04-21
 checks:
+  - id: fullscreen-release-build
+    command: cargo build --release --quiet after the unified fullscreen transcript replay change
+    status: pass
+  - id: fullscreen-clean-release-pty-validation
+    command: manual clean-release PTY validation that native fullscreen replays alternate-screen history at full width and no longer drops old session rows behind the former sidebar width
+    status: pass
+  - id: display-2c-cargo-test
+    command: cargo test --quiet after the fullscreen-history acceptance bug fix
+    status: pass
+  - id: display-2c-shell-fullscreen-acceptance
+    command: manual daemon-backed validation that fullscreen replays old shell history at full width and returns cleanly to the dashboard
+    status: pass
+  - id: display-2c-codex-resume-acceptance
+    command: manual tmux-backed validation of `env ALL_PROXY=socks5://192.168.31.178:7897 codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7`, `/fullscreen`, full-width old-history replay, and raw `Ctrl-O` dashboard return
+    status: pass
   - id: cargo-test
     command: cargo test
     status: pass

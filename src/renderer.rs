@@ -21,6 +21,7 @@ pub struct RenderFrame {
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+    pub scrollback_state: Option<ScrollbackState>,
 }
 
 impl RenderFrame {
@@ -48,6 +49,13 @@ pub struct RenderContext {
 pub enum RenderMode {
     Focused,
     PeekReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbackState {
+    pub total_rows: usize,
+    pub viewport_rows: usize,
+    pub offset_from_tail_rows: usize,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -125,13 +133,25 @@ impl Renderer {
             .map(|state| state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(focused));
         let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
-        let viewport_line_count = viewport.plain_lines.len();
-        let cursor_row = snapshot
-            .cursor_row
-            .saturating_sub(viewport.start_row as u16)
-            .min(viewport_line_count.saturating_sub(1) as u16);
-        let cursor_col =
-            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col);
+        let logical_cursor_row = snapshot.scrollback.len() + snapshot.cursor_row as usize;
+        let cursor_in_view = logical_cursor_row >= viewport.start_row
+            && logical_cursor_row
+                < viewport
+                    .start_row
+                    .saturating_add(viewport.plain_lines.len());
+        let cursor_visible = snapshot.cursor_visible && cursor_in_view;
+        let cursor_row = if cursor_visible {
+            logical_cursor_row
+                .saturating_sub(viewport.start_row)
+                .min(viewport.plain_lines.len().saturating_sub(1)) as u16
+        } else {
+            0
+        };
+        let cursor_col = if cursor_visible {
+            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col)
+        } else {
+            0
+        };
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -152,7 +172,8 @@ impl Renderer {
             ),
             cursor_row,
             cursor_col,
-            cursor_visible: snapshot.cursor_visible,
+            cursor_visible,
+            scrollback_state: viewport.scrollback_state,
         })
     }
 
@@ -173,13 +194,25 @@ impl Renderer {
             .map(|screen_state| screen_state.active_snapshot().clone())
             .unwrap_or_else(|| blank_snapshot(peeked));
         let viewport = normalize_viewport(&snapshot, &context.overlay_lines);
-        let viewport_line_count = viewport.plain_lines.len();
-        let cursor_row = snapshot
-            .cursor_row
-            .saturating_sub(viewport.start_row as u16)
-            .min(viewport_line_count.saturating_sub(1) as u16);
-        let cursor_col =
-            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col);
+        let logical_cursor_row = snapshot.scrollback.len() + snapshot.cursor_row as usize;
+        let cursor_in_view = logical_cursor_row >= viewport.start_row
+            && logical_cursor_row
+                < viewport
+                    .start_row
+                    .saturating_add(viewport.plain_lines.len());
+        let cursor_visible = snapshot.cursor_visible && cursor_in_view;
+        let cursor_row = if cursor_visible {
+            logical_cursor_row
+                .saturating_sub(viewport.start_row)
+                .min(viewport.plain_lines.len().saturating_sub(1)) as u16
+        } else {
+            0
+        };
+        let cursor_col = if cursor_visible {
+            projected_cursor_col(&viewport.plain_lines, cursor_row, snapshot.cursor_col)
+        } else {
+            0
+        };
         state.last_focused_session = Some(focused.clone());
 
         Ok(RenderFrame {
@@ -200,7 +233,8 @@ impl Renderer {
             ),
             cursor_row,
             cursor_col,
-            cursor_visible: snapshot.cursor_visible,
+            cursor_visible,
+            scrollback_state: None,
         })
     }
 }
@@ -283,6 +317,7 @@ struct ViewportProjection {
     plain_lines: Vec<String>,
     styled_lines: Vec<String>,
     start_row: usize,
+    scrollback_state: Option<ScrollbackState>,
 }
 
 fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> ViewportProjection {
@@ -293,34 +328,49 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vi
         1,
         (snapshot.size.rows as usize).saturating_sub(reserved_rows),
     );
-    let viewport_end = snapshot
-        .lines
+    let logical_lines = snapshot
+        .scrollback
         .iter()
-        .rposition(|line| !line.trim_end().is_empty())
+        .enumerate()
+        .map(|(index, plain_line)| {
+            (
+                snapshot
+                    .styled_scrollback
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| plain_line.clone()),
+                plain_line.clone(),
+            )
+        })
+        .chain(
+            snapshot
+                .styled_lines
+                .iter()
+                .cloned()
+                .zip(snapshot.lines.iter().cloned()),
+        )
+        .collect::<Vec<_>>();
+    let logical_cursor_row = snapshot.scrollback.len() + snapshot.cursor_row as usize;
+    let content_end = logical_lines
+        .iter()
+        .rposition(|(_, plain_line)| !plain_line.trim_end().is_empty())
         .map(|index| index + 1)
-        .unwrap_or_else(|| (snapshot.cursor_row as usize).saturating_add(1))
-        .max((snapshot.cursor_row as usize).saturating_add(1))
-        .min(snapshot.lines.len());
-    let viewport_start = viewport_end.saturating_sub(available_rows);
-    let plain_lines = snapshot
-        .lines
+        .unwrap_or_else(|| logical_cursor_row.saturating_add(1))
+        .max(logical_cursor_row.saturating_add(1))
+        .min(logical_lines.len());
+    let tail_start = content_end.saturating_sub(available_rows);
+    let viewport_start = tail_start;
+    let plain_lines = logical_lines
         .iter()
         .enumerate()
         .skip(viewport_start)
         .take(available_rows)
-        .map(|(row, line)| {
-            visible_line(
-                line,
-                row,
-                snapshot.cursor_row as usize,
-                snapshot.cursor_col as usize,
-            )
+        .map(|(row, (_, line))| {
+            visible_line(line, row, logical_cursor_row, snapshot.cursor_col as usize)
         })
         .collect::<Vec<_>>();
-    let styled_lines = snapshot
-        .styled_lines
+    let styled_lines = logical_lines
         .iter()
-        .zip(snapshot.lines.iter())
         .enumerate()
         .skip(viewport_start)
         .take(available_rows)
@@ -329,7 +379,7 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vi
                 styled_line,
                 plain_line,
                 row,
-                snapshot.cursor_row as usize,
+                logical_cursor_row,
                 snapshot.cursor_col as usize,
             )
         })
@@ -338,6 +388,11 @@ fn normalize_viewport(snapshot: &ScreenSnapshot, overlay_lines: &[String]) -> Vi
         plain_lines,
         styled_lines,
         start_row: viewport_start,
+        scrollback_state: (tail_start > 0).then_some(ScrollbackState {
+            total_rows: content_end,
+            viewport_rows: available_rows,
+            offset_from_tail_rows: 0,
+        }),
     }
 }
 
@@ -451,6 +506,7 @@ fn blank_snapshot(address: &SessionAddress) -> ScreenSnapshot {
         styled_lines,
         active_style_ansi: "\x1b[0m".to_string(),
         scrollback: Vec::new(),
+        styled_scrollback: Vec::new(),
         scroll_top: 0,
         scroll_bottom: size.rows.saturating_sub(1),
         window_title: None,
@@ -589,10 +645,12 @@ fn find_session<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderContext, RenderMode, Renderer, RendererState};
+    use super::{
+        normalize_viewport, RenderContext, RenderMode, Renderer, RendererState, ScrollbackState,
+    };
     use crate::console::ConsoleState;
     use crate::session::SessionRegistry;
-    use crate::terminal::{TerminalEngine, TerminalSize};
+    use crate::terminal::{ScreenSnapshot, TerminalEngine, TerminalSize};
 
     fn context(waiting_count: usize) -> RenderContext {
         RenderContext {
@@ -714,6 +772,57 @@ mod tests {
         assert!(frame
             .bottom_line
             .ends_with("active | 0 waiting | 1/1 | /opt/data/workspace/wait-agent/projects/demo"));
+    }
+
+    #[test]
+    fn normalize_viewport_uses_live_tail_and_reports_scrollback() {
+        let snapshot = ScreenSnapshot {
+            size: TerminalSize {
+                rows: 3,
+                cols: 8,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            lines: vec![
+                "charlie ".to_string(),
+                "delta   ".to_string(),
+                "echo    ".to_string(),
+            ],
+            styled_lines: vec![
+                "charlie ".to_string(),
+                "delta   ".to_string(),
+                "echo    ".to_string(),
+            ],
+            active_style_ansi: "\x1b[0m".to_string(),
+            scrollback: vec!["alpha   ".to_string(), "bravo   ".to_string()],
+            styled_scrollback: vec!["alpha   ".to_string(), "bravo   ".to_string()],
+            scroll_top: 0,
+            scroll_bottom: 2,
+            window_title: None,
+            cursor_row: 2,
+            cursor_col: 4,
+            cursor_visible: true,
+            alternate_screen: false,
+        };
+
+        let viewport = normalize_viewport(&snapshot, &[]);
+
+        assert_eq!(
+            viewport.plain_lines,
+            vec![
+                "charlie".to_string(),
+                "delta".to_string(),
+                "echo".to_string(),
+            ]
+        );
+        assert_eq!(
+            viewport.scrollback_state,
+            Some(ScrollbackState {
+                total_rows: 5,
+                viewport_rows: 3,
+                offset_from_tail_rows: 0,
+            })
+        );
     }
 
     #[test]

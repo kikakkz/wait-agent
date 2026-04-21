@@ -1,0 +1,40 @@
+id: task.display-2a
+kind: task
+version: 1
+title: establish a replayable normal-screen transcript model for native fullscreen history
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.display-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+linked_runbooks:
+  - runbook.continue-default-work
+done_criteria:
+  - hosted sessions retain replayable PTY output history in a dedicated module rather than relying on the current dashboard-width screen snapshot as the only fullscreen history source
+  - the replay model can rebuild a normal-screen terminal snapshot for an arbitrary terminal width without mutating the live session runtime
+  - terminal snapshot data cleanly represents the material needed for both dashboard rendering and fullscreen history seeding, including styled scrollback when available
+  - the new transcript and replay responsibilities are placed in coherent modules rather than expanding `src/app.rs` with another ad hoc fullscreen-specific state path
+  - as the replay model lands, superseded fullscreen-history helpers and duplicate narrow-snapshot assumptions are either removed or explicitly folded into the new path so the codebase does not carry parallel legacy branches forward
+verification:
+  - cargo test
+  - targeted review of module boundaries across `src/app.rs`, `src/terminal.rs`, `src/transcript.rs`, and any updated snapshot consumers
+  - unit tests that show replay at a wider width reconstructs history differently from the old dashboard-width snapshot path
+touched_paths:
+  - src/app.rs
+  - src/terminal.rs
+  - src/renderer.rs
+  - src/transcript.rs
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.display-2a.yaml
+notes:
+  - This slice is architecture-first: it exists to replace the invalid assumption that fullscreen old-history can be reconstructed from the live narrow-width snapshot alone.
+  - The output history model should be reusable by later fullscreen and restore work instead of becoming another one-off fullscreen helper.
+  - Legacy code cleanup is in scope for this slice; obsolete fullscreen-history branches should be deleted as replacement structure becomes available rather than deferred into a vague later cleanup pass.

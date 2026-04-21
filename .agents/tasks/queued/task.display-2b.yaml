@@ -1,0 +1,39 @@
+id: task.display-2b
+kind: task
+version: 1
+title: switch native fullscreen history seeding and resize redraw to transcript replay
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-2a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - entering native fullscreen for a normal-screen session seeds fullscreen history from replay at the host terminal width instead of copying the dashboard-width snapshot
+  - resizing while native fullscreen is active rebuilds the fullscreen seed from replayed history for the active screen at the host terminal width instead of preserving a narrow dashboard-derived layout
+  - shell-specific redraw heuristics are no longer the primary correctness mechanism for fullscreen old-history layout
+  - the fullscreen entry path and resize path share one named replay-based strategy instead of diverging heuristics
+  - integrating replay into fullscreen removes the obsolete snapshot-copy fallback instead of leaving a second legacy path in place
+verification:
+  - cargo test
+  - manual: from the dashboard, enter native fullscreen for a shell session with long wrapped output and confirm the widened fullscreen view no longer preserves the old sidebar-width layout
+  - manual: run `codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7`, enter native fullscreen, and confirm the fullscreen seed no longer leaves the sidebar region blank due to snapshot-copy layout
+  - targeted review of fullscreen entry and resize control flow in `src/app.rs`
+touched_paths:
+  - src/app.rs
+  - src/terminal.rs
+  - src/transcript.rs
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.display-2b.yaml
+notes:
+  - This slice consumes the replay model from `task.display-2a`; it should not reintroduce dashboard-local scrolling or host-terminal mouse capture.
+  - Cleanup is part of delivery: when the replay path becomes authoritative, the replaced fullscreen-history branches should be pruned immediately.
+  - Accepted on the shell path after validating a clean daemon-backed `./waitagent` repro: fullscreen now replays wrapped history at full terminal width instead of preserving the dashboard sidebar gap.
+  - The final implementation converged alternate-screen fullscreen seeding onto the same transcript-driven active-screen replay path so fullscreen old-history is not limited to the last narrow visible snapshot.
+  - A real bug surfaced during acceptance: `/fullscreen` used to repaint dashboard chrome after `enter_native_fullscreen()` succeeded. That extra repaint is now suppressed so command-bar entry does not overwrite the fullscreen handoff.

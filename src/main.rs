@@ -12,6 +12,7 @@ mod scheduler;
 mod server;
 mod session;
 mod terminal;
+mod transcript;
 mod transport;
 
 use std::process::ExitCode;

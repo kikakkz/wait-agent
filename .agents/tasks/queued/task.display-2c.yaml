@@ -1,0 +1,37 @@
+id: task.display-2c
+kind: task
+version: 1
+title: validate native fullscreen history handoff across shell and Codex-style sessions
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.display-2b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - desktop-terminal validation confirms fullscreen old-history is readable with native terminal scrollback for shell-like sessions
+  - Codex-style normal-screen sessions are validated against the fullscreen contract and any remaining edge cases are either fixed or documented as explicit scope limits
+  - task and state files record the accepted fullscreen-history contract so future work does not regress back to snapshot-copy assumptions
+verification:
+  - cargo test
+  - manual: desktop terminal validation for shell output, fullscreen entry, native scrollback, and return to dashboard
+  - manual: `codex resume 019d9f0f-fd40-77e2-bb15-11b4c81129b7` validation for fullscreen history readability and dashboard return
+  - targeted review of task notes and acceptance evidence updates
+touched_paths:
+  - src/app.rs
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.display-2c.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice exists so the architecture and implementation can be accepted against real user flows instead of closing the track on unit tests alone.
+  - Shell-path validation is complete on a clean daemon-backed `./waitagent` repro: fullscreen replay widened wrapped history correctly once the stale daemon and command-bar repaint were removed from the experiment.
+  - Codex-style validation is also complete on a real resume repro: old history replays at full terminal width, `/fullscreen` no longer repaints dashboard chrome over the handoff, and raw `Ctrl-O` returns cleanly to the dashboard.
+  - A later clean release PTY rerun on 2026-04-21 also confirmed that alternate-screen history now seeds native fullscreen from transcript replay instead of dropping old rows behind the former sidebar-width snapshot.
