@@ -1,0 +1,42 @@
+id: task.tmux-1
+kind: task
+version: 1
+title: build the tmux backend primitives and workspace-instance model
+status: in_progress
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.lifecycle-5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the repository has one explicit tmux backend module responsible for vendored tmux source discovery, glue-layer build integration, and typed backend capabilities rather than scattering raw tmux invocations across unrelated runtime code
+  - workspace instance identity is formalized, including workspace key to tmux socket or server mapping and stable identifiers for windows and panes
+  - the backend exposes narrow operations for creating or discovering workspace instances, creating windows, selecting panes, toggling zoom, and entering fullscreen scroll support
+  - tmux is pinned in the repository as a submodule and does not require a user-installed runtime dependency
+  - the new architecture decision is reflected in docs and machine task state so later implementation slices do not reopen the retired custom fullscreen path by accident
+verification:
+  - cargo test
+  - targeted review of tmux backend ownership boundaries, vendored source integration, and glue-layer surface
+touched_paths:
+  - .gitmodules
+  - third_party/tmux
+  - build.rs
+  - src/infra/tmux.rs
+  - src/domain/workspace.rs
+  - src/application/workspace_service.rs
+  - src/runtime/workspace_runtime.rs
+  - docs/tmux-first-workspace-plan.md
+  - docs/tmux-first-runtime-architecture.md
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.tmux-1.yaml
+notes:
+  - This slice follows `task.tmux-0` and should build inside the new architecture skeleton rather than extending the old monolithic runtime.
+  - The backend should serve one or more waitagent instances and must not assume one process-global singleton.
+  - The backend should not rely on runtime shell commands or a separately installed tmux.

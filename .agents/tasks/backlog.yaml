@@ -1,22 +1,40 @@
 kind: task_backlog
 version: 1
 active:
-  - id: task.t5-06
-    title: implement the aggregate server session registry
-    status: ready
+  - id: task.tmux-0
+    title: establish the new modular runtime architecture, unified entry model, and migration skeleton
+    status: done
+  - id: task.tmux-1
+    title: build the tmux backend primitives and workspace-instance model
+    status: in_progress
 next:
+  - id: task.tmux-2
+    title: route workspace entry and attach lifecycle through tmux-backed instances
+    status: not_started
+  - id: task.tmux-3
+    title: implement persistent sidebar and footer panes as tmux-native UI panes
+    status: not_started
+  - id: task.tmux-4
+    title: implement tmux-native fullscreen zoom and fullscreen-only scroll handling
+    status: not_started
+  - id: task.tmux-5
+    title: move session switching and left-right focus semantics to tmux-native control
+    status: not_started
+  - id: task.tmux-6
+    title: remove the obsolete custom fullscreen and live-surface path and validate shell plus Codex behavior
+    status: not_started
   - id: task.display-2a
     title: establish a replayable normal-screen transcript model for native fullscreen history
-    status: done
+    status: superseded
   - id: task.display-2b
     title: switch native fullscreen history seeding and resize redraw to transcript replay
-    status: done
+    status: superseded
   - id: task.display-2
     title: implement user-facing entry into native fullscreen and a reliable return shortcut
     status: superseded
   - id: task.display-2c
     title: validate native fullscreen history handoff across shell and Codex-style sessions
-    status: done
+    status: superseded
   - id: task.lifecycle-1
     title: wrap the current workspace runtime in a daemon-owned PTY envelope
     status: done
@@ -44,6 +62,9 @@ next:
   - id: task.sidebar-4
     title: polish the default-visible sidebar detail area and enter-to-switch behavior
     status: deferred
+  - id: task.t5-06
+    title: implement the aggregate server session registry
+    status: deferred
   - id: task.scroll-1
     title: implement tmux-style pane history with mouse-draggable gutter scrolling
     status: superseded
@@ -58,16 +79,16 @@ next:
     status: not_started
   - id: task.architecture-1
     title: refactor the runtime and module architecture for clearer boundaries and cleaner code
-    status: deferred
+    status: superseded
   - id: task.display-3
     title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
-    status: deferred
+    status: superseded
   - id: task.runtime-1
     title: extract a shared console runtime loop for workspace and server surfaces
-    status: deferred
+    status: superseded
   - id: task.terminal-1
     title: decide and document the terminal-engine coverage strategy for reliable TUI switching
-    status: deferred
+    status: superseded
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
@@ -77,9 +98,10 @@ source_of_truth:
   file: .agents/tasks/backlog.yaml
 notes:
   - `.agents/tasks/*` is the unified task source; task status changes must update backlog, the current task pointer, queued task files, and task/state mirrors in the same change.
-  - Replacement work must clean up superseded code paths as it lands; old fullscreen-history logic should not be left in place behind the new architecture unless a named compatibility reason is documented in the active task.
+  - Replacement work must clean up superseded code paths as it lands; old custom fullscreen and live-surface logic should not be left in place behind the tmux-first architecture unless a named compatibility reason is documented in the active task.
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
-  - The lifecycle queue is complete enough for the current local baseline; the next delivery slice resumes network expansion from the accepted local fullscreen-history baseline.
-  - The old gutter-scroll direction is intentionally retired in favor of a fullscreen-first interaction model because dashboard-local mouse scrolling is not robust across desktop terminals and remote terminal clients.
-  - The original fullscreen task was split because entry/exit controls landed, but snapshot-based history reconstruction was not an acceptable architectural base for fullscreen old-history viewing.
+  - The lifecycle queue is complete enough to support the tmux-first migration; resumed network expansion is deferred until the local display baseline is rebuilt on tmux-native ownership boundaries.
+  - The tmux-first migration now includes an architecture-first slice because the old code structure is not an acceptable foundation for a large local-runtime rewrite.
+  - The old gutter-scroll direction remains retired.
+  - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

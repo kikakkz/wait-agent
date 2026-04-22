@@ -1,38 +1,46 @@
-id: task.t5-06
+id: task.tmux-1
 kind: task
 version: 1
-title: implement the aggregate server session registry
-status: ready
+title: build the tmux backend primitives and workspace-instance model
+status: in_progress
 priority: high
-target_task_reference: task.t5-06
+target_task_reference: task.tmux-1
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: active
 depends_on:
   - task.lifecycle-5.done
 linked_primitives:
-  - primitive.network-registry-scope
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - the aggregate server tracks registered local and remote sessions in one authoritative registry instead of relying on one-off publication paths
-  - registry state is structured so later remote resize, input routing, and server-side console work can consume it without another schema rewrite
-  - local-only workspace behavior remains intact while aggregate registration is introduced
+  - the repository has one explicit tmux backend module that owns vendored tmux source discovery, glue-layer build integration, workspace instance lookup, and window or pane identifiers
+  - workspace instance identity is defined in a way that can support one or more daemon-backed tmux workspaces without assuming one global singleton
+  - the backend surface is narrow enough that later tasks can swap workspace entry, sidebar or footer panes, fullscreen, and session switching onto tmux without threading raw command strings through unrelated modules
+  - tmux integration no longer assumes a user-installed binary or shell-command orchestration model
+  - the old custom fullscreen and live-surface architecture is documented as retired in the task board and human docs before implementation begins
   - task board and verification state are refreshed together with the implementation slice
 verification:
   - cargo test
-  - targeted review of registry ownership and update paths across the server, transport, and session layers
+  - targeted review of tmux backend ownership boundaries, vendored source integration, and glue-layer surface
 touched_paths:
-  - src/server.rs
-  - src/session.rs
-  - src/transport.rs
-  - src/app.rs
+  - .gitmodules
+  - third_party/tmux
+  - build.rs
+  - src/infra/tmux.rs
+  - src/domain/workspace.rs
+  - src/application/workspace_service.rs
+  - src/runtime/workspace_runtime.rs
+  - src/ui
+  - docs/tmux-first-workspace-plan.md
+  - docs/tmux-first-runtime-architecture.md
   - .agents/tasks/backlog.yaml
   - .agents/tasks/current.yaml
-  - .agents/tasks/queued/task.t5-06.yaml
+  - .agents/tasks/queued/task.tmux-1.yaml
   - .agents/state/current-focus.yaml
 notes:
-  - This is the next ready delivery slice after the accepted fullscreen-history work.
-  - The slice should extend the current network foundations rather than reopening local fullscreen or sidebar directions.
+  - This slice follows the architecture-first `tmux-0` work and should build inside the new skeleton rather than extending the old monolithic runtime.
+  - The backend should serve one or more waitagent instances and must not assume one process-global singleton.
+  - The backend should not rely on runtime shell commands or a separately installed tmux.

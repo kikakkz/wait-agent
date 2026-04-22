@@ -6,6 +6,12 @@ Date: `2026-04-07`
 
 ## 1. Purpose
 
+Current note:
+
+- the accepted replacement for the old custom local fullscreen and live-surface path is documented in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
+- the accepted code-level runtime reorganization for that migration is documented in [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
+- until this architecture document is fully revised, treat the tmux-first plan as the authoritative local workspace display direction
+
 This document translates the product requirements in [wait-agent-prd.md](wait-agent-prd.md) into a build-oriented system architecture.
 
 It answers:

@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.1`  
+Version: `v1.2`  
 Status: `Active`  
-Date: `2026-04-17`
+Date: `2026-04-21`
 
 ## 1. Purpose
 
@@ -13,7 +13,7 @@ It exists to make coding assistants behave more like disciplined project operato
 - Read the current task before exploring widely
 - Route work through reusable primitives and runbooks
 - Keep machine state aligned with the human execution board
-- Avoid drifting into premature network work while the current post-acceptance local UX queue is still active
+- Avoid drifting into premature network work while the tmux-first local architecture migration is still active
 
 This file is human-facing.
 The machine-facing control plane lives under `.agents/`.
@@ -28,7 +28,7 @@ The WaitAgent control plane follows these rules:
 - `.agents/index.yaml` is the single assistant entrypoint
 - `docs/execution-status-board.md` remains the human-facing status summary
 - `docs/local-acceptance-checklist.md` remains the human-facing acceptance checklist
-- After local acceptance closes, the post-acceptance local UX queue becomes the execution gate before resumed network execution
+- After the custom fullscreen baseline was retired, the tmux-first local architecture queue became the execution gate before resumed network execution
 - Exact execution state, ordering, blockers, and verification now live in `.agents/`
 - Do not create orphan tasks that exist only in chat, scratch notes, or human docs without a matching `.agents/tasks/` entry
 - Implementation state and unified task-source state must move together; when code materially changes task completion, scope, or sequencing, the same work slice must update `.agents/tasks/` and any linked `.agents/state/` entries before the task can be considered synced
@@ -70,9 +70,9 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.sidebar-2`:
+The current default task is `task.tmux-0`:
 
-> Implement sidebar focus mode with unified left-right navigation.
+> Establish the new modular runtime architecture, unified entry model, and migration skeleton.
 
 That task intentionally routes assistants through:
 
@@ -82,9 +82,10 @@ That task intentionally routes assistants through:
 
 This keeps assistants focused on:
 
-- the approved sidebar v1 interaction contract
-- unified task-source synchronization after the acceptance gate closed
-- a bounded first implementation slice before wider sidebar rendering work
+- the accepted tmux-first workspace architecture
+- the accepted tmux-first runtime architecture
+- removing ambiguity about the retired custom fullscreen baseline
+- bounded delivery slices that stabilize local UX before more network work resumes
 
 ## 5. Maintenance Rules
 

@@ -1,0 +1,39 @@
+id: task.tmux-0
+kind: task
+version: 1
+title: establish the new modular runtime architecture, unified entry model, and migration skeleton
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.lifecycle-5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the repository records one explicit target architecture for the tmux-first migration, including bootstrap, application, domain, runtime, infra, ui, and legacy boundaries
+  - the new architecture is reflected in docs and machine task state before further tmux feature implementation continues
+  - a minimum code skeleton exists so new tmux-first work can land outside `src/app.rs`
+  - migration rules state that old monolithic local-runtime files are not the default landing zone for new tmux-first behavior
+verification:
+  - cargo test
+  - targeted review of module boundaries, entry unification, and migration rules
+touched_paths:
+  - src/bootstrap.rs
+  - src/application
+  - src/domain
+  - src/runtime
+  - src/infra
+  - src/ui
+  - src/main.rs
+  - docs/tmux-first-runtime-architecture.md
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.tmux-0.yaml
+notes:
+  - This is an architecture-first slice for a large migration, not an optional cleanup task.
+  - The objective is to make later tmux implementation more modular, more uniform, and more aligned with software engineering principles.

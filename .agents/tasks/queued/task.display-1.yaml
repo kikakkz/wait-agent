@@ -2,7 +2,7 @@ id: task.display-1
 kind: task
 version: 1
 title: establish an explicit dashboard vs native-fullscreen display boundary
-status: done
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -34,3 +34,4 @@ notes:
   - This slice supersedes the previous scrollbar-first direction as the architectural entry point for the new fullscreen product model.
   - Success is defined by explicit ownership and attach-path correctness first, not by ad hoc escape-sequence filtering or by preserving the gutter-scroll prototype.
   - Code baseline cleanup is complete: the dashboard scrollbar path, mouse parsing, and attach-side forced mouse mode have been removed.
+  - This task is now historical only because the entire custom dashboard versus native-fullscreen direction has been replaced by the tmux-first workspace plan.

@@ -6,12 +6,17 @@ summary:
 constraints:
   - Preserve raw terminal semantics and PTY ownership boundaries.
   - Do not introduce semantic parsing of agent intent.
-  - Local workspace acceptance is closed; prefer bounded post-acceptance local UX slices before starting new mirrored-network work.
+  - The old custom fullscreen and live-surface path is retired; do not spend new delivery work trying to rehabilitate it.
+  - Prefer bounded tmux-first local architecture slices before resuming mirrored-network work.
+  - Do not make waitagent depend on a user-installed tmux binary; tmux backend integration must flow through the vendored submodule and Rust glue layer.
   - Treat docs/execution-status-board.md and docs/local-acceptance-checklist.md as the human source of truth for project status.
   - Keep human-readable process guidance in docs and machine-routable execution state in .agents.
   - Treat .agents/tasks/ as the complete task inventory; every task must be represented there and orphan tasks outside the unified task source are forbidden.
   - Dirty worktree files may include active user work; understand them before editing and never revert unrelated changes.
   - Favor small validation slices that update verification state and blockers explicitly.
+  - Every `.rs` file must stay at or below 1000 lines; if a Rust file grows beyond that limit, split it into smaller modules before continuing feature work.
+  - Vendored tmux must build as part of the default `cargo build` path; do not hide tmux compilation behind opt-in environment-variable gates.
+  - Keep `build.rs` minimal and move vendored tmux build orchestration into the tmux glue module rather than accumulating build logic directly in the script entrypoint.
 source_of_truth:
   - README.md
   - docs/architecture.md

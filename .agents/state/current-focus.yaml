@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-06
-focus_statement: the fullscreen-history acceptance slice is closed, the deferred architecture cleanup remains visible in backlog, and the next active delivery work resumes on the aggregate server session registry
+current_task: task.tmux-1
+focus_statement: the modular tmux-first runtime architecture skeleton is in place, and the active local delivery gate is now the tmux backend primitive layer for workspace, window, pane, zoom, and copy-mode ownership
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

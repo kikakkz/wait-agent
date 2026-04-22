@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.t5-06
+  default_task: task.tmux-0
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -22,6 +22,8 @@ authoritative_sources:
   execution_board: docs/execution-status-board.md
   acceptance_checklist: docs/local-acceptance-checklist.md
   architecture: docs/architecture.md
+  tmux_first_plan: docs/tmux-first-workspace-plan.md
+  tmux_first_runtime_architecture: docs/tmux-first-runtime-architecture.md
   functional_design: docs/functional-design.md
   interaction_flows: docs/interaction-flows.md
   human_overview: docs/agents-control-plane.md
@@ -42,15 +44,14 @@ directories:
   generated: .agents/generated
 active_context:
   project_phase: phase-1
-  current_stage: network-registry-resumption
-  current_focus: keep the accepted fullscreen-history baseline stable while active delivery resumes on the aggregate server session registry and broader architecture cleanup remains deferred
+  current_stage: tmux-first-local-architecture-migration
+  current_focus: establish the new modular tmux-first runtime architecture and unified entry model before implementing the tmux feature migration
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.task-switch-current
-  - primitive.network-registry-scope
   - primitive.agents-self-maintenance
 recommended_runbooks:
   - runbook.continue-default-work

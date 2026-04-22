@@ -2,7 +2,7 @@ id: task.t5-06
 kind: task
 version: 1
 title: implement the aggregate server session registry
-status: ready
+status: deferred
 priority: high
 target_task_reference: task.t5-06
 source_of_truth:
@@ -34,5 +34,4 @@ touched_paths:
   - .agents/tasks/queued/task.t5-06.yaml
   - .agents/state/current-focus.yaml
 notes:
-  - This is the next ready delivery slice after the accepted fullscreen-history work.
-  - The slice should extend the current network foundations rather than reopening local fullscreen or sidebar directions.
+  - This task is deferred behind the tmux-first local migration because continuing network expansion on the retired custom display baseline would multiply later debugging cost.

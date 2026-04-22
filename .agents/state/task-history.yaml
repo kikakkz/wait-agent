@@ -1,15 +1,33 @@
 kind: state
 version: 1
 history:
-  - task_id: task.t5-06
-    status: ready
-    summary: with the fullscreen-history acceptance work closed, active delivery focus returns to the aggregate server session registry as the next bounded network slice
+  - task_id: task.tmux-0
+    status: done
+    summary: the tmux-first runtime architecture slice landed with unified bootstrap entry, command dispatch, legacy boundary, and initial application, domain, runtime, infra, and ui skeleton modules outside the old monolith
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-0.yaml
+      reference: task.tmux-0
+  - task_id: task.tmux-1
+    status: in_progress
+    summary: with the runtime architecture skeleton in place, active work now moves to the vendored tmux backend primitives and glue-layer workspace-instance model
     source_of_truth:
       file: .agents/tasks/current.yaml
-      reference: task.t5-06
+      reference: status
+  - task_id: task.t5-06
+    status: deferred
+    summary: aggregate server registry work is intentionally deferred until the tmux-first local workspace base replaces the retired custom fullscreen path
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-06.yaml
+      reference: status
+  - task_id: task.display-2c
+    status: superseded
+    summary: the custom fullscreen validation record remains preserved as history, but the verified path is no longer the accepted local architecture baseline after the tmux-first decision
+    source_of_truth:
+      file: .agents/tasks/queued/task.display-2c.yaml
+      reference: status
   - task_id: task.architecture-1
     status: deferred
-    summary: a broader runtime and module-boundary cleanup task is now parked as deferred follow-up so it remains visible without displacing the accepted fullscreen baseline
+    summary: a broader runtime and module-boundary cleanup task is now parked as deferred follow-up so it remains visible without displacing the tmux-first migration queue
     source_of_truth:
       file: .agents/tasks/current.yaml
       reference: task.architecture-1

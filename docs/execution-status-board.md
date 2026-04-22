@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.3`  
+Version: `v1.4`  
 Status: `Active`  
 Date: `2026-04-21`
 
@@ -35,13 +35,14 @@ Current phase:
 
 Current gate:
 
-- `display-2c` fullscreen-history acceptance is closed; active delivery focus now returns to `t5-06` while the broader architecture cleanup remains explicitly deferred
+- `tmux-0` tmux-first runtime architecture and module-boundary establishment is now the active delivery gate
 
 Why this is the current gate:
 
-- the fullscreen-first display direction has now been accepted against both shell-style sessions and a real Codex-style resume flow, which closes the old dashboard-scroll direction as a product path
-- the broader module cleanup debt is real, but it is intentionally parked as deferred work instead of being treated as an unbounded implicit gate
-- with the fullscreen acceptance slice closed, the next bounded delivery work is the aggregate server session registry rather than another local display follow-up
+- repeated real-terminal validation showed that the old custom fullscreen path is structurally unstable for Codex-like live TUI workloads
+- the accepted replacement is now the tmux-first workspace architecture documented in `docs/tmux-first-workspace-plan.md`
+- the current code structure is also not a good base for this migration, especially because `src/app.rs` concentrates too many responsibilities
+- the new code-level target is documented in `docs/tmux-first-runtime-architecture.md`
 
 ## 3. Current Snapshot
 
@@ -50,13 +51,13 @@ Project status at a glance:
 - Product, architecture, functional, module, UI, interaction-flow, protocol, and MVP planning docs exist
 - The Rust implementation workspace and core local runtime are in place
 - Local PTY ownership, console focus, scheduling, Peek, renderer, and VT screen-state handling exist
-- Local multi-session workspace behavior has passed the main implementation and live validation loops, and the final local acceptance sign-off has been manually confirmed
+- Local multi-session workspace behavior has passed the original custom-runtime implementation and live validation loops, but that display baseline is no longer the accepted architecture target
 - The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
-- The right-sidebar prototype remains part of the accepted baseline, but it is no longer the active project gate
-- Native fullscreen history now replays active-screen transcript data at the real terminal width, including alternate-screen history, and returns cleanly to the dashboard
-- The command-bar `/fullscreen` path no longer repaints dashboard chrome over the native fullscreen handoff
+- The right-sidebar and bottom menu remain accepted product requirements, but their implementation home is now tmux-native panes rather than shared-surface composition
+- The old custom `native fullscreen` and `live surface` direction is formally retired as the target baseline
+- The current accepted local direction is `tmux-first`, with one session per tmux window, fullscreen implemented as pane zoom, and tmux vendored as a pinned backend rather than required as a system dependency
 - Network foundations up through client/server registration and remote session publication baselines also exist
-- The current machine focus is `t5-06`, while the architecture-cleanup note remains visible only as deferred follow-up
+- The current machine focus is `tmux-0`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
 
 ## 4. Milestone Summary
 
@@ -74,9 +75,9 @@ Execution tracks at human-summary level:
 - `T0` Documentation and planning: complete
 - `T1` Local runtime foundation: complete
 - `T2` Console interaction and scheduler: complete
-- `T3` Terminal UI and rendering: functionally complete for the local gate, with `T3-07` still optional until acceptance evidence says otherwise
-- `T4` Local workspace UX and validation: done, including the final local acceptance sign-off plus the fullscreen-history acceptance closure
-- `T5` Network transport and registration: complete through the current foundations; resumed network work is the next ready delivery queue
+- `T3` Terminal UI and rendering: partially complete, but the old custom fullscreen/render path is no longer the accepted steady-state architecture
+- `T4` Local workspace UX and validation: reopened on a bounded architecture pivot to tmux-first workspace delivery
+- `T5` Network transport and registration: complete through the current foundations; resumed network work is intentionally deferred behind tmux-first local stabilization
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
 
@@ -84,23 +85,28 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `t5-06` Resume active delivery on the aggregate server session registry without destabilizing the accepted local fullscreen-history baseline
+- `tmux-0` Establish the new modular runtime architecture, unified entry model, and migration skeleton
 
-What remains from the accepted fullscreen rollout:
+Accepted local architecture direction:
 
-- keep transcript replay as the authoritative active-screen fullscreen seed instead of reviving snapshot-copy assumptions
-- keep fullscreen handoff native so desktop terminals and remote clients retain their own scrollback, selection, and IME behavior
-- keep the accepted dashboard return path stable after `/fullscreen` and `Ctrl-O`
-- treat broader module cleanup as a later bounded refactor rather than as permission to reopen the fullscreen direction itself
+- main interactive sessions run in real tmux panes
+- sidebar and footer become dedicated tmux panes
+- fullscreen becomes tmux pane zoom
+- fullscreen scrollback uses tmux-native history instead of WaitAgent-local replay
+- one session maps to one tmux window
+- multiple waitagent instances are allowed when separate tmux-backed workspaces are the simpler model
 
-Accepted display queue:
+Accepted tmux-first delivery queue:
 
-1. `display-1` Establish the explicit dashboard versus native-fullscreen boundary (`done`)
-2. `display-2a` Establish replayable transcript-backed normal-screen history (`done`)
-3. `display-2b` Switch fullscreen history seeding and resize redraw to replay (`done`)
-4. `display-2c` Validate fullscreen history handoff on shell and Codex-style sessions (`done`)
+1. `tmux-0` Establish the new modular runtime architecture, unified entry model, and migration skeleton
+2. `tmux-1` Build tmux backend primitives and workspace-instance model
+3. `tmux-2` Route workspace entry and attach lifecycle through tmux-backed instances
+4. `tmux-3` Implement persistent sidebar and footer panes as tmux-native UI panes
+5. `tmux-4` Implement tmux-native fullscreen zoom and fullscreen-only scroll handling
+6. `tmux-5` Move session switching and left-right focus semantics to tmux-native control
+7. `tmux-6` Remove obsolete custom fullscreen/live-surface path and validate shell plus Codex behavior
 
-Next queue after the accepted display rollout:
+Deferred queue after local tmux-first stabilization:
 
 1. `T5-06` Implement aggregate server session registry
 2. `T5-07` Implement remote resize and input routing
@@ -109,25 +115,25 @@ Next queue after the accepted display rollout:
 
 The exact machine ordering for that queue now lives in `.agents/tasks/backlog.yaml`.
 
-Deferred refactor queue for later reconsideration:
+Retired or absorbed queue:
 
-- `architecture-1` Refactor the runtime and module architecture for clearer boundaries and cleaner code
-- `display-3` Collapse screen recovery to one primary restore path
-- `runtime-1` Extract a shared console runtime loop for workspace and server surfaces
-- `terminal-1` Decide and document the terminal-engine coverage strategy for reliable TUI switching
+- `display-1`, `display-2`, `display-2a`, `display-2b`, and `display-2c` are now historical slices from the retired custom fullscreen direction
+- `display-3`, `runtime-1`, and `terminal-1` are absorbed by the tmux-first migration and are no longer the preferred cleanup path
+- `scroll-1` remains retired
 
 ## 7. Human Sign-Off Notes
 
-Local acceptance is now treated as closed after user-confirmed manual sign-off.
+The prior local acceptance sign-off is preserved as historical evidence for the old custom runtime, but it is not treated as final sign-off for the tmux-first architecture.
 
-The current local baseline should still preserve:
+The current local product contract that must survive the migration is:
 
 - shell-backed sessions still feel like real reusable shell contexts
 - Codex-like TUI behavior remains trustworthy inside WaitAgent
-- native fullscreen old-history remains readable in both shell and Codex-style resume flows
+- sidebar and menu remain first-class workspace controls
+- fullscreen still exists and behaves like a real terminal view
 - UTF-8 and Chinese input remain readable in practical use
 - auto-switch behavior is predictable enough for daily use
-- no remaining UX issue is likely to distort subsequent network debugging
+- the local display architecture should stop generating bugs that would distort later network debugging
 
 ## 8. Maintenance Rule
 

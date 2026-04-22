@@ -6,21 +6,25 @@ summary:
   repo_type: single_crate_rust_repo
   language: rust
   package_manager: cargo
-  architecture_style: local_first_terminal_runtime
-  active_business_goal: complete trustworthy local workspace acceptance before extending mirrored network interaction
+  architecture_style: tmux_first_local_workspace_runtime
+  active_business_goal: stabilize the tmux-first local workspace architecture before extending mirrored network interaction
 current_phase:
   phase_id: phase-1
   phase_title: local workspace MVP
-  stage_id: local-workspace-mvp-acceptance
-  stage_title: final local acceptance sign-off and next-task preparation
+  stage_id: tmux-first-local-architecture-migration
+  stage_title: replace the retired custom fullscreen baseline with tmux-native workspace ownership
 current_focus:
-  default_task_id: task.t4-10
-  focus_statement: validate and close the local workspace acceptance gate without reopening premature network complexity
+  default_task_id: task.tmux-0
+  focus_statement: establish the new modular runtime architecture first, then deliver the tmux-first workspace path on top of it
 upcoming_focus:
-  - implement the aggregate server session registry after local acceptance is explicitly closed
-  - route remote resize and input through the PTY-owning node without breaking local-first behavior
+  - build the tmux backend inside the new architecture skeleton instead of extending the old monolith
+  - route workspace entry and attach through tmux-backed instances
+  - move sidebar, menu, fullscreen, and session switching onto tmux-native ownership boundaries
+  - resume aggregate server registry work after the local tmux-first base is stable
 source_of_truth:
   - docs/execution-status-board.md
   - docs/local-acceptance-checklist.md
   - docs/architecture.md
+  - docs/tmux-first-workspace-plan.md
+  - docs/tmux-first-runtime-architecture.md
   - docs/functional-design.md

@@ -1,0 +1,30 @@
+id: task.tmux-5
+kind: task
+version: 1
+title: move session switching and left-right focus semantics to tmux-native control
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - session switching uses tmux window selection as the primary control path
+  - `Right`, `Left`, `Up`, `Down`, and `Enter` behavior are stable on top of pane and window focus rather than old custom focus bookkeeping
+  - switching to the sidebar and back is responsive during live session output
+verification:
+  - cargo test
+  - manual: exercise repeated session switches and sidebar focus transitions during live Codex output
+touched_paths:
+  - src/tmux.rs
+  - src/lifecycle.rs
+  - src/app.rs
+  - .agents/tasks/queued/task.tmux-5.yaml
+notes:
+  - This slice preserves the accepted navigation contract but moves implementation authority into tmux.

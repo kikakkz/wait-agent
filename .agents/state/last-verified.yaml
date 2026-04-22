@@ -1,7 +1,43 @@
 kind: state
 version: 1
-last_updated_from: fullscreen transcript replay and task-source resync at 2026-04-21
+last_updated_from: tmux-1 default vendored tmux cargo build path plus quiet cargo build and cargo test at 2026-04-22
 checks:
+  - id: tmux-1-default-vendored-build-cargo-build-quiet
+    command: cargo build --quiet after moving build.rs orchestration into the tmux glue module, enabling default vendored tmux compilation, and installing the required system toolchain
+    status: pass
+  - id: tmux-1-default-vendored-build-cargo-test-quiet
+    command: cargo test --quiet after moving build.rs orchestration into the tmux glue module, enabling default vendored tmux compilation, and installing the required system toolchain
+    status: pass
+  - id: tmux-1-build-status-cargo-test-quiet
+    command: cargo test --quiet after introducing typed vendored tmux build status and wiring it through the backend and build.rs
+    status: pass
+  - id: tmux-1-executor-guarded-build-cargo-test-quiet
+    command: cargo test --quiet after adding the tmux glue executor, structured execution errors, and the guarded vendored-build entrypoint behind WAITAGENT_BUILD_VENDORED_TMUX
+    status: pass
+  - id: tmux-1-toolchain-probe-cargo-test-quiet
+    command: cargo test --quiet after adding vendored tmux toolchain probing on top of the typed autotools orchestration model
+    status: pass
+  - id: tmux-1-orchestration-model-cargo-test-quiet
+    command: cargo test --quiet after adding vendored tmux source metadata discovery, typed autotools build-step modeling, and build.rs version export
+    status: pass
+  - id: tmux-1-shared-glue-contract-cargo-test-quiet
+    command: cargo test --quiet after extracting the vendored tmux glue contract into a shared module used by both build.rs and the runtime backend
+    status: pass
+  - id: tmux-1-glue-module-split-cargo-test-quiet
+    command: cargo test --quiet after splitting vendored tmux source and artifact modeling into src/infra/tmux_glue.rs and keeping src/infra/tmux.rs focused on typed backend capabilities
+    status: pass
+  - id: tmux-1-vendored-submodule-cargo-test-quiet
+    command: cargo test --quiet after adding the pinned third_party/tmux submodule, crate build.rs integration, and the vendored tmux glue-layer skeleton
+    status: pass
+  - id: tmux-0-bootstrap-dispatch-cargo-test-quiet
+    command: cargo test --quiet after moving top-level command dispatch into bootstrap and routing legacy execution through the new legacy wrapper
+    status: pass
+  - id: tmux-0-cargo-test-quiet
+    command: cargo test --quiet after suppressing expected dead-code warnings for the initial architecture skeleton modules
+    status: pass
+  - id: tmux-0-cargo-test
+    command: cargo test after adding bootstrap entry and the initial application/domain/runtime/infra/ui module skeleton
+    status: pass
   - id: fullscreen-release-build
     command: cargo build --release --quiet after the unified fullscreen transcript replay change
     status: pass

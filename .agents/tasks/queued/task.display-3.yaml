@@ -2,7 +2,7 @@ id: task.display-3
 kind: task
 version: 1
 title: remove the obsolete dashboard-scroll experiment and converge restore and resize behavior
-status: deferred
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -35,3 +35,4 @@ touched_paths:
 notes:
   - The rejected scrollbar experiment and attach-side mouse capture have already been removed from the baseline.
   - This task is now only about restore-path convergence after fullscreen handoff exists, not about preserving partial compatibility of the retired scrollbar design.
+  - This task is superseded because tmux-first cutover removes the need to converge the old custom fullscreen restore path.

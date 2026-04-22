@@ -2,7 +2,7 @@ id: task.display-2b
 kind: task
 version: 1
 title: switch native fullscreen history seeding and resize redraw to transcript replay
-status: done
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -37,3 +37,4 @@ notes:
   - Accepted on the shell path after validating a clean daemon-backed `./waitagent` repro: fullscreen now replays wrapped history at full terminal width instead of preserving the dashboard sidebar gap.
   - The final implementation converged alternate-screen fullscreen seeding onto the same transcript-driven active-screen replay path so fullscreen old-history is not limited to the last narrow visible snapshot.
   - A real bug surfaced during acceptance: `/fullscreen` used to repaint dashboard chrome after `enter_native_fullscreen()` succeeded. That extra repaint is now suppressed so command-bar entry does not overwrite the fullscreen handoff.
+  - This task is now historical only because tmux pane zoom replaces custom fullscreen replay as the accepted steady-state architecture.
