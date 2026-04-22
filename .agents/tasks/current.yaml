@@ -26,6 +26,7 @@ verification:
   - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
   - manual: existing oversized sidebar and footer panes are normalized back to the fixed waitagent geometry during layout restore
   - manual: a maximized desktop terminal attach triggers native tmux reconcile hooks that keep the sidebar at fixed width and the footer at a single row after client attach and resize
+  - manual: two default `waitagent` launches from the same directory create two independent backends, and `waitagent ls` reports them as tmux-like session lines keyed by session id
 touched_paths:
   - src/cli.rs
   - src/command
@@ -42,3 +43,5 @@ notes:
   - Root cause: bootstrap-only layout normalization cannot hold fixed chrome geometry after a later tmux client resize from the desktop window manager.
   - Accepted fix: register native tmux `client-attached` and `client-resized` hooks that run a hidden waitagent layout reconcile command instead of patching attach-specific runtime paths.
   - Footer baseline: the persistent menu bar is now one row high; later submenu work may temporarily expand it, but the default chrome must stay single-line.
+  - Session semantics: default `waitagent` launches are no longer workspace-bound; each invocation creates a fresh tmux backend, and only explicit `attach` reuses an existing session.
+  - Listing semantics: `waitagent ls` now follows tmux-like session summaries keyed by the session id rather than workspace path aliases.

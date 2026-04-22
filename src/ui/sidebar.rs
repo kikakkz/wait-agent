@@ -32,17 +32,7 @@ impl SidebarUi {
 }
 
 fn short_session_label(session: &ManagedSessionRecord) -> String {
-    if let Some(key) = session.workspace_key.as_deref() {
-        return format!("ws-{key}");
-    }
-
-    session
-        .workspace_dir
-        .as_deref()
-        .and_then(|path| path.file_name())
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| session.address.session_id().to_string())
+    session.address.display_session_id().to_string()
 }
 
 #[cfg(test)]
@@ -52,7 +42,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn sidebar_ui_marks_active_session_and_uses_workspace_key() {
+    fn sidebar_ui_marks_active_session_and_uses_session_display_id() {
         let output = SidebarUi::render(
             "wa-1",
             "waitagent-1",
@@ -61,10 +51,11 @@ mod tests {
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: Some("1234".to_string()),
                 attached_clients: 2,
+                window_count: 1,
             }],
         );
 
         assert!(output.contains("WaitAgent"));
-        assert!(output.contains("> ws-1234 [2]"));
+        assert!(output.contains("> 1 [2]"));
     }
 }

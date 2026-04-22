@@ -270,7 +270,7 @@ impl EmbeddedTmuxBackend {
         let args = vec![
             "list-sessions".to_string(),
             "-F".to_string(),
-            "#{session_name}\t#{session_attached}".to_string(),
+            "#{session_name}\t#{session_attached}\t#{session_windows}".to_string(),
         ];
         let output = match self.run_on_socket(socket_name, &args) {
             Ok(output) => output,
@@ -280,7 +280,14 @@ impl EmbeddedTmuxBackend {
 
         let mut records = Vec::new();
         for line in output.stdout.lines() {
-            let Some((session_name, attached_clients)) = line.split_once('\t') else {
+            let mut parts = line.split('\t');
+            let Some(session_name) = parts.next() else {
+                continue;
+            };
+            let Some(attached_clients) = parts.next() else {
+                continue;
+            };
+            let Some(window_count) = parts.next() else {
                 continue;
             };
             let metadata = self.session_metadata(socket_name, session_name)?;
@@ -292,6 +299,7 @@ impl EmbeddedTmuxBackend {
                 workspace_dir: metadata.workspace_dir,
                 workspace_key: metadata.workspace_key,
                 attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
+                window_count: window_count.parse::<usize>().unwrap_or(1),
             });
         }
 

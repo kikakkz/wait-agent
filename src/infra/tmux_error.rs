@@ -188,6 +188,12 @@ impl fmt::Display for TmuxError {
 
 impl std::error::Error for TmuxError {}
 
+impl From<&'static str> for TmuxError {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
 pub(crate) fn validate_percent(value: u8, label: &str) -> Result<(), TmuxError> {
     if value == 0 || value > 100 {
         return Err(TmuxError::new(format!(

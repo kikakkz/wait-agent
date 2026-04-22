@@ -1,6 +1,6 @@
 use crate::application::layout_service::{LayoutFocusBehavior, LayoutService};
 use crate::cli::LayoutReconcileCommand;
-use crate::domain::workspace::{stable_workspace_key, WorkspaceInstanceId};
+use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxProgram, TmuxSessionName, TmuxSocketName,
     TmuxWorkspaceHandle,
@@ -41,7 +41,7 @@ impl WorkspaceLayoutRuntime {
     pub fn run_reconcile(&self, command: LayoutReconcileCommand) -> Result<(), LifecycleError> {
         let workspace_dir = PathBuf::from(&command.workspace_dir);
         let workspace = TmuxWorkspaceHandle {
-            workspace_id: WorkspaceInstanceId::new(stable_workspace_key(&workspace_dir)),
+            workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
             socket_name: TmuxSocketName::new(command.socket_name),
             session_name: TmuxSessionName::new(command.session_name),
         };

@@ -1,7 +1,16 @@
 kind: state
 version: 1
-last_updated_from: tmux-r5 native tmux hook reconcile and single-row footer verified on release build with maximized desktop-terminal validation at 2026-04-22
+last_updated_from: tmux-r5 per-invocation session backends and tmux-like ls semantics verified on release build with same-directory multi-launch validation at 2026-04-22
 checks:
+  - id: tmux-r5-same-directory-multi-launch-creates-independent-backends
+    command: manual release validation by launching env -u TMUX ./target/release/waitagent twice from /opt/data/workspace/wait-agent, confirming waitagent ls reports two distinct session ids, and verifying each vendored tmux socket owns its own single attached session
+    status: pass
+  - id: tmux-r5-per-invocation-session-identity-release-build
+    command: cargo build --release after switching default waitagent launches from workspace-bound identities to per-invocation tmux session ids and changing ls output to tmux-like session summaries
+    status: pass
+  - id: tmux-r5-per-invocation-session-identity-cargo-test-quiet
+    command: cargo test --quiet after switching default waitagent launches from workspace-bound identities to per-invocation tmux session ids and changing ls output to tmux-like session summaries
+    status: pass
   - id: tmux-r5-native-hook-reconcile-maximized-terminal
     command: manual release validation by launching ./target/release/waitagent in a maximized desktop gnome-terminal and confirming the final live tmux geometry remains sidebar width 24 and footer height 1 at a 204x54 client after attach-time and window-manager resize hooks fire
     status: pass

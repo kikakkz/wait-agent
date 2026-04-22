@@ -32,7 +32,7 @@ where
         &self,
         workspace_dir: &Path,
     ) -> Result<BootstrappedWorkspace, G::Error> {
-        let instance_config = WorkspaceInstanceConfig::for_workspace_dir(workspace_dir);
+        let instance_config = WorkspaceInstanceConfig::for_new_session(workspace_dir);
         let workspace_handle = self.ensure_workspace(&instance_config)?;
 
         Ok(BootstrappedWorkspace {
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_workspace_for_dir_derives_tmux_workspace_identity() {
+    fn ensure_workspace_for_dir_creates_a_new_tmux_session_identity() {
         let service = WorkspaceService::new(FakeTmuxGateway);
         let workspace = service
             .ensure_workspace_for_dir(Path::new("/tmp/waitagent/ws"))

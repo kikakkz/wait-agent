@@ -1,4 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceInstanceId(String);
@@ -22,15 +26,27 @@ pub struct WorkspaceInstanceConfig {
 }
 
 impl WorkspaceInstanceConfig {
-    pub fn for_workspace_dir(workspace_dir: &Path) -> Self {
-        let workspace_key = stable_workspace_key(workspace_dir);
+    pub fn for_new_session(workspace_dir: &Path) -> Self {
+        let workspace_key = next_session_key();
         Self {
             workspace_dir: workspace_dir.to_path_buf(),
             socket_name: format!("wa-{workspace_key}"),
-            session_name: format!("waitagent-{workspace_key}"),
+            session_name: workspace_key.clone(),
             workspace_key,
         }
     }
+}
+
+pub fn next_session_key() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = u128::from(SESSION_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let pid = u128::from(std::process::id());
+    let mixed = nanos ^ (counter << 17) ^ (pid << 49);
+    let lower = (mixed & u128::from(u64::MAX)) as u64;
+    format!("{lower:016x}")
 }
 
 pub fn stable_workspace_key(path: &Path) -> String {
@@ -45,7 +61,7 @@ pub fn stable_workspace_key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{stable_workspace_key, WorkspaceInstanceConfig};
+    use super::{next_session_key, stable_workspace_key, WorkspaceInstanceConfig};
     use std::path::Path;
 
     #[test]
@@ -55,15 +71,22 @@ mod tests {
     }
 
     #[test]
-    fn workspace_instance_config_derives_tmux_identity_from_workspace_dir() {
-        let config = WorkspaceInstanceConfig::for_workspace_dir(Path::new("/tmp/waitagent/ws"));
+    fn workspace_instance_config_derives_new_tmux_session_identity() {
+        let config = WorkspaceInstanceConfig::for_new_session(Path::new("/tmp/waitagent/ws"));
 
         assert_eq!(config.workspace_dir, Path::new("/tmp/waitagent/ws"));
         assert!(config.workspace_key.len() == 16);
         assert_eq!(config.socket_name, format!("wa-{}", config.workspace_key));
-        assert_eq!(
-            config.session_name,
-            format!("waitagent-{}", config.workspace_key)
-        );
+        assert_eq!(config.session_name, config.workspace_key);
+    }
+
+    #[test]
+    fn next_session_key_returns_fixed_width_hex_identity() {
+        let first = next_session_key();
+        let second = next_session_key();
+
+        assert_eq!(first.len(), 16);
+        assert_eq!(second.len(), 16);
+        assert_ne!(first, second);
     }
 }

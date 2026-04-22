@@ -30,8 +30,7 @@ fn active_session_label(active_session: &str, sessions: &[ManagedSessionRecord])
     sessions
         .iter()
         .find(|session| session.address.session_id() == active_session)
-        .and_then(|session| session.workspace_key.as_deref())
-        .map(|key| format!("ws-{key}"))
+        .map(|session| session.address.display_session_id().to_string())
         .unwrap_or_else(|| active_session.to_string())
 }
 

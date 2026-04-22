@@ -11,7 +11,6 @@ use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
 use crate::terminal::TerminalSize;
 use std::io;
-use std::path::Path;
 
 pub struct WorkspaceCommandRuntime {
     bootstrap: WorkspaceBootstrapRuntime,
@@ -68,7 +67,7 @@ impl WorkspaceCommandRuntime {
     }
 
     pub fn run_attach(&self, command: AttachCommand) -> Result<(), LifecycleError> {
-        match attach_target_path(&self.bootstrap, &command)? {
+        match attach_target_path(&command)? {
             Some(target) => {
                 let session = self
                     .session_service
@@ -81,15 +80,15 @@ impl WorkspaceCommandRuntime {
                     .attach_session(&session)
                     .map_err(tmux_runtime_error)
             }
-            None => {
-                let workspace_dir = self
-                    .bootstrap
-                    .resolve_workspace_dir(command.workspace_dir.as_deref())?;
-                let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
-                self.session_service
-                    .attach_workspace(&workspace.workspace_handle)
-                    .map_err(tmux_runtime_error)
-            }
+            None => self
+                .session_service
+                .resolve_default_attach_session()
+                .map_err(tmux_runtime_error)
+                .and_then(|session| {
+                    self.session_service
+                        .attach_session(&session)
+                        .map_err(tmux_runtime_error)
+                }),
         }
     }
 
@@ -110,13 +109,10 @@ impl WorkspaceCommandRuntime {
     }
 
     pub fn run_detach(&self, command: DetachCommand) -> Result<(), LifecycleError> {
-        if let Some(target) = attach_target_path(
-            &self.bootstrap,
-            &AttachCommand {
-                workspace_dir: command.workspace_dir.clone(),
-                target: command.target.clone(),
-            },
-        )? {
+        if let Some(target) = attach_target_path(&AttachCommand {
+            workspace_dir: command.workspace_dir.clone(),
+            target: command.target.clone(),
+        })? {
             let session = self
                 .session_service
                 .find_session(&target)
@@ -141,40 +137,27 @@ impl WorkspaceCommandRuntime {
             return Ok(());
         }
 
-        let workspace_dir = self
-            .bootstrap
-            .resolve_workspace_dir(command.workspace_dir.as_deref())?;
-        let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
+        let session = self
+            .session_service
+            .resolve_default_attach_session()
+            .map_err(tmux_runtime_error)?;
         self.session_service
-            .detach_workspace_clients(&workspace.workspace_handle)
+            .detach_session_clients(&session)
             .map_err(tmux_runtime_error)?;
         println!(
-            "detached clients from {}:{}",
-            workspace.workspace_handle.socket_name.as_str(),
-            workspace.workspace_handle.session_name.as_str()
+            "detached clients from {}",
+            session.address.qualified_target()
         );
         Ok(())
     }
 }
 
-fn attach_target_path(
-    bootstrap: &WorkspaceBootstrapRuntime,
-    command: &AttachCommand,
-) -> Result<Option<String>, LifecycleError> {
+fn attach_target_path(command: &AttachCommand) -> Result<Option<String>, LifecycleError> {
     if let Some(target) = command.target.as_deref() {
-        if looks_like_workspace_path(target) {
-            let workspace_dir = bootstrap.resolve_workspace_dir(Some(target))?;
-            return Ok(Some(workspace_dir.display().to_string()));
-        }
         return Ok(Some(target.to_string()));
     }
 
     Ok(None)
-}
-
-fn looks_like_workspace_path(value: &str) -> bool {
-    let path = Path::new(value);
-    path.is_absolute() || value.contains(std::path::MAIN_SEPARATOR) || path.exists()
 }
 
 fn tmux_runtime_error(error: TmuxError) -> LifecycleError {
