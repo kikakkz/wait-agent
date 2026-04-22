@@ -10,6 +10,7 @@ source_of_truth:
   reference: next
 depends_on:
   - task.tmux-r4.done
+  - task.tmux-style-1.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
@@ -21,12 +22,19 @@ done_criteria:
   - the main pane remains a tmux-native shell or agent surface and is no longer composed with sidebar or footer on the same display surface
   - layout creation, restore, and focus handoff use tmux-native split and pane selection primitives rather than waitagent-owned frame composition
   - the sidebar and footer consume a shared session-registry model that can later represent both local tmux sessions and future network-backed sessions
+  - the footer baseline remains a single row after attach, resize, session create, session exit, and cross-session geometry churn, even when another attached session used a different client height
+  - the sidebar top section, list rows, and footer section follow the legacy waitagent information hierarchy while being rendered by tmux-owned panes
+  - sidebar session rows display runtime identity in a transport-aware form such as `bash@local`, `codex@local`, or `codex@192.168.1.31`, and the right edge shows the current task state using the legacy-style status treatment
+  - the sidebar footer shows the currently selected session's basic metadata using the shared session catalog rather than ad hoc local-only fields
+  - the persistent footer bar shows the current session directory at the far right and shows aggregate session totals plus per-state counts in the status area
 verification:
   - cargo test
   - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
   - manual: existing oversized sidebar and footer panes are normalized back to the fixed waitagent geometry during layout restore
   - manual: a maximized desktop terminal attach triggers native tmux reconcile hooks that keep the sidebar at fixed width and the footer at a single row after client attach and resize
   - manual: two default `waitagent` launches from the same directory create two independent backends, and `waitagent ls` reports them as tmux-like session lines keyed by session id
+  - manual: attaching to and exiting from a second session with a different terminal height does not leave the current session footer taller than one row
+  - manual: sidebar rows and footer info match the intended legacy-style information layout for local and future network-addressed sessions
 touched_paths:
   - src/cli.rs
   - src/command
@@ -45,3 +53,6 @@ notes:
   - Footer baseline: the persistent menu bar is now one row high; later submenu work may temporarily expand it, but the default chrome must stay single-line.
   - Session semantics: default `waitagent` launches are no longer workspace-bound; each invocation creates a fresh tmux backend, and only explicit `attach` reuses an existing session.
   - Listing semantics: `waitagent ls` now follows tmux-like session summaries keyed by the session id rather than workspace path aliases.
+  - Sidebar presentation must preserve the old waitagent visual information contract where it is still valid: header at the top, per-session rows in the middle, selected-session summary at the bottom, but the data model must now be transport-aware so future remote sessions fit the same row shape.
+  - Menu interaction itself is not complete in this slice; this slice only owns stable geometry plus the rendered information contract for the persistent sidebar and footer chrome.
+  - Legacy contract evidence for this slice is now anchored to `.agents/tasks/queued/task.sidebar-1.yaml`, `docs/ui-design.md`, and the old sidebar or footer tests and literals in `src/app.rs`, rather than informal recollection.

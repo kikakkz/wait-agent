@@ -5,7 +5,12 @@ use crate::infra::tmux::{
 
 pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
-const LAYOUT_RECONCILE_HOOKS: [&str; 2] = ["client-attached", "client-resized"];
+const LAYOUT_RECONCILE_HOOKS: [&str; 4] = [
+    "client-attached",
+    "client-detached",
+    "client-resized",
+    "client-session-changed",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutFocusBehavior {
@@ -301,6 +306,7 @@ mod tests {
                 pane_id: pane.clone(),
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: false,
             });
             Ok(pane)
@@ -320,6 +326,7 @@ mod tests {
                 pane_id: pane.clone(),
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: false,
             });
             Ok(pane)
@@ -400,6 +407,7 @@ mod tests {
             pane_id: TmuxPaneId::new("%1"),
             title: String::new(),
             current_command: Some("bash".to_string()),
+            current_path: None,
             is_dead: false,
         }]);
         let service = LayoutService::new(gateway.clone());
@@ -438,18 +446,21 @@ mod tests {
                 pane_id: TmuxPaneId::new("%1"),
                 title: String::new(),
                 current_command: Some("bash".to_string()),
+                current_path: None,
                 is_dead: false,
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%2"),
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: true,
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%3"),
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: true,
             },
         ]);
@@ -486,18 +497,21 @@ mod tests {
                 pane_id: TmuxPaneId::new("%1"),
                 title: String::new(),
                 current_command: Some("bash".to_string()),
+                current_path: None,
                 is_dead: false,
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%2"),
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: false,
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%3"),
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
+                current_path: None,
                 is_dead: false,
             },
         ]);
@@ -541,7 +555,15 @@ mod tests {
                     "run-shell -b 'waitagent __layout-reconcile'".to_string(),
                 ),
                 Call::SetHook(
+                    "client-detached".to_string(),
+                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
+                ),
+                Call::SetHook(
                     "client-resized".to_string(),
+                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
+                ),
+                Call::SetHook(
+                    "client-session-changed".to_string(),
                     "run-shell -b 'waitagent __layout-reconcile'".to_string(),
                 ),
             ]

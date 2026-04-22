@@ -16,6 +16,9 @@ active:
   - id: task.tmux-r3
     title: build a new workspace lifecycle stack outside the legacy lifecycle module
     status: done
+  - id: task.tmux-style-1
+    title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
+    status: done
 next:
   - id: task.tmux-r4
     title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases

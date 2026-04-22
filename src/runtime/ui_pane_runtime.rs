@@ -11,6 +11,7 @@ use std::time::Duration;
 const PANE_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 pub struct UiPaneRuntime {
+    backend: EmbeddedTmuxBackend,
     session_service: SessionService<EmbeddedTmuxBackend>,
 }
 
@@ -18,7 +19,8 @@ impl UiPaneRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(ui_pane_error)?;
         Ok(Self {
-            session_service: SessionService::new(backend),
+            session_service: SessionService::new(backend.clone()),
+            backend,
         })
     }
 
@@ -28,10 +30,13 @@ impl UiPaneRuntime {
                 .session_service
                 .list_sessions()
                 .map_err(ui_pane_error)?;
+            let (width, height) = self.pane_size(&command.socket_name);
             redraw(SidebarUi::render(
                 &command.socket_name,
                 &command.session_name,
                 &sessions,
+                width,
+                height,
             ))?;
             thread::sleep(PANE_REFRESH_INTERVAL);
         }
@@ -43,13 +48,24 @@ impl UiPaneRuntime {
                 .session_service
                 .list_sessions()
                 .map_err(ui_pane_error)?;
+            let (width, _) = self.pane_size(&command.socket_name);
             redraw(FooterUi::render(
                 &command.socket_name,
                 &command.session_name,
                 &sessions,
+                width,
             ))?;
             thread::sleep(PANE_REFRESH_INTERVAL);
         }
+    }
+
+    fn pane_size(&self, socket_name: &str) -> (usize, usize) {
+        let Some(pane_target) = std::env::var("TMUX_PANE").ok() else {
+            return (80, 12);
+        };
+        self.backend
+            .pane_dimensions_on_socket(socket_name, &pane_target)
+            .unwrap_or((80, 12))
     }
 }
 

@@ -1,4 +1,6 @@
-use crate::domain::session_catalog::{ManagedSessionAddress, ManagedSessionRecord};
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
+};
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
 use crate::infra::tmux_error::{
     parse_tmux_id, parse_tmux_identifier, tmux_socket_dir, validate_percent, TmuxCommandOutput,
@@ -21,6 +23,8 @@ const WAITAGENT_WORKSPACE_DIR_ENV: &str = "WAITAGENT_WORKSPACE_DIR";
 const WAITAGENT_WORKSPACE_KEY_ENV: &str = "WAITAGENT_WORKSPACE_KEY";
 const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
+const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
+const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedTmuxBackend {
@@ -34,6 +38,13 @@ pub struct EmbeddedTmuxBackend {
 struct TmuxSessionMetadata {
     workspace_dir: Option<PathBuf>,
     workspace_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TmuxSessionRuntimeMetadata {
+    command_name: Option<String>,
+    current_path: Option<PathBuf>,
+    task_state: ManagedSessionTaskState,
 }
 
 impl EmbeddedTmuxBackend {
@@ -291,6 +302,7 @@ impl EmbeddedTmuxBackend {
                 continue;
             };
             let metadata = self.session_metadata(socket_name, session_name)?;
+            let runtime = self.session_runtime_metadata(socket_name, session_name)?;
             records.push(ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux(
                     socket_name.as_str(),
@@ -300,6 +312,9 @@ impl EmbeddedTmuxBackend {
                 workspace_key: metadata.workspace_key,
                 attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
                 window_count: window_count.parse::<usize>().unwrap_or(1),
+                command_name: runtime.command_name,
+                current_path: runtime.current_path,
+                task_state: runtime.task_state,
             });
         }
 
@@ -334,6 +349,102 @@ impl EmbeddedTmuxBackend {
         }
 
         Ok(metadata)
+    }
+
+    fn session_runtime_metadata(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+    ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
+        let window_id = self.current_window_id_on_socket(socket_name, session_name)?;
+        let panes = self.list_panes_on_target(socket_name, &window_id)?;
+        let Some(main_pane) = panes.iter().find(|pane| {
+            pane.title != WAITAGENT_SIDEBAR_PANE_TITLE && pane.title != WAITAGENT_FOOTER_PANE_TITLE
+        }) else {
+            return Ok(TmuxSessionRuntimeMetadata::default());
+        };
+        let pane_text = self.capture_pane_text(socket_name, &main_pane.pane_id)?;
+        Ok(TmuxSessionRuntimeMetadata {
+            command_name: main_pane.current_command.clone(),
+            current_path: main_pane.current_path.clone(),
+            task_state: ManagedSessionTaskState::infer(
+                main_pane.current_command.as_deref(),
+                &pane_text,
+            ),
+        })
+    }
+
+    fn current_window_id_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            "#{window_id}".to_string(),
+        ];
+        let output = self.run_on_socket(socket_name, &args)?;
+        parse_tmux_id(&output.stdout, '@', "window id")
+    }
+
+    fn list_panes_on_target(
+        &self,
+        socket_name: &TmuxSocketName,
+        target: &str,
+    ) -> Result<Vec<TmuxPaneInfo>, TmuxError> {
+        let args = vec![
+            "list-panes".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+            "-F".to_string(),
+            "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
+                .to_string(),
+        ];
+        let output = self.run_on_socket(socket_name, &args)?;
+        output
+            .stdout
+            .lines()
+            .map(Self::pane_info_for_line)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn capture_pane_text(
+        &self,
+        socket_name: &TmuxSocketName,
+        pane_id: &TmuxPaneId,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "capture-pane".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_id.as_str().to_string(),
+            "-S".to_string(),
+            "-40".to_string(),
+        ];
+        let output = self.run_on_socket(socket_name, &args)?;
+        Ok(output.stdout)
+    }
+
+    pub fn pane_dimensions_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<(usize, usize), TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+            "#{pane_width}\t#{pane_height}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        let mut parts = output.stdout.trim().split('\t');
+        let width = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+        let height = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+        Ok((width, height))
     }
 
     fn find_managed_session(
@@ -371,16 +482,18 @@ impl EmbeddedTmuxBackend {
     }
 
     fn pane_info_for_line(line: &str) -> Result<TmuxPaneInfo, TmuxError> {
-        let mut parts = line.splitn(4, '\t');
+        let mut parts = line.splitn(5, '\t');
         let pane_id = parts.next().unwrap_or_default();
         let title = parts.next().unwrap_or_default();
         let current_command = parts.next().unwrap_or_default();
+        let current_path = parts.next().unwrap_or_default();
         let dead = parts.next().unwrap_or_default();
 
         Ok(TmuxPaneInfo {
             pane_id: TmuxPaneId::new(parse_tmux_id(pane_id, '%', "pane id")?),
             title: title.to_string(),
             current_command: (!current_command.is_empty()).then(|| current_command.to_string()),
+            current_path: (!current_path.is_empty()).then(|| PathBuf::from(current_path)),
             is_dead: dead == "1",
         })
     }

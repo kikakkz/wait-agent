@@ -60,7 +60,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::SessionService;
-    use crate::domain::session_catalog::{ManagedSessionAddress, ManagedSessionRecord};
+    use crate::domain::session_catalog::{
+        ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
+    };
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::infra::tmux::{
         TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
@@ -96,6 +98,9 @@ mod tests {
                     workspace_key: Some("1234".to_string()),
                     attached_clients: 1,
                     window_count: 1,
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/demo")),
+                    task_state: ManagedSessionTaskState::Input,
                 }])),
             }
         }
@@ -314,6 +319,9 @@ mod tests {
                 workspace_key: None,
                 attached_clients: 0,
                 window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Unknown,
             },
             ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-2", "2222"),
@@ -321,6 +329,9 @@ mod tests {
                 workspace_key: None,
                 attached_clients: 0,
                 window_count: 1,
+                command_name: Some("codex".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Unknown,
             },
         ]);
         let service = SessionService::new(gateway);

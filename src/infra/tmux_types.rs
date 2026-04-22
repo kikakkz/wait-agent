@@ -72,6 +72,7 @@ pub struct TmuxPaneInfo {
     pub pane_id: TmuxPaneId,
     pub title: String,
     pub current_command: Option<String>,
+    pub current_path: Option<PathBuf>,
     pub is_dead: bool,
 }
 

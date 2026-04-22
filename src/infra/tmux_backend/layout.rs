@@ -49,7 +49,8 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
             "-t".to_string(),
             window.window_id.as_str().to_string(),
             "-F".to_string(),
-            "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_dead}".to_string(),
+            "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
+                .to_string(),
         ];
         let output = self.run_workspace_command(workspace, &args)?;
         output

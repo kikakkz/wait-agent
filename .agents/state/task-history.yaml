@@ -1,6 +1,12 @@
 kind: state
 version: 1
 history:
+  - task_id: task.tmux-style-1
+    status: done
+    summary: the legacy sidebar and menu style contract was traced to historical task, design, and test sources, and the reusable information hierarchy was mapped into the current tmux-pane slice while interactive menu behavior remained deferred to the later tmux-native control slice
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-style-1.yaml
+      reference: status
   - task_id: task.tmux-r4
     status: in_progress
     summary: the tmux-native cutover has been refined into a stricter sequence where command semantics and target identity move first, tmux-owned sidebar and footer panes land second, fullscreen and controls align third, and transitional daemon paths are removed only after tmux-native replacements exist
