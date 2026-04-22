@@ -1,0 +1,31 @@
+id: task.tmux-r5
+kind: task
+version: 1
+title: implement persistent sidebar and footer panes as tmux-owned UI surfaces
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - each managed session window can host a stable three-pane layout with a real main pane plus sidebar and footer panes
+  - sidebar and footer rendering move to dedicated waitagent pane programs or pane-oriented runtimes
+  - main-pane output is no longer composed with sidebar or footer on the same display surface
+verification:
+  - cargo test
+  - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
+touched_paths:
+  - src/ui
+  - src/runtime
+  - src/application
+  - src/infra/tmux.rs
+  - .agents/tasks/queued/task.tmux-r5.yaml
+notes:
+  - This slice preserves the product contract while moving UI ownership into tmux panes.

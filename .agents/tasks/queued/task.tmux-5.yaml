@@ -2,11 +2,11 @@ id: task.tmux-5
 kind: task
 version: 1
 title: move session switching and left-right focus semantics to tmux-native control
-status: not_started
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: historical
 depends_on:
   - task.tmux-4.done
 linked_primitives:
@@ -27,4 +27,4 @@ touched_paths:
   - src/app.rs
   - .agents/tasks/queued/task.tmux-5.yaml
 notes:
-  - This slice preserves the accepted navigation contract but moves implementation authority into tmux.
+  - This slice is superseded as part of the rewrite queue reset; the navigation goal remains active but now depends on a cleaner tmux-backed lifecycle and pane ownership model.

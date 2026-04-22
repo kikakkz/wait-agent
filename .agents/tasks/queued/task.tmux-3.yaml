@@ -2,11 +2,11 @@ id: task.tmux-3
 kind: task
 version: 1
 title: implement persistent sidebar and footer panes as tmux-native UI panes
-status: not_started
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: historical
 depends_on:
   - task.tmux-2.done
 linked_primitives:
@@ -28,4 +28,4 @@ touched_paths:
   - src/renderer.rs
   - .agents/tasks/queued/task.tmux-3.yaml
 notes:
-  - This slice preserves the sidebar and menu product contract but relocates ownership into tmux panes.
+  - This slice is superseded only as part of the first queue definition; the product goal remains valid and is replaced by the rewrite queue entry that lands after command cutover.

@@ -6,23 +6,47 @@ active:
     status: done
   - id: task.tmux-1
     title: build the tmux backend primitives and workspace-instance model
+    status: superseded
+  - id: task.tmux-r1
+    title: re-baseline the tmux-first migration around a clean rewrite boundary
+    status: done
+  - id: task.tmux-r2
+    title: implement the real vendored tmux control adapter behind the new runtime interfaces
     status: in_progress
 next:
+  - id: task.tmux-r3
+    title: build a new workspace lifecycle stack outside the legacy lifecycle module
+    status: not_started
+  - id: task.tmux-r4
+    title: route workspace-facing commands through the new tmux-first lifecycle stack
+    status: not_started
+  - id: task.tmux-r5
+    title: implement persistent sidebar and footer panes as tmux-owned UI surfaces
+    status: not_started
+  - id: task.tmux-r6
+    title: implement tmux-native fullscreen zoom and fullscreen-only scrollback
+    status: not_started
+  - id: task.tmux-r7
+    title: move session switching and sidebar focus semantics onto tmux-native control
+    status: not_started
+  - id: task.tmux-r8
+    title: remove the retired custom local display path and complete shell-plus-codex acceptance
+    status: not_started
   - id: task.tmux-2
     title: route workspace entry and attach lifecycle through tmux-backed instances
-    status: not_started
+    status: superseded
   - id: task.tmux-3
     title: implement persistent sidebar and footer panes as tmux-native UI panes
-    status: not_started
+    status: superseded
   - id: task.tmux-4
     title: implement tmux-native fullscreen zoom and fullscreen-only scroll handling
-    status: not_started
+    status: superseded
   - id: task.tmux-5
     title: move session switching and left-right focus semantics to tmux-native control
-    status: not_started
+    status: superseded
   - id: task.tmux-6
     title: remove the obsolete custom fullscreen and live-surface path and validate shell plus Codex behavior
-    status: not_started
+    status: superseded
   - id: task.display-2a
     title: establish a replayable normal-screen transcript model for native fullscreen history
     status: superseded
@@ -105,3 +129,4 @@ notes:
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.
+  - The original `task.tmux-1` through `task.tmux-6` split is preserved as historical planning only and is superseded by the rewrite queue after review found that the bridge-heavy path would preserve too much of the legacy lifecycle structure.

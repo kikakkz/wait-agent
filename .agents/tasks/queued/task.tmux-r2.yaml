@@ -3,8 +3,7 @@ kind: task
 version: 1
 title: implement the real vendored tmux control adapter behind the new runtime interfaces
 status: in_progress
-priority: high
-target_task_reference: task.tmux-r2
+priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: active

@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.tmux-1
-focus_statement: the modular tmux-first runtime architecture skeleton is in place, and the active local delivery gate is now the tmux backend primitive layer for workspace, window, pane, zoom, and copy-mode ownership
+current_task: task.tmux-r2
+focus_statement: the rewrite reset is complete, and the active code task is now replacing the placeholder tmux backend with a real vendored tmux control adapter and stricter build guarantees
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -1,0 +1,48 @@
+id: task.tmux-r1
+kind: task
+version: 1
+title: re-baseline the tmux-first migration around a clean rewrite boundary
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.tmux-0.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - all task and status files agree on the rewritten tmux queue and no longer point at the superseded bridge-heavy split
+  - the repository documents which tmux-first foundations are retained from the existing work and which execution slices are superseded
+  - the next implementation slice is defined around a clean rewrite boundary instead of extending `runtime/workspace_entry_runtime` or routing back into `lifecycle.rs`
+  - the rewrite queue preserves command compatibility goals while explicitly dropping legacy code-structure compatibility as a delivery constraint
+verification:
+  - targeted review of task-state consistency and rewrite sequencing
+touched_paths:
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.tmux-1.yaml
+  - .agents/tasks/queued/task.tmux-2.yaml
+  - .agents/tasks/queued/task.tmux-3.yaml
+  - .agents/tasks/queued/task.tmux-4.yaml
+  - .agents/tasks/queued/task.tmux-5.yaml
+  - .agents/tasks/queued/task.tmux-6.yaml
+  - .agents/tasks/queued/task.tmux-r1.yaml
+  - .agents/tasks/queued/task.tmux-r2.yaml
+  - .agents/tasks/queued/task.tmux-r3.yaml
+  - .agents/tasks/queued/task.tmux-r4.yaml
+  - .agents/tasks/queued/task.tmux-r5.yaml
+  - .agents/tasks/queued/task.tmux-r6.yaml
+  - .agents/tasks/queued/task.tmux-r7.yaml
+  - .agents/tasks/queued/task.tmux-r8.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+  - .agents/context/project.yaml
+  - docs/execution-status-board.md
+  - docs/tmux-first-workspace-plan.md
+notes:
+  - This slice is the formal reset after the tmux migration review.
+  - It does not claim the runtime is already cut over; it redefines the accepted path so the next code changes can be judged against one coherent queue.

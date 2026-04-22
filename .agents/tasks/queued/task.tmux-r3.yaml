@@ -1,0 +1,32 @@
+id: task.tmux-r3
+kind: task
+version: 1
+title: build a new workspace lifecycle stack outside the legacy lifecycle module
+status: not_started
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - workspace-dir resolution, workspace identity, daemon/bootstrap policy, and attach policy move into new domain, application, and runtime modules
+  - `src/lifecycle.rs` stops being the implementation home for new local workspace behavior
+  - the new stack uses explicit service or runtime objects and shared traits rather than free-function growth
+  - duplicated workspace-key and runtime-path logic is collapsed into one authoritative path
+verification:
+  - cargo test
+  - targeted review of lifecycle ownership boundaries and duplication removal
+touched_paths:
+  - src/domain
+  - src/application
+  - src/runtime
+  - src/lifecycle.rs
+  - .agents/tasks/queued/task.tmux-r3.yaml
+notes:
+  - This slice builds the new lifecycle stack before default commands are cut over to it.

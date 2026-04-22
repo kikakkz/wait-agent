@@ -2,11 +2,11 @@ id: task.tmux-1
 kind: task
 version: 1
 title: build the tmux backend primitives and workspace-instance model
-status: in_progress
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: active
+  reference: historical
 depends_on:
   - task.lifecycle-5.done
 linked_primitives:
@@ -37,6 +37,5 @@ touched_paths:
   - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.tmux-1.yaml
 notes:
-  - This slice follows `task.tmux-0` and should build inside the new architecture skeleton rather than extending the old monolithic runtime.
-  - The backend should serve one or more waitagent instances and must not assume one process-global singleton.
-  - The backend should not rely on runtime shell commands or a separately installed tmux.
+  - This slice produced reusable foundations including the vendored tmux submodule, default build integration, and typed backend contracts.
+  - It is superseded as an execution slice because the backend remained a placeholder and the follow-on queue encouraged a bridge-heavy route back into the legacy lifecycle structure.

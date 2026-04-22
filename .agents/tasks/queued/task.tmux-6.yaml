@@ -2,11 +2,11 @@ id: task.tmux-6
 kind: task
 version: 1
 title: remove the obsolete custom fullscreen and live-surface path and validate shell plus Codex behavior
-status: not_started
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: historical
 depends_on:
   - task.tmux-5.done
 linked_primitives:
@@ -31,4 +31,4 @@ touched_paths:
   - .agents/tasks/queued/task.tmux-6.yaml
   - .agents/state/task-history.yaml
 notes:
-  - This is the cutover and cleanup slice. It should leave one clear primary local display path.
+  - This slice is superseded as part of the rewrite queue reset; the cleanup target remains valid but moves to the end of the new queue after the new runtime stack is genuinely in place.

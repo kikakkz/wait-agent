@@ -1,0 +1,35 @@
+id: task.tmux-r8
+kind: task
+version: 1
+title: remove the retired custom local display path and complete shell-plus-codex acceptance
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r7.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the old custom fullscreen and live-surface path is deleted or isolated as inactive historical compatibility code
+  - legacy modules no longer own the default local workspace path
+  - shell and Codex validation confirm that the tmux-first route solves the regressions that triggered the architecture change
+  - task and doc state record one clear primary local runtime path
+verification:
+  - cargo test
+  - manual: shell validation in a real terminal
+  - manual: Codex validation in a real terminal
+  - targeted review of retired-path deletion
+touched_paths:
+  - src/app.rs
+  - src/lifecycle.rs
+  - src/legacy
+  - docs/execution-status-board.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/queued/task.tmux-r8.yaml
+notes:
+  - This is the final cutover and cleanup slice for the local tmux-first migration.

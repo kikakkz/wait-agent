@@ -1,0 +1,32 @@
+id: task.tmux-r4
+kind: task
+version: 1
+title: route workspace-facing commands through the new tmux-first lifecycle stack
+status: not_started
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `waitagent workspace`, `attach`, `daemon`, `list`, `status`, and `detach` route through the new runtime stack rather than the legacy lifecycle path
+  - command compatibility is preserved while the old bridge path through `workspace_entry_runtime -> lifecycle.rs` is removed or demoted to compatibility-only legacy code
+  - the new composition root owns dependency construction for the default workspace runtime path
+verification:
+  - cargo test
+  - manual: fresh workspace, detach, reattach, list, and status through the new tmux-first route
+touched_paths:
+  - src/bootstrap.rs
+  - src/command
+  - src/runtime
+  - src/lifecycle.rs
+  - src/legacy
+  - .agents/tasks/queued/task.tmux-r4.yaml
+notes:
+  - This is the functional cutover slice for workspace-facing command entrypoints.

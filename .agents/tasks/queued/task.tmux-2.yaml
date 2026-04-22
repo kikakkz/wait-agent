@@ -2,11 +2,11 @@ id: task.tmux-2
 kind: task
 version: 1
 title: route workspace entry and attach lifecycle through tmux-backed instances
-status: not_started
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: historical
 depends_on:
   - task.tmux-1.done
 linked_primitives:
@@ -27,4 +27,4 @@ touched_paths:
   - src/tmux.rs
   - .agents/tasks/queued/task.tmux-2.yaml
 notes:
-  - This slice changes the default workspace route. It should avoid partial mixed ownership with the old custom display path.
+  - This split is superseded by the rewrite review because the attempted route introduced a new runtime wrapper that still delegated into `lifecycle.rs`, which is explicitly not the accepted migration shape.

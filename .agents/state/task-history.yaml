@@ -1,18 +1,30 @@
 kind: state
 version: 1
 history:
+  - task_id: task.tmux-r2
+    status: in_progress
+    summary: with the rewrite queue reset complete, active work now moves to replacing the placeholder tmux backend with a real vendored tmux control adapter
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r1
+    status: done
+    summary: the tmux migration task graph was reset around a clean rewrite boundary, the historical bridge-heavy queue was superseded, and the new rewrite sequence became the accepted execution plan
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r1.yaml
+      reference: status
+  - task_id: task.tmux-1
+    status: superseded
+    summary: the initial vendored tmux build and typed backend skeleton remain useful foundations, but the original tmux queue is superseded because placeholder backend behavior and the follow-on bridge plan do not satisfy the rewrite rules
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-1.yaml
+      reference: status
   - task_id: task.tmux-0
     status: done
     summary: the tmux-first runtime architecture slice landed with unified bootstrap entry, command dispatch, legacy boundary, and initial application, domain, runtime, infra, and ui skeleton modules outside the old monolith
     source_of_truth:
       file: .agents/tasks/queued/task.tmux-0.yaml
       reference: task.tmux-0
-  - task_id: task.tmux-1
-    status: in_progress
-    summary: with the runtime architecture skeleton in place, active work now moves to the vendored tmux backend primitives and glue-layer workspace-instance model
-    source_of_truth:
-      file: .agents/tasks/current.yaml
-      reference: status
   - task_id: task.t5-06
     status: deferred
     summary: aggregate server registry work is intentionally deferred until the tmux-first local workspace base replaces the retired custom fullscreen path

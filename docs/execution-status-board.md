@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.4`  
+Version: `v1.5`  
 Status: `Active`  
-Date: `2026-04-21`
+Date: `2026-04-22`
 
 ## 1. Purpose
 
@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `tmux-0` tmux-first runtime architecture and module-boundary establishment is now the active delivery gate
+- `tmux-r2` implement the real vendored tmux control adapter behind the new runtime interfaces
 
 Why this is the current gate:
 
@@ -57,7 +57,7 @@ Project status at a glance:
 - The old custom `native fullscreen` and `live surface` direction is formally retired as the target baseline
 - The current accepted local direction is `tmux-first`, with one session per tmux window, fullscreen implemented as pane zoom, and tmux vendored as a pinned backend rather than required as a system dependency
 - Network foundations up through client/server registration and remote session publication baselines also exist
-- The current machine focus is `tmux-0`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
+- The current machine focus is `tmux-r2`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
 
 ## 4. Milestone Summary
 
@@ -85,7 +85,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `tmux-0` Establish the new modular runtime architecture, unified entry model, and migration skeleton
+- `tmux-r2` Implement the real vendored tmux control adapter behind the new runtime interfaces
 
 Accepted local architecture direction:
 
@@ -99,12 +99,14 @@ Accepted local architecture direction:
 Accepted tmux-first delivery queue:
 
 1. `tmux-0` Establish the new modular runtime architecture, unified entry model, and migration skeleton
-2. `tmux-1` Build tmux backend primitives and workspace-instance model
-3. `tmux-2` Route workspace entry and attach lifecycle through tmux-backed instances
-4. `tmux-3` Implement persistent sidebar and footer panes as tmux-native UI panes
-5. `tmux-4` Implement tmux-native fullscreen zoom and fullscreen-only scroll handling
-6. `tmux-5` Move session switching and left-right focus semantics to tmux-native control
-7. `tmux-6` Remove obsolete custom fullscreen/live-surface path and validate shell plus Codex behavior
+2. `tmux-r1` Re-baseline the migration around a clean rewrite boundary and freeze the invalid bridge path
+3. `tmux-r2` Implement the real vendored tmux control adapter behind the new runtime interfaces
+4. `tmux-r3` Build a new workspace lifecycle stack outside the legacy lifecycle module
+5. `tmux-r4` Route workspace-facing commands through the new tmux-first lifecycle stack
+6. `tmux-r5` Implement persistent sidebar and footer panes as tmux-owned UI surfaces
+7. `tmux-r6` Implement tmux-native fullscreen zoom and fullscreen-only scrollback
+8. `tmux-r7` Move session switching and sidebar focus semantics onto tmux-native control
+9. `tmux-r8` Remove the obsolete custom local display path and complete shell plus Codex acceptance
 
 Deferred queue after local tmux-first stabilization:
 
@@ -120,6 +122,7 @@ Retired or absorbed queue:
 - `display-1`, `display-2`, `display-2a`, `display-2b`, and `display-2c` are now historical slices from the retired custom fullscreen direction
 - `display-3`, `runtime-1`, and `terminal-1` are absorbed by the tmux-first migration and are no longer the preferred cleanup path
 - `scroll-1` remains retired
+- the original `tmux-1` through `tmux-6` execution split is retained as historical planning only and is superseded by the rewrite queue above
 
 ## 7. Human Sign-Off Notes
 

@@ -1,8 +1,8 @@
 # WaitAgent Tmux-First Workspace Plan
 
-Version: `v1.0`  
+Version: `v1.1`  
 Status: `Accepted`  
-Date: `2026-04-21`
+Date: `2026-04-22`
 
 ## 1. Purpose
 
@@ -178,22 +178,26 @@ The migration must follow these rules:
 
 ## 10. Implementation Slices
 
-The accepted implementation queue is:
+The accepted implementation queue after the rewrite review is:
 
 1. `task.tmux-0`
    Establish the new modular runtime architecture, unified entry model, and migration skeleton.
-2. `task.tmux-1`
-   Build the tmux backend primitives and workspace-instance model.
-3. `task.tmux-2`
-   Route workspace entry and attach lifecycle through tmux-backed instances.
-4. `task.tmux-3`
-   Implement persistent sidebar and footer panes as tmux-native UI panes.
-5. `task.tmux-4`
-   Implement tmux-native fullscreen zoom and fullscreen-only scroll handling.
-6. `task.tmux-5`
-   Move session switching and left-right focus semantics fully onto tmux-native window and pane control.
-7. `task.tmux-6`
-   Remove the obsolete custom fullscreen/live-surface path and validate shell plus Codex behavior on the tmux path.
+2. `task.tmux-r1`
+   Re-baseline the migration around a clean rewrite boundary, freezing the invalid bridge path and clarifying what existing tmux work is retained.
+3. `task.tmux-r2`
+   Implement the real vendored tmux control adapter behind the new runtime interfaces.
+4. `task.tmux-r3`
+   Build a new workspace lifecycle stack outside the legacy lifecycle module.
+5. `task.tmux-r4`
+   Route workspace-facing commands through the new tmux-first lifecycle stack.
+6. `task.tmux-r5`
+   Implement persistent sidebar and footer panes as tmux-owned UI surfaces.
+7. `task.tmux-r6`
+   Implement tmux-native fullscreen zoom and fullscreen-only scrollback.
+8. `task.tmux-r7`
+   Move session switching and sidebar focus semantics onto tmux-native control.
+9. `task.tmux-r8`
+   Remove the obsolete custom local display path and complete shell-plus-codex acceptance.
 
 ## 11. Acceptance Criteria
 
@@ -218,3 +222,4 @@ That means:
 - old `display-*` fullscreen slices may be marked `superseded` even if code landed during that period
 - network tasks that assumed the old local display baseline should be deferred until the tmux-first path is stable
 - sidebar tasks remain product-relevant, but their implementation home moves from custom screen composition to tmux panes
+- the original `task.tmux-1` through `task.tmux-6` queue is also retained only as historical planning after the rewrite review found that the bridge-heavy route would preserve too much of the legacy lifecycle structure

@@ -1,0 +1,31 @@
+id: task.tmux-r7
+kind: task
+version: 1
+title: move session switching and sidebar focus semantics onto tmux-native control
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r6.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - session switching uses tmux window selection as the primary control path
+  - sidebar focus and return behavior use pane selection semantics rather than legacy display bookkeeping
+  - navigation remains responsive during live shell and Codex output
+verification:
+  - cargo test
+  - manual: repeated focus and session switching during live output
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - src/infra/tmux.rs
+  - .agents/tasks/queued/task.tmux-r7.yaml
+notes:
+  - This slice finishes the navigation ownership move after fullscreen and pane layout are already tmux-native.

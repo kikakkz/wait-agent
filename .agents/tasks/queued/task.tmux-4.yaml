@@ -2,11 +2,11 @@ id: task.tmux-4
 kind: task
 version: 1
 title: implement tmux-native fullscreen zoom and fullscreen-only scroll handling
-status: not_started
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: historical
 depends_on:
   - task.tmux-3.done
 linked_primitives:
@@ -27,4 +27,4 @@ touched_paths:
   - src/app.rs
   - .agents/tasks/queued/task.tmux-4.yaml
 notes:
-  - This slice replaces the old fullscreen implementation rather than trying to fix it again.
+  - This slice is superseded as part of the original queue reshuffle; the accepted fullscreen direction still stands and is now represented in the rewrite queue.

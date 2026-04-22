@@ -1,0 +1,31 @@
+id: task.tmux-r6
+kind: task
+version: 1
+title: implement tmux-native fullscreen zoom and fullscreen-only scrollback
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - fullscreen toggles tmux pane zoom for the main pane instead of entering the retired custom fullscreen path
+  - fullscreen history and scrolling use tmux-native pane history or copy-mode behavior
+  - fullscreen no longer leaves fake sidebar blanks or narrow-layout residue on shell or Codex sessions
+verification:
+  - cargo test
+  - manual: fullscreen plus scrollback on shell and Codex sessions
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/infra/tmux.rs
+  - src/legacy
+  - .agents/tasks/queued/task.tmux-r6.yaml
+notes:
+  - This slice replaces the old fullscreen behavior rather than trying to rehabilitate it.
