@@ -1,7 +1,73 @@
 kind: state
 version: 1
-last_updated_from: tmux-1 default vendored tmux cargo build path plus quiet cargo build and cargo test at 2026-04-22
+last_updated_from: tmux-r5 native tmux hook reconcile and single-row footer verified on release build with maximized desktop-terminal validation at 2026-04-22
 checks:
+  - id: tmux-r5-native-hook-reconcile-maximized-terminal
+    command: manual release validation by launching ./target/release/waitagent in a maximized desktop gnome-terminal and confirming the final live tmux geometry remains sidebar width 24 and footer height 1 at a 204x54 client after attach-time and window-manager resize hooks fire
+    status: pass
+  - id: tmux-r5-native-hook-reconcile-release-build
+    command: cargo build --release after adding native tmux client-attached and client-resized layout-reconcile hooks plus the single-row footer baseline
+    status: pass
+  - id: tmux-r5-native-hook-reconcile-cargo-test-quiet
+    command: cargo test --quiet after adding native tmux client-attached and client-resized layout-reconcile hooks plus the single-row footer baseline
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-manual-restore
+    command: manual release validation by attaching ./target/release/waitagent in /opt/data/workspace/wait-agent, forcing sidebar and footer panes to 35x5 with the matching vendored tmux client, then running env -u TMUX ./target/release/waitagent detach and confirming the final pane geometry returns to sidebar width 24 and footer height 2
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-release-ls-smoke
+    command: ./target/release/waitagent ls after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-release-build
+    command: cargo build --release after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-cargo-test-quiet
+    command: cargo test --quiet after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-fixed-size-menu-release-ls-smoke
+    command: ./target/release/waitagent ls after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-fixed-size-menu-release-build
+    command: cargo build --release after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-fixed-size-menu-cargo-test-quiet
+    command: cargo test --quiet after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-release-ls-smoke
+    command: ./target/release/waitagent ls after adding tmux-owned sidebar and footer pane bootstrap plus hidden pane-program commands
+    status: pass
+  - id: tmux-r5-release-build
+    command: cargo build --release after adding tmux-owned sidebar and footer pane bootstrap plus hidden pane-program commands
+    status: pass
+  - id: tmux-r5-layout-and-pane-runtime-cargo-test-quiet
+    command: cargo test --quiet after splitting the tmux adapter below 1000 lines, adding the layout service, hidden pane runtimes, and tmux-owned sidebar or footer bootstrap
+    status: pass
+  - id: tmux-r4-release-ls-smoke
+    command: ./target/release/waitagent ls after moving workspace-facing commands onto the tmux-native command runtime and managed session catalog
+    status: pass
+  - id: tmux-r4-release-build
+    command: cargo build --release after moving workspace-facing commands onto the tmux-native command runtime and managed session catalog
+    status: pass
+  - id: tmux-r4-command-cutover-cargo-test-quiet-session-catalog
+    command: cargo test --quiet after adding the tmux-native attach or ls or detach runtime path, the transport-agnostic managed session catalog shape, and composition-root dispatcher wiring
+    status: pass
+  - id: tmux-r4-status-command-removal-cargo-test-quiet
+    command: cargo test --quiet after removing the custom status command from the branded tmux command surface and tightening the persistent-pane and session-registry architecture constraints
+    status: pass
+  - id: tmux-r4-command-cutover-cargo-test-quiet
+    command: cargo test --quiet after routing workspace-facing command dispatch through WorkspaceCommandRuntime and demoting src/lifecycle.rs to the shared error boundary
+    status: pass
+  - id: tmux-r3-lifecycle-stack-complete-cargo-test-quiet
+    command: cargo test --quiet after moving daemon status management, attach runtime, daemon runtime, and workspace-readiness helpers out of src/lifecycle.rs into new runtime and application/domain modules
+    status: pass
+  - id: tmux-r3-workspace-bootstrap-extraction-cargo-test-quiet
+    command: cargo test --quiet after moving workspace path derivation and daemon bootstrap policy into new domain, application, and runtime modules
+    status: pass
+  - id: tmux-r2-real-vendored-tmux-adapter-tests
+    command: cargo test --quiet infra::tmux::tests after replacing the placeholder backend with a real vendored tmux control adapter and fail-fast build behavior
+    status: pass
+  - id: tmux-r2-full-cargo-test-quiet
+    command: cargo test --quiet after replacing the placeholder backend with a real vendored tmux control adapter and fail-fast build behavior
+    status: pass
   - id: tmux-1-default-vendored-build-cargo-build-quiet
     command: cargo build --quiet after moving build.rs orchestration into the tmux glue module, enabling default vendored tmux compilation, and installing the required system toolchain
     status: pass

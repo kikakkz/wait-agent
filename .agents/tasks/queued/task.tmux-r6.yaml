@@ -1,7 +1,7 @@
 id: task.tmux-r6
 kind: task
 version: 1
-title: implement tmux-native fullscreen zoom and fullscreen-only scrollback
+title: align fullscreen, scrollback, copy-mode, and detach controls with tmux-native behavior
 status: not_started
 priority: high
 source_of_truth:
@@ -15,12 +15,15 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - fullscreen toggles tmux pane zoom for the main pane instead of entering the retired custom fullscreen path
-  - fullscreen history and scrolling use tmux-native pane history or copy-mode behavior
-  - fullscreen no longer leaves fake sidebar blanks or narrow-layout residue on shell or Codex sessions
+  - fullscreen toggles tmux pane zoom for the main pane instead of entering any custom waitagent fullscreen path
+  - scrollback and copy-mode use tmux-native pane history and tmux-native copy-mode behavior
+  - fullscreen history browsing can reach the complete tmux pane history available for the zoomed main pane rather than a truncated subset of recent output
+  - waitagent-branded fullscreen and detach controls map onto tmux-native behavior rather than parallel waitagent-owned control paths
+  - fullscreen no longer leaves fake sidebar blanks, transcript replay artifacts, or narrow-layout residue on shell or Codex sessions
+  - exiting fullscreen cleanly restores the persistent sidebar and footer pane layout without extra waitagent-only layout repair logic
 verification:
   - cargo test
-  - manual: fullscreen plus scrollback on shell and Codex sessions
+  - manual: fullscreen, scrollback, copy-mode, and detach on shell and Codex sessions
 touched_paths:
   - src/runtime
   - src/application
@@ -29,3 +32,5 @@ touched_paths:
   - .agents/tasks/queued/task.tmux-r6.yaml
 notes:
   - This slice replaces the old fullscreen behavior rather than trying to rehabilitate it.
+  - Do not add waitagent-owned transcript replay, custom scroll models, or parallel detach control paths in this slice.
+  - Fullscreen acceptance requires that the user can browse the full tmux-backed pane history for the main shell or Codex pane after zoom, subject only to tmux history retention rather than a waitagent-imposed truncation.

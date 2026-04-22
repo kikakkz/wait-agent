@@ -1,36 +1,44 @@
-id: task.tmux-r2
+id: task.tmux-r5
 kind: task
 version: 1
-title: implement the real vendored tmux control adapter behind the new runtime interfaces
+title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
 status: in_progress
 priority: high
-target_task_reference: task.tmux-r2
+target_task_reference: task.tmux-r5
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: active
+  reference: next
 depends_on:
-  - task.tmux-r1.done
+  - task.tmux-r4.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - `src/infra/tmux.rs` stops acting as a placeholder and exposes real typed tmux control behavior behind trait boundaries
-  - the default build fails fast if vendored tmux is missing instead of silently compiling a runtime without the required backend
-  - the adapter owns stable workspace, window, and pane identities without duplicating workspace-key policy in legacy modules
-  - adapter tests validate the glue-layer contract and real control-surface ownership assumptions needed by later runtime slices
+  - each managed workspace can host a stable tmux layout with a real main pane plus waitagent-owned sidebar and footer panes
+  - sidebar and footer rendering move to dedicated waitagent pane programs or pane-oriented runtimes
+  - the main pane remains a tmux-native shell or agent surface and is no longer composed with sidebar or footer on the same display surface
+  - layout creation, restore, and focus handoff use tmux-native split and pane selection primitives rather than waitagent-owned frame composition
+  - the sidebar and footer consume a shared session-registry model that can later represent both local tmux sessions and future network-backed sessions
 verification:
   - cargo test
-  - targeted review of vendored tmux adapter behavior and build guarantees
+  - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
+  - manual: existing oversized sidebar and footer panes are normalized back to the fixed waitagent geometry during layout restore
+  - manual: a maximized desktop terminal attach triggers native tmux reconcile hooks that keep the sidebar at fixed width and the footer at a single row after client attach and resize
 touched_paths:
-  - build.rs
+  - src/cli.rs
+  - src/command
+  - src/ui
+  - src/runtime
+  - src/application
   - src/infra/tmux.rs
-  - src/infra/tmux_glue.rs
-  - src/infra/tmux_glue_build_script.rs
-  - src/domain/workspace.rs
-  - src/application/workspace_service.rs
-  - src/runtime/workspace_runtime.rs
-  - .agents/tasks/queued/task.tmux-r2.yaml
+  - src/infra/tmux_backend
+  - .agents/tasks/queued/task.tmux-r5.yaml
 notes:
-  - The retained vendored tmux build work from the superseded queue is input to this slice, not proof that the runtime adapter is already complete.
+  - This slice preserves the product contract while moving UI ownership into tmux panes.
+  - Do not reimplement shell rendering, scrollback, or fullscreen behavior here; the only new waitagent-owned surfaces should be the sidebar and footer panes.
+  - Sidebar and footer are architecturally persistent panes even if the main pane later zooms fullscreen.
+  - Root cause: bootstrap-only layout normalization cannot hold fixed chrome geometry after a later tmux client resize from the desktop window manager.
+  - Accepted fix: register native tmux `client-attached` and `client-resized` hooks that run a hidden waitagent layout reconcile command instead of patching attach-specific runtime paths.
+  - Footer baseline: the persistent menu bar is now one row high; later submenu work may temporarily expand it, but the default chrome must stay single-line.

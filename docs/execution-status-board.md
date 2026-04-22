@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `tmux-r2` implement the real vendored tmux control adapter behind the new runtime interfaces
+- `tmux-r3` build a new workspace lifecycle stack outside the legacy lifecycle module
 
 Why this is the current gate:
 
@@ -57,7 +57,7 @@ Project status at a glance:
 - The old custom `native fullscreen` and `live surface` direction is formally retired as the target baseline
 - The current accepted local direction is `tmux-first`, with one session per tmux window, fullscreen implemented as pane zoom, and tmux vendored as a pinned backend rather than required as a system dependency
 - Network foundations up through client/server registration and remote session publication baselines also exist
-- The current machine focus is `tmux-r2`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
+- The current machine focus is `tmux-r3`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
 
 ## 4. Milestone Summary
 
@@ -85,7 +85,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `tmux-r2` Implement the real vendored tmux control adapter behind the new runtime interfaces
+- `tmux-r3` Build a new workspace lifecycle stack outside the legacy lifecycle module
 
 Accepted local architecture direction:
 

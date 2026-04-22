@@ -1,7 +1,7 @@
 use crate::agent::live_agent_label as live_command_label;
 use crate::cli::{
     AttachCommand, Command, DaemonCommand, DetachCommand, ListCommand, RunCommand, ServerCommand,
-    StatusCommand, WorkspaceCommand,
+    WorkspaceCommand,
 };
 use crate::client::{
     normalize_endpoint, read_delegated_spawn_request, write_delegated_spawn_response,
@@ -209,10 +209,12 @@ impl App {
             Command::Workspace(workspace) | Command::WorkspaceInternal(workspace) => {
                 self.handle_workspace(workspace)
             }
+            Command::UiSidebar(_) | Command::UiFooter(_) | Command::LayoutReconcile(_) => {
+                unreachable!("hidden pane commands should be handled before legacy app execution")
+            }
             Command::Daemon(command) => self.handle_unexpected_daemon(command),
             Command::Attach(command) => self.handle_unexpected_attach(command),
             Command::List(command) => self.handle_unexpected_list(command),
-            Command::Status(command) => self.handle_unexpected_status(command),
             Command::Detach(command) => self.handle_unexpected_detach(command),
             Command::Run(run) => self.handle_run(run),
             Command::Server(server) => self.handle_server(server),
@@ -244,12 +246,6 @@ impl App {
     fn handle_unexpected_list(&mut self, _command: ListCommand) -> Result<(), AppError> {
         Err(AppError::InvalidCommand(
             "ls should be handled before workspace app startup".to_string(),
-        ))
-    }
-
-    fn handle_unexpected_status(&mut self, _command: StatusCommand) -> Result<(), AppError> {
-        Err(AppError::InvalidCommand(
-            "status should be handled before workspace app startup".to_string(),
         ))
     }
 

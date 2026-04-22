@@ -12,25 +12,25 @@ active:
     status: done
   - id: task.tmux-r2
     title: implement the real vendored tmux control adapter behind the new runtime interfaces
-    status: in_progress
-next:
+    status: done
   - id: task.tmux-r3
     title: build a new workspace lifecycle stack outside the legacy lifecycle module
-    status: not_started
+    status: done
+next:
   - id: task.tmux-r4
-    title: route workspace-facing commands through the new tmux-first lifecycle stack
-    status: not_started
+    title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases
+    status: done
   - id: task.tmux-r5
-    title: implement persistent sidebar and footer panes as tmux-owned UI surfaces
-    status: not_started
+    title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
+    status: in_progress
   - id: task.tmux-r6
-    title: implement tmux-native fullscreen zoom and fullscreen-only scrollback
+    title: align fullscreen, scrollback, copy-mode, and detach controls with tmux-native behavior
     status: not_started
   - id: task.tmux-r7
-    title: move session switching and sidebar focus semantics onto tmux-native control
+    title: layer waitagent session management and menus on top of tmux-native switching
     status: not_started
   - id: task.tmux-r8
-    title: remove the retired custom local display path and complete shell-plus-codex acceptance
+    title: remove transitional daemon and composed-display paths and complete shell-plus-codex acceptance
     status: not_started
   - id: task.tmux-2
     title: route workspace entry and attach lifecycle through tmux-backed instances
@@ -61,31 +61,31 @@ next:
     status: superseded
   - id: task.lifecycle-1
     title: wrap the current workspace runtime in a daemon-owned PTY envelope
-    status: done
+    status: superseded
   - id: task.lifecycle-2
     title: add workspace-local daemon discovery and single-client attach
-    status: done
+    status: superseded
   - id: task.lifecycle-3
     title: implement detach, reattach, and resize forwarding for the daemon envelope
-    status: done
+    status: superseded
   - id: task.lifecycle-4
     title: validate tmux-style persistence without changing interaction or rendering behavior
-    status: done
+    status: superseded
   - id: task.lifecycle-5
     title: support tmux-style attach workflows with multi-client attach and daemon listing
-    status: done
+    status: superseded
   - id: task.sidebar-1
     title: finalize the v1 right-side session sidebar contract and split the rollout into implementation slices
     status: done
   - id: task.sidebar-2
     title: implement sidebar focus mode with unified left-right navigation
-    status: done
+    status: superseded
   - id: task.sidebar-3
     title: render one-line sidebar session rows with agent labels and wait-state badges
-    status: done
+    status: superseded
   - id: task.sidebar-4
     title: polish the default-visible sidebar detail area and enter-to-switch behavior
-    status: deferred
+    status: superseded
   - id: task.t5-06
     title: implement the aggregate server session registry
     status: deferred
@@ -126,6 +126,9 @@ notes:
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
   - The lifecycle queue is complete enough to support the tmux-first migration; resumed network expansion is deferred until the local display baseline is rebuilt on tmux-native ownership boundaries.
   - The tmux-first migration now includes an architecture-first slice because the old code structure is not an acceptable foundation for a large local-runtime rewrite.
+  - The accepted destination is a waitagent-branded tmux-like tool: `workspace` may remain as bootstrap UX, but core runtime identity and command semantics should converge on tmux-native targets and capabilities.
+  - The lifecycle daemon queue and old composed-sidebar implementation queue are now historical transitional work, not the accepted destination; they should not drive future architecture decisions.
+  - The refined execution order is: tmux-native command semantics first, tmux-owned sidebar and footer second, tmux-native fullscreen and control behavior third, waitagent management affordances fourth, and only then final transitional-path deletion.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

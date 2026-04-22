@@ -17,6 +17,17 @@ constraints:
   - Every `.rs` file must stay at or below 1000 lines; if a Rust file grows beyond that limit, split it into smaller modules before continuing feature work.
   - Vendored tmux must build as part of the default `cargo build` path; do not hide tmux compilation behind opt-in environment-variable gates.
   - Keep `build.rs` minimal and move vendored tmux build orchestration into the tmux glue module rather than accumulating build logic directly in the script entrypoint.
+  - Preserve command compatibility where it matters, but do not preserve legacy code structure for its own sake; large tmux-first slices may replace old implementation paths with new modules when that yields cleaner ownership.
+  - New Rust code should converge on one style: trait-oriented boundaries, explicit service or runtime objects, and clear layering over ad hoc free-function growth.
+  - When integrating Rust or tmux behavior that is not already well-understood in the repository, consult the relevant official documentation and source code before locking in abstractions.
+  - From now on, Rust component selection should prefer mature, widely used, and actively maintained libraries rather than custom infrastructure or niche dependencies.
+  - Do not reinvent abstractions that established maintained Rust components already solve well.
+  - Do not adopt temporary, weakly maintained, or convenience-first components for core runtime architecture; dependency choices must bias toward long-term maintenance health and ecosystem maturity.
+  - Treat waitagent as a branded tmux-like tool rather than a parallel multiplexer; except for sidebar, footer/menu, branding, and management affordances, maximize reuse of tmux native behavior and targets.
+  - `workspace` may remain as a convenience bootstrap alias, but long-lived runtime identity should converge on tmux-native targets rather than waitagent-owned daemon sockets or custom attach protocols.
+  - Sidebar and footer or menu are persistent tmux-owned panes in the target architecture; fullscreen is main-pane zoom with clean pane restore, not a separate waitagent display mode.
+  - Fullscreen history browsing must expose the complete tmux pane history available to the zoomed main pane; waitagent must not introduce its own truncated fullscreen-history subset.
+  - Session discovery, sidebar state, footer state, and future network-session management must converge on one transport-agnostic session registry model rather than separate local and remote bookkeeping paths.
 source_of_truth:
   - README.md
   - docs/architecture.md

@@ -1,7 +1,7 @@
 id: task.tmux-r7
 kind: task
 version: 1
-title: move session switching and sidebar focus semantics onto tmux-native control
+title: layer waitagent session management and menus on top of tmux-native switching
 status: not_started
 priority: high
 source_of_truth:
@@ -15,8 +15,9 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - session switching uses tmux window selection as the primary control path
-  - sidebar focus and return behavior use pane selection semantics rather than legacy display bookkeeping
+  - session switching uses tmux window or session selection as the primary control path
+  - sidebar focus, return behavior, and menu actions use tmux-native pane and window selection semantics rather than legacy display bookkeeping
+  - waitagent-specific management affordances are limited to branded menus, discovery helpers, and metadata presentation layered on top of tmux-native control
   - navigation remains responsive during live shell and Codex output
 verification:
   - cargo test
@@ -29,3 +30,4 @@ touched_paths:
   - .agents/tasks/queued/task.tmux-r7.yaml
 notes:
   - This slice finishes the navigation ownership move after fullscreen and pane layout are already tmux-native.
+  - Avoid inventing a separate waitagent window manager; menu actions should translate into tmux-native target selection and control.

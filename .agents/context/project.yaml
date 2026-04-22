@@ -15,10 +15,10 @@ current_phase:
   stage_id: tmux-first-local-architecture-migration
   stage_title: replace the retired custom fullscreen baseline with tmux-native workspace ownership
 current_focus:
-  default_task_id: task.tmux-r2
-  focus_statement: replace the placeholder tmux backend with a real vendored control adapter before building the new workspace lifecycle stack on top of it
+  default_task_id: task.tmux-r3
+  focus_statement: build a new workspace lifecycle stack outside the legacy lifecycle module now that the vendored tmux control adapter is in place
 upcoming_focus:
-  - build a new workspace lifecycle stack outside the old lifecycle module and cut commands over to it
+  - cut workspace-facing commands over to the new tmux-first lifecycle stack
   - move sidebar, menu, fullscreen, and session switching onto tmux-native ownership boundaries
   - resume aggregate server registry work after the local tmux-first base is stable
 source_of_truth:

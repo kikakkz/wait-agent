@@ -1,11 +1,89 @@
 kind: state
 version: 1
 history:
-  - task_id: task.tmux-r2
+  - task_id: task.tmux-r4
     status: in_progress
-    summary: with the rewrite queue reset complete, active work now moves to replacing the placeholder tmux backend with a real vendored tmux control adapter
+    summary: the tmux-native cutover has been refined into a stricter sequence where command semantics and target identity move first, tmux-owned sidebar and footer panes land second, fullscreen and controls align third, and transitional daemon paths are removed only after tmux-native replacements exist
     source_of_truth:
       file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.sidebar-4
+    status: superseded
+    summary: the deferred polish slice for the old composed sidebar path is no longer accepted because sidebar and footer must land as tmux-owned panes instead
+    source_of_truth:
+      file: .agents/tasks/queued/task.sidebar-4.yaml
+      reference: status
+  - task_id: task.sidebar-3
+    status: superseded
+    summary: the old composed-surface sidebar row renderer is now historical only because the accepted destination is a tmux-owned sidebar pane
+    source_of_truth:
+      file: .agents/tasks/queued/task.sidebar-3.yaml
+      reference: status
+  - task_id: task.sidebar-2
+    status: superseded
+    summary: the old composed-surface sidebar focus navigation implementation is now historical only because sidebar focus must move to tmux-owned panes
+    source_of_truth:
+      file: .agents/tasks/queued/task.sidebar-2.yaml
+      reference: status
+  - task_id: task.lifecycle-5
+    status: superseded
+    summary: multi-attach and host-wide listing through waitagent daemon instances are no longer the accepted target because attach and ls should converge on tmux-native targets
+    source_of_truth:
+      file: .agents/tasks/queued/task.lifecycle-5.yaml
+      reference: status
+  - task_id: task.lifecycle-4
+    status: superseded
+    summary: daemonized persistence validation remains historical evidence only because the validated daemon path is no longer the accepted target architecture
+    source_of_truth:
+      file: .agents/tasks/queued/task.lifecycle-4.yaml
+      reference: status
+  - task_id: task.lifecycle-3
+    status: superseded
+    summary: daemon-envelope detach, reattach, and resize forwarding are no longer the target because those behaviors should converge on tmux-native control
+    source_of_truth:
+      file: .agents/tasks/queued/task.lifecycle-3.yaml
+      reference: status
+  - task_id: task.lifecycle-2
+    status: superseded
+    summary: workspace-local daemon identity and attach discovery are now historical because waitagent should converge on tmux-native target identity instead
+    source_of_truth:
+      file: .agents/tasks/queued/task.lifecycle-2.yaml
+      reference: status
+  - task_id: task.lifecycle-1
+    status: superseded
+    summary: the daemon-owned PTY envelope is now historical because a parallel waitagent multiplexer is not the accepted endpoint architecture
+    source_of_truth:
+      file: .agents/tasks/queued/task.lifecycle-1.yaml
+      reference: status
+  - task_id: task.tmux-r4
+    status: in_progress
+    summary: the active cutover direction has been narrowed so waitagent behaves like branded tmux, with workspace kept as bootstrap UX while attach, list, status, detach, and control behavior converge on tmux-native targets and capabilities
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r4
+    status: in_progress
+    summary: with the new workspace lifecycle stack extracted from the legacy lifecycle module, active work now moves to cutting workspace-facing command entrypoints over to the tmux-first runtime path
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r3
+    status: done
+    summary: workspace path/bootstrap policy, daemon status management, attach runtime, daemon runtime, and readiness helpers were moved into new domain, application, and runtime modules, leaving src/lifecycle.rs as a thin command-and-error boundary
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r3.yaml
+      reference: status
+  - task_id: task.tmux-r3
+    status: in_progress
+    summary: with the real vendored tmux adapter in place, active work now moves to building a new workspace lifecycle stack outside the legacy lifecycle module
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r2
+    status: done
+    summary: the placeholder tmux backend was replaced with a real vendored tmux control adapter, default builds now fail fast when vendored tmux is missing, and cargo test passed with real tmux-backed adapter coverage
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r2.yaml
       reference: status
   - task_id: task.tmux-r1
     status: done

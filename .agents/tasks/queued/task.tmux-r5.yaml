@@ -1,8 +1,8 @@
 id: task.tmux-r5
 kind: task
 version: 1
-title: implement persistent sidebar and footer panes as tmux-owned UI surfaces
-status: not_started
+title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
+status: in_progress
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -15,17 +15,35 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - each managed session window can host a stable three-pane layout with a real main pane plus sidebar and footer panes
+  - each managed workspace can host a stable tmux layout with a real main pane plus waitagent-owned sidebar and footer panes
   - sidebar and footer rendering move to dedicated waitagent pane programs or pane-oriented runtimes
-  - main-pane output is no longer composed with sidebar or footer on the same display surface
+  - the main pane remains a tmux-native shell or agent surface and is no longer composed with sidebar or footer on the same display surface
+  - layout creation, restore, and focus handoff use tmux-native split and pane selection primitives rather than waitagent-owned frame composition
+  - the sidebar and footer consume a shared session-registry model that can later represent both local tmux sessions and future network-backed sessions
 verification:
   - cargo test
   - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
+  - manual: existing oversized sidebar and footer panes are normalized back to the fixed waitagent geometry during layout restore
+  - manual: a maximized desktop terminal attach triggers native tmux reconcile hooks that keep the sidebar at fixed width and the footer at a single row after client attach and resize
 touched_paths:
+  - src/cli.rs
+  - src/command
   - src/ui
   - src/runtime
   - src/application
   - src/infra/tmux.rs
+  - src/infra/tmux_backend
   - .agents/tasks/queued/task.tmux-r5.yaml
 notes:
   - This slice preserves the product contract while moving UI ownership into tmux panes.
+  - Do not reimplement shell rendering, scrollback, or fullscreen behavior here; the only new waitagent-owned surfaces should be the sidebar and footer panes.
+  - Sidebar and footer are architecturally persistent panes even if the main pane later zooms fullscreen.
+  - 2026-04-22 progress: workspace bootstrap now ensures a tmux-owned sidebar pane and a tmux-owned footer pane through a dedicated layout runtime plus hidden pane-program entrypoints.
+  - 2026-04-22 progress: sidebar and footer panes now consume the shared managed-session catalog shape instead of the legacy composed display state, but real-terminal visual validation with shell and codex is still pending.
+  - 2026-04-22 progress: sidebar width and footer height now default to fixed tmux-native cell sizes rather than oversized percentages, which makes the chrome materially less intrusive before later show or hide and menu interaction work.
+  - 2026-04-22 progress: the footer pane now renders a branded waitagent menu skeleton instead of only generic hint text, but menu actions and sidebar toggle behavior are still pending later tmux-native slices.
+  - 2026-04-22 root cause: the oversize chrome bug was not caused by tmux preferring large panes; it happened because layout restore only applied split sizes when panes were first created and never normalized the geometry of already-existing waitagent-owned panes.
+  - 2026-04-22 verification: release-terminal validation confirmed that after manually inflating the existing sidebar and footer panes to 35x5, the waitagent restore path returned them to 24x2.
+  - 2026-04-22 root cause refinement: a maximized desktop terminal can attach at one size and then receive a later client resize from the window manager; tmux reflows the session layout during that later resize, and bootstrap-only normalization does not reapply the fixed waitagent chrome geometry.
+  - 2026-04-22 progress: waitagent now registers native tmux `client-attached` and `client-resized` hooks that run a hidden layout-reconcile command, so chrome geometry is restored after attach-time and window-manager resize events without routing the fix through attach-specific runtime patches.
+  - 2026-04-22 progress: footer chrome now defaults to a single fixed row and renders a single-line menu summary; later submenu work may temporarily expand it, but the persistent footer baseline is now one row.

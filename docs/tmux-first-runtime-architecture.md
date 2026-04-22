@@ -52,6 +52,39 @@ The tmux-first architecture follows these principles:
    For tmux specifically, the adapter is a vendored submodule plus a Rust glue layer, not a shell-command wrapper around a user-installed binary.
 5. Strangler migration
    old code may coexist temporarily, but new tmux-first work should land in new modules and pull responsibility out of `app.rs`, not add to it.
+6. Command compatibility over code compatibility
+   preserve the user-facing command surface where needed, but do not preserve old module structure or runtime plumbing when a clean replacement is clearer.
+7. Trait-oriented boundaries
+   prefer trait-backed adapters, explicit service objects, and runtime objects over growing monolithic function clusters.
+8. Document-and-source-driven integration
+   when Rust standard behavior, Cargo build behavior, or tmux behavior is uncertain, check the official docs and relevant source before freezing the abstraction.
+9. Branded tmux over custom runtime
+   waitagent should behave like a branded tmux distribution wherever possible.
+   Except for waitagent-specific sidebar, footer/menu, and management surfaces, local runtime behavior should reuse tmux native concepts and semantics rather than rebuilding them in a custom daemon or socket protocol.
+
+## 4.1 Native Reuse Rules
+
+The intended product is not a new terminal multiplexer that merely borrows tmux pieces.
+It is a waitagent-branded tmux-like tool with a narrow amount of product-specific chrome.
+
+Effective interpretation:
+
+- keep the executable and product surface branded as `waitagent`
+- preserve convenience entry by workspace directory where that improves UX
+- after entry, runtime identity should be tmux-native
+  `server/socket -> session -> window -> pane`
+- `workspace` is a bootstrap alias, not the primary long-lived runtime identity
+- `attach`, `ls`, `detach`, fullscreen, scrollback, copy-mode, pane switching, and related control flow should default to tmux-native behavior
+- do not invent a dedicated waitagent-only `status` command unless tmux-native semantics prove insufficient and the extra command is justified as a waitagent-specific management surface
+- waitagent-owned code should focus on:
+  - sidebar pane
+  - footer/menu pane
+  - session discovery and management affordances layered on top of tmux
+  - product-specific defaults and branding
+
+Anti-goal:
+
+- do not keep building a parallel waitagent-owned daemon protocol for features that tmux already provides natively
 
 ## 5. Target Layering
 
@@ -108,6 +141,12 @@ Typical modules:
 - `domain/workspace.rs`
 - `domain/layout.rs`
 - `domain/focus.rs`
+- `domain/session_registry.rs`
+
+Rule:
+
+- session identity used by sidebar, footer, menus, and future network-session management should be transport-agnostic
+- local tmux sessions and future remote sessions should project into one shared domain model rather than separate ad hoc side registries
 
 ### 5.4 `application/`
 
@@ -124,6 +163,7 @@ Typical services:
 - `LayoutService`
 - `FocusService`
 - `FullscreenService`
+- `SessionRegistryService`
 
 Rule:
 
@@ -134,16 +174,18 @@ Rule:
 
 Responsibilities:
 
-- host long-lived runtime loops
-- manage workspace instance lifecycle
-- host daemon state if daemon remains part of the design
-- coordinate background readers, event fanout, and shutdown
+- host the minimum waitagent-owned runtime needed around tmux-native control
+- manage workspace bootstrap and waitagent-specific pane programs
+- coordinate startup and product-specific surfaces that tmux itself does not provide
+- own layout restore rules for persistent sidebar and footer panes plus main-pane zoom restore
 
 Typical modules:
 
 - `runtime/workspace_runtime.rs`
-- `runtime/daemon_runtime.rs`
-- `runtime/attach_runtime.rs`
+- `runtime/workspace_bootstrap_runtime.rs`
+- `runtime/layout_runtime.rs`
+- `runtime/sidebar_runtime.rs`
+- `runtime/footer_runtime.rs`
 - `runtime/ui_runtime.rs`
 
 ### 5.6 `infra/`
@@ -166,6 +208,8 @@ Rule:
 
 - infrastructure code owns sockets, file descriptors, build integration, and the Rust glue boundary into vendored tmux
 - business policy should not live here
+- prefer direct typed tmux capabilities over custom compatibility protocols when tmux already exposes the needed control surface
+- future network-session transport adapters should enter here behind the same session-registry abstractions consumed by application and UI layers
 
 Vendored tmux rule:
 
@@ -220,11 +264,35 @@ Representative command families:
 
 - `workspace`
 - `attach`
-- `daemon`
-- `status`
+- `ls`
 - `detach`
 - `ui-sidebar`
 - `ui-footer`
+
+Command model rule:
+
+- `workspace` is the friendly entry alias that maps the current directory to a tmux target
+- `attach`, `ls`, and `detach` should converge toward tmux-native target semantics rather than waitagent-specific daemon identity
+- waitagent-specific management commands should only exist where tmux has no native equivalent and where the command is part of sidebar, footer, or multi-session management product value
+
+## 6.1 Persistent Layout Rule
+
+The waitagent local UI should be designed around one persistent tmux layout:
+
+- a main tmux pane for shell or agent execution
+- a persistent right sidebar pane
+- a persistent bottom footer or menu pane
+
+Fullscreen rule:
+
+- the main pane may zoom fullscreen using tmux-native zoom behavior
+- sidebar and footer are still architectural first-class panes and must restore cleanly after zoom exit
+- history viewing during fullscreen should rely on tmux scrollback and copy-mode rather than custom replay layers
+
+Future-proofing rule:
+
+- sidebar and footer should consume a shared session registry and layout model that can represent both local tmux sessions and future network-backed sessions
+- do not hardwire sidebar or footer state to one local-only daemon model
 
 This is better than the current split where command ownership is spread across `app.rs` and `lifecycle.rs` with different runtime styles.
 
@@ -237,6 +305,14 @@ Effective immediately:
 - old modules should lose responsibility over time instead of gaining new tmux-specific branches
 - command handling should move toward one style and naming convention
 - new modules should prefer explicit service types over giant free-function clusters or giant `impl App`
+- preserve command compatibility where product behavior depends on it, but do not preserve old lifecycle code structure as a design constraint
+- maximize reuse of tmux-native behavior instead of recreating tmux features in waitagent-owned runtime code
+- if tmux already has a stable primitive for a user-visible feature, prefer exposing or wrapping that primitive over inventing a parallel waitagent protocol
+- prefer trait-oriented adapter or service boundaries and explicit runtime objects so new modules converge on one style
+- consult relevant Rust docs, Cargo docs, tmux docs, and source code when an integration detail is not already obvious from the local codebase
+- from now on, prefer mature, widely used, and actively maintained Rust components across the board rather than homegrown infrastructure or niche dependencies
+- do not reinvent abstractions that established maintained Rust components already solve well
+- do not choose temporary or weakly maintained components for core architecture, even if they appear convenient in the short term
 - no Rust source file may exceed 1000 lines; once a file approaches that limit, split it into narrower modules before adding more logic
 - vendored tmux must compile in the default `cargo build` path; opt-in environment-variable gates are not an acceptable steady-state build model
 - `build.rs` should stay thin and delegate vendored tmux build orchestration to tmux glue modules rather than embedding that logic inline

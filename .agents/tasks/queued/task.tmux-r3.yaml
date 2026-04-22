@@ -2,11 +2,11 @@ id: task.tmux-r3
 kind: task
 version: 1
 title: build a new workspace lifecycle stack outside the legacy lifecycle module
-status: not_started
+status: done
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: active
 depends_on:
   - task.tmux-r2.done
 linked_primitives:
@@ -30,3 +30,5 @@ touched_paths:
   - .agents/tasks/queued/task.tmux-r3.yaml
 notes:
   - This slice builds the new lifecycle stack before default commands are cut over to it.
+  - Completed on 2026-04-22 after moving workspace path/bootstrap, daemon status management, attach runtime, daemon runtime, and readiness helpers out of `src/lifecycle.rs`, with `cargo test --quiet` passing.
+  - Under the branded-tmux review on 2026-04-22, the workspace path/bootstrap extraction remains useful, but the daemon-centered runtime outputs from this slice are now considered transitional rather than target architecture.

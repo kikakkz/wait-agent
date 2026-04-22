@@ -2,7 +2,7 @@ id: task.sidebar-3
 kind: task
 version: 1
 title: render one-line sidebar session rows with agent labels and wait-state badges
-status: done
+status: superseded
 priority: medium
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -28,3 +28,4 @@ touched_paths:
 notes:
   - If a stable session wait state cannot yet be derived, the row must show `UNKNOWN` rather than guessing.
   - The current prototype renders one line per session, uses the detected agent or shell label, and maps unknown wait states to `UNKNOWN`.
+  - Superseded on 2026-04-22 because the accepted destination is a tmux-owned sidebar pane rather than rows rendered in the retired composed display surface.

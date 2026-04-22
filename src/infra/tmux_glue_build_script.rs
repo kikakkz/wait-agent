@@ -52,7 +52,10 @@ pub fn run() {
     let glue_build_root = out_dir.join(TMUX_GLUE_BUILD_DIR_NAME);
 
     if !vendored_tmux_source.exists() {
-        return;
+        panic!(
+            "vendored tmux source is missing at {}. Initialize the pinned submodule before building waitagent",
+            vendored_tmux_source.display()
+        );
     }
 
     let plan = TmuxGlueBuildPlan::new(&vendored_tmux_source, &glue_build_root);

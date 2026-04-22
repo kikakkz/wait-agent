@@ -2,7 +2,7 @@ id: task.lifecycle-1
 kind: task
 version: 1
 title: wrap the current workspace runtime in a daemon-owned PTY envelope
-status: done
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -32,3 +32,4 @@ touched_paths:
 notes:
   - Do not refactor the existing workspace interaction loop or stabilized rendering behavior in this task.
   - Treat the current waitagent workspace as an opaque child runtime that the daemon hosts through a PTY.
+  - Superseded on 2026-04-22 after the branded-tmux review concluded that a waitagent-owned daemon envelope is not the accepted endpoint local runtime model.
