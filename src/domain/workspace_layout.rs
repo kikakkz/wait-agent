@@ -6,4 +6,5 @@ pub struct WorkspaceChromeLayout {
     pub main_pane: TmuxPaneId,
     pub sidebar_pane: TmuxPaneId,
     pub footer_pane: TmuxPaneId,
+    pub sidebar_width: u16,
 }

@@ -2,6 +2,10 @@ use crate::domain::workspace_layout::WorkspaceChromeLayout;
 use crate::infra::tmux::{TmuxControlGateway, TmuxWorkspaceHandle};
 
 const FULLSCREEN_TOGGLE_KEY: &str = "C-o";
+const SIDEBAR_FOCUS_KEY: &str = "Right";
+const MAIN_FOCUS_KEY: &str = "Left";
+const SIDEBAR_HIDE_KEY: &str = "h";
+const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
 const TMUX_MOUSE_OPTION: &str = "mouse";
 const TMUX_OPTION_ON: &str = "on";
 
@@ -24,7 +28,8 @@ where
     ) -> Result<(), G::Error> {
         self.tmux
             .set_session_option(workspace, TMUX_MOUSE_OPTION, TMUX_OPTION_ON)?;
-        self.bind_main_pane_fullscreen_toggle(workspace, layout)
+        self.bind_main_pane_fullscreen_toggle(workspace, layout)?;
+        self.bind_waitagent_sidebar_controls(workspace, layout)
     }
 
     fn bind_main_pane_fullscreen_toggle(
@@ -34,6 +39,34 @@ where
     ) -> Result<(), G::Error> {
         self.tmux
             .bind_main_pane_zoom_toggle(workspace, FULLSCREEN_TOGGLE_KEY, &layout.main_pane)
+    }
+
+    fn bind_waitagent_sidebar_controls(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        layout: &WorkspaceChromeLayout,
+    ) -> Result<(), G::Error> {
+        self.tmux.bind_waitagent_focus_sidebar(
+            workspace,
+            SIDEBAR_FOCUS_KEY,
+            &layout.sidebar_pane,
+            layout.sidebar_width,
+        )?;
+        self.tmux
+            .bind_waitagent_focus_main(workspace, MAIN_FOCUS_KEY, &layout.main_pane)?;
+        self.tmux.bind_waitagent_sidebar_back(
+            workspace,
+            MAIN_FOCUS_KEY,
+            &layout.sidebar_pane,
+            &layout.main_pane,
+        )?;
+        self.tmux.bind_waitagent_sidebar_hide(
+            workspace,
+            SIDEBAR_HIDE_KEY,
+            &layout.sidebar_pane,
+            &layout.main_pane,
+            SIDEBAR_COLLAPSED_WIDTH,
+        )
     }
 }
 
@@ -54,6 +87,10 @@ mod tests {
         SetSessionOption(String, String),
         BindWithoutPrefix(String, Vec<String>),
         BindMainPaneZoomToggle(String, String),
+        BindWaitagentFocusSidebar(String, String, u16),
+        BindWaitagentFocusMain(String, String),
+        BindWaitagentSidebarBack(String, String, String),
+        BindWaitagentSidebarHide(String, String, String, u16),
     }
 
     #[derive(Clone, Default)]
@@ -265,6 +302,68 @@ mod tests {
             ));
             Ok(())
         }
+
+        fn bind_waitagent_focus_sidebar(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            sidebar: &TmuxPaneId,
+            sidebar_width: u16,
+        ) -> Result<(), Self::Error> {
+            self.calls
+                .borrow_mut()
+                .push(Call::BindWaitagentFocusSidebar(
+                    key.to_string(),
+                    sidebar.as_str().to_string(),
+                    sidebar_width,
+                ));
+            Ok(())
+        }
+
+        fn bind_waitagent_focus_main(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            main: &TmuxPaneId,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentFocusMain(
+                key.to_string(),
+                main.as_str().to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_waitagent_sidebar_back(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            sidebar: &TmuxPaneId,
+            main: &TmuxPaneId,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentSidebarBack(
+                key.to_string(),
+                sidebar.as_str().to_string(),
+                main.as_str().to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_waitagent_sidebar_hide(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            sidebar: &TmuxPaneId,
+            main: &TmuxPaneId,
+            collapsed_width: u16,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentSidebarHide(
+                key.to_string(),
+                sidebar.as_str().to_string(),
+                main.as_str().to_string(),
+                collapsed_width,
+            ));
+            Ok(())
+        }
     }
 
     #[test]
@@ -284,6 +383,7 @@ mod tests {
             main_pane: TmuxPaneId::new("%1"),
             sidebar_pane: TmuxPaneId::new("%2"),
             footer_pane: TmuxPaneId::new("%3"),
+            sidebar_width: 24,
         };
 
         service
@@ -295,6 +395,19 @@ mod tests {
             vec![
                 Call::SetSessionOption("mouse".to_string(), "on".to_string()),
                 Call::BindMainPaneZoomToggle("C-o".to_string(), "%1".to_string()),
+                Call::BindWaitagentFocusSidebar("Right".to_string(), "%2".to_string(), 24),
+                Call::BindWaitagentFocusMain("Left".to_string(), "%1".to_string()),
+                Call::BindWaitagentSidebarBack(
+                    "Left".to_string(),
+                    "%2".to_string(),
+                    "%1".to_string(),
+                ),
+                Call::BindWaitagentSidebarHide(
+                    "h".to_string(),
+                    "%2".to_string(),
+                    "%1".to_string(),
+                    1,
+                ),
             ]
         );
     }

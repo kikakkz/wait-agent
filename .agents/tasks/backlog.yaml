@@ -32,6 +32,9 @@ next:
   - id: task.tmux-r7
     title: layer waitagent session management and menus on top of tmux-native switching
     status: in_progress
+  - id: task.tmux-r7a
+    title: keep the waitagent menu visible while the main session is zoomed fullscreen
+    status: not_started
   - id: task.tmux-r8
     title: remove transitional daemon and composed-display paths and complete shell-plus-codex acceptance
     status: not_started

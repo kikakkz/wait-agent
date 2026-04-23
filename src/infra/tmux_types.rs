@@ -292,4 +292,36 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         key: &str,
         pane: &TmuxPaneId,
     ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_focus_sidebar(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        sidebar: &TmuxPaneId,
+        sidebar_width: u16,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_focus_main(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        main: &TmuxPaneId,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_sidebar_back(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        sidebar: &TmuxPaneId,
+        main: &TmuxPaneId,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_sidebar_hide(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        sidebar: &TmuxPaneId,
+        main: &TmuxPaneId,
+        collapsed_width: u16,
+    ) -> Result<(), Self::Error>;
 }

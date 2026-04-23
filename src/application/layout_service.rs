@@ -96,6 +96,7 @@ where
             main_pane,
             sidebar_pane,
             footer_pane,
+            sidebar_width: self.sidebar_width.cells_or_default(),
         })
     }
 
@@ -151,6 +152,19 @@ where
         tmux.set_pane_height(workspace, pane, *height)?;
     }
     Ok(())
+}
+
+trait SplitSizeCells {
+    fn cells_or_default(&self) -> u16;
+}
+
+impl SplitSizeCells for TmuxSplitSize {
+    fn cells_or_default(&self) -> u16 {
+        match self {
+            Self::Cells(value) => *value,
+            Self::Percent(_) => 0,
+        }
+    }
 }
 
 #[cfg(test)]
