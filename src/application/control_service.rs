@@ -5,9 +5,17 @@ const FULLSCREEN_TOGGLE_KEY: &str = "C-o";
 const SIDEBAR_FOCUS_KEY: &str = "Right";
 const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
+const FOOTER_CREATE_KEY: &str = "c";
+const FOOTER_SESSIONS_KEY: &str = "s";
+const FOOTER_SWITCH_KEY: &str = "Enter";
 const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
 const TMUX_MOUSE_OPTION: &str = "mouse";
 const TMUX_OPTION_ON: &str = "on";
+
+pub struct FooterMenuBindings {
+    pub create_session_command: String,
+    pub open_sessions_menu_command: String,
+}
 
 pub struct ControlService<G> {
     tmux: G,
@@ -25,11 +33,13 @@ where
         &self,
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
+        footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
         self.tmux
             .set_session_option(workspace, TMUX_MOUSE_OPTION, TMUX_OPTION_ON)?;
         self.bind_main_pane_fullscreen_toggle(workspace, layout)?;
-        self.bind_waitagent_sidebar_controls(workspace, layout)
+        self.bind_waitagent_sidebar_controls(workspace, layout)?;
+        self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
     }
 
     fn bind_main_pane_fullscreen_toggle(
@@ -49,6 +59,7 @@ where
         self.tmux.bind_waitagent_focus_sidebar(
             workspace,
             SIDEBAR_FOCUS_KEY,
+            &layout.main_pane,
             &layout.sidebar_pane,
             layout.sidebar_width,
         )?;
@@ -68,11 +79,41 @@ where
             SIDEBAR_COLLAPSED_WIDTH,
         )
     }
+
+    fn bind_waitagent_footer_controls(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        layout: &WorkspaceChromeLayout,
+        footer_bindings: Option<&FooterMenuBindings>,
+    ) -> Result<(), G::Error> {
+        let Some(footer_bindings) = footer_bindings else {
+            return Ok(());
+        };
+
+        self.tmux.bind_waitagent_footer_action(
+            workspace,
+            FOOTER_CREATE_KEY,
+            &layout.footer_pane,
+            &footer_bindings.create_session_command,
+        )?;
+        self.tmux.bind_waitagent_footer_action(
+            workspace,
+            FOOTER_SESSIONS_KEY,
+            &layout.footer_pane,
+            &footer_bindings.open_sessions_menu_command,
+        )?;
+        self.tmux.bind_waitagent_footer_action(
+            workspace,
+            FOOTER_SWITCH_KEY,
+            &layout.footer_pane,
+            &footer_bindings.open_sessions_menu_command,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ControlService;
+    use super::{ControlService, FooterMenuBindings};
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::domain::workspace_layout::WorkspaceChromeLayout;
     use crate::infra::tmux::{
@@ -87,10 +128,11 @@ mod tests {
         SetSessionOption(String, String),
         BindWithoutPrefix(String, Vec<String>),
         BindMainPaneZoomToggle(String, String),
-        BindWaitagentFocusSidebar(String, String, u16),
+        BindWaitagentFocusSidebar(String, String, String, u16),
         BindWaitagentFocusMain(String, String),
         BindWaitagentSidebarBack(String, String, String),
         BindWaitagentSidebarHide(String, String, String, u16),
+        BindWaitagentFooterAction(String, String, String),
     }
 
     #[derive(Clone, Default)]
@@ -307,6 +349,7 @@ mod tests {
             &self,
             _workspace: &TmuxWorkspaceHandle,
             key: &str,
+            main: &TmuxPaneId,
             sidebar: &TmuxPaneId,
             sidebar_width: u16,
         ) -> Result<(), Self::Error> {
@@ -314,22 +357,10 @@ mod tests {
                 .borrow_mut()
                 .push(Call::BindWaitagentFocusSidebar(
                     key.to_string(),
+                    main.as_str().to_string(),
                     sidebar.as_str().to_string(),
                     sidebar_width,
                 ));
-            Ok(())
-        }
-
-        fn bind_waitagent_focus_main(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            key: &str,
-            main: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            self.calls.borrow_mut().push(Call::BindWaitagentFocusMain(
-                key.to_string(),
-                main.as_str().to_string(),
-            ));
             Ok(())
         }
 
@@ -343,6 +374,19 @@ mod tests {
             self.calls.borrow_mut().push(Call::BindWaitagentSidebarBack(
                 key.to_string(),
                 sidebar.as_str().to_string(),
+                main.as_str().to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_waitagent_focus_main(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            main: &TmuxPaneId,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentFocusMain(
+                key.to_string(),
                 main.as_str().to_string(),
             ));
             Ok(())
@@ -362,6 +406,23 @@ mod tests {
                 main.as_str().to_string(),
                 collapsed_width,
             ));
+            Ok(())
+        }
+
+        fn bind_waitagent_footer_action(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            footer: &TmuxPaneId,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls
+                .borrow_mut()
+                .push(Call::BindWaitagentFooterAction(
+                    key.to_string(),
+                    footer.as_str().to_string(),
+                    command.to_string(),
+                ));
             Ok(())
         }
     }
@@ -387,7 +448,14 @@ mod tests {
         };
 
         service
-            .ensure_native_controls(&workspace, &layout)
+            .ensure_native_controls(
+                &workspace,
+                &layout,
+                Some(&FooterMenuBindings {
+                    create_session_command: "detach-client -E 'waitagent'".to_string(),
+                    open_sessions_menu_command: "run-shell 'waitagent __footer-menu'".to_string(),
+                }),
+            )
             .expect("control configuration should succeed");
 
         assert_eq!(
@@ -395,7 +463,12 @@ mod tests {
             vec![
                 Call::SetSessionOption("mouse".to_string(), "on".to_string()),
                 Call::BindMainPaneZoomToggle("C-o".to_string(), "%1".to_string()),
-                Call::BindWaitagentFocusSidebar("Right".to_string(), "%2".to_string(), 24),
+                Call::BindWaitagentFocusSidebar(
+                    "Right".to_string(),
+                    "%1".to_string(),
+                    "%2".to_string(),
+                    24,
+                ),
                 Call::BindWaitagentFocusMain("Left".to_string(), "%1".to_string()),
                 Call::BindWaitagentSidebarBack(
                     "Left".to_string(),
@@ -407,6 +480,21 @@ mod tests {
                     "%2".to_string(),
                     "%1".to_string(),
                     1,
+                ),
+                Call::BindWaitagentFooterAction(
+                    "c".to_string(),
+                    "%3".to_string(),
+                    "detach-client -E 'waitagent'".to_string(),
+                ),
+                Call::BindWaitagentFooterAction(
+                    "s".to_string(),
+                    "%3".to_string(),
+                    "run-shell 'waitagent __footer-menu'".to_string(),
+                ),
+                Call::BindWaitagentFooterAction(
+                    "Enter".to_string(),
+                    "%3".to_string(),
+                    "run-shell 'waitagent __footer-menu'".to_string(),
                 ),
             ]
         );

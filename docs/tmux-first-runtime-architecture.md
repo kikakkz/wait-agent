@@ -1,8 +1,8 @@
 # WaitAgent Tmux-First Runtime Architecture
 
-Version: `v1.0`  
+Version: `v1.2`  
 Status: `Accepted`  
-Date: `2026-04-21`
+Date: `2026-04-23`
 
 ## 1. Purpose
 
@@ -65,6 +65,10 @@ The tmux-first architecture follows these principles:
    fullscreen correctness is defined by tmux-native pane zoom, history, and restore behavior.
    If an artifact reproduces in raw tmux, do not reintroduce waitagent-owned redraw, replay, or fullscreen composition to hide it.
    A TUI that was started in a narrow pane may legitimately keep unused columns after zoom until it redraws itself; this is an accepted consequence of tmux-native ownership, not a waitagent bug.
+11. Remote sessions stay host-owned
+   future remote sessions must connect to the server over long-lived transport links, keep PTY ownership on the remote host, and expose server-side interaction through waitagent control-plane abstractions rather than by pretending the server owns a remote PTY locally.
+12. Chrome navigation uses pane identity
+   waitagent global chrome-navigation keys such as `Right`, `Left`, and sidebar-hide actions must be driven by tmux pane identity and layout ownership, not by probing pane contents or inferring shell prompt state.
 
 ## 4.1 Native Reuse Rules
 
@@ -91,6 +95,8 @@ Anti-goal:
 - do not keep building a parallel waitagent-owned daemon protocol for features that tmux already provides natively
 - do not rebuild a waitagent-owned fullscreen redraw or replay path to compensate for tmux-native resize behavior
 - do not add app-specific redraw hints or view-reset tricks for Codex-like sessions in order to hide accepted narrow-start zoom behavior
+- do not let the local tmux adapter become the only session model; future remote sessions will use server-routed interaction rather than a local tmux pane backed by a server-owned PTY
+- do not use pane-text inspection, shell-prompt heuristics, or nested shell probes inside tmux key bindings to decide whether sidebar or menu navigation should activate
 
 ## 5. Target Layering
 
@@ -153,6 +159,7 @@ Rule:
 
 - session identity used by sidebar, footer, menus, and future network-session management should be transport-agnostic
 - local tmux sessions and future remote sessions should project into one shared domain model rather than separate ad hoc side registries
+- session identity should converge on `transport + authority/node id + session id`, not on local tmux socket semantics alone
 
 ### 5.4 `application/`
 
@@ -175,6 +182,7 @@ Rule:
 
 - application services may depend on domain abstractions and adapter traits
 - they should not write raw tmux command strings inline
+- session control should flow through transport-agnostic capabilities so a future server-side `interact` runtime can route input, resize, attach, and detach to either a local tmux host or a remote connected node
 
 ### 5.5 `runtime/`
 
@@ -193,6 +201,12 @@ Typical modules:
 - `runtime/sidebar_runtime.rs`
 - `runtime/footer_runtime.rs`
 - `runtime/ui_runtime.rs`
+
+Compatibility rule for future remote sessions:
+
+- local session runtime may stay tmux-native
+- remote session runtime on the server will not be a server-owned PTY pane; it will be a waitagent `interact` surface that talks to the server control plane
+- runtime boundaries should therefore separate `session presentation` from `session host ownership`
 
 ### 5.6 `infra/`
 
@@ -216,6 +230,7 @@ Rule:
 - business policy should not live here
 - prefer direct typed tmux capabilities over custom compatibility protocols when tmux already exposes the needed control surface
 - future network-session transport adapters should enter here behind the same session-registry abstractions consumed by application and UI layers
+- the vendored tmux adapter is a local-session host adapter only; it must not become the implicit authority for future remote-session control or metadata inference
 
 Vendored tmux rule:
 
@@ -299,6 +314,8 @@ Future-proofing rule:
 
 - sidebar and footer should consume a shared session registry and layout model that can represent both local tmux sessions and future network-backed sessions
 - do not hardwire sidebar or footer state to one local-only daemon model
+- a future remote session selected on the server may render through a waitagent `interact` runtime in the main pane while sidebar and footer continue to consume the same transport-agnostic session catalog
+- local fullscreen, copy-mode, and tmux-native focus semantics remain the baseline for local sessions only; remote sessions will require separate server-routed interaction policy without changing the shared catalog shape
 
 This is better than the current split where command ownership is spread across `app.rs` and `lifecycle.rs` with different runtime styles.
 
@@ -322,6 +339,8 @@ Effective immediately:
 - no Rust source file may exceed 1000 lines; once a file approaches that limit, split it into narrower modules before adding more logic
 - vendored tmux must compile in the default `cargo build` path; opt-in environment-variable gates are not an acceptable steady-state build model
 - `build.rs` should stay thin and delegate vendored tmux build orchestration to tmux glue modules rather than embedding that logic inline
+- local metadata inference based on tmux pane inspection is acceptable only for local sessions; future remote sessions must publish authoritative metadata through the transport layer instead of forcing the server to re-infer it from a local pane adapter
+- tmux key bindings for waitagent chrome navigation must stay declarative and pane-targeted; avoid shell-based runtime probes that make navigation depend on the live contents of the pane
 
 ## 8. Suggested First Concrete Module Split
 

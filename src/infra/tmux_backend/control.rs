@@ -29,10 +29,11 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         &self,
         workspace: &TmuxWorkspaceHandle,
         key: &str,
+        main: &TmuxPaneId,
         sidebar: &TmuxPaneId,
         sidebar_width: u16,
     ) -> Result<(), Self::Error> {
-        let args = bind_waitagent_focus_sidebar_args(key, sidebar, sidebar_width);
+        let args = bind_waitagent_focus_sidebar_args(key, main, sidebar, sidebar_width);
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
@@ -72,6 +73,18 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
+
+    fn bind_waitagent_footer_action(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        footer: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        let args = bind_waitagent_footer_action_args(key, footer, command);
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
 }
 
 fn bind_main_pane_zoom_toggle_args(key: &str, pane: &TmuxPaneId) -> Vec<String> {
@@ -93,22 +106,19 @@ fn bind_main_pane_zoom_toggle_args(key: &str, pane: &TmuxPaneId) -> Vec<String> 
 
 fn bind_waitagent_focus_sidebar_args(
     key: &str,
+    main: &TmuxPaneId,
     sidebar: &TmuxPaneId,
     sidebar_width: u16,
 ) -> Vec<String> {
     bind_key_args(
         key,
-        true,
+        false,
         vec![
-            "resize-pane".to_string(),
-            "-t".to_string(),
-            sidebar.as_str().to_string(),
-            "-x".to_string(),
-            sidebar_width.to_string(),
-            "\\;".to_string(),
-            "select-pane".to_string(),
-            "-t".to_string(),
-            sidebar.as_str().to_string(),
+            "if-shell".to_string(),
+            "-F".to_string(),
+            current_pane_is(main),
+            focus_sidebar_command(sidebar, sidebar_width),
+            format!("send-keys {key}"),
         ],
     )
 }
@@ -157,13 +167,36 @@ fn bind_waitagent_sidebar_hide_args(
             "-F".to_string(),
             current_pane_is(sidebar),
             format!(
-                "resize-pane -t {} -x {} \\; select-pane -t {}",
+                "resize-pane -t {} -x {} ; select-pane -t {}",
                 sidebar.as_str(),
                 collapsed_width,
                 main.as_str()
             ),
             format!("send-keys {}", key),
         ],
+    )
+}
+
+fn bind_waitagent_footer_action_args(key: &str, footer: &TmuxPaneId, command: &str) -> Vec<String> {
+    bind_key_args(
+        key,
+        false,
+        vec![
+            "if-shell".to_string(),
+            "-F".to_string(),
+            current_pane_is(footer),
+            command.to_string(),
+            format!("send-keys {}", key),
+        ],
+    )
+}
+
+fn focus_sidebar_command(sidebar: &TmuxPaneId, sidebar_width: u16) -> String {
+    format!(
+        "resize-pane -t {} -x {} ; select-pane -t {}",
+        sidebar.as_str(),
+        sidebar_width,
+        sidebar.as_str()
     )
 }
 
@@ -185,8 +218,8 @@ fn current_pane_is(pane: &TmuxPaneId) -> String {
 mod tests {
     use super::{
         bind_main_pane_zoom_toggle_args, bind_waitagent_focus_main_args,
-        bind_waitagent_focus_sidebar_args, bind_waitagent_sidebar_back_args,
-        bind_waitagent_sidebar_hide_args,
+        bind_waitagent_focus_sidebar_args, bind_waitagent_footer_action_args,
+        bind_waitagent_sidebar_back_args, bind_waitagent_sidebar_hide_args,
     };
     use crate::infra::tmux_types::TmuxPaneId;
 
@@ -214,22 +247,24 @@ mod tests {
 
     #[test]
     fn sidebar_focus_binding_restores_width_before_selecting_sidebar() {
-        let args = bind_waitagent_focus_sidebar_args("Right", &TmuxPaneId::new("%2"), 24);
+        let args = bind_waitagent_focus_sidebar_args(
+            "Right",
+            &TmuxPaneId::new("%1"),
+            &TmuxPaneId::new("%2"),
+            24,
+        );
 
         assert_eq!(
             args,
             vec![
                 "bind-key",
+                "-n",
                 "Right",
-                "resize-pane",
-                "-t",
-                "%2",
-                "-x",
-                "24",
-                "\\;",
-                "select-pane",
-                "-t",
-                "%2",
+                "if-shell",
+                "-F",
+                "#{==:#{pane_id},%1}",
+                "resize-pane -t %2 -x 24 ; select-pane -t %2",
+                "send-keys Right",
             ]
         );
     }
@@ -282,8 +317,31 @@ mod tests {
                 "if-shell",
                 "-F",
                 "#{==:#{pane_id},%2}",
-                "resize-pane -t %2 -x 1 \\; select-pane -t %1",
+                "resize-pane -t %2 -x 1 ; select-pane -t %1",
                 "send-keys h",
+            ]
+        );
+    }
+
+    #[test]
+    fn footer_action_binding_only_claims_keys_when_footer_is_focused() {
+        let args = bind_waitagent_footer_action_args(
+            "s",
+            &TmuxPaneId::new("%3"),
+            "run-shell 'waitagent __footer-menu'",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "bind-key",
+                "-n",
+                "s",
+                "if-shell",
+                "-F",
+                "#{==:#{pane_id},%3}",
+                "run-shell 'waitagent __footer-menu'",
+                "send-keys s",
             ]
         );
     }

@@ -13,7 +13,7 @@ impl FooterUi {
         let active = active_session_record(active_socket, active_session, sessions);
         let counts = task_counts(sessions);
         let left = format!(
-            "WaitAgent | [c] create  [s] sessions  [Enter] switch | total:{} R:{} I:{} C:{} U:{}",
+            "keys: [c] new  [s] sessions  [Enter] switch | total:{} R:{} I:{} C:{} U:{}",
             sessions.len(),
             counts.running,
             counts.input,
@@ -126,7 +126,7 @@ mod tests {
             96,
         );
 
-        assert!(output.contains("WaitAgent | [c] create  [s] sessions  [Enter] switch"));
+        assert!(output.contains("keys: [c] new  [s] sessions  [Enter] switch"));
         assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));
         assert!(output.ends_with("/tmp/demo"));
         assert!(!output.contains('\n'));

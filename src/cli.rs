@@ -13,6 +13,7 @@ pub enum Command {
     WorkspaceInternal(WorkspaceCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
+    FooterMenu(FooterMenuCommand),
     LayoutReconcile(LayoutReconcileCommand),
     Daemon(DaemonCommand),
     Attach(AttachCommand),
@@ -91,6 +92,14 @@ pub struct LayoutReconcileCommand {
     pub workspace_dir: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FooterMenuCommand {
+    pub socket_name: String,
+    pub session_name: String,
+    pub pane_id: String,
+    pub client_tty: String,
+}
+
 impl Cli {
     pub fn parse<I>(args: I) -> Result<Self, CliError>
     where
@@ -127,6 +136,10 @@ impl Cli {
             "__ui-footer" => {
                 args.remove(0);
                 Command::UiFooter(parse_ui_pane(args)?)
+            }
+            "__footer-menu" => {
+                args.remove(0);
+                Command::FooterMenu(parse_footer_menu(args)?)
             }
             "__layout-reconcile" => {
                 args.remove(0);
@@ -390,6 +403,34 @@ fn parse_layout_reconcile(args: Vec<String>) -> Result<LayoutReconcileCommand, C
     })
 }
 
+fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+    let mut pane_id = None;
+    let mut client_tty = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
+            "--client-tty" => client_tty = Some(expect_value("--client-tty", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(FooterMenuCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+        pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
+        client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
+    })
+}
+
 fn expect_value<I>(flag: &str, iter: &mut I) -> Result<String, CliError>
 where
     I: Iterator<Item = String>,
@@ -628,6 +669,30 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_footer_menu_command() {
+        match parse(&[
+            "waitagent",
+            "__footer-menu",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--pane-id",
+            "%2",
+            "--client-tty",
+            "/dev/pts/7",
+        ]) {
+            Command::FooterMenu(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.pane_id, "%2");
+                assert_eq!(command.client_tty, "/dev/pts/7");
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -85,6 +85,10 @@ fn selected_detail_lines(session: &ManagedSessionRecord, width: usize) -> Vec<St
         ),
         width,
     ));
+    lines.push(fit(
+        &format!(" id: {}", session.address.display_session_id()),
+        width,
+    ));
     let current_path = session
         .current_path
         .as_ref()
@@ -149,6 +153,7 @@ mod tests {
         assert!(output.contains("← back  ↑↓ move  enter swit"));
         assert!(output.contains("> codex@local"));
         assert!(output.contains("CONFIRM"));
+        assert!(output.contains(" id: 1"));
         assert!(output.contains(" dir: /tmp/demo"));
         assert!(output.contains(" clients:2 windows:1"));
     }

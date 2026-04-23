@@ -20,6 +20,7 @@ done_criteria:
   - waitagent-specific management affordances are limited to branded menus, discovery helpers, and metadata presentation layered on top of tmux-native control
   - navigation remains responsive during live shell and Codex output
   - right-arrow focus handoff lands on the sidebar pane directly rather than the footer pane, and tmux-native pane order or bindings do not strand focus in the bottom chrome
+  - global chrome navigation keys use tmux pane identity and layout ownership only; they do not depend on shell-prompt detection, pane-text probing, `capture-pane`, or nested shell probes
   - when the sidebar is focused, `h` hides the sidebar and left-arrow restores or reveals the sidebar using tmux-native layout operations rather than custom surface bookkeeping
   - the footer quick menu is operational: it can create sessions, list current sessions, open a session menu, and switch to the chosen session while preserving tmux-native control semantics
   - session switching affordances and popup menus follow the legacy waitagent interaction model where it still fits, without replacing tmux's underlying session or pane selection ownership
@@ -42,3 +43,5 @@ notes:
   - Avoid inventing a separate waitagent window manager; menu actions should translate into tmux-native target selection and control.
   - The persistent chrome information contract is established in `task.tmux-r5`; this slice only adds the working interaction model on top of that chrome.
   - The legacy footer menu wording and item inventory should be reviewed against historical sources before implementation so this slice does not converge on a merely functional but contract-inconsistent menu surface.
+  - Execute this task in three steps: first replace heuristic raw navigation with pane-identity-driven global chrome keys, then finish the footer quick-menu and session-menu interactions, then rerun manual validation during live shell and Codex output.
+  - Prompt-aware or pane-content-aware sidebar activation is explicitly rejected for this slice even if it appears to reduce app-key conflicts, because it is less native, less stable, and less compatible with future remote-session interaction surfaces.

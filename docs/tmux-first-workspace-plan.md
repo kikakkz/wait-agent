@@ -1,8 +1,8 @@
 # WaitAgent Tmux-First Workspace Plan
 
-Version: `v1.1`  
+Version: `v1.2`  
 Status: `Accepted`  
-Date: `2026-04-22`
+Date: `2026-04-23`
 
 ## 1. Purpose
 
@@ -108,9 +108,11 @@ The interaction contract is intentionally close to tmux.
 Normal mode:
 
 - session switching selects another tmux window
-- moving focus right selects the sidebar pane
-- moving focus left returns to the main pane
+- `Right` is a waitagent global chrome-navigation key that selects the sidebar pane from the main pane
+- `Left` is a waitagent global chrome-navigation key that returns from the sidebar pane to the main pane
+- `h` hides the sidebar when the sidebar pane is focused and returns focus to the main pane
 - entering the sidebar and pressing `Enter` switches to the selected session window and returns focus to the main pane
+- waitagent chrome navigation decisions are based on tmux pane identity and layout only; they must not depend on shell-prompt detection, pane-text probing, `capture-pane`, or content-aware heuristics
 
 Fullscreen mode:
 
@@ -121,6 +123,11 @@ Fullscreen mode:
 The critical rule is that WaitAgent no longer tries to co-own the same framebuffer as the live session.
 If the same fullscreen artifact can be reproduced with the same pane layout in raw tmux, treat it as tmux-native behavior rather than a waitagent layout bug.
 If a TUI session was started in a pane narrowed by sidebar or footer chrome, zoom may reveal unused columns on the right until that application chooses to redraw the current view; this is accepted product behavior for the tmux-first path.
+
+Rejected interaction approach:
+
+- do not implement conditional sidebar navigation that probes the current pane contents and only steals `Right` when a shell prompt appears to be visible
+- do not embed nested shell probes inside tmux key bindings in order to guess whether waitagent chrome navigation should activate
 
 ## 7. Process Model
 
@@ -197,7 +204,7 @@ The accepted implementation queue after the rewrite review is:
 7. `task.tmux-r6`
    Implement tmux-native fullscreen zoom and fullscreen-only scrollback.
 8. `task.tmux-r7`
-   Move session switching and sidebar focus semantics onto tmux-native control.
+   Move session switching and sidebar focus semantics onto tmux-native control, starting with pane-identity-driven global chrome navigation and then finishing the footer quick-menu contract.
 9. `task.tmux-r8`
    Remove the obsolete custom local display path and complete shell-plus-codex acceptance.
 

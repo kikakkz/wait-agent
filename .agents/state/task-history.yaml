@@ -3,6 +3,12 @@ version: 1
 history:
   - task_id: task.tmux-r7
     status: in_progress
+    summary: pane-identity-driven chrome navigation is now in place, and the tmux-native footer menu has advanced from a placeholder into a sectioned waitagent menu with current-session headers, new-session creation, and session-target switching on top of detach-client -E attach semantics
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r7
+    status: in_progress
     summary: with tmux-native fullscreen, history, copy-mode, and detach now validated on both shell and Codex sessions, active work moves to direct sidebar focus handoff, hide or restore behavior, and the legacy footer menu interaction contract on top of tmux-native control
     source_of_truth:
       file: .agents/tasks/current.yaml

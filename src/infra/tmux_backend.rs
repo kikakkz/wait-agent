@@ -142,6 +142,14 @@ impl EmbeddedTmuxBackend {
         self.command_runner().run(socket_name, args)
     }
 
+    pub(crate) fn run_socket_command(
+        &self,
+        socket_name: &TmuxSocketName,
+        args: &[String],
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(socket_name, args).map(|_| ())
+    }
+
     fn session_exists(&self, workspace: &TmuxWorkspaceHandle) -> Result<bool, TmuxError> {
         let args = vec![
             "has-session".to_string(),

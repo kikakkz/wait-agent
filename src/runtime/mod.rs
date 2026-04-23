@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod footer_menu_runtime;
 pub mod ui_pane_runtime;
 pub mod workspace_attach_runtime;
 pub mod workspace_bootstrap_runtime;

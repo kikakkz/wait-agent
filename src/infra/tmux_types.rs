@@ -297,6 +297,7 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         &self,
         workspace: &TmuxWorkspaceHandle,
         key: &str,
+        main: &TmuxPaneId,
         sidebar: &TmuxPaneId,
         sidebar_width: u16,
     ) -> Result<(), Self::Error>;
@@ -323,5 +324,13 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         sidebar: &TmuxPaneId,
         main: &TmuxPaneId,
         collapsed_width: u16,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_footer_action(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        footer: &TmuxPaneId,
+        command: &str,
     ) -> Result<(), Self::Error>;
 }

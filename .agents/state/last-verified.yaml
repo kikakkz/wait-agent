@@ -1,7 +1,13 @@
 kind: state
 version: 1
-last_updated_from: tmux-r6 tmux-native fullscreen, history, copy-mode, and detach verified on release build for shell and Codex sessions at 2026-04-22
+last_updated_from: tmux-r7 footer-menu contract and legacy chrome metadata advanced on release build at 2026-04-23
 checks:
+  - id: tmux-r7-footer-menu-contract-release-build
+    command: cargo build --release after upgrading the tmux-native footer menu to include current-session headers, sectioned session items, and legacy-aligned footer chrome wording while keeping switching on detach-client -E attach semantics
+    status: pass
+  - id: tmux-r7-footer-menu-contract-cargo-test-quiet
+    command: cargo test --quiet after upgrading the tmux-native footer menu to include current-session headers, empty-state coverage, sidebar selected-session id detail, and legacy-aligned footer chrome wording
+    status: pass
   - id: tmux-r6-codex-fullscreen-and-detach-manual-release-validation
     command: manual release validation by launching ./target/release/waitagent, starting `codex` in the main pane, confirming the tmux root binding `C-o` toggles `#{window_zoomed_flag}` from 0 to 1 and back to 0 on the vendored tmux session, and confirming `Ctrl-B d` detaches the client while the session stays alive
     status: pass

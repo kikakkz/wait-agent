@@ -1,4 +1,4 @@
-use crate::application::control_service::ControlService;
+use crate::application::control_service::{ControlService, FooterMenuBindings};
 use crate::application::layout_service::{LayoutFocusBehavior, LayoutService};
 use crate::cli::LayoutReconcileCommand;
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -68,8 +68,9 @@ impl WorkspaceLayoutRuntime {
             .layout_service
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
             .map_err(tmux_layout_error)?;
+        let footer_bindings = self.footer_menu_bindings(workspace, &layout.footer_pane);
         self.control_service
-            .ensure_native_controls(workspace, &layout)
+            .ensure_native_controls(workspace, &layout, Some(&footer_bindings))
             .map_err(tmux_layout_error)?;
         self.layout_service
             .ensure_layout_hooks(workspace, &reconcile_command)
@@ -103,6 +104,37 @@ impl WorkspaceLayoutRuntime {
                 workspace.session_name.as_str().to_string(),
             ])
             .with_start_directory(workspace_dir)
+    }
+
+    fn footer_menu_bindings(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        footer_pane: &crate::infra::tmux::TmuxPaneId,
+    ) -> FooterMenuBindings {
+        FooterMenuBindings {
+            create_session_command: format!(
+                "detach-client -E {}",
+                shell_escape(self.current_executable.to_string_lossy().as_ref())
+            ),
+            open_sessions_menu_command: format!(
+                "run-shell {}",
+                shell_escape(
+                    &[
+                        shell_escape(self.current_executable.to_string_lossy().as_ref()),
+                        shell_escape("__footer-menu"),
+                        shell_escape("--socket-name"),
+                        shell_escape(workspace.socket_name.as_str()),
+                        shell_escape("--session-name"),
+                        shell_escape(workspace.session_name.as_str()),
+                        shell_escape("--pane-id"),
+                        shell_escape(footer_pane.as_str()),
+                        shell_escape("--client-tty"),
+                        shell_escape("#{client_tty}"),
+                    ]
+                    .join(" ")
+                )
+            ),
+        }
     }
 
     fn layout_reconcile_hook_command(

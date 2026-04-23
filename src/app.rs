@@ -209,7 +209,10 @@ impl App {
             Command::Workspace(workspace) | Command::WorkspaceInternal(workspace) => {
                 self.handle_workspace(workspace)
             }
-            Command::UiSidebar(_) | Command::UiFooter(_) | Command::LayoutReconcile(_) => {
+            Command::UiSidebar(_)
+            | Command::UiFooter(_)
+            | Command::FooterMenu(_)
+            | Command::LayoutReconcile(_) => {
                 unreachable!("hidden pane commands should be handled before legacy app execution")
             }
             Command::Daemon(command) => self.handle_unexpected_daemon(command),
