@@ -119,6 +119,8 @@ Fullscreen mode:
 - WaitAgent may wrap tmux copy-mode behind simpler keys, but the underlying mechanism remains tmux-native
 
 The critical rule is that WaitAgent no longer tries to co-own the same framebuffer as the live session.
+If the same fullscreen artifact can be reproduced with the same pane layout in raw tmux, treat it as tmux-native behavior rather than a waitagent layout bug.
+If a TUI session was started in a pane narrowed by sidebar or footer chrome, zoom may reveal unused columns on the right until that application chooses to redraw the current view; this is accepted product behavior for the tmux-first path.
 
 ## 7. Process Model
 
@@ -205,7 +207,7 @@ The tmux-first migration is accepted only if all of the following become true:
 
 - Codex runs in a real tmux main pane rather than a custom replayed surface
 - normal mode keeps sidebar and footer visible without overwriting main session output
-- fullscreen no longer leaves a fake blank sidebar region
+- fullscreen no longer leaves waitagent-owned fake sidebar chrome or custom replay artifacts over the main pane; a narrow-start TUI may still preserve unused columns after zoom until the application redraws
 - fullscreen history is complete and scrollable through tmux pane history
 - switching between main pane and sidebar is responsive and deterministic
 - switching sessions never restarts the target process or loses its history

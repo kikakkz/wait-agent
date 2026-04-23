@@ -1,7 +1,31 @@
 kind: state
 version: 1
-last_updated_from: tmux-r5 per-invocation session backends and tmux-like ls semantics verified on release build with same-directory multi-launch validation at 2026-04-22
+last_updated_from: tmux-r6 tmux-native fullscreen, history, copy-mode, and detach verified on release build for shell and Codex sessions at 2026-04-22
 checks:
+  - id: tmux-r6-codex-fullscreen-and-detach-manual-release-validation
+    command: manual release validation by launching ./target/release/waitagent, starting `codex` in the main pane, confirming the tmux root binding `C-o` toggles `#{window_zoomed_flag}` from 0 to 1 and back to 0 on the vendored tmux session, and confirming `Ctrl-B d` detaches the client while the session stays alive
+    status: pass
+  - id: tmux-r6-shell-fullscreen-history-copy-detach-manual-release-validation
+    command: manual release validation by launching ./target/release/waitagent, confirming `C-o` toggles tmux zoom on the main pane, running `seq 1 5000` and verifying vendored tmux `capture-pane -S -5005` retains lines 1 through 5000, confirming `Ctrl-B [` enters copy-mode (`#{pane_in_mode}=1`) and `q` exits it, and confirming `Ctrl-B d` detaches the client
+    status: pass
+  - id: tmux-r6-release-build
+    command: cargo build --release after replacing waitagent-owned fullscreen control with tmux root-key zoom binding, enabling tmux-native mouse or copy-mode session options, and setting new-session history defaults before pane creation
+    status: pass
+  - id: tmux-r6-cargo-test-quiet
+    command: cargo test --quiet after replacing waitagent-owned fullscreen control with tmux root-key zoom binding, enabling tmux-native mouse or copy-mode session options, and setting new-session history defaults before pane creation
+    status: pass
+  - id: tmux-r5-status-bar-disabled-manual-release-validation
+    command: manual release validation by launching env -u TMUX ./target/release/waitagent and confirming the rebuilt session shows only the waitagent footer pane on the bottom edge after `status off` is applied to the tmux session
+    status: pass
+  - id: tmux-r5-multi-client-footer-single-row-manual-release-validation
+    command: manual release validation by attaching a second differently-sized client to a live waitagent session, detaching it, and confirming the final pane geometry remains sidebar width 24 and footer height 1
+    status: pass
+  - id: tmux-r5-metadata-rendering-release-build
+    command: cargo build --release after adding transport-aware sidebar labels, inferred task state, directory-aware footer rendering, stale-socket-tolerant session enumeration, and tmux status-bar shutdown for waitagent sessions
+    status: pass
+  - id: tmux-r5-metadata-rendering-cargo-test-quiet
+    command: cargo test --quiet after adding transport-aware sidebar labels, inferred task state, directory-aware footer rendering, stale-socket-tolerant session enumeration, and tmux status-bar shutdown for waitagent sessions
+    status: pass
   - id: tmux-r5-same-directory-multi-launch-creates-independent-backends
     command: manual release validation by launching env -u TMUX ./target/release/waitagent twice from /opt/data/workspace/wait-agent, confirming waitagent ls reports two distinct session ids, and verifying each vendored tmux socket owns its own single attached session
     status: pass

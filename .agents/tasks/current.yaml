@@ -1,58 +1,45 @@
-id: task.tmux-r5
+id: task.tmux-r7
 kind: task
 version: 1
-title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
+title: layer waitagent session management and menus on top of tmux-native switching
 status: in_progress
 priority: high
-target_task_reference: task.tmux-r5
+target_task_reference: task.tmux-r7
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.tmux-r4.done
-  - task.tmux-style-1.done
+  - task.tmux-r6.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - each managed workspace can host a stable tmux layout with a real main pane plus waitagent-owned sidebar and footer panes
-  - sidebar and footer rendering move to dedicated waitagent pane programs or pane-oriented runtimes
-  - the main pane remains a tmux-native shell or agent surface and is no longer composed with sidebar or footer on the same display surface
-  - layout creation, restore, and focus handoff use tmux-native split and pane selection primitives rather than waitagent-owned frame composition
-  - the sidebar and footer consume a shared session-registry model that can later represent both local tmux sessions and future network-backed sessions
-  - the footer baseline remains a single row after attach, resize, session create, session exit, and cross-session geometry churn, even when another attached session used a different client height
-  - the sidebar top section, list rows, and footer section follow the legacy waitagent information hierarchy while being rendered by tmux-owned panes
-  - sidebar session rows display runtime identity in a transport-aware form such as `bash@local`, `codex@local`, or `codex@192.168.1.31`, and the right edge shows the current task state using the legacy-style status treatment
-  - the sidebar footer shows the currently selected session's basic metadata using the shared session catalog rather than ad hoc local-only fields
-  - the persistent footer bar shows the current session directory at the far right and shows aggregate session totals plus per-state counts in the status area
+  - session switching uses tmux window or session selection as the primary control path
+  - sidebar focus, return behavior, and menu actions use tmux-native pane and window selection semantics rather than legacy display bookkeeping
+  - waitagent-specific management affordances are limited to branded menus, discovery helpers, and metadata presentation layered on top of tmux-native control
+  - navigation remains responsive during live shell and Codex output
+  - right-arrow focus handoff lands on the sidebar pane directly rather than the footer pane, and tmux-native pane order or bindings do not strand focus in the bottom chrome
+  - when the sidebar is focused, `h` hides the sidebar and left-arrow restores or reveals the sidebar using tmux-native layout operations rather than custom surface bookkeeping
+  - the footer quick menu is operational: it can create sessions, list current sessions, open a session menu, and switch to the chosen session while preserving tmux-native control semantics
+  - session switching affordances and popup menus follow the legacy waitagent interaction model where it still fits, without replacing tmux's underlying session or pane selection ownership
+  - the footer menu item set and menu wording align with the reviewed legacy waitagent menu contract rather than shipping a placeholder or reduced menu skeleton
+  - the footer menu popup and quick actions expose the legacy session-management items that remain valid in the tmux-first architecture, including session creation, current-session listing, session-target switching, and other tmux-backed management actions that replaced the old custom controls
 verification:
   - cargo test
-  - manual: shell and codex remain visually uncorrupted while sidebar and footer stay visible
-  - manual: existing oversized sidebar and footer panes are normalized back to the fixed waitagent geometry during layout restore
-  - manual: a maximized desktop terminal attach triggers native tmux reconcile hooks that keep the sidebar at fixed width and the footer at a single row after client attach and resize
-  - manual: two default `waitagent` launches from the same directory create two independent backends, and `waitagent ls` reports them as tmux-like session lines keyed by session id
-  - manual: attaching to and exiting from a second session with a different terminal height does not leave the current session footer taller than one row
-  - manual: sidebar rows and footer info match the intended legacy-style information layout for local and future network-addressed sessions
+  - manual: repeated focus and session switching during live output
+  - manual: sidebar hide/show shortcuts and footer menu actions work repeatedly during live shell and Codex output
+  - manual: right-arrow and tmux key-driven focus movement reach the sidebar directly instead of landing on the footer pane
+  - manual: footer quick menu contents and popup items match the reviewed legacy menu contract except where a specific tmux-first replacement is documented
 touched_paths:
-  - src/cli.rs
-  - src/command
-  - src/ui
   - src/runtime
   - src/application
+  - src/ui
   - src/infra/tmux.rs
-  - src/infra/tmux_backend
-  - .agents/tasks/queued/task.tmux-r5.yaml
+  - .agents/tasks/queued/task.tmux-r7.yaml
 notes:
-  - This slice preserves the product contract while moving UI ownership into tmux panes.
-  - Do not reimplement shell rendering, scrollback, or fullscreen behavior here; the only new waitagent-owned surfaces should be the sidebar and footer panes.
-  - Sidebar and footer are architecturally persistent panes even if the main pane later zooms fullscreen.
-  - Root cause: bootstrap-only layout normalization cannot hold fixed chrome geometry after a later tmux client resize from the desktop window manager.
-  - Accepted fix: register native tmux `client-attached` and `client-resized` hooks that run a hidden waitagent layout reconcile command instead of patching attach-specific runtime paths.
-  - Footer baseline: the persistent menu bar is now one row high; later submenu work may temporarily expand it, but the default chrome must stay single-line.
-  - Session semantics: default `waitagent` launches are no longer workspace-bound; each invocation creates a fresh tmux backend, and only explicit `attach` reuses an existing session.
-  - Listing semantics: `waitagent ls` now follows tmux-like session summaries keyed by the session id rather than workspace path aliases.
-  - Sidebar presentation must preserve the old waitagent visual information contract where it is still valid: header at the top, per-session rows in the middle, selected-session summary at the bottom, but the data model must now be transport-aware so future remote sessions fit the same row shape.
-  - Menu interaction itself is not complete in this slice; this slice only owns stable geometry plus the rendered information contract for the persistent sidebar and footer chrome.
-  - Legacy contract evidence for this slice is now anchored to `.agents/tasks/queued/task.sidebar-1.yaml`, `docs/ui-design.md`, and the old sidebar or footer tests and literals in `src/app.rs`, rather than informal recollection.
+  - This slice finishes the navigation ownership move after fullscreen and pane layout are already tmux-native.
+  - Avoid inventing a separate waitagent window manager; menu actions should translate into tmux-native target selection and control.
+  - The persistent chrome information contract is established in `task.tmux-r5`; this slice only adds the working interaction model on top of that chrome.
+  - The legacy footer menu wording and item inventory should be reviewed against historical sources before implementation so this slice does not converge on a merely functional but contract-inconsistent menu surface.

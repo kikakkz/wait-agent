@@ -2,7 +2,7 @@ id: task.tmux-r5
 kind: task
 version: 1
 title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
-status: in_progress
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -61,3 +61,6 @@ notes:
   - 2026-04-22 refinement: the current slice also owns the legacy-style sidebar and footer information contract, including transport-aware row labels like `bash@local` or `codex@192.168.1.31`, selected-session summary at the bottom of the sidebar, and footer aggregate counters plus current-directory display.
   - 2026-04-22 refinement: menu actions, sidebar hide/show shortcuts, and session-switch popups remain intentionally deferred to the later tmux-native session-management slice rather than being partially reintroduced here.
   - 2026-04-22 refinement: legacy style requirements for this slice are grounded in explicit sources: `task.sidebar-1` for the sidebar contract, `docs/ui-design.md` for persistent chrome hierarchy, and `src/app.rs` legacy tests and literals for concrete header, row, badge, and footer string patterns.
+  - 2026-04-22 completion: the pane metadata model now exposes transport-aware labels, inferred task state, current directory, and aggregate footer counters to the dedicated sidebar and footer pane runtimes.
+  - 2026-04-22 completion: native tmux reconcile hooks now cover attach, detach, resize, and session-change churn, and manual validation confirmed that a second differently-sized client can attach and leave without lifting the footer above one row.
+  - 2026-04-22 completion: tmux's built-in status bar is disabled for waitagent-managed sessions so the persistent footer pane is the only bottom chrome surface.

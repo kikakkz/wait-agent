@@ -1,3 +1,4 @@
+use crate::application::control_service::ControlService;
 use crate::application::layout_service::{LayoutFocusBehavior, LayoutService};
 use crate::cli::LayoutReconcileCommand;
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -10,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub struct WorkspaceLayoutRuntime {
+    control_service: ControlService<EmbeddedTmuxBackend>,
     layout_service: LayoutService<EmbeddedTmuxBackend>,
     current_executable: std::path::PathBuf,
 }
@@ -25,6 +27,7 @@ impl WorkspaceLayoutRuntime {
         })?;
 
         Ok(Self {
+            control_service: ControlService::new(backend.clone()),
             layout_service: LayoutService::new(backend),
             current_executable,
         })
@@ -61,9 +64,12 @@ impl WorkspaceLayoutRuntime {
         let sidebar_program = self.sidebar_program(workspace, workspace_dir);
         let footer_program = self.footer_program(workspace, workspace_dir);
         let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
-        self.layout_service
+        let layout = self
+            .layout_service
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
-            .map(|_| ())
+            .map_err(tmux_layout_error)?;
+        self.control_service
+            .ensure_native_controls(workspace, &layout)
             .map_err(tmux_layout_error)?;
         self.layout_service
             .ensure_layout_hooks(workspace, &reconcile_command)

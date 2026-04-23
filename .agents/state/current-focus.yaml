@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.tmux-r5
-focus_statement: the active task is now stabilizing tmux-owned persistent chrome so the sidebar and footer keep fixed geometry, render a legacy-style information contract anchored in reviewed historical sources, and stay compatible with later tmux-native hide/show and menu interactions for both local and future network-backed sessions
+current_task: task.tmux-r7
+focus_statement: the active task is now layering the working waitagent sidebar and footer management interactions on top of tmux-native pane and session control, with special focus on direct sidebar focus handoff, hide or restore behavior, and the legacy footer menu contract
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -43,10 +43,6 @@ where
 
     pub fn list_daemons(&self) -> Result<Vec<DaemonStatusRecord>, LifecycleError> {
         let runtime_root_dir = self.path_service.runtime_root_dir();
-        if !runtime_root_dir.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut daemons = Vec::new();
         for socket_path in self.gateway.list_socket_paths(&runtime_root_dir)? {
             let WorkspaceDaemonResponse::Running(status) = self

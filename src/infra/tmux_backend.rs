@@ -16,6 +16,7 @@ use crate::infra::tmux_types::{
 use std::fs;
 use std::path::PathBuf;
 
+mod control;
 mod layout;
 
 const WAITAGENT_SOCKET_PREFIX: &str = "wa-";
@@ -25,6 +26,9 @@ const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
+const DEFAULT_HISTORY_LIMIT: &str = "100000";
+const TMUX_MOUSE_OPTION: &str = "mouse";
+const TMUX_OPTION_ON: &str = "on";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedTmuxBackend {
@@ -157,6 +161,16 @@ impl EmbeddedTmuxBackend {
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<(), TmuxError> {
         let args = vec![
+            "set-option".to_string(),
+            "-g".to_string(),
+            "history-limit".to_string(),
+            DEFAULT_HISTORY_LIMIT.to_string(),
+            ";".to_string(),
+            "set-option".to_string(),
+            "-g".to_string(),
+            TMUX_MOUSE_OPTION.to_string(),
+            TMUX_OPTION_ON.to_string(),
+            ";".to_string(),
             "new-session".to_string(),
             "-d".to_string(),
             "-s".to_string(),
@@ -301,8 +315,16 @@ impl EmbeddedTmuxBackend {
             let Some(window_count) = parts.next() else {
                 continue;
             };
-            let metadata = self.session_metadata(socket_name, session_name)?;
-            let runtime = self.session_runtime_metadata(socket_name, session_name)?;
+            let metadata = match self.session_metadata(socket_name, session_name) {
+                Ok(metadata) => metadata,
+                Err(error) if error.is_command_failure() => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
+            let runtime = match self.session_runtime_metadata(socket_name, session_name) {
+                Ok(runtime) => runtime,
+                Err(error) if error.is_command_failure() => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
             records.push(ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux(
                     socket_name.as_str(),
@@ -356,8 +378,7 @@ impl EmbeddedTmuxBackend {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let window_id = self.current_window_id_on_socket(socket_name, session_name)?;
-        let panes = self.list_panes_on_target(socket_name, &window_id)?;
+        let panes = self.list_panes_on_target(socket_name, session_name)?;
         let Some(main_pane) = panes.iter().find(|pane| {
             pane.title != WAITAGENT_SIDEBAR_PANE_TITLE && pane.title != WAITAGENT_FOOTER_PANE_TITLE
         }) else {
@@ -372,22 +393,6 @@ impl EmbeddedTmuxBackend {
                 &pane_text,
             ),
         })
-    }
-
-    fn current_window_id_on_socket(
-        &self,
-        socket_name: &TmuxSocketName,
-        session_name: &str,
-    ) -> Result<String, TmuxError> {
-        let args = vec![
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            "#{window_id}".to_string(),
-        ];
-        let output = self.run_on_socket(socket_name, &args)?;
-        parse_tmux_id(&output.stdout, '@', "window id")
     }
 
     fn list_panes_on_target(
@@ -818,6 +823,29 @@ mod tests {
         assert!(right.as_str().starts_with('%'));
         assert!(bottom.as_str().starts_with('%'));
         assert_eq!(active_pane.pane_id, right);
+    }
+
+    #[test]
+    fn embedded_backend_sets_new_workspace_history_limit_before_session_creation() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("history-limit"))
+            .expect("workspace bootstrap should succeed");
+
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "show-options".to_string(),
+                    "-g".to_string(),
+                    "history-limit".to_string(),
+                ],
+            )
+            .expect("history-limit should be visible");
+        kill_server(&backend, &workspace);
+
+        assert!(output.stdout.contains("history-limit 100000"));
     }
 
     #[test]

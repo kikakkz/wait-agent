@@ -210,6 +210,23 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
+
+    fn set_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-option".to_string(),
+            "-t".to_string(),
+            workspace.session_name.as_str().to_string(),
+            option_name.to_string(),
+            value.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
 }
 
 fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxError> {

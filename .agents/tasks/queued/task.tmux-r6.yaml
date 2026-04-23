@@ -2,7 +2,7 @@ id: task.tmux-r6
 kind: task
 version: 1
 title: align fullscreen, scrollback, copy-mode, and detach controls with tmux-native behavior
-status: not_started
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml

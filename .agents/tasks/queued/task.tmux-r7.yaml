@@ -2,7 +2,7 @@ id: task.tmux-r7
 kind: task
 version: 1
 title: layer waitagent session management and menus on top of tmux-native switching
-status: not_started
+status: in_progress
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -19,13 +19,18 @@ done_criteria:
   - sidebar focus, return behavior, and menu actions use tmux-native pane and window selection semantics rather than legacy display bookkeeping
   - waitagent-specific management affordances are limited to branded menus, discovery helpers, and metadata presentation layered on top of tmux-native control
   - navigation remains responsive during live shell and Codex output
+  - right-arrow focus handoff lands on the sidebar pane directly rather than the footer pane, and tmux-native pane order or bindings do not strand focus in the bottom chrome
   - when the sidebar is focused, `h` hides the sidebar and left-arrow restores or reveals the sidebar using tmux-native layout operations rather than custom surface bookkeeping
   - the footer quick menu is operational: it can create sessions, list current sessions, open a session menu, and switch to the chosen session while preserving tmux-native control semantics
   - session switching affordances and popup menus follow the legacy waitagent interaction model where it still fits, without replacing tmux's underlying session or pane selection ownership
+  - the footer menu item set and menu wording align with the reviewed legacy waitagent menu contract rather than shipping a placeholder or reduced menu skeleton
+  - the footer menu popup and quick actions expose the legacy session-management items that remain valid in the tmux-first architecture, including session creation, current-session listing, session-target switching, and other tmux-backed management actions that replaced the old custom controls
 verification:
   - cargo test
   - manual: repeated focus and session switching during live output
   - manual: sidebar hide/show shortcuts and footer menu actions work repeatedly during live shell and Codex output
+  - manual: right-arrow and tmux key-driven focus movement reach the sidebar directly instead of landing on the footer pane
+  - manual: footer quick menu contents and popup items match the reviewed legacy menu contract except where a specific tmux-first replacement is documented
 touched_paths:
   - src/runtime
   - src/application
@@ -36,3 +41,4 @@ notes:
   - This slice finishes the navigation ownership move after fullscreen and pane layout are already tmux-native.
   - Avoid inventing a separate waitagent window manager; menu actions should translate into tmux-native target selection and control.
   - The persistent chrome information contract is established in `task.tmux-r5`; this slice only adds the working interaction model on top of that chrome.
+  - The legacy footer menu wording and item inventory should be reviewed against historical sources before implementation so this slice does not converge on a merely functional but contract-inconsistent menu surface.

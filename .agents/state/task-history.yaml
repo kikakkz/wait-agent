@@ -1,6 +1,30 @@
 kind: state
 version: 1
 history:
+  - task_id: task.tmux-r7
+    status: in_progress
+    summary: with tmux-native fullscreen, history, copy-mode, and detach now validated on both shell and Codex sessions, active work moves to direct sidebar focus handoff, hide or restore behavior, and the legacy footer menu interaction contract on top of tmux-native control
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r6
+    status: done
+    summary: fullscreen control now binds directly to tmux zoom on the main pane, pane history comes from tmux rather than waitagent replay, mouse or copy-mode are tmux-native, and shell plus Codex detach flows were validated on the release build
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r6.yaml
+      reference: status
+  - task_id: task.tmux-r6
+    status: in_progress
+    summary: with persistent sidebar and footer panes now stabilized and verified, active work now moves to replacing the remaining custom fullscreen and scrollback path with tmux-native zoom, history, copy-mode, and detach behavior
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r5
+    status: done
+    summary: the tmux-owned sidebar and footer pane slice is complete, including shared session metadata rendering, single-row footer persistence under multi-client size churn, and disabling tmux's built-in status bar so the waitagent footer is the only bottom chrome
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r5.yaml
+      reference: status
   - task_id: task.tmux-style-1
     status: done
     summary: the legacy sidebar and menu style contract was traced to historical task, design, and test sources, and the reusable information hierarchy was mapped into the current tmux-pane slice while interactive menu behavior remained deferred to the later tmux-native control slice

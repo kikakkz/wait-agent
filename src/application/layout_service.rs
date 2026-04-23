@@ -173,6 +173,7 @@ mod tests {
         SetWidth(String, u16),
         SetHeight(String, u16),
         SetHook(String, String),
+        SetSessionOption(String, String),
         SelectMain(String),
     }
 
@@ -389,6 +390,19 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(Call::SetHook(hook_name.to_string(), command.to_string()));
+            Ok(())
+        }
+
+        fn set_session_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            option_name: &str,
+            value: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetSessionOption(
+                option_name.to_string(),
+                value.to_string(),
+            ));
             Ok(())
         }
     }

@@ -269,4 +269,27 @@ pub trait TmuxLayoutGateway: TmuxGateway {
         hook_name: &str,
         command: &str,
     ) -> Result<(), Self::Error>;
+
+    fn set_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error>;
+}
+
+pub trait TmuxControlGateway: TmuxLayoutGateway {
+    fn bind_key_without_prefix(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        command_and_args: &[String],
+    ) -> Result<(), Self::Error>;
+
+    fn bind_main_pane_zoom_toggle(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(), Self::Error>;
 }

@@ -25,13 +25,13 @@ next:
     status: done
   - id: task.tmux-r5
     title: implement sidebar and footer as tmux-owned waitagent panes on stable tmux layouts
-    status: in_progress
+    status: done
   - id: task.tmux-r6
     title: align fullscreen, scrollback, copy-mode, and detach controls with tmux-native behavior
-    status: not_started
+    status: done
   - id: task.tmux-r7
     title: layer waitagent session management and menus on top of tmux-native switching
-    status: not_started
+    status: in_progress
   - id: task.tmux-r8
     title: remove transitional daemon and composed-display paths and complete shell-plus-codex acceptance
     status: not_started

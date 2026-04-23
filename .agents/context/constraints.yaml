@@ -27,6 +27,8 @@ constraints:
   - `workspace` may remain as a convenience bootstrap alias, but long-lived runtime identity should converge on tmux-native targets rather than waitagent-owned daemon sockets or custom attach protocols.
   - Sidebar and footer or menu are persistent tmux-owned panes in the target architecture; fullscreen is main-pane zoom with clean pane restore, not a separate waitagent display mode.
   - Fullscreen history browsing must expose the complete tmux pane history available to the zoomed main pane; waitagent must not introduce its own truncated fullscreen-history subset.
+  - If fullscreen behavior reproduces in raw tmux, treat it as tmux-native behavior rather than a waitagent layout bug; do not reintroduce waitagent-owned fullscreen redraw, replay, or composition to hide it.
+  - If a TUI session starts in a pane narrowed by persistent chrome and later zooms wider, unused right-side columns are accepted until the application redraws itself; do not add app-specific redraw hints or fallback fullscreen composition to hide this.
   - Session discovery, sidebar state, footer state, and future network-session management must converge on one transport-agnostic session registry model rather than separate local and remote bookkeeping paths.
 source_of_truth:
   - README.md

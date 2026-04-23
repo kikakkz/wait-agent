@@ -61,6 +61,10 @@ The tmux-first architecture follows these principles:
 9. Branded tmux over custom runtime
    waitagent should behave like a branded tmux distribution wherever possible.
    Except for waitagent-specific sidebar, footer/menu, and management surfaces, local runtime behavior should reuse tmux native concepts and semantics rather than rebuilding them in a custom daemon or socket protocol.
+10. Tmux owns fullscreen
+   fullscreen correctness is defined by tmux-native pane zoom, history, and restore behavior.
+   If an artifact reproduces in raw tmux, do not reintroduce waitagent-owned redraw, replay, or fullscreen composition to hide it.
+   A TUI that was started in a narrow pane may legitimately keep unused columns after zoom until it redraws itself; this is an accepted consequence of tmux-native ownership, not a waitagent bug.
 
 ## 4.1 Native Reuse Rules
 
@@ -85,6 +89,8 @@ Effective interpretation:
 Anti-goal:
 
 - do not keep building a parallel waitagent-owned daemon protocol for features that tmux already provides natively
+- do not rebuild a waitagent-owned fullscreen redraw or replay path to compensate for tmux-native resize behavior
+- do not add app-specific redraw hints or view-reset tricks for Codex-like sessions in order to hide accepted narrow-start zoom behavior
 
 ## 5. Target Layering
 
