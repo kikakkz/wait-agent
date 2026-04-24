@@ -2,7 +2,7 @@ id: task.tmux-r7
 kind: task
 version: 1
 title: layer waitagent session management and menus on top of tmux-native switching
-status: in_progress
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml

@@ -4,7 +4,6 @@ version: 1
 title: move attach, resize, and scheduler control onto explicit runtime events
 status: in_progress
 priority: high
-target_task_reference: task.event-r3
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
@@ -29,8 +28,7 @@ touched_paths:
   - src/application
   - src/domain
   - src/app.rs
-  - .agents/tasks/current.yaml
   - .agents/tasks/queued/task.event-r3.yaml
 notes:
-  - `task.event-r2` is complete: the default pane path is event-driven, cross-session refresh uses explicit events, and the old pane polling runtime is no longer on the default module path.
   - This slice should build the new control path, not patch the historical tick loop in place unless that is the smallest route to isolate it behind a new boundary.
+  - 2026-04-24 next: audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.

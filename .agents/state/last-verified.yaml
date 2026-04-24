@@ -1,7 +1,70 @@
 kind: state
 version: 1
-last_updated_from: tmux-r7 footer-menu contract and legacy chrome metadata advanced on release build at 2026-04-23
+last_updated_from: event-r3 event-driven app loop validation refreshed on 2026-04-24
 checks:
+  - id: event-r3-cargo-test-quiet
+    command: cargo test --quiet after replacing accepted-path app loop ticks with deadline-driven waits, wiring server accepts into explicit runtime events, and moving resize handling onto SIGWINCH-fed runtime events
+    status: pass
+  - id: event-r3-cli-tests
+    command: cargo test cli -- --nocapture after replacing accepted-path app loop ticks with deadline-driven waits and explicit server accept events
+    status: pass
+  - id: event-r3-event-driven-tests
+    command: cargo test event_driven -- --nocapture after replacing accepted-path app loop ticks with deadline-driven waits and explicit server accept events
+    status: pass
+  - id: event-r3-cargo-build-quiet
+    command: cargo build --quiet after replacing accepted-path app loop ticks with deadline-driven waits, explicit listener events, and SIGWINCH resize watchers
+    status: pass
+  - id: event-r2-terminal-global-refresh-command
+    command: manual terminal validation by running `./target/debug/waitagent __chrome-refresh-all` and confirming an existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-bootstrap-cross-session-refresh
+    command: manual terminal validation by launching a fresh `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` session and confirming another existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-explicit-close-cross-session-refresh
+    command: manual terminal validation by running `./target/debug/waitagent __close-session --socket-name wa-<session> --session-name <session>` for a fresh session and confirming another existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-shell-exit-cross-session-refresh
+    command: manual terminal validation by launching two fresh `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` sessions, sending `exit` to the second session's main shell pane, confirming `waitagent ls` removes the exited session, and confirming the surviving session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-layout-service-hooks
+    command: cargo test layout_service -- --nocapture after expanding tmux chrome refresh hooks and moving default pane refresh to explicit hook-driven respawns
+    status: pass
+  - id: event-r2-chrome-refresh-cli
+    command: cargo test chrome_refresh -- --nocapture after adding the hidden `__chrome-refresh` command and hook-shell wiring
+    status: pass
+  - id: event-r2-event-driven-tmux-pane-runtime
+    command: cargo test event_driven_tmux_pane_runtime -- --nocapture after adding the tmux-backed bridge that publishes pane dimensions, fullscreen state, and session snapshots into the new pane orchestrator
+    status: pass
+  - id: event-r2-event-driven-runtime-regression
+    command: cargo test event_driven -- --nocapture after adding the tmux-backed pane bridge alongside the existing event-driven chrome runtime modules
+    status: pass
+  - id: event-r2-event-driven-ui-pane-runtime
+    command: cargo test event_driven_ui_pane_runtime -- --nocapture after adding the new pane-side event orchestrator for session snapshots, resize/fullscreen events, sidebar navigation, and submit intents
+    status: pass
+  - id: event-r2-local-runtime-contract
+    command: cargo test local_runtime -- --nocapture after extending the event-driven pane path on top of the local runtime event contract
+    status: pass
+  - id: event-r2-event-driven-runtime
+    command: cargo test event_driven -- --nocapture after wiring the new event-driven ui pane runtime into the chrome runtime module set
+    status: pass
+  - id: tmux-r8a-release-build
+    command: cargo build --release after restoring tmux native status-bar coexistence, adding tmux-owned sidebar selection commands, bringing back legacy sidebar or footer colors, and expanding the footer popup command section
+    status: pass
+  - id: tmux-r8a-cargo-test-quiet
+    command: cargo test --quiet after restoring tmux native status-bar coexistence, adding tmux-owned sidebar selection commands, bringing back legacy sidebar or footer colors, and expanding the footer popup command section
+    status: pass
+  - id: tmux-r7a-codex-fullscreen-status-line-manual-release-validation
+    command: manual release validation by launching env -u TMUX TERM=xterm-256color ./target/release/waitagent, starting `codex`, confirming Ctrl-O keeps the waitagent menu visible on the tmux status line while Codex is focused, and confirming a second Ctrl-O restores the normal sidebar and footer layout
+    status: pass
+  - id: tmux-r7a-shell-fullscreen-status-line-manual-release-validation
+    command: manual release validation by launching env -u TMUX TERM=xterm-256color ./target/release/waitagent, entering fullscreen with Ctrl-O, confirming waitagent menu chrome remains visible on the tmux status line, and confirming Ctrl-B s still opens the waitagent session menu while zoomed
+    status: pass
+  - id: tmux-r7a-release-build
+    command: cargo build --release after projecting fullscreen waitagent menu hints onto the tmux status line and adding prefixed tmux bindings for fullscreen-safe session actions
+    status: pass
+  - id: tmux-r7a-cargo-test-quiet
+    command: cargo test --quiet after projecting fullscreen waitagent menu hints onto the tmux status line and adding prefixed tmux bindings for fullscreen-safe session actions
+    status: pass
   - id: tmux-r7-footer-menu-contract-release-build
     command: cargo build --release after upgrading the tmux-native footer menu to include current-session headers, sectioned session items, and legacy-aligned footer chrome wording while keeping switching on detach-client -E attach semantics
     status: pass

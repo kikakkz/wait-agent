@@ -1,0 +1,51 @@
+id: task.event-r2
+kind: task
+version: 1
+title: implement event-driven tmux chrome, session catalog, and pane update flows
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - sidebar and footer updates are driven by explicit session-catalog and pane-geometry events rather than periodic `list_sessions`, pane-size polling, or timed redraw loops
+  - tmux-owned chrome surfaces consume named event payloads for selection changes, active-session changes, menu visibility, and footer status updates
+  - resize and layout changes arrive through explicit runtime events or tmux hooks rather than timeout wakeups
+  - the new chrome path is implemented in new modules or new runtime boundaries rather than extending the old polling pane loops
+verification:
+  - cargo test
+  - manual: sidebar and footer update only on real session, selection, or resize events in a terminal repro
+  - targeted review of event ownership across `src/runtime`, `src/application`, and `src/ui`
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - src/domain
+  - src/infra/tmux.rs
+  - src/infra/tmux_types.rs
+  - src/infra/tmux_backend.rs
+  - src/runtime/event_driven_ui_pane_runtime.rs
+  - src/runtime/event_driven_tmux_pane_runtime.rs
+  - src/runtime/event_driven_pane_runtime.rs
+  - src/runtime/workspace_layout_runtime.rs
+  - src/command/dispatch.rs
+  - src/cli.rs
+  - .agents/tasks/queued/task.event-r2.yaml
+notes:
+  - This slice owns the new event-fed chrome pipeline only.
+  - Keep old polling pane runtimes isolated rather than partially merged into the new path.
+  - 2026-04-23 progress: a new chrome projection layer now exists outside the polling pane runtimes, with explicit sidebar and footer view models in `src/domain/chrome.rs`, event-fed projection state in `src/application/chrome_projection_service.rs`, and renderer entrypoints that can consume those view models without rediscovering state.
+  - 2026-04-23 progress: session-catalog snapshot publication and the event-driven chrome runtime are now implemented as separate modules, so the new path can already run `session snapshot -> local runtime event -> chrome projection -> rendered sidebar/footer/status buffers` without touching the historical polling pane loops.
+  - 2026-04-24 progress: a dedicated `src/runtime/event_driven_ui_pane_runtime.rs` now orchestrates local runtime event publication, event-bus delivery, sidebar input parsing, selection events, and chrome buffer updates without any timer-based redraw loop in the new path.
+  - 2026-04-24 progress: a dedicated `src/runtime/event_driven_tmux_pane_runtime.rs` now bridges real tmux pane dimensions, fullscreen state, and session snapshots into the new pane orchestrator through explicit gateway calls instead of periodic redraw work.
+  - 2026-04-24 progress: the default hidden pane command entrypoints now dispatch through `src/runtime/event_driven_pane_runtime.rs`, and tmux session hooks now target `__chrome-refresh` so chrome panes refresh by explicit respawn events instead of pane-local polling loops.
+  - 2026-04-24 progress: cross-session refresh now uses an explicit global `__chrome-refresh-all` command, bootstrap-triggered refresh after new workspace creation, and menu-driven `__close-session` handling, while session hooks split local resize refresh from cross-session refresh events.
+  - 2026-04-24 progress: non-menu shell exit now flows through a main-pane `pane-exited` hook into explicit `__close-session`, which removes the exiting session and refreshes surviving sessions without timer-based cleanup.
+  - 2026-04-24 progress: `src/runtime/ui_pane_runtime.rs` is no longer exported through `src/runtime/mod.rs`, so the historical polling pane runtime is off the default module path.

@@ -2,7 +2,7 @@ id: task.tmux-r7a
 kind: task
 version: 1
 title: keep the waitagent menu visible while the main session is zoomed fullscreen
-status: not_started
+status: done
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -34,4 +34,6 @@ touched_paths:
 notes:
   - This slice is specifically about keeping menu visibility during fullscreen; it should not reopen the accepted tmux-owned fullscreen baseline.
   - The solution must explain which surface owns the persistent menu while the main pane is zoomed, rather than relying on accidental leftover chrome.
+  - Accepted ownership model for this slice: normal mode keeps the footer pane as the visible menu surface, while fullscreen mirrors waitagent menu chrome into the tmux status line and leaves tmux zoom in control of the main pane.
+  - Fullscreen menu actions must not steal raw shell or agent keystrokes from the zoomed main pane; prefixed tmux bindings are the safe entry path for fullscreen-only session actions.
   - Sidebar visibility during fullscreen remains a separate product decision; this task only requires the menu to stay available.

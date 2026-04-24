@@ -1,0 +1,42 @@
+id: task.event-r1
+kind: task
+version: 1
+title: establish the new event-driven local runtime architecture and event contract
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r7a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the accepted new local runtime is described in concrete module and event terms, including named producers, consumers, and payload boundaries for session catalog, pane chrome, attach clients, input, output, resize, and scheduler transitions
+  - the new runtime path does not depend on fixed refresh ticks, unconditional sleeps, or timeout-driven background recomputation for normal UI, attach, or scheduler behavior
+  - task and code notes make it explicit which existing polling paths are historical and which new modules own the event-driven replacement path
+  - the follow-on implementation slices are bounded so new work can proceed without reopening the old mixed polling architecture
+verification:
+  - targeted review of runtime boundaries and event ownership across `src/runtime`, `src/application`, and `src/domain`
+  - task and state sync review across `.agents/tasks/*` and `.agents/state/*`
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/domain
+  - docs/tmux-first-workspace-plan.md
+  - .agents/tasks/current.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.event-r1.yaml
+  - .agents/tasks/queued/task.event-r2.yaml
+  - .agents/tasks/queued/task.event-r3.yaml
+  - .agents/tasks/queued/task.event-r4.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice is architecture-only. Do not spend effort rehabilitating old polling loops.
+  - The user explicitly chose an event-driven direction for all new local runtime work.
+  - Old tmux cleanup slices are now historical unless a concrete event-driven replacement path depends on one of their artifacts.
+  - Completed on 2026-04-23 with an explicit local-runtime event contract in `src/domain/local_runtime.rs`, an application event-bus boundary in `src/application/local_runtime_event_service.rs`, a runtime replacement map in `src/runtime/event_driven_runtime.rs`, and the corresponding architecture notes in `docs/event-driven-local-runtime-architecture.md`.

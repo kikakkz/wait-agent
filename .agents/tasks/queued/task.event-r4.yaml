@@ -1,0 +1,36 @@
+id: task.event-r4
+kind: task
+version: 1
+title: route the default local path through the new event-driven stack and isolate polling history
+status: not_started
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the default local workspace and attach path runs through the new event-driven stack
+  - fixed polling loops that remain are no longer on the primary local path and are clearly marked historical or inactive
+  - shell and Codex validation confirm the new event-driven path is the accepted baseline
+  - docs and task state record one clear primary local runtime direction
+verification:
+  - cargo test
+  - manual: shell validation in a real terminal
+  - manual: Codex validation in a real terminal
+  - targeted review of default-route ownership
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/domain
+  - docs/tmux-first-workspace-plan.md
+  - docs/execution-status-board.md
+  - .agents/tasks/queued/task.event-r4.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice closes the architecture reset by making the new event-driven route the only accepted default local path.

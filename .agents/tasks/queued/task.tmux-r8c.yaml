@@ -1,14 +1,14 @@
-id: task.tmux-r8
+id: task.tmux-r8c
 kind: task
 version: 1
-title: remove transitional daemon and composed-display paths and complete shell-plus-codex acceptance
+title: remove transitional daemon and composed-display paths and complete final tmux-first acceptance
 status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.tmux-r7a.done
+  - task.tmux-r8b.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
@@ -34,7 +34,8 @@ touched_paths:
   - docs/execution-status-board.md
   - docs/tmux-native-realignment-review.md
   - .agents/state/task-history.yaml
-  - .agents/tasks/queued/task.tmux-r8.yaml
+  - .agents/tasks/queued/task.tmux-r8c.yaml
 notes:
-  - Superseded on 2026-04-23 after the remaining work was split into `task.tmux-r8a`, `task.tmux-r8b`, and `task.tmux-r8c`.
-  - The split separates chrome-contract restoration, tmux-style local session semantics, and final transitional-path deletion so each slice has one clear acceptance boundary.
+  - This is the final cleanup slice after the chrome contract and tmux-style local session semantics have both stabilized.
+  - The expected output of this task is one obvious local runtime model: branded tmux plus waitagent-owned sidebar, footer, and management surfaces.
+  - Superseded on 2026-04-23 after the local runtime plan was redirected to an event-driven rewrite queue.

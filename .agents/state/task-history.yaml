@@ -1,6 +1,132 @@
 kind: state
 version: 1
 history:
+  - task_id: task.event-r3
+    status: in_progress
+    summary: with the pane-side chrome path now event-driven and the historical polling pane runtime removed from the default module graph, active work moves to attach, resize, and scheduler coordination on the remaining local control loop
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: done
+    summary: the tmux chrome and session-catalog slice is complete: default sidebar and footer now run through the event-driven pane path, cross-session refresh is explicit, shell exit closes sessions through hooks, and the historical polling pane runtime is off the default module path
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: natural shell exit now flows through a main-pane pane-exited hook into explicit close-session handling, so the exiting tmux session is removed and surviving sidebars refresh without timer-driven cleanup
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: cross-session chrome refresh now works on explicit event paths, with global refresh commands, bootstrap-triggered updates for new sessions, and menu-driven explicit close handling all verified in a real terminal without timer-based redraw loops
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: the default hidden pane entrypoints now route through the event-driven pane runtime and tmux hooks refresh chrome by explicit `__chrome-refresh` respawns, so the accepted path no longer depends on pane-local timeout loops for sidebar or footer redraws
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: the event-driven pane path now has a tmux-backed bridge runtime, so real pane dimensions, zoom state, and session snapshots can feed the new orchestrator through explicit refresh calls without adding timer-based redraw logic
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: the new event-driven pane orchestrator now owns sidebar input parsing, explicit resize and fullscreen events, session snapshot publication, and chrome buffer fanout without adding any timer-based redraw loop to the accepted path
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: the new chrome path now reaches all the way from session snapshot publication through local runtime events and chrome projection to rendered sidebar, footer, and fullscreen-status buffers, still without extending the historical polling pane runtimes
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: the first event-driven chrome implementation layer is now in place, with explicit sidebar and footer view models plus an event-fed chrome projection service living outside the historical polling pane runtimes
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2.yaml
+      reference: status
+  - task_id: task.event-r2
+    status: in_progress
+    summary: with the event contract and replacement map now defined in code and docs, active work moves to making tmux chrome updates consume explicit session-catalog, pane-geometry, and chrome-intent events instead of polling loops
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r1
+    status: done
+    summary: the event-driven local runtime contract is now defined in code and docs, including typed local-runtime events, a dedicated application event bus, and an explicit replacement map for historical polling paths
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r1.yaml
+      reference: status
+  - task_id: task.event-r1
+    status: in_progress
+    summary: the local runtime plan has been reset around a new event-driven architecture queue, with current work focused on naming explicit event producers, consumers, and implementation boundaries for chrome, attach, resize, and scheduler behavior
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r8c
+    status: superseded
+    summary: the final tmux cleanup slice is now historical because the local runtime plan was redirected to a stricter event-driven rewrite queue
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r8c.yaml
+      reference: status
+  - task_id: task.tmux-r8b
+    status: superseded
+    summary: the local session-semantics cleanup slice is now historical because the local runtime plan was redirected to a stricter event-driven rewrite queue
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r8b.yaml
+      reference: status
+  - task_id: task.tmux-r8a
+    status: superseded
+    summary: the remaining chrome-contract cleanup slice is now historical because the local runtime plan was redirected to a stricter event-driven rewrite queue
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r8a.yaml
+      reference: status
+  - task_id: task.tmux-r8a
+    status: in_progress
+    summary: tmux native status and waitagent footer now coexist again, sidebar selection is stored and driven through tmux-owned hidden commands, and the legacy sidebar or footer color contract has been restored while menu-item parity remains the last open chrome gap
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r8a
+    status: in_progress
+    summary: the old catch-all tmux cleanup slice has been split so current work is now narrowly focused on restoring the legacy waitagent chrome contract on top of tmux-owned panes and menus
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r8
+    status: superseded
+    summary: the original final cleanup slice was split into separate follow-up tasks for chrome restoration, tmux-style local session semantics, and final transitional-path deletion
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r8.yaml
+      reference: status
+  - task_id: task.tmux-r8
+    status: in_progress
+    summary: with fullscreen menu projection now validated for both shell and Codex, active work moves to removing or isolating the old daemon-centered and composed-display local runtime paths so tmux-first waitagent is the only default route
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.tmux-r7a
+    status: done
+    summary: fullscreen menu ownership is now explicit and tmux-native: the footer pane remains the normal-mode chrome surface while the tmux status line carries waitagent menu hints and prefixed session actions during zoomed fullscreen for both shell and Codex
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r7a.yaml
+      reference: status
+  - task_id: task.tmux-r7
+    status: done
+    summary: pane-identity navigation, sidebar hide or restore behavior, and the legacy-aligned footer session menu are now working on top of tmux-native focus and attach control
+    source_of_truth:
+      file: .agents/tasks/queued/task.tmux-r7.yaml
+      reference: status
   - task_id: task.tmux-r7
     status: in_progress
     summary: pane-identity-driven chrome navigation is now in place, and the tmux-native footer menu has advanced from a placeholder into a sectioned waitagent menu with current-session headers, new-session creation, and session-target switching on top of detach-client -E attach semantics
