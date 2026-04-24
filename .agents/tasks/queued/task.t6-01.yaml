@@ -1,0 +1,37 @@
+id: task.t6-01
+kind: task
+version: 1
+title: implement the server-side workspace console as a target-activation surface
+status: deferred
+priority: medium
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r4.done
+  - task.t5-06.done
+  - task.t5-07.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the server-side workspace console renders the shared target catalog through one target-activation surface instead of inventing a second console model
+  - selecting a remote or local target on the server-side console follows the same transport-agnostic activation semantics established by the local main-slot model
+  - server-side console work does not reintroduce detached client switching, daemon-specific attach identity, or server-owned remote PTY assumptions
+  - docs and task state record the server-console boundary and activation model explicitly
+verification:
+  - cargo test
+  - targeted review of server-console ownership, target activation, and transport boundaries
+touched_paths:
+  - src/server.rs
+  - src/runtime
+  - src/application
+  - .agents/tasks/queued/task.t6-01.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/execution-status-board.md
+notes:
+  - This task remains deferred until the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` closes.
+  - The accepted console model is a server-side target-activation surface, not a parallel local-style tmux client running on top of remote PTYs.

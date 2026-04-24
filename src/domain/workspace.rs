@@ -23,16 +23,28 @@ pub struct WorkspaceInstanceConfig {
     pub workspace_key: String,
     pub socket_name: String,
     pub session_name: String,
+    pub initial_rows: Option<u16>,
+    pub initial_cols: Option<u16>,
 }
 
 impl WorkspaceInstanceConfig {
     pub fn for_new_session(workspace_dir: &Path) -> Self {
+        Self::for_new_session_with_size(workspace_dir, None, None)
+    }
+
+    pub fn for_new_session_with_size(
+        workspace_dir: &Path,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Self {
         let workspace_key = next_session_key();
         Self {
             workspace_dir: workspace_dir.to_path_buf(),
             socket_name: format!("wa-{workspace_key}"),
             session_name: workspace_key.clone(),
             workspace_key,
+            initial_rows: rows,
+            initial_cols: cols,
         }
     }
 }
@@ -78,6 +90,8 @@ mod tests {
         assert!(config.workspace_key.len() == 16);
         assert_eq!(config.socket_name, format!("wa-{}", config.workspace_key));
         assert_eq!(config.session_name, config.workspace_key);
+        assert_eq!(config.initial_rows, None);
+        assert_eq!(config.initial_cols, None);
     }
 
     #[test]

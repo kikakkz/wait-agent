@@ -29,4 +29,14 @@ where
         self.workspace_service
             .ensure_workspace_for_dir(workspace_dir)
     }
+
+    pub fn ensure_workspace_for_dir_with_size(
+        &self,
+        workspace_dir: &Path,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<BootstrappedWorkspace, G::Error> {
+        self.workspace_service
+            .ensure_workspace_for_dir_with_size(workspace_dir, rows, cols)
+    }
 }

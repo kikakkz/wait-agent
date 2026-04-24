@@ -1,0 +1,36 @@
+id: task.t3-07
+kind: task
+version: 1
+title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
+status: deferred
+priority: low
+target_task_reference: task.t3-07
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - narrow-terminal behavior preserves the fixed-chrome workspace model rather than falling back to the retired overlay or detached-switching path
+  - compaction rules are driven by layout ownership and event-driven state, not by content probing or shell heuristics
+  - sidebar, main slot, and footer or menu remain explainable under one coherent compact layout policy
+  - docs and task state record the accepted compact-layout policy
+verification:
+  - cargo test
+  - manual: narrow-terminal validation in a real terminal
+  - targeted review of compact-layout ownership and navigation behavior
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - .agents/tasks/queued/task.t3-07.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/execution-status-board.md
+notes:
+  - This task is optional and remains deferred until the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` closes and acceptance evidence proves compaction is necessary.
+  - Do not reintroduce an overlay renderer or detached client switching as a narrow-terminal fallback.

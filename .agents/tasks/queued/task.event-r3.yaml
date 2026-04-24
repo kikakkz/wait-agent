@@ -2,13 +2,13 @@ id: task.event-r3
 kind: task
 version: 1
 title: move attach, resize, and scheduler control onto explicit runtime events
-status: in_progress
-priority: high
+status: not_started
+priority: critical
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.event-r2.done
+  - task.event-r2a.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
@@ -31,4 +31,6 @@ touched_paths:
   - .agents/tasks/queued/task.event-r3.yaml
 notes:
   - This slice should build the new control path, not patch the historical tick loop in place unless that is the smallest route to isolate it behind a new boundary.
-  - 2026-04-24 next: audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
+  - 2026-04-24 pause: do not resume this slice until in-workspace target switching stops leaving the current client. The current `detach-client -E "waitagent attach <target>"` path is an upstream blocker because it cannot satisfy fixed chrome, no shell reveal, or no flicker.
+  - When this slice resumes, audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
+  - This task is the second slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

@@ -20,6 +20,15 @@ active:
     title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
     status: done
 next:
+  - id: task.event-r2a
+    title: replace cross-session attach switching with fixed-chrome main-slot target activation
+    status: in_progress
+  - id: task.event-r3
+    title: move attach, resize, and scheduler control onto explicit runtime events
+    status: not_started
+  - id: task.event-r4
+    title: route the default local path through the new event-driven stack and isolate polling history
+    status: not_started
   - id: task.tmux-r4
     title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases
     status: done
@@ -52,13 +61,7 @@ next:
     status: done
   - id: task.event-r2
     title: implement event-driven tmux chrome, session catalog, and pane update flows
-    status: in_progress
-  - id: task.event-r3
-    title: move attach, resize, and scheduler control onto explicit runtime events
-    status: not_started
-  - id: task.event-r4
-    title: route the default local path through the new event-driven stack and isolate polling history
-    status: not_started
+    status: done
   - id: task.tmux-2
     title: route workspace entry and attach lifecycle through tmux-backed instances
     status: superseded
@@ -114,20 +117,20 @@ next:
     title: polish the default-visible sidebar detail area and enter-to-switch behavior
     status: superseded
   - id: task.t5-06
-    title: implement the aggregate server session registry
+    title: implement the aggregate transport-agnostic target registry
     status: deferred
   - id: task.scroll-1
     title: implement tmux-style pane history with mouse-draggable gutter scrolling
     status: superseded
   - id: task.t5-07
-    title: implement remote resize and input routing
-    status: not_started
+    title: implement remote target input and resize routing through the server control plane
+    status: deferred
   - id: task.t6-01
-    title: implement the server-side workspace console
-    status: not_started
+    title: implement the server-side workspace console as a target-activation surface
+    status: deferred
   - id: task.t3-07
-    title: implement narrow-terminal compaction rules
-    status: not_started
+    title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
+    status: deferred
   - id: task.architecture-1
     title: refactor the runtime and module architecture for clearer boundaries and cleaner code
     status: superseded
@@ -157,6 +160,9 @@ notes:
   - The lifecycle daemon queue and old composed-sidebar implementation queue are now historical transitional work, not the accepted destination; they should not drive future architecture decisions.
   - The refined execution order is: tmux-native command semantics first, tmux-owned sidebar and footer second, tmux-native fullscreen and control behavior third, waitagent management affordances fourth, and only then final transitional-path deletion.
   - 2026-04-23 direction reset: new local-runtime work is now anchored on an event-driven rewrite queue. Fixed tick, sleep, and timeout polling loops are not an acceptable primary architecture for new implementation slices.
+  - 2026-04-24 refinement: fixed-chrome main-slot target activation is now a prerequisite for further attach-side event cleanup, because the current sidebar or footer switch path still detaches the client and launches `waitagent attach <target>`.
+  - 2026-04-24 execution lock: `task.event-r2a -> task.event-r3 -> task.event-r4` is the top-priority local batch and must complete before resuming remote, network, or optional polish work.
+  - Remaining network and remote tasks must build on the shared transport-agnostic target catalog and fixed-chrome main-slot activation model; do not resume them on top of superseded daemon, attach, or local-only session assumptions.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

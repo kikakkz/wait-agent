@@ -1,3 +1,17 @@
 kind: state
 version: 1
-blockers: []
+blockers:
+  - id: blocker.fixed-chrome-switching-detach-attach
+    summary: current in-workspace target switching still detaches the client and runs `waitagent attach <target>`, so the shell becomes visible and the workspace chrome cannot stay fixed
+    affects:
+      - task.event-r2a
+      - task.event-r3
+      - task.event-r4
+    evidence:
+      - manual terminal repro on 2026-04-24: pressing Enter on a sidebar item exits to the shell and then re-enters waitagent
+      - `src/runtime/event_driven_pane_runtime.rs` still launches `detach-client -E "waitagent attach <target>"`
+      - `src/runtime/footer_menu_runtime.rs` still routes menu switching through the same cross-session attach path
+      - `src/runtime/workspace_command_runtime.rs` still makes `attach` the cross-session client handoff path
+    unblock_when:
+      - in-workspace target activation rebinds the main slot without detaching the current client
+      - sidebar and footer or menu remain mounted while only the main view changes

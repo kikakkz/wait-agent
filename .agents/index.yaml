@@ -45,7 +45,7 @@ directories:
 active_context:
   project_phase: phase-1
   current_stage: tmux-first-local-architecture-migration
-  current_focus: establish the new modular tmux-first runtime architecture and unified entry model before implementing the tmux feature migration
+  current_focus: replace cross-session attach switching with fixed-chrome main-slot target activation before resuming attach-side event cleanup
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

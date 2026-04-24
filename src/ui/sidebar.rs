@@ -1,8 +1,9 @@
 use crate::domain::chrome::SidebarViewModel;
-use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
 use crate::ui::chrome::{
-    style_sidebar_detail_line, style_sidebar_header_line, style_sidebar_hint_line,
-    style_sidebar_item_line, SidebarRowStyle,
+    right_align, sidebar_row_prefix, style_sidebar_badge, style_sidebar_detail_line,
+    style_sidebar_header_line, style_sidebar_hint_line, style_sidebar_item_line,
+    style_sidebar_separator_line, SidebarBadgeState, SidebarRowStyle,
 };
 
 pub struct SidebarUi;
@@ -36,39 +37,57 @@ impl SidebarUi {
         }
 
         let mut lines = Vec::new();
-        lines.push(style_sidebar_header_line(" Sessions  [h] hide", width));
-        if height > 1 {
-            lines.push(style_sidebar_hint_line(
-                " Left back  Up/Down  Enter switch",
-                width,
-            ));
+        push_line(
+            &mut lines,
+            style_sidebar_header_line(" Sessions  [h] hide", width),
+            height,
+        );
+        push_line(
+            &mut lines,
+            style_sidebar_hint_line(" Left back  Up/Down  Enter", width),
+            height,
+        );
+        push_line(&mut lines, render_separator_row(width), height);
+        if lines.len() == height {
+            return lines.join("\n");
         }
 
         if sessions.is_empty() {
-            while lines.len() + 1 < height {
+            while lines.len() + 2 < height {
                 lines.push(style_sidebar_item_line("", width, SidebarRowStyle::Normal));
             }
-            lines.push(style_sidebar_detail_line(" (no sessions)", width));
+            push_line(&mut lines, render_separator_row(width), height);
+            lines.push(style_sidebar_detail_line(
+                &right_align("(no sessions)", width),
+                width,
+            ));
             return lines.join("\n");
         }
 
         let selected = selected_session(active_socket, active_session, selected_target, sessions)
             .unwrap_or(&sessions[0]);
-        let detail_lines = selected_detail_lines(selected, width);
-        let session_capacity = height.saturating_sub(lines.len() + detail_lines.len());
+        let detail_line = selected_detail_line(selected, width);
+        let session_capacity = height.saturating_sub(lines.len() + 2);
         for session in sessions.iter().take(session_capacity) {
             let is_current = session.address.server_id() == active_socket
                 && session.address.session_id() == active_session;
             let is_selected =
                 session.address.qualified_target() == selected.address.qualified_target();
-            lines.push(render_session_row(session, is_current, is_selected, width));
+            lines.push(render_session_row(
+                session,
+                is_current,
+                is_selected,
+                width,
+                _now_millis,
+            ));
         }
 
-        while lines.len() + detail_lines.len() < height {
+        while lines.len() + 2 < height {
             lines.push(style_sidebar_item_line("", width, SidebarRowStyle::Normal));
         }
 
-        lines.extend(detail_lines);
+        push_line(&mut lines, render_separator_row(width), height);
+        lines.push(detail_line);
         lines.join("\n")
     }
 }
@@ -106,6 +125,7 @@ fn render_session_row(
     is_current: bool,
     is_selected: bool,
     width: usize,
+    now_millis: u128,
 ) -> String {
     let marker = if is_selected {
         ">"
@@ -114,13 +134,6 @@ fn render_session_row(
     } else {
         " "
     };
-    let state = session.task_state.label();
-    let reserved = marker.len() + 1 + 1 + state.len();
-    let label_width = width.saturating_sub(reserved);
-    let label = pad_right(
-        &truncate_left(&session.display_label(), label_width),
-        label_width,
-    );
     let row_style = if is_selected {
         SidebarRowStyle::Selected
     } else if is_current {
@@ -128,44 +141,40 @@ fn render_session_row(
     } else {
         SidebarRowStyle::Normal
     };
-    style_sidebar_item_line(&format!("{marker} {label} {state}"), width, row_style)
+    let badge_state = sidebar_badge_state(session.task_state);
+    let (badge, badge_width) = style_sidebar_badge(badge_state, row_style, now_millis);
+    let reserved = marker.len() + 1 + 1 + badge_width;
+    let label_width = width.saturating_sub(reserved);
+    let label = pad_right(
+        &truncate_left(&session.display_label(), label_width),
+        label_width,
+    );
+    let prefix = sidebar_row_prefix(row_style);
+    format!("{prefix}{marker} {label} {badge}\x1b[0m")
 }
 
-fn selected_detail_lines(session: &ManagedSessionRecord, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
+fn selected_detail_line(session: &ManagedSessionRecord, width: usize) -> String {
+    let detail = format!("{} {}", session.display_label(), session.task_state.label());
+    style_sidebar_detail_line(&right_align(&detail, width), width)
+}
+
+fn render_separator_row(width: usize) -> String {
+    style_sidebar_separator_line(&"─".repeat(width), width)
+}
+
+fn sidebar_badge_state(state: ManagedSessionTaskState) -> SidebarBadgeState {
+    match state {
+        ManagedSessionTaskState::Running => SidebarBadgeState::Running,
+        ManagedSessionTaskState::Input => SidebarBadgeState::Input,
+        ManagedSessionTaskState::Confirm => SidebarBadgeState::Confirm,
+        ManagedSessionTaskState::Unknown => SidebarBadgeState::Unknown,
     }
+}
 
-    let current_path = session
-        .current_path
-        .as_ref()
-        .or(session.workspace_dir.as_ref())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "-".to_string());
-
-    vec![
-        style_sidebar_detail_line(&"-".repeat(width), width),
-        style_sidebar_detail_line(
-            &format!(
-                " {} | {}",
-                session.display_label(),
-                session.task_state.label()
-            ),
-            width,
-        ),
-        style_sidebar_detail_line(
-            &format!(" id: {}", session.address.display_session_id()),
-            width,
-        ),
-        style_sidebar_detail_line(&format!(" dir: {current_path}"), width),
-        style_sidebar_detail_line(
-            &format!(
-                " clients:{} windows:{}",
-                session.attached_clients, session.window_count
-            ),
-            width,
-        ),
-    ]
+fn push_line(lines: &mut Vec<String>, line: String, height: usize) {
+    if lines.len() < height {
+        lines.push(line);
+    }
 }
 
 fn pad_right(text: &str, width: usize) -> String {
@@ -185,7 +194,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn sidebar_ui_renders_plain_session_rows_and_detail_footer() {
+    fn sidebar_ui_renders_items_with_badges_and_single_detail_footer() {
         let output = SidebarUi::render(
             "wa-1",
             "waitagent-1",
@@ -220,12 +229,14 @@ mod tests {
         assert!(output.starts_with("\u{1b}[48;5;236m"));
         assert!(output.contains(" Sessions  [h] hide"));
         assert!(output.contains("Up/Down"));
+        assert!(output.contains("────"));
         assert!(output.contains("* bash@local"));
         assert!(output.contains("> codex@local"));
-        assert!(output.contains("INPUT"));
-        assert!(output.contains("CONFIRM"));
-        assert!(output.contains("codex@local | CONFIRM"));
-        assert!(output.contains(" id: 2"));
+        assert!(output.contains("\u{1b}[38;5;227m🔊I"));
+        assert!(output.contains("\u{1b}[38;5;215m📢C"));
+        assert!(output.contains("codex@local CONFIRM"));
+        assert!(!output.contains("----------------"));
+        assert!(!output.contains(" id: 2"));
         assert!(output.contains("\u{1b}[48;5;240m"));
     }
 

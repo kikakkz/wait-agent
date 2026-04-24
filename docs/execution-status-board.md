@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.5`  
+Version: `v1.6`  
 Status: `Active`  
-Date: `2026-04-22`
+Date: `2026-04-24`
 
 ## 1. Purpose
 
@@ -25,7 +25,7 @@ Use `.agents/` for:
 - the complete machine task inventory
 - blocker records
 - verification records
-- reusable assistant primitives and runbooks
+- reusable assistant procedures
 
 ## 2. Current Phase
 
@@ -35,36 +35,34 @@ Current phase:
 
 Current gate:
 
-- `tmux-r3` build a new workspace lifecycle stack outside the legacy lifecycle module
+- `event-r2a` replace cross-session attach switching with fixed-chrome main-slot target activation
 
 Why this is the current gate:
 
-- repeated real-terminal validation showed that the old custom fullscreen path is structurally unstable for Codex-like live TUI workloads
-- the accepted replacement is now the tmux-first workspace architecture documented in `docs/tmux-first-workspace-plan.md`
-- the current code structure is also not a good base for this migration, especially because `src/app.rs` concentrates too many responsibilities
-- the new code-level target is documented in `docs/tmux-first-runtime-architecture.md`
+- the pane-side chrome path is already event-driven enough to expose the real remaining architecture problem
+- terminal repro confirmed that sidebar Enter and footer switching still detach the client and relaunch through `waitagent attach <target>`
+- that switching path exits to the shell and then re-enters WaitAgent, so it cannot satisfy the accepted fixed-chrome, no-shell-reveal, and no-flicker product contract
+- attach or scheduler event cleanup is still needed, but it is not the current root blocker
+- this work is now the first slice in a locked batch: `event-r2a -> event-r3 -> event-r4`
 
 ## 3. Current Snapshot
 
 Project status at a glance:
 
-- Product, architecture, functional, module, UI, interaction-flow, protocol, and MVP planning docs exist
-- The Rust implementation workspace and core local runtime are in place
-- Local PTY ownership, console focus, scheduling, Peek, renderer, and VT screen-state handling exist
-- Local multi-session workspace behavior has passed the original custom-runtime implementation and live validation loops, but that display baseline is no longer the accepted architecture target
-- The tmux-style daemon lifecycle queue through `lifecycle-5` now supports detach and reattach persistence, multi-client attach, shared PTY input, and host-wide `waitagent ls` listing
-- The right-sidebar and bottom menu remain accepted product requirements, but their implementation home is now tmux-native panes rather than shared-surface composition
-- The old custom `native fullscreen` and `live surface` direction is formally retired as the target baseline
-- The current accepted local direction is `tmux-first`, with one session per tmux window, fullscreen implemented as pane zoom, and tmux vendored as a pinned backend rather than required as a system dependency
-- Network foundations up through client/server registration and remote session publication baselines also exist
-- The current machine focus is `tmux-r3`, while resumed network expansion is explicitly deferred until the tmux-first local base is stable
+- product, architecture, functional, module, UI, interaction-flow, protocol, and MVP planning docs exist
+- the Rust implementation workspace and core local runtime are in place
+- the tmux-first local path already owns the visible workspace chrome
+- the accepted new direction is now stricter than the earlier tmux-window switching model: sidebar and footer stay fixed while only the main view changes
+- `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
+- the current blocker is architectural, not cosmetic: in-workspace target switching still depends on `detach-client -E "waitagent attach <target>"`
+- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable
 
 ## 4. Milestone Summary
 
 | Milestone | Goal | Status |
 | --- | --- | --- |
 | `M0` | Product and design baseline completed | `done` |
-| `M1` | Local single-machine workspace UX usable end to end | `done` |
+| `M1` | Local single-machine workspace UX usable end to end | `in_progress` |
 | `M2` | Network aggregation MVP usable end to end | `not_started` |
 | `M3` | Hardening, observability, and developer usability | `not_started` |
 
@@ -72,12 +70,12 @@ Project status at a glance:
 
 Execution tracks at human-summary level:
 
-- `T0` Documentation and planning: complete
-- `T1` Local runtime foundation: complete
-- `T2` Console interaction and scheduler: complete
-- `T3` Terminal UI and rendering: partially complete, but the old custom fullscreen/render path is no longer the accepted steady-state architecture
-- `T4` Local workspace UX and validation: reopened on a bounded architecture pivot to tmux-first workspace delivery
-- `T5` Network transport and registration: complete through the current foundations; resumed network work is intentionally deferred behind tmux-first local stabilization
+- `T0` Documentation and planning: active and aligned with the refined fixed-chrome architecture
+- `T1` Local runtime foundation: complete enough for the current architecture correction
+- `T2` Event-driven control path: in progress
+- `T3` Terminal UI and rendering: the old custom fullscreen and shared-surface path remains retired
+- `T4` Local workspace UX and validation: in progress on fixed chrome and main-slot target activation
+- `T5` Network transport and registration: foundations exist, but resumed network work remains intentionally deferred
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
 
@@ -85,58 +83,50 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `tmux-r3` Build a new workspace lifecycle stack outside the legacy lifecycle module
+- `event-r2a` Replace cross-session attach switching with fixed-chrome main-slot target activation
 
 Accepted local architecture direction:
 
-- main interactive sessions run in real tmux panes
-- sidebar and footer become dedicated tmux panes
-- fullscreen becomes tmux pane zoom
-- fullscreen scrollback uses tmux-native history instead of WaitAgent-local replay
-- one session maps to one tmux window
-- multiple waitagent instances are allowed when separate tmux-backed workspaces are the simpler model
+- one persistent workspace chrome with fixed sidebar, fixed main slot, and fixed footer or menu
+- selecting a sidebar or footer item rebinds only the main slot target
+- in-workspace switching must not detach the current client, reveal the shell, or rebuild the workspace chrome
+- local targets live inside one tmux backend and switch through tmux-native rebinding primitives rather than by launching a fresh attach command
+- future remote targets must fit the same transport-agnostic target catalog and render into the same main slot through a bridge runtime
+- `waitagent` or `workspace` may bootstrap a backend; `waitagent attach` joins an existing backend only
 
-Accepted tmux-first delivery queue:
+Accepted event-driven delivery queue:
 
-1. `tmux-0` Establish the new modular runtime architecture, unified entry model, and migration skeleton
-2. `tmux-r1` Re-baseline the migration around a clean rewrite boundary and freeze the invalid bridge path
-3. `tmux-r2` Implement the real vendored tmux control adapter behind the new runtime interfaces
-4. `tmux-r3` Build a new workspace lifecycle stack outside the legacy lifecycle module
-5. `tmux-r4` Route workspace-facing commands through the new tmux-first lifecycle stack
-6. `tmux-r5` Implement persistent sidebar and footer panes as tmux-owned UI surfaces
-7. `tmux-r6` Implement tmux-native fullscreen zoom and fullscreen-only scrollback
-8. `tmux-r7` Move session switching and sidebar focus semantics onto tmux-native control
-9. `tmux-r8` Remove the obsolete custom local display path and complete shell plus Codex acceptance
+1. `event-r1` Establish the new event-driven local runtime architecture and event contract
+2. `event-r2` Implement event-driven tmux chrome, session catalog, and pane update flows
+3. `event-r2a` Replace cross-session attach switching with fixed-chrome main-slot target activation
+4. `event-r3` Move attach, resize, and scheduler control onto explicit runtime events
+5. `event-r4` Route the default local path through the new event-driven stack and isolate polling history
 
-Deferred queue after local tmux-first stabilization:
+Priority rule:
 
-1. `T5-06` Implement aggregate server session registry
-2. `T5-07` Implement remote resize and input routing
-3. `T6-01` Implement server-side workspace console
-4. `T3-07` Implement narrow-terminal compaction rules if acceptance evidence makes it necessary
+- `event-r2a -> event-r3 -> event-r4` is the locked top-priority local batch
+- no network, remote, or optional local polish task should overtake this batch without an explicit replanning decision
 
-The exact machine ordering for that queue now lives in `.agents/tasks/backlog.yaml`.
+Deferred queue after local stabilization:
 
-Retired or absorbed queue:
+1. `T5-06` Implement the aggregate transport-agnostic target registry
+2. `T5-07` Implement remote target input and resize routing through the server control plane
+3. `T6-01` Implement the server-side workspace console as a target-activation surface
+4. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
 
-- `display-1`, `display-2`, `display-2a`, `display-2b`, and `display-2c` are now historical slices from the retired custom fullscreen direction
-- `display-3`, `runtime-1`, and `terminal-1` are absorbed by the tmux-first migration and are no longer the preferred cleanup path
-- `scroll-1` remains retired
-- the original `tmux-1` through `tmux-6` execution split is retained as historical planning only and is superseded by the rewrite queue above
+The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 
 ## 7. Human Sign-Off Notes
 
-The prior local acceptance sign-off is preserved as historical evidence for the old custom runtime, but it is not treated as final sign-off for the tmux-first architecture.
-
-The current local product contract that must survive the migration is:
+The local product contract that must survive the migration is:
 
 - shell-backed sessions still feel like real reusable shell contexts
 - Codex-like TUI behavior remains trustworthy inside WaitAgent
 - sidebar and menu remain first-class workspace controls
+- sidebar and menu stay mounted while switching targets in normal mode
 - fullscreen still exists and behaves like a real terminal view
 - UTF-8 and Chinese input remain readable in practical use
-- auto-switch behavior is predictable enough for daily use
-- the local display architecture should stop generating bugs that would distort later network debugging
+- the local display architecture should stop generating chrome-switch artifacts that would distort later network debugging
 
 ## 8. Maintenance Rule
 
@@ -148,5 +138,5 @@ Update this board when:
 - the next queue changes in a way humans need to understand
 
 Do not re-expand this file into a machine task database.
-That role now belongs to `.agents/`.
+That role belongs to `.agents/`.
 Any task that becomes real work must be represented in `.agents/tasks/`; do not keep orphan tasks only in docs or chat.

@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.event-r3
-focus_statement: task.event-r3 is now centered on removing tick-driven attach and scheduler control, because the pane-side chrome path is already event-driven and the next accepted slice is the remaining local control loop in `src/app.rs` and related attach runtimes
+current_task: task.event-r2a
+focus_statement: task.event-r2a is now the head of the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`, centered on replacing cross-session detach or attach switching with a fixed-chrome main-slot activation model before any attach cleanup, route cutover, or remote work resumes
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

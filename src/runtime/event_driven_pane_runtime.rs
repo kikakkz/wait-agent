@@ -9,7 +9,21 @@ use crate::runtime::event_driven_tmux_pane_runtime::EventDrivenTmuxPaneRuntime;
 use crate::runtime::event_driven_ui_pane_runtime::EventDrivenSidebarActivation;
 use crate::terminal::TerminalRuntime;
 use std::io::{self, Read, Write};
+use std::os::raw::{c_int, c_void};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::thread;
+
+const SIGWINCH: c_int = 28;
+
+static PANE_SIGWINCH_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" {
+    fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+}
 
 const FULLSCREEN_FOOTER_OPTION: &str = "@waitagent_fullscreen_footer_line";
 
@@ -27,7 +41,9 @@ impl EventDrivenPaneRuntime {
         let pane_target = current_tmux_pane_target();
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
-        let input = spawn_input_thread();
+        let event_rx = spawn_pane_event_stream(true).map_err(|error| {
+            LifecycleError::Io("failed to install pane resize watcher".to_string(), error)
+        })?;
         let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
         let mut last_buffer = String::new();
 
@@ -37,20 +53,32 @@ impl EventDrivenPaneRuntime {
         )?;
 
         loop {
-            let bytes = match input.recv() {
-                Ok(bytes) => bytes,
+            let event = match event_rx.recv() {
+                Ok(event) => event,
                 Err(_) => return Ok(()),
             };
-            let outcome = chrome.apply_sidebar_input(&bytes);
-            redraw_sidebar(outcome.render, &mut last_buffer)?;
-            if let Some(activation) = outcome.activation {
-                self.apply_sidebar_activation(&command, activation)?;
+            match event {
+                PaneEvent::Input(bytes) => {
+                    let outcome = chrome.apply_sidebar_input(&bytes);
+                    redraw_sidebar(outcome.render, &mut last_buffer)?;
+                    if let Some(activation) = outcome.activation {
+                        self.apply_sidebar_activation(&command, activation)?;
+                    }
+                }
+                PaneEvent::Resize => redraw_sidebar(
+                    chrome
+                        .refresh_sidebar_for_pane(&command, pane_target.as_deref().unwrap_or(""))?,
+                    &mut last_buffer,
+                )?,
             }
         }
     }
 
     pub fn run_footer(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
         let pane_target = current_tmux_pane_target();
+        let event_rx = spawn_pane_event_stream(false).map_err(|error| {
+            LifecycleError::Io("failed to install pane resize watcher".to_string(), error)
+        })?;
         let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
         let mut last_buffer = String::new();
         let workspace = workspace_handle(&command);
@@ -58,8 +86,17 @@ impl EventDrivenPaneRuntime {
             chrome.refresh_footer_for_pane(&command, pane_target.as_deref().unwrap_or(""))?;
         apply_footer_update(&self.backend, &workspace, update, &mut last_buffer)?;
 
-        wait_until_killed();
-        Ok(())
+        loop {
+            let event = match event_rx.recv() {
+                Ok(event) => event,
+                Err(_) => return Ok(()),
+            };
+            if matches!(event, PaneEvent::Resize) {
+                let update = chrome
+                    .refresh_footer_for_pane(&command, pane_target.as_deref().unwrap_or(""))?;
+                apply_footer_update(&self.backend, &workspace, update, &mut last_buffer)?;
+            }
+        }
     }
 
     fn apply_sidebar_activation(
@@ -147,16 +184,44 @@ fn write_buffer(stdout: &mut impl Write, buffer: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn spawn_input_thread() -> Receiver<Vec<u8>> {
+#[derive(Debug)]
+enum PaneEvent {
+    Input(Vec<u8>),
+    Resize,
+}
+
+struct PaneResizeWatcher {
+    _writer: UnixStream,
+}
+
+impl Drop for PaneResizeWatcher {
+    fn drop(&mut self) {
+        PANE_SIGWINCH_WRITE_FD.store(-1, Ordering::Relaxed);
+    }
+}
+
+fn spawn_pane_event_stream(include_input: bool) -> io::Result<Receiver<PaneEvent>> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    if include_input {
+        spawn_input_thread(tx.clone());
+    }
+    let _resize_watcher = spawn_resize_watcher(tx)?;
+    thread::spawn(move || {
+        let _keep_resize_watcher_alive = _resize_watcher;
+        thread::park();
+    });
+    Ok(rx)
+}
+
+fn spawn_input_thread(tx: mpsc::Sender<PaneEvent>) {
+    thread::spawn(move || {
         let mut stdin = io::stdin().lock();
         let mut buffer = [0u8; 64];
         loop {
             match stdin.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    if tx.send(buffer[..read].to_vec()).is_err() {
+                    if tx.send(PaneEvent::Input(buffer[..read].to_vec())).is_err() {
                         break;
                     }
                 }
@@ -164,17 +229,35 @@ fn spawn_input_thread() -> Receiver<Vec<u8>> {
             }
         }
     });
-    rx
 }
 
 fn current_tmux_pane_target() -> Option<String> {
     std::env::var("TMUX_PANE").ok()
 }
 
-fn wait_until_killed() {
-    loop {
-        std::thread::park();
+fn spawn_resize_watcher(tx: mpsc::Sender<PaneEvent>) -> io::Result<PaneResizeWatcher> {
+    let (mut reader, writer) = UnixStream::pair()?;
+    PANE_SIGWINCH_WRITE_FD.store(writer.as_raw_fd(), Ordering::Relaxed);
+    unsafe {
+        signal(SIGWINCH, pane_sigwinch_handler);
     }
+
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx.send(PaneEvent::Resize).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(PaneResizeWatcher { _writer: writer })
 }
 
 fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
@@ -205,6 +288,18 @@ where
         "failed to run event-driven waitagent pane".to_string(),
         io::Error::new(io::ErrorKind::Other, error.to_string()),
     )
+}
+
+extern "C" fn pane_sigwinch_handler(_signal: c_int) {
+    let fd = PANE_SIGWINCH_WRITE_FD.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+
+    let byte = 1_u8;
+    unsafe {
+        let _ = write(fd, (&byte as *const u8).cast::<c_void>(), 1);
+    }
 }
 
 #[cfg(test)]

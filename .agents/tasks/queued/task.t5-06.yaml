@@ -1,15 +1,15 @@
 id: task.t5-06
 kind: task
 version: 1
-title: implement the aggregate server session registry
+title: implement the aggregate transport-agnostic target registry
 status: deferred
-priority: high
+priority: medium
 target_task_reference: task.t5-06
 source_of_truth:
   file: .agents/tasks/backlog.yaml
-  reference: active
+  reference: next
 depends_on:
-  - task.lifecycle-5.done
+  - task.event-r4.done
 linked_primitives:
   - primitive.network-registry-scope
   - primitive.verification-refresh
@@ -17,9 +17,10 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - the aggregate server tracks registered local and remote sessions in one authoritative registry instead of relying on one-off publication paths
-  - registry state is structured so later remote resize, input routing, and server-side console work can consume it without another schema rewrite
-  - local-only workspace behavior remains intact while aggregate registration is introduced
+  - the aggregate server tracks local and remote targets in one authoritative transport-agnostic registry instead of relying on one-off publication paths
+  - registry state matches the shared target catalog and main-slot activation model used by the local tmux-first path, so later remote input, resize, and server-side console work can consume it without another schema rewrite
+  - the registry does not assume local tmux inspection, superseded daemon attach identity, or server-owned remote PTYs as the universal session model
+  - local fixed-chrome workspace behavior remains intact while aggregate registration is introduced
   - task board and verification state are refreshed together with the implementation slice
 verification:
   - cargo test
@@ -28,10 +29,11 @@ touched_paths:
   - src/server.rs
   - src/session.rs
   - src/transport.rs
-  - src/app.rs
-  - .agents/tasks/current.yaml
-  - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.t5-06.yaml
-  - .agents/state/current-focus.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/execution-status-board.md
+  - docs/tmux-first-workspace-plan.md
 notes:
-  - This task is deferred behind the tmux-first local migration because continuing network expansion on the retired custom display baseline would multiply later debugging cost.
+  - This task is deferred behind the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4`.
+  - This task is the first network slice only after the fixed-chrome main-slot model becomes the accepted default local path.
+  - Do not fork a separate remote-only registry shape; local and remote targets must converge on one shared catalog.

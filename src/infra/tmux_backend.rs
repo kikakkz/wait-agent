@@ -14,7 +14,7 @@ use crate::infra::tmux_types::{
     TmuxSessionName, TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod control;
 mod layout;
@@ -191,7 +191,8 @@ impl EmbeddedTmuxBackend {
         config: &WorkspaceInstanceConfig,
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<(), TmuxError> {
-        let args = vec![
+        let window_name = default_window_name();
+        let mut args = vec![
             "set-option".to_string(),
             "-g".to_string(),
             "history-limit".to_string(),
@@ -206,12 +207,24 @@ impl EmbeddedTmuxBackend {
             "-d".to_string(),
             "-s".to_string(),
             workspace.session_name.as_str().to_string(),
+            "-n".to_string(),
+            window_name,
             "-c".to_string(),
             config.workspace_dir.display().to_string(),
+        ];
+        if let Some(cols) = config.initial_cols {
+            args.push("-x".to_string());
+            args.push(cols.to_string());
+        }
+        if let Some(rows) = config.initial_rows {
+            args.push("-y".to_string());
+            args.push(rows.to_string());
+        }
+        args.extend([
             "-P".to_string(),
             "-F".to_string(),
             "#{session_name}".to_string(),
-        ];
+        ]);
         let output = self.run_workspace_command(workspace, &args)?;
         let session_name = parse_tmux_identifier(&output.stdout, "session name")?;
         if session_name != workspace.session_name.as_str() {
@@ -483,6 +496,23 @@ impl EmbeddedTmuxBackend {
         Ok((width, height))
     }
 
+    pub fn capture_pane_text_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "capture-pane".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+            "-S".to_string(),
+            "-40".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout)
+    }
+
     pub fn window_zoomed_on_socket(
         &self,
         socket_name: &str,
@@ -549,6 +579,18 @@ impl EmbeddedTmuxBackend {
             is_dead: dead == "1",
         })
     }
+}
+
+fn default_window_name() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .and_then(|value| {
+            Path::new(&value)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "shell".to_string())
 }
 
 impl TmuxGateway for EmbeddedTmuxBackend {
@@ -786,6 +828,8 @@ mod tests {
             workspace_key: "wk-1".to_string(),
             socket_name: "sock-1".to_string(),
             session_name: "sess-1".to_string(),
+            initial_rows: None,
+            initial_cols: None,
         }
     }
 
@@ -1028,6 +1072,8 @@ mod tests {
             workspace_key: format!("{prefix}-{nonce:x}"),
             socket_name: format!("wa-test-{nonce:x}"),
             session_name: format!("waitagent-test-{prefix}-{nonce:x}"),
+            initial_rows: None,
+            initial_cols: None,
         }
     }
 

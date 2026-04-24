@@ -17,6 +17,8 @@ const TMUX_STATUS_OPTION: &str = "status";
 const TMUX_STATUS_ON: &str = "on";
 const TMUX_STATUS_POSITION_OPTION: &str = "status-position";
 const TMUX_STATUS_BOTTOM: &str = "bottom";
+const TMUX_AUTOMATIC_RENAME_OPTION: &str = "automatic-rename";
+const TMUX_OPTION_OFF: &str = "off";
 const TMUX_MENU_STYLE_OPTION: &str = "menu-style";
 const TMUX_MENU_SELECTED_STYLE_OPTION: &str = "menu-selected-style";
 const TMUX_MENU_BORDER_STYLE_OPTION: &str = "menu-border-style";
@@ -61,6 +63,12 @@ where
             .set_session_option(workspace, TMUX_STATUS_OPTION, TMUX_STATUS_ON)?;
         self.tmux
             .set_session_option(workspace, TMUX_STATUS_POSITION_OPTION, TMUX_STATUS_BOTTOM)?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_AUTOMATIC_RENAME_OPTION,
+            TMUX_OPTION_OFF,
+        )?;
         self.tmux.set_window_option(
             workspace,
             &layout.window,
@@ -594,6 +602,7 @@ mod tests {
                 Call::SetSessionOption("mouse".to_string(), "on".to_string()),
                 Call::SetSessionOption("status".to_string(), "on".to_string()),
                 Call::SetSessionOption("status-position".to_string(), "bottom".to_string()),
+                Call::SetWindowOption("automatic-rename".to_string(), "off".to_string()),
                 Call::SetWindowOption(
                     "menu-style".to_string(),
                     "fg=colour250,bg=colour235".to_string(),

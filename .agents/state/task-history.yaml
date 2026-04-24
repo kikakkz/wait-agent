@@ -1,6 +1,18 @@
 kind: state
 version: 1
 history:
+  - task_id: task.event-r2a
+    status: in_progress
+    summary: terminal repro and runtime review showed that sidebar and footer switching still detach the client and relaunch through `waitagent attach <target>`, so active work moves to a fixed-chrome main-slot activation model before more attach or scheduler cleanup
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r3
+    status: not_started
+    summary: the attach, resize, and scheduler event slice is parked until in-workspace switching stops leaving the current client, because the current detach or attach model cannot satisfy fixed chrome, no shell reveal, or no flicker requirements
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r3.yaml
+      reference: status
   - task_id: task.event-r3
     status: in_progress
     summary: with the pane-side chrome path now event-driven and the historical polling pane runtime removed from the default module graph, active work moves to attach, resize, and scheduler coordination on the remaining local control loop

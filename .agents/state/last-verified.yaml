@@ -1,7 +1,13 @@
 kind: state
 version: 1
-last_updated_from: event-r3 event-driven app loop validation refreshed on 2026-04-24
+last_updated_from: fixed-chrome switching validation refreshed on 2026-04-24
 checks:
+  - id: event-r2a-sidebar-enter-fixed-chrome-manual-repro
+    command: manual terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent`, pressing `Enter` on a sidebar item, and confirming whether sidebar and footer stay mounted while only the main view changes
+    status: fail
+  - id: event-r2a-switching-path-root-cause-review
+    command: targeted review of `src/runtime/event_driven_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and `src/runtime/workspace_command_runtime.rs` confirming that in-workspace switching still flows through `detach-client -E \"waitagent attach <target>\"`
+    status: fail
   - id: event-r3-cargo-test-quiet
     command: cargo test --quiet after replacing accepted-path app loop ticks with deadline-driven waits, wiring server accepts into explicit runtime events, and moving resize handling onto SIGWINCH-fed runtime events
     status: pass

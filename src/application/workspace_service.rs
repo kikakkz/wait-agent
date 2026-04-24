@@ -32,7 +32,17 @@ where
         &self,
         workspace_dir: &Path,
     ) -> Result<BootstrappedWorkspace, G::Error> {
-        let instance_config = WorkspaceInstanceConfig::for_new_session(workspace_dir);
+        self.ensure_workspace_for_dir_with_size(workspace_dir, None, None)
+    }
+
+    pub fn ensure_workspace_for_dir_with_size(
+        &self,
+        workspace_dir: &Path,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<BootstrappedWorkspace, G::Error> {
+        let instance_config =
+            WorkspaceInstanceConfig::for_new_session_with_size(workspace_dir, rows, cols);
         let workspace_handle = self.ensure_workspace(&instance_config)?;
 
         Ok(BootstrappedWorkspace {

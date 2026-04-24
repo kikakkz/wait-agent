@@ -7,11 +7,6 @@ pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const SIDEBAR_PANE_STYLE: &str = "fg=colour250,bg=colour234";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
-const SESSION_GLOBAL_REFRESH_HOOKS: [&str; 3] = [
-    "client-attached",
-    "client-detached",
-    "client-session-changed",
-];
 const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 2] = ["session-created", "session-closed"];
 const MAIN_PANE_GLOBAL_REFRESH_HOOKS: [&str; 1] = ["pane-exited"];
 
@@ -92,9 +87,11 @@ where
         self.tmux
             .set_pane_title(workspace, &footer_pane, FOOTER_PANE_TITLE)?;
         apply_height(&self.tmux, workspace, &footer_pane, &self.footer_height)?;
-        if matches!(focus_behavior, LayoutFocusBehavior::ReturnToMain) {
-            self.tmux.select_pane(workspace, &main_pane)?;
-        }
+        let target_pane = match focus_behavior {
+            LayoutFocusBehavior::ReturnToMain => &main_pane,
+            LayoutFocusBehavior::PreserveCurrent => &current_pane,
+        };
+        self.tmux.select_pane(workspace, target_pane)?;
 
         Ok(WorkspaceChromeLayout {
             window,
@@ -116,10 +113,6 @@ where
         for hook_name in SESSION_LAYOUT_RECONCILE_HOOKS {
             self.tmux
                 .set_session_hook(workspace, hook_name, reconcile_command)?;
-        }
-        for hook_name in SESSION_GLOBAL_REFRESH_HOOKS {
-            self.tmux
-                .set_session_hook(workspace, hook_name, global_reconcile_command)?;
         }
         for hook_name in GLOBAL_LAYOUT_RECONCILE_HOOKS {
             self.tmux
@@ -218,6 +211,7 @@ mod tests {
     struct FakeGateway {
         panes: Rc<RefCell<Vec<TmuxPaneInfo>>>,
         calls: Rc<RefCell<Vec<Call>>>,
+        current_pane: Rc<RefCell<TmuxPaneId>>,
     }
 
     impl FakeGateway {
@@ -225,11 +219,17 @@ mod tests {
             Self {
                 panes: Rc::new(RefCell::new(panes)),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                current_pane: Rc::new(RefCell::new(TmuxPaneId::new("%1"))),
             }
         }
 
         fn calls(&self) -> Vec<Call> {
             self.calls.borrow().clone()
+        }
+
+        fn with_current_pane(self, pane: &str) -> Self {
+            *self.current_pane.borrow_mut() = TmuxPaneId::new(pane);
+            self
         }
     }
 
@@ -320,7 +320,7 @@ mod tests {
             &self,
             _workspace: &TmuxWorkspaceHandle,
         ) -> Result<TmuxPaneId, Self::Error> {
-            Ok(TmuxPaneId::new("%1"))
+            Ok(self.current_pane.borrow().clone())
         }
 
         fn list_panes(
@@ -618,7 +618,8 @@ mod tests {
                 current_path: None,
                 is_dead: false,
             },
-        ]);
+        ])
+        .with_current_pane("%3");
         let service = LayoutService::new(gateway.clone());
         let program = TmuxProgram::new("/tmp/waitagent");
 
@@ -635,9 +636,11 @@ mod tests {
             gateway.calls(),
             vec![
                 Call::SetTitle("%2".to_string()),
+                Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
                 Call::SetTitle("%3".to_string()),
                 Call::SetHeight("%3".to_string(), 1),
+                Call::SelectMain("%3".to_string()),
             ]
         );
     }
@@ -663,18 +666,6 @@ mod tests {
                 Call::SetHook(
                     "client-resized".to_string(),
                     "run-shell -b 'waitagent __layout-reconcile'".to_string(),
-                ),
-                Call::SetHook(
-                    "client-attached".to_string(),
-                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
-                ),
-                Call::SetHook(
-                    "client-detached".to_string(),
-                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
-                ),
-                Call::SetHook(
-                    "client-session-changed".to_string(),
-                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
                 ),
                 Call::SetGlobalHook(
                     "session-created".to_string(),

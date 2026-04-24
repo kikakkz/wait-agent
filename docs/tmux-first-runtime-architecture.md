@@ -1,8 +1,8 @@
 # WaitAgent Tmux-First Runtime Architecture
 
-Version: `v1.2`  
+Version: `v1.3`  
 Status: `Accepted`  
-Date: `2026-04-23`
+Date: `2026-04-24`
 
 ## 1. Purpose
 
@@ -70,6 +70,9 @@ The tmux-first architecture follows these principles:
    future remote sessions must connect to the server over long-lived transport links, keep PTY ownership on the remote host, and expose server-side interaction through waitagent control-plane abstractions rather than by pretending the server owns a remote PTY locally.
 12. Chrome navigation uses pane identity
    waitagent global chrome-navigation keys such as `Right`, `Left`, and sidebar-hide actions must be driven by tmux pane identity and layout ownership, not by probing pane contents or inferring shell prompt state.
+13. Target activation keeps chrome fixed
+   sidebar or footer activation must rebind the main presentation slot inside the current workspace.
+   In-workspace target switching must not detach the client, reveal the shell, or launch a fresh `waitagent attach <target>` path.
 
 ## 4.1 Native Reuse Rules
 
@@ -84,11 +87,12 @@ Effective interpretation:
   `server/socket -> session -> window -> pane`
 - `workspace` is a bootstrap alias, not the primary long-lived runtime identity
 - `attach`, `ls`, `detach`, fullscreen, scrollback, copy-mode, pane switching, and related control flow should default to tmux-native behavior
+- `waitagent` or `workspace` may create or bootstrap a backend when no attach target is specified; `attach` is only for joining an existing backend
 - do not invent a dedicated waitagent-only `status` command unless tmux-native semantics prove insufficient and the extra command is justified as a waitagent-specific management surface
 - waitagent-owned code should focus on:
   - sidebar pane
   - footer/menu pane
-  - session discovery and management affordances layered on top of tmux
+  - target discovery and management affordances layered on top of tmux
   - product-specific defaults and branding
 
 Anti-goal:
@@ -98,6 +102,7 @@ Anti-goal:
 - do not add app-specific redraw hints or view-reset tricks for Codex-like sessions in order to hide accepted narrow-start zoom behavior
 - do not let the local tmux adapter become the only session model; future remote sessions will use server-routed interaction rather than a local tmux pane backed by a server-owned PTY
 - do not use pane-text inspection, shell-prompt heuristics, or nested shell probes inside tmux key bindings to decide whether sidebar or menu navigation should activate
+- do not implement in-workspace target switching by detaching the client and launching `waitagent attach <target>`
 
 ## 5. Target Layering
 
@@ -142,7 +147,7 @@ Responsibilities:
 
 Responsibilities:
 
-- session identity and metadata
+- target identity and metadata
 - workspace instance identity
 - layout identity
 - focus targets
@@ -158,9 +163,10 @@ Typical modules:
 
 Rule:
 
-- session identity used by sidebar, footer, menus, and future network-session management should be transport-agnostic
-- local tmux sessions and future remote sessions should project into one shared domain model rather than separate ad hoc side registries
-- session identity should converge on `transport + authority/node id + session id`, not on local tmux socket semantics alone
+- target identity used by sidebar, footer, menus, and future network-session management should be transport-agnostic
+- local tmux-backed targets and future remote targets should project into one shared domain model rather than separate ad hoc side registries
+- target identity should converge on `transport + authority/node id + session id`, not on local tmux socket semantics alone
+- the domain model should distinguish `workspace chrome`, `main slot`, and `target realization` so switching policy does not collapse back into attach semantics
 
 ### 5.4 `application/`
 
@@ -183,7 +189,8 @@ Rule:
 
 - application services may depend on domain abstractions and adapter traits
 - they should not write raw tmux command strings inline
-- session control should flow through transport-agnostic capabilities so a future server-side `interact` runtime can route input, resize, attach, and detach to either a local tmux host or a remote connected node
+- target activation should flow through transport-agnostic capabilities so a future server-side `interact` runtime can route input, resize, focus, and attach to either a local tmux host or a remote connected node
+- sidebar or footer selection must resolve to `activate target in main slot`, not to `detach current client and run attach`
 
 ### 5.5 `runtime/`
 
@@ -192,13 +199,15 @@ Responsibilities:
 - host the minimum waitagent-owned runtime needed around tmux-native control
 - manage workspace bootstrap and waitagent-specific pane programs
 - coordinate startup and product-specific surfaces that tmux itself does not provide
-- own layout restore rules for persistent sidebar and footer panes plus main-pane zoom restore
+- own layout restore rules for persistent sidebar and footer panes plus main-slot zoom restore
+- own the stable main-slot binding or rebinding path used by sidebar and footer activation
 
 Typical modules:
 
 - `runtime/workspace_runtime.rs`
 - `runtime/workspace_bootstrap_runtime.rs`
 - `runtime/layout_runtime.rs`
+- `runtime/main_slot_runtime.rs`
 - `runtime/sidebar_runtime.rs`
 - `runtime/footer_runtime.rs`
 - `runtime/ui_runtime.rs`
@@ -295,15 +304,23 @@ Command model rule:
 
 - `workspace` is the friendly entry alias that maps the current directory to a tmux target
 - `attach`, `ls`, and `detach` should converge toward tmux-native target semantics rather than waitagent-specific daemon identity
+- `attach` is an explicit client-entry command for an existing backend; it is not the hidden mechanism for sidebar or footer target switching inside an already-running workspace
 - waitagent-specific management commands should only exist where tmux has no native equivalent and where the command is part of sidebar, footer, or multi-session management product value
 
 ## 6.1 Persistent Layout Rule
 
 The waitagent local UI should be designed around one persistent tmux layout:
 
-- a main tmux pane for shell or agent execution
+- a persistent main slot for shell, agent, or remote interaction
 - a persistent right sidebar pane
 - a persistent bottom footer or menu pane
+
+Main-slot rule:
+
+- sidebar or footer activation rebinds only the main slot target
+- the current workspace client stays attached during in-workspace switching
+- local implementations may use parked panes, parked windows, `swap-pane`, `join-pane`, `move-pane`, or equivalent tmux-native rebinding primitives as long as the visible chrome remains fixed
+- future remote targets must bind into the same main slot through a dedicated bridge runtime rather than by replacing the entire workspace client
 
 Fullscreen rule:
 
@@ -315,7 +332,7 @@ Future-proofing rule:
 
 - sidebar and footer should consume a shared session registry and layout model that can represent both local tmux sessions and future network-backed sessions
 - do not hardwire sidebar or footer state to one local-only daemon model
-- a future remote session selected on the server may render through a waitagent `interact` runtime in the main pane while sidebar and footer continue to consume the same transport-agnostic session catalog
+- a future remote session selected on the server may render through a waitagent `interact` runtime in the main slot while sidebar and footer continue to consume the same transport-agnostic session catalog
 - local fullscreen, copy-mode, and tmux-native focus semantics remain the baseline for local sessions only; remote sessions will require separate server-routed interaction policy without changing the shared catalog shape
 
 This is better than the current split where command ownership is spread across `app.rs` and `lifecycle.rs` with different runtime styles.
@@ -342,6 +359,7 @@ Effective immediately:
 - `build.rs` should stay thin and delegate vendored tmux build orchestration to tmux glue modules rather than embedding that logic inline
 - local metadata inference based on tmux pane inspection is acceptable only for local sessions; future remote sessions must publish authoritative metadata through the transport layer instead of forcing the server to re-infer it from a local pane adapter
 - tmux key bindings for waitagent chrome navigation must stay declarative and pane-targeted; avoid shell-based runtime probes that make navigation depend on the live contents of the pane
+- if a user-visible target switch would leave the current client and re-enter through `attach`, the architecture is still wrong and the implementation should be reworked at the ownership boundary rather than patched with redraw suppression
 
 ## 8. Suggested First Concrete Module Split
 
@@ -365,8 +383,9 @@ The code migration should happen in this order:
 2. add vendored tmux backend adapter and build integration inside the new `infra` layer
 3. move workspace entry and lifecycle wiring onto the new bootstrap and runtime path
 4. move sidebar and footer onto dedicated UI modules
-5. move fullscreen and focus logic onto tmux-native services
-6. delete or isolate the old custom fullscreen runtime inside `legacy`
+5. add a stable main-slot activation path that keeps chrome fixed while rebinding local or future remote targets
+6. move fullscreen and focus logic onto tmux-native services
+7. delete or isolate the old custom fullscreen runtime inside `legacy`
 
 ## 10. Acceptance Criteria
 
@@ -374,6 +393,7 @@ The architecture migration is successful only if:
 
 - `src/app.rs` stops being the default landing zone for new local-runtime behavior
 - new tmux-first work enters through unified bootstrap and explicit runtime or application modules
-- at least the tmux backend, workspace runtime, and pane UI entrypoints live outside the old monolithic files
+- at least the tmux backend, workspace runtime, main-slot activation path, and pane UI entrypoints live outside the old monolithic files
 - the resulting entry structure is simpler to explain than the current `main -> app + lifecycle + legacy fullscreen` split
+- in-workspace target switching is expressed as `activate target in main slot` rather than as `detach current client and attach elsewhere`
 - the module split is reflected in tasks before implementation continues

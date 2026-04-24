@@ -3,6 +3,7 @@ use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
+use crate::terminal::TerminalRuntime;
 use std::io;
 use std::path::Path;
 
@@ -36,9 +37,15 @@ impl WorkspaceEntryRuntime {
         &self,
         workspace_dir: &Path,
     ) -> Result<BootstrappedWorkspace, LifecycleError> {
+        let terminal_size = TerminalRuntime::stdio().current_size_or_default();
+        let (rows, cols) = if terminal_size.rows > 1 && terminal_size.cols > 1 {
+            (Some(terminal_size.rows), Some(terminal_size.cols))
+        } else {
+            (None, None)
+        };
         let workspace = self
             .workspace_runtime
-            .ensure_workspace_for_dir(workspace_dir)
+            .ensure_workspace_for_dir_with_size(workspace_dir, rows, cols)
             .map_err(tmux_bootstrap_error)?;
         self.layout_runtime
             .ensure_layout(&workspace.workspace_handle, &workspace.workspace_dir)?;

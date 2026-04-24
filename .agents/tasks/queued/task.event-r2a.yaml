@@ -4,7 +4,6 @@ version: 1
 title: replace cross-session attach switching with fixed-chrome main-slot target activation
 status: in_progress
 priority: critical
-target_task_reference: task.event-r2a
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
@@ -45,7 +44,9 @@ touched_paths:
   - .agents/context/constraints.yaml
   - .agents/index.yaml
 notes:
-  - `task.event-r2` is complete: the default chrome path is event-driven, but current in-workspace switching still exits the client because sidebar and footer activation flow through `detach-client -E "waitagent attach <target>"`.
+  - Root cause confirmed in terminal on 2026-04-24: sidebar Enter and footer menu switching still detach the client and relaunch through `waitagent attach <target>`, which exits to the shell before re-entering waitagent.
   - Treat the shell reveal and flicker on target switching as a root-cause architecture problem, not a redraw bug.
   - Do not patch over detach or reattach with delayed respawns or redraw suppression; replace the switching model so the current client never leaves the workspace during in-workspace target activation.
-  - This task is the first slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`; no network, remote, or optional local polish slice should overtake that batch.
+  - Local realization may use parked panes, parked windows, `swap-pane`, `join-pane`, `move-pane`, or equivalent tmux-native rebinding primitives as long as the visible chrome stays fixed.
+  - Remote targets are not part of this implementation slice, but the target model for local work must not block a later bridge-backed main-slot renderer.
+  - This task starts the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

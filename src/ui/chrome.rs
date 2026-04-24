@@ -5,6 +5,7 @@ const ANSI_BG_SIDEBAR_HINT: &str = "\x1b[48;5;235m\x1b[38;5;246m";
 const ANSI_BG_SIDEBAR_ITEM: &str = "\x1b[48;5;234m\x1b[38;5;250m";
 const ANSI_BG_SIDEBAR_ACTIVE: &str = "\x1b[48;5;240m\x1b[1;38;5;255m";
 const ANSI_BG_SIDEBAR_DETAIL: &str = "\x1b[48;5;236m\x1b[38;5;252m";
+const ANSI_BG_SIDEBAR_SEPARATOR: &str = "\x1b[48;5;236m\x1b[38;5;244m";
 const ANSI_FG_SIDEBAR_RUNNING: &str = "\x1b[38;5;121m";
 const ANSI_FG_SIDEBAR_INPUT: &str = "\x1b[38;5;227m";
 const ANSI_FG_SIDEBAR_CONFIRM: &str = "\x1b[38;5;215m";
@@ -55,6 +56,13 @@ pub fn style_sidebar_item_line(line: &str, width: usize, style: SidebarRowStyle)
 pub fn style_sidebar_detail_line(line: &str, width: usize) -> String {
     format!(
         "{ANSI_BG_SIDEBAR_DETAIL}{}{ANSI_RESET}",
+        pad_right(line, width)
+    )
+}
+
+pub fn style_sidebar_separator_line(line: &str, width: usize) -> String {
+    format!(
+        "{ANSI_BG_SIDEBAR_SEPARATOR}{}{ANSI_RESET}",
         pad_right(line, width)
     )
 }
@@ -119,11 +127,15 @@ fn pad_right(text: &str, width: usize) -> String {
 }
 
 fn char_width(ch: char) -> usize {
-    if ch.is_ascii() {
+    if ch.is_ascii() || is_single_width_non_ascii(ch) {
         1
     } else {
         2
     }
+}
+
+fn is_single_width_non_ascii(ch: char) -> bool {
+    matches!(ch, '\u{2500}'..='\u{257F}')
 }
 
 #[cfg(test)]
@@ -146,5 +158,10 @@ mod tests {
             style_sidebar_badge(SidebarBadgeState::Running, SidebarRowStyle::Selected, 0);
 
         assert_eq!(width, display_width("🍳R"));
+    }
+
+    #[test]
+    fn box_drawing_characters_are_treated_as_single_width() {
+        assert_eq!(display_width("────"), 4);
     }
 }

@@ -1,8 +1,8 @@
 # WaitAgent Event-Driven Local Runtime Architecture
 
-Version: `v1.0`  
+Version: `v1.1`  
 Status: `Accepted`  
-Date: `2026-04-23`
+Date: `2026-04-24`
 
 ## 1. Purpose
 
@@ -48,9 +48,11 @@ The new local runtime is split into these event-owning modules:
    Renders sidebar chrome and emits explicit selection intent.
 5. `FooterPaneRuntime`
    Renders footer or status-line chrome and emits explicit menu intent.
-6. `AttachClientRuntime`
+6. `MainSlotRuntime`
+   Owns target activation inside the persistent workspace chrome and rebinds the main slot without leaving the current client.
+7. `AttachClientRuntime`
    Translates client stdin, daemon output, attach lifecycle, and terminal resize into runtime events.
-7. `SchedulerRuntime`
+8. `SchedulerRuntime`
    Produces focus and autoswitch decisions only when upstream runtime state changes.
 
 ## 4. Accepted Event Classes
@@ -74,12 +76,16 @@ The accepted top-level event classes are:
 3. `Chrome`
    Source: pane runtimes
    Examples: sidebar selection changed, footer render requested, status-line projection changed
-   Consumers: `WorkspaceController`, sibling chrome runtime when needed
-4. `Attach`
+   Consumers: `WorkspaceController`, `MainSlotRuntime`, sibling chrome runtime when needed
+4. `TargetActivation`
+   Source: `WorkspaceController`, `MainSlotRuntime`
+   Examples: target activation requested, target rebound into main slot, target activation committed
+   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`, `SchedulerRuntime`
+5. `Attach`
    Source: `AttachClientRuntime`
    Examples: client attached, input read, client resized, daemon output received
    Consumers: `WorkspaceController`, `SchedulerRuntime`
-5. `Scheduler`
+6. `Scheduler`
    Source: `SchedulerRuntime`
    Examples: focus changed, autoswitch requested, autoswitch committed
    Consumers: `WorkspaceController`, chrome runtimes
@@ -100,7 +106,14 @@ session catalog updates
 
 sidebar selection intent
   -> WorkspaceController
+  -> MainSlotRuntime
   -> FooterPaneRuntime
+
+target activation
+  -> MainSlotRuntime
+  -> SidebarPaneRuntime
+  -> FooterPaneRuntime
+  -> SchedulerRuntime
 
 attach input / attach resize / daemon output
   -> WorkspaceController
@@ -114,6 +127,8 @@ scheduler focus / autoswitch decisions
 
 The critical constraint is that `SidebarPaneRuntime` and `FooterPaneRuntime` consume explicit state-change events.
 They must not be responsible for rediscovering state by periodic `list_sessions()` and redraw polling.
+The other critical constraint is that `MainSlotRuntime` keeps target activation inside the current client.
+It must not translate sidebar or footer selection into `detach-client -E "waitagent attach <target>"`.
 
 ## 6. Historical Polling Paths
 
@@ -137,6 +152,12 @@ The following paths are now historical and have explicit replacement owners in t
 
 These paths may remain while migration is incomplete, but they are not allowed to absorb new feature work.
 
+Additional rejected path:
+
+6. `src/runtime/event_driven_pane_runtime.rs` sidebar switch handoff
+   Current mechanism: `detach-client -E "waitagent attach <target>"`
+   Replacement owner: `MainSlotRuntime`
+
 ## 7. Slice Mapping
 
 The accepted follow-on queue is:
@@ -145,9 +166,11 @@ The accepted follow-on queue is:
    Define the event contract and ownership map.
 2. `task.event-r2`
    Make tmux chrome and session-catalog projection event-driven.
-3. `task.event-r3`
+3. `task.event-r2a`
+   Replace cross-session attach switching with fixed-chrome main-slot target activation.
+4. `task.event-r3`
    Move attach, resize, and scheduler behavior onto explicit runtime events.
-4. `task.event-r4`
+5. `task.event-r4`
    Route the default local path through the new event-driven stack and isolate polling history.
 
 ## 8. Migration Rule
@@ -166,3 +189,4 @@ Rejected work:
 - keeping `recv_timeout(...tick...)` as the primary coordinator and only renaming helpers
 - keeping pane runtimes on periodic `list_sessions()` refresh and calling that “reactive”
 - keeping scheduler recomputation in a timeout branch and calling that “event assisted”
+- keeping in-workspace target switching on `detach-client -E "waitagent attach <target>"` and calling that “tmux-native” or “event-driven”
