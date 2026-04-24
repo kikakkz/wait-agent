@@ -17,10 +17,6 @@ const TMUX_STATUS_OPTION: &str = "status";
 const TMUX_STATUS_ON: &str = "on";
 const TMUX_STATUS_POSITION_OPTION: &str = "status-position";
 const TMUX_STATUS_BOTTOM: &str = "bottom";
-const TMUX_PANE_BORDER_STYLE_OPTION: &str = "pane-border-style";
-const TMUX_PANE_ACTIVE_BORDER_STYLE_OPTION: &str = "pane-active-border-style";
-const TMUX_PANE_BORDER_STYLE: &str = "fg=colour239";
-const TMUX_PANE_ACTIVE_BORDER_STYLE: &str = "fg=colour240";
 const TMUX_MENU_STYLE_OPTION: &str = "menu-style";
 const TMUX_MENU_SELECTED_STYLE_OPTION: &str = "menu-selected-style";
 const TMUX_MENU_BORDER_STYLE_OPTION: &str = "menu-border-style";
@@ -82,18 +78,6 @@ where
             &layout.window,
             TMUX_MENU_BORDER_STYLE_OPTION,
             TMUX_MENU_BORDER_STYLE,
-        )?;
-        self.tmux.set_window_option(
-            workspace,
-            &layout.window,
-            TMUX_PANE_BORDER_STYLE_OPTION,
-            TMUX_PANE_BORDER_STYLE,
-        )?;
-        self.tmux.set_window_option(
-            workspace,
-            &layout.window,
-            TMUX_PANE_ACTIVE_BORDER_STYLE_OPTION,
-            TMUX_PANE_ACTIVE_BORDER_STYLE,
         )
     }
 
@@ -621,11 +605,6 @@ mod tests {
                 Call::SetWindowOption(
                     "menu-border-style".to_string(),
                     "fg=colour24,bg=colour235".to_string(),
-                ),
-                Call::SetWindowOption("pane-border-style".to_string(), "fg=colour239".to_string()),
-                Call::SetWindowOption(
-                    "pane-active-border-style".to_string(),
-                    "fg=colour240".to_string(),
                 ),
                 Call::BindMainPaneZoomToggle("C-o".to_string(), "%1".to_string()),
                 Call::BindMainPaneZoomToggleWithPrefix("z".to_string(), "%1".to_string()),

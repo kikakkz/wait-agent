@@ -5,6 +5,7 @@ use crate::infra::tmux::{
 
 pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
+const SIDEBAR_PANE_STYLE: &str = "fg=colour250,bg=colour234";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
 const SESSION_GLOBAL_REFRESH_HOOKS: [&str; 3] = [
     "client-attached",
@@ -67,6 +68,8 @@ where
         };
         self.tmux
             .set_pane_title(workspace, &sidebar_pane, SIDEBAR_PANE_TITLE)?;
+        self.tmux
+            .set_pane_style(workspace, &sidebar_pane, SIDEBAR_PANE_STYLE)?;
         apply_width(&self.tmux, workspace, &sidebar_pane, &self.sidebar_width)?;
 
         let panes = self.tmux.list_panes(workspace, &window)?;
@@ -201,6 +204,7 @@ mod tests {
         SplitBottom,
         Respawn(String),
         SetTitle(String),
+        SetPaneStyle(String, String),
         SetWidth(String, u16),
         SetHeight(String, u16),
         SetHook(String, String),
@@ -417,9 +421,13 @@ mod tests {
         fn set_pane_style(
             &self,
             _workspace: &TmuxWorkspaceHandle,
-            _pane: &TmuxPaneId,
-            _style: &str,
+            pane: &TmuxPaneId,
+            style: &str,
         ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetPaneStyle(
+                pane.as_str().to_string(),
+                style.to_string(),
+            ));
             Ok(())
         }
 
@@ -524,6 +532,7 @@ mod tests {
             vec![
                 Call::SplitRight,
                 Call::SetTitle("%2".to_string()),
+                Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
                 Call::SplitBottom,
                 Call::SetTitle("%3".to_string()),
@@ -575,6 +584,7 @@ mod tests {
             vec![
                 Call::Respawn("%2".to_string()),
                 Call::SetTitle("%2".to_string()),
+                Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
                 Call::Respawn("%3".to_string()),
                 Call::SetTitle("%3".to_string()),
