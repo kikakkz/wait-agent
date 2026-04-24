@@ -204,6 +204,20 @@ pub trait TmuxSessionGateway: TmuxGateway {
     fn detach_current_client(&self) -> Result<(), Self::Error>;
 }
 
+pub trait TmuxChromeGateway: TmuxSessionGateway {
+    fn pane_dimensions_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<(usize, usize), Self::Error>;
+
+    fn window_zoomed_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<bool, Self::Error>;
+}
+
 pub trait TmuxLayoutGateway: TmuxGateway {
     fn current_window(
         &self,
@@ -263,7 +277,29 @@ pub trait TmuxLayoutGateway: TmuxGateway {
         height: u16,
     ) -> Result<(), Self::Error>;
 
+    fn set_pane_style(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        style: &str,
+    ) -> Result<(), Self::Error>;
+
     fn set_session_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn set_pane_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn set_global_hook(
         &self,
         workspace: &TmuxWorkspaceHandle,
         hook_name: &str,
@@ -273,6 +309,14 @@ pub trait TmuxLayoutGateway: TmuxGateway {
     fn set_session_option(
         &self,
         workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn set_window_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        window: &TmuxWindowHandle,
         option_name: &str,
         value: &str,
     ) -> Result<(), Self::Error>;
@@ -291,6 +335,20 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         workspace: &TmuxWorkspaceHandle,
         key: &str,
         pane: &TmuxPaneId,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_main_pane_zoom_toggle_with_prefix(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_command_with_prefix(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        command: &str,
     ) -> Result<(), Self::Error>;
 
     fn bind_waitagent_focus_sidebar(

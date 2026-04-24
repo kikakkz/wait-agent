@@ -10,8 +10,8 @@ use crate::infra::tmux_glue::{
     TmuxGlueArtifacts, TmuxGlueBuildConfig, TmuxGlueBuildStatus, VendoredTmuxSource,
 };
 use crate::infra::tmux_types::{
-    TmuxGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram, TmuxSessionGateway, TmuxSessionName,
-    TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
+    TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram, TmuxSessionGateway,
+    TmuxSessionName, TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -148,6 +148,29 @@ impl EmbeddedTmuxBackend {
         args: &[String],
     ) -> Result<(), TmuxError> {
         self.run_on_socket(socket_name, args).map(|_| ())
+    }
+
+    pub(crate) fn show_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<Option<String>, TmuxError> {
+        let output = self.run_workspace_command(
+            workspace,
+            &[
+                "show-options".to_string(),
+                "-qv".to_string(),
+                "-t".to_string(),
+                workspace.session_name.as_str().to_string(),
+                option_name.to_string(),
+            ],
+        )?;
+        let value = output.stdout.trim();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(value.to_string()))
+        }
     }
 
     fn session_exists(&self, workspace: &TmuxWorkspaceHandle) -> Result<bool, TmuxError> {
@@ -460,6 +483,22 @@ impl EmbeddedTmuxBackend {
         Ok((width, height))
     }
 
+    pub fn window_zoomed_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<bool, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+            "#{window_zoomed_flag}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout.trim() == "1")
+    }
+
     fn find_managed_session(
         &self,
         target: &str,
@@ -707,6 +746,24 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
     fn detach_current_client(&self) -> Result<(), Self::Error> {
         self.command_runner()
             .run_from_current_client(&["detach-client".to_string()])
+    }
+}
+
+impl TmuxChromeGateway for EmbeddedTmuxBackend {
+    fn pane_dimensions_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<(usize, usize), Self::Error> {
+        EmbeddedTmuxBackend::pane_dimensions_on_socket(self, socket_name, pane_target)
+    }
+
+    fn window_zoomed_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<bool, Self::Error> {
+        EmbeddedTmuxBackend::window_zoomed_on_socket(self, socket_name, pane_target)
     }
 }
 

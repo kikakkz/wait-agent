@@ -42,6 +42,7 @@ impl WorkspaceEntryRuntime {
             .map_err(tmux_bootstrap_error)?;
         self.layout_runtime
             .ensure_layout(&workspace.workspace_handle, &workspace.workspace_dir)?;
+        self.layout_runtime.run_chrome_refresh_all()?;
         Ok(workspace)
     }
 }

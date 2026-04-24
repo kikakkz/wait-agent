@@ -194,6 +194,23 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
+    fn set_pane_style(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        style: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "select-pane".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "-P".to_string(),
+            style.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
     fn set_session_hook(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -211,6 +228,40 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
+    fn set_pane_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-hook".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            hook_name.to_string(),
+            command.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
+    fn set_global_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-hook".to_string(),
+            "-g".to_string(),
+            hook_name.to_string(),
+            command.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
     fn set_session_option(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -221,6 +272,25 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
             "set-option".to_string(),
             "-t".to_string(),
             workspace.session_name.as_str().to_string(),
+            option_name.to_string(),
+            value.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
+    fn set_window_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        window: &TmuxWindowHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-option".to_string(),
+            "-w".to_string(),
+            "-t".to_string(),
+            window.window_id.as_str().to_string(),
             option_name.to_string(),
             value.to_string(),
         ];

@@ -28,6 +28,7 @@ The accepted model is:
 - the bottom menu/footer is a dedicated tmux pane
 - one user-visible session maps to one tmux window
 - fullscreen is implemented as tmux pane zoom, not as local replay or repaint
+- fullscreen keeps waitagent menu visibility by projecting footer chrome onto the tmux status line while the footer pane is hidden by zoom
 - fullscreen history and scrolling use tmux-native pane history and copy-mode behavior
 - tmux is vendored into the repository as a pinned submodule and exposed upward through a Rust glue layer rather than through runtime shell commands or a system tmux dependency
 
@@ -99,6 +100,8 @@ Layout in fullscreen mode:
 
 - zoom the `main pane`
 - keep session/window identity unchanged
+- let tmux hide the sidebar and footer panes as part of native zoom
+- mirror the waitagent footer or menu line into the tmux status line so fullscreen retains menu visibility without reopening local overlay rendering
 - return from zoom back to the same three-pane layout
 
 ## 6. Interaction Model
@@ -112,11 +115,14 @@ Normal mode:
 - `Left` is a waitagent global chrome-navigation key that returns from the sidebar pane to the main pane
 - `h` hides the sidebar when the sidebar pane is focused and returns focus to the main pane
 - entering the sidebar and pressing `Enter` switches to the selected session window and returns focus to the main pane
+- the footer pane is the primary non-prefixed waitagent session-management surface
 - waitagent chrome navigation decisions are based on tmux pane identity and layout only; they must not depend on shell-prompt detection, pane-text probing, `capture-pane`, or content-aware heuristics
 
 Fullscreen mode:
 
 - `Ctrl-O` toggles zoom on the main pane
+- the tmux status line becomes the fullscreen owner of the waitagent menu line
+- fullscreen-safe waitagent session actions use prefixed tmux bindings such as `Ctrl-B s`
 - fullscreen scrollback uses tmux pane history
 - WaitAgent may wrap tmux copy-mode behind simpler keys, but the underlying mechanism remains tmux-native
 

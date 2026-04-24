@@ -1,35 +1,102 @@
+use crate::domain::chrome::FooterViewModel;
 use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
+use crate::ui::chrome::style_status_line;
 
 pub struct FooterUi;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterProjection {
+    Pane,
+    FullscreenStatus,
+}
+
 impl FooterUi {
+    pub fn render_view_model(model: &FooterViewModel) -> String {
+        if model.fullscreen {
+            Self::render_fullscreen(
+                &model.active_socket,
+                &model.active_session,
+                &model.sessions,
+                model.width,
+            )
+        } else {
+            Self::render(
+                &model.active_socket,
+                &model.active_session,
+                &model.sessions,
+                model.width,
+            )
+        }
+    }
+
     pub fn render(
         active_socket: &str,
         active_session: &str,
         sessions: &[ManagedSessionRecord],
         width: usize,
     ) -> String {
-        let width = width.max(1);
-        let active = active_session_record(active_socket, active_session, sessions);
-        let counts = task_counts(sessions);
-        let left = format!(
-            "keys: [c] new  [s] sessions  [Enter] switch | total:{} R:{} I:{} C:{} U:{}",
+        render_footer(
+            active_socket,
+            active_session,
+            sessions,
+            width,
+            FooterProjection::Pane,
+        )
+    }
+
+    pub fn render_fullscreen(
+        active_socket: &str,
+        active_session: &str,
+        sessions: &[ManagedSessionRecord],
+        width: usize,
+    ) -> String {
+        render_footer(
+            active_socket,
+            active_session,
+            sessions,
+            width,
+            FooterProjection::FullscreenStatus,
+        )
+    }
+}
+
+fn render_footer(
+    active_socket: &str,
+    active_session: &str,
+    sessions: &[ManagedSessionRecord],
+    width: usize,
+    projection: FooterProjection,
+) -> String {
+    let width = width.max(1);
+    let active = active_session_record(active_socket, active_session, sessions);
+    let counts = task_counts(sessions);
+    let left = match projection {
+        FooterProjection::Pane => {
+            "keys: ^W cmd  ^B/^F switch  ^N new  ^O full on/off  ^L picker  ^X close  ^Q quit"
+                .to_string()
+        }
+        FooterProjection::FullscreenStatus => format!(
+            "keys: [Ctrl-b c] new  [Ctrl-b s] sessions  [Ctrl-o] full off | total:{} R:{} I:{} C:{} U:{}",
             sessions.len(),
             counts.running,
             counts.input,
             counts.confirm,
             counts.unknown
-        );
-        let right = active
-            .and_then(|session| {
-                session
-                    .current_path
-                    .as_ref()
-                    .or(session.workspace_dir.as_ref())
-            })
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| active_session.to_string());
-        join_left_right(&left, &right, width)
+        ),
+    };
+    let right = active
+        .and_then(|session| {
+            session
+                .current_path
+                .as_ref()
+                .or(session.workspace_dir.as_ref())
+        })
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| active_session.to_string());
+    let line = join_left_right(&left, &right, width);
+    match projection {
+        FooterProjection::Pane => style_status_line(&line, width),
+        FooterProjection::FullscreenStatus => line,
     }
 }
 
@@ -126,9 +193,36 @@ mod tests {
             96,
         );
 
-        assert!(output.contains("keys: [c] new  [s] sessions  [Enter] switch"));
-        assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));
-        assert!(output.ends_with("/tmp/demo"));
+        assert!(output.contains("keys: ^W cmd"));
+        assert!(output.contains("^N new"));
+        assert!(output.contains("^Q quit"));
+        assert!(output.contains("/tmp/demo"));
         assert!(!output.contains('\n'));
+        assert!(output.starts_with("\u{1b}[48;5;24m"));
+    }
+
+    #[test]
+    fn fullscreen_footer_ui_uses_prefixed_menu_hints() {
+        let output = FooterUi::render_fullscreen(
+            "wa-1",
+            "waitagent-1",
+            &[ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
+                workspace_dir: Some(PathBuf::from("/tmp/demo")),
+                workspace_key: None,
+                attached_clients: 1,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: Some(PathBuf::from("/tmp/demo")),
+                task_state: ManagedSessionTaskState::Input,
+            }],
+            120,
+        );
+
+        assert!(output.contains("[Ctrl-b c] new"));
+        assert!(output.contains("[Ctrl-b s] sessions"));
+        assert!(output.contains("[Ctrl-o] full off"));
+        assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));
+        assert!(output.contains("/tmp/demo"));
     }
 }

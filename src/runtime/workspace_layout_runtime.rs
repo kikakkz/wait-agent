@@ -1,18 +1,21 @@
 use crate::application::control_service::{ControlService, FooterMenuBindings};
 use crate::application::layout_service::{LayoutFocusBehavior, LayoutService};
-use crate::cli::LayoutReconcileCommand;
+use crate::application::session_service::SessionService;
+use crate::cli::{CloseSessionCommand, LayoutReconcileCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxError, TmuxProgram, TmuxSessionName, TmuxSocketName,
-    TmuxWorkspaceHandle,
+    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxProgram, TmuxSessionName,
+    TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use std::io;
 use std::path::{Path, PathBuf};
 
 pub struct WorkspaceLayoutRuntime {
+    backend: EmbeddedTmuxBackend,
     control_service: ControlService<EmbeddedTmuxBackend>,
     layout_service: LayoutService<EmbeddedTmuxBackend>,
+    session_service: SessionService<EmbeddedTmuxBackend>,
     current_executable: std::path::PathBuf,
 }
 
@@ -28,7 +31,9 @@ impl WorkspaceLayoutRuntime {
 
         Ok(Self {
             control_service: ControlService::new(backend.clone()),
-            layout_service: LayoutService::new(backend),
+            layout_service: LayoutService::new(backend.clone()),
+            session_service: SessionService::new(backend.clone()),
+            backend,
             current_executable,
         })
     }
@@ -55,27 +60,113 @@ impl WorkspaceLayoutRuntime {
         )
     }
 
+    pub fn run_chrome_refresh(
+        &self,
+        command: LayoutReconcileCommand,
+    ) -> Result<(), LifecycleError> {
+        let workspace_dir = PathBuf::from(&command.workspace_dir);
+        let workspace = TmuxWorkspaceHandle {
+            workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
+            socket_name: TmuxSocketName::new(command.socket_name),
+            session_name: TmuxSessionName::new(command.session_name),
+        };
+        self.refresh_chrome(&workspace, &workspace_dir)
+    }
+
+    pub fn run_chrome_refresh_all(&self) -> Result<(), LifecycleError> {
+        let sessions = self
+            .session_service
+            .list_sessions()
+            .map_err(tmux_layout_error)?;
+
+        for session in sessions {
+            let Some(workspace_dir) = session.workspace_dir.as_ref() else {
+                continue;
+            };
+            let workspace = TmuxWorkspaceHandle {
+                workspace_id: WorkspaceInstanceId::new(session.address.session_id()),
+                socket_name: TmuxSocketName::new(session.address.server_id()),
+                session_name: TmuxSessionName::new(session.address.session_id()),
+            };
+            self.refresh_chrome(&workspace, workspace_dir)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn run_close_session(&self, command: CloseSessionCommand) -> Result<(), LifecycleError> {
+        self.backend
+            .run_socket_command(
+                &TmuxSocketName::new(command.socket_name),
+                &[
+                    "kill-session".to_string(),
+                    "-t".to_string(),
+                    command.session_name,
+                ],
+            )
+            .map_err(tmux_layout_error)?;
+        self.run_chrome_refresh_all()
+    }
+
     fn reconcile_layout(
         &self,
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
         focus_behavior: LayoutFocusBehavior,
     ) -> Result<(), LifecycleError> {
+        self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)
+            .map(|_| ())
+    }
+
+    fn refresh_chrome(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+    ) -> Result<(), LifecycleError> {
         let sidebar_program = self.sidebar_program(workspace, workspace_dir);
         let footer_program = self.footer_program(workspace, workspace_dir);
-        let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
+        let layout = self.ensure_layout_topology(
+            workspace,
+            workspace_dir,
+            LayoutFocusBehavior::PreserveCurrent,
+        )?;
+        self.backend
+            .respawn_pane(workspace, &layout.sidebar_pane, &sidebar_program)
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .respawn_pane(workspace, &layout.footer_pane, &footer_program)
+            .map_err(tmux_layout_error)
+    }
+
+    fn ensure_layout_topology(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+        focus_behavior: LayoutFocusBehavior,
+    ) -> Result<crate::domain::workspace_layout::WorkspaceChromeLayout, LifecycleError> {
+        let sidebar_program = self.sidebar_program(workspace, workspace_dir);
+        let footer_program = self.footer_program(workspace, workspace_dir);
+        let reconcile_command = self.chrome_refresh_hook_command(workspace, workspace_dir);
+        let global_reconcile_command = self.chrome_refresh_all_hook_command();
+        let pane_exit_command = self.close_session_hook_command(workspace);
         let layout = self
             .layout_service
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
             .map_err(tmux_layout_error)?;
-        let footer_bindings = self.footer_menu_bindings(workspace, &layout.footer_pane);
+        let footer_bindings = self.footer_menu_bindings(workspace);
         self.control_service
             .ensure_native_controls(workspace, &layout, Some(&footer_bindings))
             .map_err(tmux_layout_error)?;
         self.layout_service
-            .ensure_layout_hooks(workspace, &reconcile_command)
-            .map(|_| ())
-            .map_err(tmux_layout_error)
+            .ensure_layout_hooks(
+                workspace,
+                &layout.main_pane,
+                &reconcile_command,
+                &global_reconcile_command,
+                &pane_exit_command,
+            )
+            .map_err(tmux_layout_error)?;
+        Ok(layout)
     }
 
     fn sidebar_program(
@@ -106,62 +197,124 @@ impl WorkspaceLayoutRuntime {
             .with_start_directory(workspace_dir)
     }
 
-    fn footer_menu_bindings(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        footer_pane: &crate::infra::tmux::TmuxPaneId,
-    ) -> FooterMenuBindings {
+    fn footer_menu_bindings(&self, workspace: &TmuxWorkspaceHandle) -> FooterMenuBindings {
+        let shell_command = footer_menu_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+        );
         FooterMenuBindings {
             create_session_command: format!(
                 "detach-client -E {}",
                 shell_escape(self.current_executable.to_string_lossy().as_ref())
             ),
             open_sessions_menu_command: format!(
-                "run-shell {}",
-                shell_escape(
-                    &[
-                        shell_escape(self.current_executable.to_string_lossy().as_ref()),
-                        shell_escape("__footer-menu"),
-                        shell_escape("--socket-name"),
-                        shell_escape(workspace.socket_name.as_str()),
-                        shell_escape("--session-name"),
-                        shell_escape(workspace.session_name.as_str()),
-                        shell_escape("--pane-id"),
-                        shell_escape(footer_pane.as_str()),
-                        shell_escape("--client-tty"),
-                        shell_escape("#{client_tty}"),
-                    ]
-                    .join(" ")
-                )
+                "run-shell -b {}",
+                tmux_quote_argument(&shell_command)
             ),
         }
     }
 
-    fn layout_reconcile_hook_command(
+    fn chrome_refresh_hook_command(
         &self,
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
     ) -> String {
-        let shell_command = [
-            shell_escape(self.current_executable.to_string_lossy().as_ref()),
-            shell_escape("__layout-reconcile"),
-            shell_escape("--socket-name"),
-            shell_escape(workspace.socket_name.as_str()),
-            shell_escape("--session-name"),
-            shell_escape(workspace.session_name.as_str()),
-            shell_escape("--workspace-dir"),
-            shell_escape(&workspace_dir.display().to_string()),
-        ]
-        .join(" ");
+        let shell_command = chrome_refresh_hook_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &workspace_dir.display().to_string(),
+        );
         format!(
             "run-shell -b {}",
-            shell_escape(&format!("{shell_command} >/dev/null 2>&1"))
+            tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
+        )
+    }
+
+    fn chrome_refresh_all_hook_command(&self) -> String {
+        let shell_command = chrome_refresh_all_hook_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+        );
+        format!(
+            "run-shell -b {}",
+            tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
+        )
+    }
+
+    fn close_session_hook_command(&self, workspace: &TmuxWorkspaceHandle) -> String {
+        let shell_command = close_session_hook_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace.socket_name.as_str(),
+            workspace.session_name.as_str(),
+        );
+        format!(
+            "run-shell -b {}",
+            tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
         )
     }
 }
 
+fn footer_menu_shell_command(executable: &str, workspace: &TmuxWorkspaceHandle) -> String {
+    [
+        shell_escape(executable),
+        shell_escape("__footer-menu"),
+        shell_escape("--socket-name"),
+        shell_escape(workspace.socket_name.as_str()),
+        shell_escape("--session-name"),
+        shell_escape(workspace.session_name.as_str()),
+        shell_escape("--client-tty"),
+        shell_escape("#{client_tty}"),
+    ]
+    .join(" ")
+}
+
+fn chrome_refresh_hook_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    workspace_dir: &str,
+) -> String {
+    [
+        shell_escape(executable),
+        shell_escape("__chrome-refresh"),
+        shell_escape("--socket-name"),
+        shell_escape(workspace.socket_name.as_str()),
+        shell_escape("--session-name"),
+        shell_escape(workspace.session_name.as_str()),
+        shell_escape("--workspace-dir"),
+        shell_escape(workspace_dir),
+    ]
+    .join(" ")
+}
+
+fn chrome_refresh_all_hook_shell_command(executable: &str) -> String {
+    [
+        shell_escape(executable),
+        shell_escape("__chrome-refresh-all"),
+    ]
+    .join(" ")
+}
+
+fn close_session_hook_shell_command(
+    executable: &str,
+    socket_name: &str,
+    session_name: &str,
+) -> String {
+    [
+        shell_escape(executable),
+        shell_escape("__close-session"),
+        shell_escape("--socket-name"),
+        shell_escape(socket_name),
+        shell_escape("--session-name"),
+        shell_escape(session_name),
+    ]
+    .join(" ")
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn tmux_quote_argument(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn tmux_layout_error(error: TmuxError) -> LifecycleError {
@@ -169,4 +322,75 @@ fn tmux_layout_error(error: TmuxError) -> LifecycleError {
         "failed to ensure tmux-owned waitagent layout".to_string(),
         io::Error::new(io::ErrorKind::Other, error.to_string()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        chrome_refresh_all_hook_shell_command, chrome_refresh_hook_shell_command,
+        close_session_hook_shell_command, footer_menu_shell_command, tmux_quote_argument,
+    };
+    use crate::domain::workspace::WorkspaceInstanceId;
+    use crate::infra::tmux::{TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
+
+    #[test]
+    fn footer_menu_shell_command_quotes_shell_arguments_but_not_tmux_layer() {
+        let workspace = workspace();
+
+        let command = footer_menu_shell_command("/tmp/wait agent", &workspace);
+
+        assert_eq!(
+            command,
+            "'/tmp/wait agent' '__footer-menu' '--socket-name' 'wa-1' '--session-name' 'session-1' '--client-tty' '#{client_tty}'"
+        );
+    }
+
+    #[test]
+    fn tmux_quote_argument_wraps_shell_command_for_tmux_parser() {
+        let quoted =
+            tmux_quote_argument("'waitagent' '__footer-menu' '--client-tty' '#{client_tty}'");
+
+        assert_eq!(
+            quoted,
+            "\"'waitagent' '__footer-menu' '--client-tty' '#{client_tty}'\""
+        );
+    }
+
+    #[test]
+    fn chrome_refresh_hook_shell_command_preserves_workspace_directory_as_shell_argument() {
+        let workspace = workspace();
+
+        let command =
+            chrome_refresh_hook_shell_command("/tmp/wait agent", &workspace, "/tmp/demo path");
+
+        assert_eq!(
+            command,
+            "'/tmp/wait agent' '__chrome-refresh' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path'"
+        );
+    }
+
+    #[test]
+    fn chrome_refresh_all_hook_shell_command_runs_global_refresh() {
+        let command = chrome_refresh_all_hook_shell_command("/tmp/wait agent");
+
+        assert_eq!(command, "'/tmp/wait agent' '__chrome-refresh-all'");
+    }
+
+    #[test]
+    fn close_session_hook_shell_command_targets_current_session() {
+        let command = close_session_hook_shell_command("/tmp/wait agent", "wa-1", "session-1");
+
+        assert_eq!(
+            command,
+            "'/tmp/wait agent' '__close-session' '--socket-name' 'wa-1' '--session-name' 'session-1'"
+        );
+    }
+
+    fn workspace() -> TmuxWorkspaceHandle {
+        TmuxWorkspaceHandle {
+            workspace_id: WorkspaceInstanceId::new("session-1"),
+            socket_name: TmuxSocketName::new("wa-1"),
+            session_name: TmuxSessionName::new("session-1"),
+        }
+    }
 }

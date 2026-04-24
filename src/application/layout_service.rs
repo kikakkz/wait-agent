@@ -5,12 +5,14 @@ use crate::infra::tmux::{
 
 pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
-const LAYOUT_RECONCILE_HOOKS: [&str; 4] = [
+const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
+const SESSION_GLOBAL_REFRESH_HOOKS: [&str; 3] = [
     "client-attached",
     "client-detached",
-    "client-resized",
     "client-session-changed",
 ];
+const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 2] = ["session-created", "session-closed"];
+const MAIN_PANE_GLOBAL_REFRESH_HOOKS: [&str; 1] = ["pane-exited"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutFocusBehavior {
@@ -103,11 +105,26 @@ where
     pub fn ensure_layout_hooks(
         &self,
         workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
         reconcile_command: &str,
+        global_reconcile_command: &str,
+        pane_exit_command: &str,
     ) -> Result<(), G::Error> {
-        for hook_name in LAYOUT_RECONCILE_HOOKS {
+        for hook_name in SESSION_LAYOUT_RECONCILE_HOOKS {
             self.tmux
                 .set_session_hook(workspace, hook_name, reconcile_command)?;
+        }
+        for hook_name in SESSION_GLOBAL_REFRESH_HOOKS {
+            self.tmux
+                .set_session_hook(workspace, hook_name, global_reconcile_command)?;
+        }
+        for hook_name in GLOBAL_LAYOUT_RECONCILE_HOOKS {
+            self.tmux
+                .set_global_hook(workspace, hook_name, global_reconcile_command)?;
+        }
+        for hook_name in MAIN_PANE_GLOBAL_REFRESH_HOOKS {
+            self.tmux
+                .set_pane_hook(workspace, main_pane, hook_name, pane_exit_command)?;
         }
         Ok(())
     }
@@ -187,6 +204,8 @@ mod tests {
         SetWidth(String, u16),
         SetHeight(String, u16),
         SetHook(String, String),
+        SetPaneHook(String, String, String),
+        SetGlobalHook(String, String),
         SetSessionOption(String, String),
         SelectMain(String),
     }
@@ -395,6 +414,15 @@ mod tests {
             Ok(())
         }
 
+        fn set_pane_style(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _pane: &TmuxPaneId,
+            _style: &str,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn set_session_hook(
             &self,
             _workspace: &TmuxWorkspaceHandle,
@@ -404,6 +432,34 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(Call::SetHook(hook_name.to_string(), command.to_string()));
+            Ok(())
+        }
+
+        fn set_global_hook(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            hook_name: &str,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetGlobalHook(
+                hook_name.to_string(),
+                command.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn set_pane_hook(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            pane: &TmuxPaneId,
+            hook_name: &str,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetPaneHook(
+                pane.as_str().to_string(),
+                hook_name.to_string(),
+                command.to_string(),
+            ));
             Ok(())
         }
 
@@ -417,6 +473,16 @@ mod tests {
                 option_name.to_string(),
                 value.to_string(),
             ));
+            Ok(())
+        }
+
+        fn set_window_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _window: &TmuxWindowHandle,
+            _option_name: &str,
+            _value: &str,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -572,27 +638,46 @@ mod tests {
         let service = LayoutService::new(gateway.clone());
 
         service
-            .ensure_layout_hooks(&workspace(), "run-shell -b 'waitagent __layout-reconcile'")
+            .ensure_layout_hooks(
+                &workspace(),
+                &TmuxPaneId::new("%1"),
+                "run-shell -b 'waitagent __layout-reconcile'",
+                "run-shell -b 'waitagent __chrome-refresh-all'",
+                "run-shell -b 'waitagent __close-session --socket-name wa-wk-1 --session-name waitagent-wk-1'",
+            )
             .expect("hook registration should succeed");
 
         assert_eq!(
             gateway.calls(),
             vec![
                 Call::SetHook(
-                    "client-attached".to_string(),
-                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
-                ),
-                Call::SetHook(
-                    "client-detached".to_string(),
-                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
-                ),
-                Call::SetHook(
                     "client-resized".to_string(),
                     "run-shell -b 'waitagent __layout-reconcile'".to_string(),
                 ),
                 Call::SetHook(
+                    "client-attached".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                ),
+                Call::SetHook(
+                    "client-detached".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                ),
+                Call::SetHook(
                     "client-session-changed".to_string(),
-                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                ),
+                Call::SetGlobalHook(
+                    "session-created".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                ),
+                Call::SetGlobalHook(
+                    "session-closed".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                ),
+                Call::SetPaneHook(
+                    "%1".to_string(),
+                    "pane-exited".to_string(),
+                    "run-shell -b 'waitagent __close-session --socket-name wa-wk-1 --session-name waitagent-wk-1'".to_string(),
                 ),
             ]
         );

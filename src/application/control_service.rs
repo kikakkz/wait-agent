@@ -1,7 +1,9 @@
 use crate::domain::workspace_layout::WorkspaceChromeLayout;
 use crate::infra::tmux::{TmuxControlGateway, TmuxWorkspaceHandle};
+use crate::ui::chrome::{TMUX_MENU_BORDER_STYLE, TMUX_MENU_SELECTED_STYLE, TMUX_MENU_STYLE};
 
 const FULLSCREEN_TOGGLE_KEY: &str = "C-o";
+const FULLSCREEN_TOGGLE_PREFIX_KEY: &str = "z";
 const SIDEBAR_FOCUS_KEY: &str = "Right";
 const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
@@ -11,6 +13,17 @@ const FOOTER_SWITCH_KEY: &str = "Enter";
 const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
 const TMUX_MOUSE_OPTION: &str = "mouse";
 const TMUX_OPTION_ON: &str = "on";
+const TMUX_STATUS_OPTION: &str = "status";
+const TMUX_STATUS_ON: &str = "on";
+const TMUX_STATUS_POSITION_OPTION: &str = "status-position";
+const TMUX_STATUS_BOTTOM: &str = "bottom";
+const TMUX_PANE_BORDER_STYLE_OPTION: &str = "pane-border-style";
+const TMUX_PANE_ACTIVE_BORDER_STYLE_OPTION: &str = "pane-active-border-style";
+const TMUX_PANE_BORDER_STYLE: &str = "fg=colour239";
+const TMUX_PANE_ACTIVE_BORDER_STYLE: &str = "fg=colour240";
+const TMUX_MENU_STYLE_OPTION: &str = "menu-style";
+const TMUX_MENU_SELECTED_STYLE_OPTION: &str = "menu-selected-style";
+const TMUX_MENU_BORDER_STYLE_OPTION: &str = "menu-border-style";
 
 pub struct FooterMenuBindings {
     pub create_session_command: String,
@@ -37,9 +50,51 @@ where
     ) -> Result<(), G::Error> {
         self.tmux
             .set_session_option(workspace, TMUX_MOUSE_OPTION, TMUX_OPTION_ON)?;
+        self.configure_session_chrome(workspace, layout)?;
         self.bind_main_pane_fullscreen_toggle(workspace, layout)?;
         self.bind_waitagent_sidebar_controls(workspace, layout)?;
         self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
+    }
+
+    fn configure_session_chrome(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        layout: &WorkspaceChromeLayout,
+    ) -> Result<(), G::Error> {
+        self.tmux
+            .set_session_option(workspace, TMUX_STATUS_OPTION, TMUX_STATUS_ON)?;
+        self.tmux
+            .set_session_option(workspace, TMUX_STATUS_POSITION_OPTION, TMUX_STATUS_BOTTOM)?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_MENU_STYLE_OPTION,
+            TMUX_MENU_STYLE,
+        )?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_MENU_SELECTED_STYLE_OPTION,
+            TMUX_MENU_SELECTED_STYLE,
+        )?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_MENU_BORDER_STYLE_OPTION,
+            TMUX_MENU_BORDER_STYLE,
+        )?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_PANE_BORDER_STYLE_OPTION,
+            TMUX_PANE_BORDER_STYLE,
+        )?;
+        self.tmux.set_window_option(
+            workspace,
+            &layout.window,
+            TMUX_PANE_ACTIVE_BORDER_STYLE_OPTION,
+            TMUX_PANE_ACTIVE_BORDER_STYLE,
+        )
     }
 
     fn bind_main_pane_fullscreen_toggle(
@@ -47,8 +102,16 @@ where
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
     ) -> Result<(), G::Error> {
-        self.tmux
-            .bind_main_pane_zoom_toggle(workspace, FULLSCREEN_TOGGLE_KEY, &layout.main_pane)
+        self.tmux.bind_main_pane_zoom_toggle(
+            workspace,
+            FULLSCREEN_TOGGLE_KEY,
+            &layout.main_pane,
+        )?;
+        self.tmux.bind_main_pane_zoom_toggle_with_prefix(
+            workspace,
+            FULLSCREEN_TOGGLE_PREFIX_KEY,
+            &layout.main_pane,
+        )
     }
 
     fn bind_waitagent_sidebar_controls(
@@ -96,10 +159,20 @@ where
             &layout.footer_pane,
             &footer_bindings.create_session_command,
         )?;
+        self.tmux.bind_command_with_prefix(
+            workspace,
+            FOOTER_CREATE_KEY,
+            &footer_bindings.create_session_command,
+        )?;
         self.tmux.bind_waitagent_footer_action(
             workspace,
             FOOTER_SESSIONS_KEY,
             &layout.footer_pane,
+            &footer_bindings.open_sessions_menu_command,
+        )?;
+        self.tmux.bind_command_with_prefix(
+            workspace,
+            FOOTER_SESSIONS_KEY,
             &footer_bindings.open_sessions_menu_command,
         )?;
         self.tmux.bind_waitagent_footer_action(
@@ -126,8 +199,11 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
         SetSessionOption(String, String),
+        SetWindowOption(String, String),
         BindWithoutPrefix(String, Vec<String>),
         BindMainPaneZoomToggle(String, String),
+        BindMainPaneZoomToggleWithPrefix(String, String),
+        BindCommandWithPrefix(String, String),
         BindWaitagentFocusSidebar(String, String, String, u16),
         BindWaitagentFocusMain(String, String),
         BindWaitagentSidebarBack(String, String, String),
@@ -295,9 +371,37 @@ mod tests {
             unreachable!("not used")
         }
 
+        fn set_pane_style(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _pane: &TmuxPaneId,
+            _style: &str,
+        ) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
+
         fn set_session_hook(
             &self,
             _workspace: &TmuxWorkspaceHandle,
+            _hook_name: &str,
+            _command: &str,
+        ) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
+
+        fn set_global_hook(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _hook_name: &str,
+            _command: &str,
+        ) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
+
+        fn set_pane_hook(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _pane: &TmuxPaneId,
             _hook_name: &str,
             _command: &str,
         ) -> Result<(), Self::Error> {
@@ -311,6 +415,20 @@ mod tests {
             value: &str,
         ) -> Result<(), Self::Error> {
             self.calls.borrow_mut().push(Call::SetSessionOption(
+                option_name.to_string(),
+                value.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn set_window_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _window: &TmuxWindowHandle,
+            option_name: &str,
+            value: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetWindowOption(
                 option_name.to_string(),
                 value.to_string(),
             ));
@@ -341,6 +459,34 @@ mod tests {
             self.calls.borrow_mut().push(Call::BindMainPaneZoomToggle(
                 key.to_string(),
                 pane.as_str().to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_main_pane_zoom_toggle_with_prefix(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            pane: &TmuxPaneId,
+        ) -> Result<(), Self::Error> {
+            self.calls
+                .borrow_mut()
+                .push(Call::BindMainPaneZoomToggleWithPrefix(
+                    key.to_string(),
+                    pane.as_str().to_string(),
+                ));
+            Ok(())
+        }
+
+        fn bind_command_with_prefix(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindCommandWithPrefix(
+                key.to_string(),
+                command.to_string(),
             ));
             Ok(())
         }
@@ -462,7 +608,27 @@ mod tests {
             gateway.calls(),
             vec![
                 Call::SetSessionOption("mouse".to_string(), "on".to_string()),
+                Call::SetSessionOption("status".to_string(), "on".to_string()),
+                Call::SetSessionOption("status-position".to_string(), "bottom".to_string()),
+                Call::SetWindowOption(
+                    "menu-style".to_string(),
+                    "fg=colour250,bg=colour235".to_string(),
+                ),
+                Call::SetWindowOption(
+                    "menu-selected-style".to_string(),
+                    "fg=colour255,bg=colour31".to_string(),
+                ),
+                Call::SetWindowOption(
+                    "menu-border-style".to_string(),
+                    "fg=colour24,bg=colour235".to_string(),
+                ),
+                Call::SetWindowOption("pane-border-style".to_string(), "fg=colour239".to_string()),
+                Call::SetWindowOption(
+                    "pane-active-border-style".to_string(),
+                    "fg=colour240".to_string(),
+                ),
                 Call::BindMainPaneZoomToggle("C-o".to_string(), "%1".to_string()),
+                Call::BindMainPaneZoomToggleWithPrefix("z".to_string(), "%1".to_string()),
                 Call::BindWaitagentFocusSidebar(
                     "Right".to_string(),
                     "%1".to_string(),
@@ -486,9 +652,17 @@ mod tests {
                     "%3".to_string(),
                     "detach-client -E 'waitagent'".to_string(),
                 ),
+                Call::BindCommandWithPrefix(
+                    "c".to_string(),
+                    "detach-client -E 'waitagent'".to_string(),
+                ),
                 Call::BindWaitagentFooterAction(
                     "s".to_string(),
                     "%3".to_string(),
+                    "run-shell 'waitagent __footer-menu'".to_string(),
+                ),
+                Call::BindCommandWithPrefix(
+                    "s".to_string(),
                     "run-shell 'waitagent __footer-menu'".to_string(),
                 ),
                 Call::BindWaitagentFooterAction(

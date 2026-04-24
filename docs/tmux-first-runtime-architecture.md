@@ -9,6 +9,7 @@ Date: `2026-04-23`
 This document defines the target code architecture for the tmux-first migration.
 
 The product direction is already accepted in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md).
+The event-driven counterpart for the new local runtime path is documented in [event-driven-local-runtime-architecture.md](event-driven-local-runtime-architecture.md).
 This document answers a different question:
 
 - how the codebase should be reorganized so the tmux-first direction lands on a cleaner architecture instead of becoming another layer inside the current monolith

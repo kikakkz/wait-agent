@@ -6,7 +6,7 @@ use crate::lifecycle::LifecycleError;
 use std::io;
 use std::path::PathBuf;
 
-const FOOTER_MENU_TITLE: &str = "WaitAgent Sessions";
+const FOOTER_MENU_TITLE: &str = "WaitAgent Menu";
 const MAX_SESSION_SHORTCUTS: usize = 9;
 
 pub struct FooterMenuRuntime {
@@ -55,14 +55,13 @@ fn build_footer_menu_args(
         "display-menu".to_string(),
         "-c".to_string(),
         command.client_tty.clone(),
-        "-t".to_string(),
-        command.pane_id.clone(),
         "-x".to_string(),
         "P".to_string(),
         "-y".to_string(),
         "P".to_string(),
         "-T".to_string(),
         FOOTER_MENU_TITLE.to_string(),
+        "--".to_string(),
     ];
 
     if let Some(session) = active {
@@ -81,12 +80,22 @@ fn build_footer_menu_args(
         push_separator(&mut args);
     }
 
+    push_disabled_item(&mut args, "- Commands");
     push_action_item(
         &mut args,
         "New Session",
         "c",
         &create_session_command(executable),
     );
+    if active.is_some() {
+        push_action_item(
+            &mut args,
+            "Close Current Session",
+            "x",
+            &close_session_command(executable, command),
+        );
+    }
+    push_action_item(&mut args, "Quit Client", "q", "detach-client");
     push_separator(&mut args);
 
     if sessions.is_empty() {
@@ -176,6 +185,18 @@ fn attach_session_command(executable: &std::path::Path, session: &ManagedSession
     )
 }
 
+fn close_session_command(executable: &std::path::Path, command: &FooterMenuCommand) -> String {
+    format!(
+        "detach-client -E {}",
+        shell_escape(&format!(
+            "{} __close-session --socket-name {} --session-name {}",
+            executable.display(),
+            command.socket_name,
+            command.session_name
+        ))
+    )
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -202,7 +223,6 @@ mod tests {
             &FooterMenuCommand {
                 socket_name: "wa-1".to_string(),
                 session_name: "1".to_string(),
-                pane_id: "%2".to_string(),
                 client_tty: "/dev/pts/7".to_string(),
             },
             Path::new("/tmp/waitagent"),
@@ -221,17 +241,26 @@ mod tests {
         assert_eq!(args[0], "display-menu");
         assert!(args.contains(&"New Session".to_string()));
         assert!(args.contains(&FOOTER_MENU_TITLE.to_string()));
+        assert!(args.contains(&"--".to_string()));
         assert!(args
             .iter()
             .any(|value| value == "- Current: codex@local [I]"));
         assert!(args.iter().any(|value| value == "- Cwd: /tmp/demo"));
+        assert!(args.iter().any(|value| value == "- Commands"));
         assert!(args.iter().any(|value| value == "- Sessions"));
+        assert!(args.iter().any(|value| value == "Close Current Session"));
+        assert!(args.iter().any(|value| value == "Quit Client"));
         assert!(args
             .iter()
             .any(|value| value == "* codex@local [I] cwd: /tmp/demo"));
         assert!(args
             .iter()
             .any(|value| value.contains("detach-client -E '/tmp/waitagent attach wa-1:1'")));
+        assert!(args.iter().any(|value| {
+            value.contains(
+                "detach-client -E '/tmp/waitagent __close-session --socket-name wa-1 --session-name 1'",
+            )
+        }));
     }
 
     #[test]
@@ -240,7 +269,6 @@ mod tests {
             &FooterMenuCommand {
                 socket_name: "wa-1".to_string(),
                 session_name: "1".to_string(),
-                pane_id: "%2".to_string(),
                 client_tty: "/dev/pts/7".to_string(),
             },
             Path::new("/tmp/waitagent"),

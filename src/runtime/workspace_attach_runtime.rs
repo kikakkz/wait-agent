@@ -4,12 +4,21 @@ use crate::runtime::workspace_daemon_protocol::{read_frame, write_frame, Frame};
 use crate::runtime::workspace_readiness::attach_frame_has_visible_workspace;
 use crate::terminal::{TerminalRuntime, TerminalSize};
 use std::io::{self, Read, Write};
+use std::os::raw::{c_int, c_void};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Duration;
 
-const CLIENT_TICK: Duration = Duration::from_millis(50);
+const SIGWINCH: c_int = 28;
+
+static ATTACH_SIGWINCH_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" {
+    fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+}
 
 pub struct WorkspaceAttachRuntime {
     paths: WorkspacePaths,
@@ -43,27 +52,28 @@ impl WorkspaceAttachRuntime {
             stream.try_clone().map_err(|error| {
                 LifecycleError::Io("failed to clone daemon socket".to_string(), error)
             })?,
-            tx,
+            tx.clone(),
         );
+        let _resize_watcher = spawn_attach_resize_watcher(tx.clone()).map_err(|error| {
+            LifecycleError::Io("failed to install attach resize watcher".to_string(), error)
+        })?;
 
-        let mut terminal_runtime = TerminalRuntime::stdio();
         let mut writer = stream;
         let mut stdout = io::stdout().lock();
-        let mut first_message_seen = false;
         let mut workspace_visible = false;
         let mut requested_startup_refresh = false;
 
         loop {
-            match rx.recv_timeout(CLIENT_TICK) {
+            match rx.recv() {
                 Ok(AttachClientEvent::Input(bytes)) => {
                     write_frame(&mut writer, &Frame::Input(bytes))?;
                 }
+                Ok(AttachClientEvent::Resize(size)) => {
+                    write_frame(&mut writer, &Frame::Resize(size.into()))?;
+                }
                 Ok(AttachClientEvent::Socket(frame)) => match frame {
-                    Frame::Ack(_) => {
-                        first_message_seen = true;
-                    }
+                    Frame::Ack(_) => {}
                     Frame::Snapshot(bytes) | Frame::Output(bytes) => {
-                        first_message_seen = true;
                         if !workspace_visible {
                             if !attach_frame_has_visible_workspace(&bytes) {
                                 if !requested_startup_refresh {
@@ -93,18 +103,7 @@ impl WorkspaceAttachRuntime {
                     }
                 },
                 Ok(AttachClientEvent::SocketClosed) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if first_message_seen && !workspace_visible && !requested_startup_refresh {
-                        request_attach_startup_refresh(&mut writer, self.size)?;
-                        requested_startup_refresh = true;
-                    }
-                    if first_message_seen {
-                        if let Some(resized) = terminal_runtime.capture_resize()? {
-                            write_frame(&mut writer, &Frame::Resize(resized.into()))?;
-                        }
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(_) => break,
             }
         }
 
@@ -130,8 +129,19 @@ fn request_attach_startup_refresh(
 #[derive(Debug)]
 enum AttachClientEvent {
     Input(Vec<u8>),
+    Resize(TerminalSize),
     Socket(Frame),
     SocketClosed,
+}
+
+struct AttachResizeWatcher {
+    _writer: UnixStream,
+}
+
+impl Drop for AttachResizeWatcher {
+    fn drop(&mut self) {
+        ATTACH_SIGWINCH_WRITE_FD.store(-1, Ordering::Relaxed);
+    }
 }
 
 fn spawn_attach_stdin_reader(tx: Sender<AttachClientEvent>) {
@@ -170,4 +180,47 @@ fn spawn_attach_socket_reader(mut stream: UnixStream, tx: Sender<AttachClientEve
             }
         }
     });
+}
+
+fn spawn_attach_resize_watcher(tx: Sender<AttachClientEvent>) -> io::Result<AttachResizeWatcher> {
+    let (mut reader, writer) = UnixStream::pair()?;
+    ATTACH_SIGWINCH_WRITE_FD.store(writer.as_raw_fd(), Ordering::Relaxed);
+    unsafe {
+        signal(SIGWINCH, attach_sigwinch_handler);
+    }
+
+    thread::spawn(move || {
+        let terminal = TerminalRuntime::stdio();
+        let mut buffer = [0_u8; 64];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx
+                        .send(AttachClientEvent::Resize(
+                            terminal.current_size_or_default(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(AttachResizeWatcher { _writer: writer })
+}
+
+extern "C" fn attach_sigwinch_handler(_signal: c_int) {
+    let fd = ATTACH_SIGWINCH_WRITE_FD.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+
+    let byte = 1_u8;
+    unsafe {
+        let _ = write(fd, (&byte as *const u8).cast::<c_void>(), 1);
+    }
 }

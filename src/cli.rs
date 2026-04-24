@@ -14,7 +14,10 @@ pub enum Command {
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
     FooterMenu(FooterMenuCommand),
+    CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
+    ChromeRefresh(LayoutReconcileCommand),
+    ChromeRefreshAll,
     Daemon(DaemonCommand),
     Attach(AttachCommand),
     List(ListCommand),
@@ -96,8 +99,13 @@ pub struct LayoutReconcileCommand {
 pub struct FooterMenuCommand {
     pub socket_name: String,
     pub session_name: String,
-    pub pane_id: String,
     pub client_tty: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CloseSessionCommand {
+    pub socket_name: String,
+    pub session_name: String,
 }
 
 impl Cli {
@@ -141,9 +149,22 @@ impl Cli {
                 args.remove(0);
                 Command::FooterMenu(parse_footer_menu(args)?)
             }
+            "__close-session" => {
+                args.remove(0);
+                Command::CloseSession(parse_close_session(args)?)
+            }
             "__layout-reconcile" => {
                 args.remove(0);
                 Command::LayoutReconcile(parse_layout_reconcile(args)?)
+            }
+            "__chrome-refresh" => {
+                args.remove(0);
+                Command::ChromeRefresh(parse_layout_reconcile(args)?)
+            }
+            "__chrome-refresh-all" => {
+                args.remove(0);
+                parse_no_args(args)?;
+                Command::ChromeRefreshAll
             }
             "daemon" => {
                 args.remove(0);
@@ -407,14 +428,12 @@ fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
     let mut session_name = None;
-    let mut pane_id = None;
     let mut client_tty = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
             "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
-            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
             "--client-tty" => client_tty = Some(expect_value("--client-tty", &mut iter)?),
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
@@ -426,9 +445,43 @@ fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
-        pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
         client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
     })
+}
+
+fn parse_close_session(args: Vec<String>) -> Result<CloseSessionCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(CloseSessionCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+    })
+}
+
+fn parse_no_args(args: Vec<String>) -> Result<(), CliError> {
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(())
 }
 
 fn expect_value<I>(flag: &str, iter: &mut I) -> Result<String, CliError>
@@ -675,6 +728,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_hidden_chrome_refresh_command() {
+        match parse(&[
+            "waitagent",
+            "__chrome-refresh",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--workspace-dir",
+            "/tmp/workspace",
+        ]) {
+            Command::ChromeRefresh(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.workspace_dir, "/tmp/workspace");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_chrome_refresh_all_command() {
+        assert!(matches!(
+            parse(&["waitagent", "__chrome-refresh-all"]),
+            Command::ChromeRefreshAll
+        ));
+    }
+
+    #[test]
+    fn parses_hidden_close_session_command() {
+        match parse(&[
+            "waitagent",
+            "__close-session",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+        ]) {
+            Command::CloseSession(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_hidden_footer_menu_command() {
         match parse(&[
             "waitagent",
@@ -683,15 +783,12 @@ mod tests {
             "wa-1",
             "--session-name",
             "waitagent-1",
-            "--pane-id",
-            "%2",
             "--client-tty",
             "/dev/pts/7",
         ]) {
             Command::FooterMenu(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
-                assert_eq!(command.pane_id, "%2");
                 assert_eq!(command.client_tty, "/dev/pts/7");
             }
             other => panic!("unexpected command: {other:?}"),

@@ -137,6 +137,15 @@ impl NodeRegistry {
         offline
     }
 
+    pub fn next_expiration_unix_ms(&self) -> Option<u128> {
+        let timeout_ms = self.heartbeat_timeout.as_millis();
+        self.nodes
+            .values()
+            .filter(|record| matches!(record.connection_status, NodeConnectionStatus::Online))
+            .map(|record| record.last_heartbeat_at_unix_ms.saturating_add(timeout_ms))
+            .min()
+    }
+
     pub fn get(&self, node_id: &str) -> Option<&NodeRecord> {
         self.nodes.get(node_id)
     }
@@ -220,24 +229,24 @@ impl ServerRuntime {
         &self.config.listen_addr
     }
 
+    pub fn blocking_listener(&self) -> Result<TcpListener, ServerRuntimeError> {
+        let listener = self
+            .listener
+            .try_clone()
+            .map_err(ServerRuntimeError::CloneListener)?;
+        listener
+            .set_nonblocking(false)
+            .map_err(ServerRuntimeError::ConfigureBlocking)?;
+        Ok(listener)
+    }
+
     pub fn accept_pending(&mut self) -> Result<Vec<AcceptedConnection>, ServerRuntimeError> {
         let mut accepted = Vec::new();
 
         loop {
             match self.listener.accept() {
                 Ok((stream, peer_addr)) => {
-                    self.next_connection_id += 1;
-                    let connection_id =
-                        ConnectionId::new(format!("conn-{}", self.next_connection_id));
-                    self.events.publish(ServerRuntimeEvent::ConnectionAccepted {
-                        connection_id: connection_id.clone(),
-                        peer_addr,
-                    });
-                    accepted.push(AcceptedConnection {
-                        connection_id,
-                        peer_addr,
-                        stream,
-                    });
+                    accepted.push(self.register_accepted_stream(stream, peer_addr));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(ServerRuntimeError::Accept(error)),
@@ -245,6 +254,28 @@ impl ServerRuntime {
         }
 
         Ok(accepted)
+    }
+
+    pub fn register_accepted_stream(
+        &mut self,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+    ) -> AcceptedConnection {
+        self.next_connection_id += 1;
+        let connection_id = ConnectionId::new(format!("conn-{}", self.next_connection_id));
+        self.events.publish(ServerRuntimeEvent::ConnectionAccepted {
+            connection_id: connection_id.clone(),
+            peer_addr,
+        });
+        AcceptedConnection {
+            connection_id,
+            peer_addr,
+            stream,
+        }
+    }
+
+    pub fn next_node_expiration_unix_ms(&self) -> Option<u128> {
+        self.nodes.next_expiration_unix_ms()
     }
 
     pub fn apply_transport_envelope(
@@ -376,6 +407,8 @@ impl std::error::Error for NodeRegistryError {}
 #[derive(Debug)]
 pub enum ServerRuntimeError {
     Bind(String, io::Error),
+    CloneListener(io::Error),
+    ConfigureBlocking(io::Error),
     ConfigureNonBlocking(io::Error),
     Accept(io::Error),
     Transport(TransportError),
@@ -388,6 +421,15 @@ impl fmt::Display for ServerRuntimeError {
         match self {
             Self::Bind(addr, error) => {
                 write!(f, "failed to bind server runtime on {addr}: {error}")
+            }
+            Self::CloneListener(error) => {
+                write!(f, "failed to clone server listener: {error}")
+            }
+            Self::ConfigureBlocking(error) => {
+                write!(
+                    f,
+                    "failed to configure server runtime blocking mode: {error}"
+                )
             }
             Self::ConfigureNonBlocking(error) => {
                 write!(
@@ -481,6 +523,35 @@ mod tests {
                 .connection_status,
             NodeConnectionStatus::Offline
         );
+    }
+
+    #[test]
+    fn reports_next_online_node_expiration_deadline() {
+        let mut registry = NodeRegistry::new(Duration::from_secs(15));
+        registry.register_client(
+            ConnectionId::new("conn-1"),
+            peer_addr(7001),
+            ClientHello {
+                node_id: "node-a".to_string(),
+                client_version: "0.1.0".to_string(),
+                capabilities: vec![],
+            },
+            100,
+        );
+        registry.register_client(
+            ConnectionId::new("conn-2"),
+            peer_addr(7002),
+            ClientHello {
+                node_id: "node-b".to_string(),
+                client_version: "0.1.0".to_string(),
+                capabilities: vec![],
+            },
+            250,
+        );
+
+        assert_eq!(registry.next_expiration_unix_ms(), Some(15_100));
+        registry.expire_stale_nodes(15_200);
+        assert_eq!(registry.next_expiration_unix_ms(), Some(15_250));
     }
 
     #[test]
