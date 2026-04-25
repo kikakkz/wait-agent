@@ -1,5 +1,5 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::infra::tmux::{TmuxSessionGateway, TmuxWorkspaceHandle};
+use crate::infra::tmux::{TmuxSessionGateway, TmuxSocketName, TmuxWorkspaceHandle};
 
 pub struct SessionService<G> {
     gateway: G,
@@ -15,6 +15,13 @@ where
 
     pub fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
         self.gateway.list_sessions()
+    }
+
+    pub fn list_sessions_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, G::Error> {
+        self.gateway.list_sessions_on_socket(socket_name)
     }
 
     pub fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, G::Error> {
@@ -218,6 +225,19 @@ mod tests {
     impl TmuxSessionGateway for FakeGateway {
         fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
             Ok(self.sessions.borrow().clone())
+        }
+
+        fn list_sessions_on_socket(
+            &self,
+            socket_name: &TmuxSocketName,
+        ) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+            Ok(self
+                .sessions
+                .borrow()
+                .iter()
+                .filter(|record| record.address.server_id() == socket_name.as_str())
+                .cloned()
+                .collect())
         }
 
         fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error> {

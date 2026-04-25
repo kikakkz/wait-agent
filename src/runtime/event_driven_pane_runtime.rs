@@ -26,6 +26,8 @@ extern "C" {
 }
 
 const FULLSCREEN_FOOTER_OPTION: &str = "@waitagent_fullscreen_footer_line";
+const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
+const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
 
 pub struct EventDrivenPaneRuntime {
     backend: EmbeddedTmuxBackend,
@@ -41,6 +43,9 @@ impl EventDrivenPaneRuntime {
         let pane_target = current_tmux_pane_target();
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
+        let _cursor_guard = PaneCursorGuard::hide().map_err(|error| {
+            LifecycleError::Io("failed to hide sidebar cursor".to_string(), error)
+        })?;
         let event_rx =
             spawn_pane_event_stream(self.backend.clone(), &command, true).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
@@ -194,6 +199,27 @@ struct PaneResizeWatcher {
     _writer: UnixStream,
 }
 
+struct PaneCursorGuard {
+    visible_on_drop: bool,
+}
+
+impl PaneCursorGuard {
+    fn hide() -> io::Result<Self> {
+        write_escape(HIDE_CURSOR_ESCAPE)?;
+        Ok(Self {
+            visible_on_drop: true,
+        })
+    }
+}
+
+impl Drop for PaneCursorGuard {
+    fn drop(&mut self) {
+        if self.visible_on_drop {
+            let _ = write_escape(SHOW_CURSOR_ESCAPE);
+        }
+    }
+}
+
 impl Drop for PaneResizeWatcher {
     fn drop(&mut self) {
         PANE_SIGWINCH_WRITE_FD.store(-1, Ordering::Relaxed);
@@ -239,6 +265,12 @@ fn spawn_input_thread(tx: mpsc::Sender<PaneEvent>) {
             }
         }
     });
+}
+
+fn write_escape(sequence: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(sequence.as_bytes())?;
+    stdout.flush()
 }
 
 fn spawn_chrome_refresh_watcher(

@@ -44,11 +44,6 @@ impl SidebarUi {
             style_sidebar_header_line(" Sessions  [h] hide", width),
             height,
         );
-        push_line(
-            &mut lines,
-            style_sidebar_hint_line(" Left back  Up/Down  Enter", width),
-            height,
-        );
         push_line(&mut lines, render_separator_row(width), height);
         if lines.len() == height {
             return lines.join("\n");
@@ -246,7 +241,6 @@ mod tests {
 
         assert!(output.starts_with("\u{1b}[48;5;236m"));
         assert!(output.contains(" Sessions  [h] hide"));
-        assert!(output.contains("Up/Down"));
         assert!(output.contains("────"));
         assert!(output.contains("* bash@local"));
         assert!(output.contains("> codex@local"));

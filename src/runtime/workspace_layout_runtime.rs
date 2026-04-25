@@ -217,7 +217,7 @@ impl WorkspaceLayoutRuntime {
         let footer_program = self.footer_program(workspace, workspace_dir);
         let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
         let global_reconcile_command = self.chrome_refresh_all_hook_command();
-        let pane_exit_command = self.close_session_hook_command(workspace);
+        let pane_died_command = self.main_pane_died_hook_command(workspace);
         let layout = self
             .layout_service
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
@@ -239,7 +239,7 @@ impl WorkspaceLayoutRuntime {
                 &layout.main_pane,
                 &reconcile_command,
                 &global_reconcile_command,
-                &pane_exit_command,
+                &pane_died_command,
             )
             .map_err(tmux_layout_error)?;
         Ok(layout)
@@ -356,8 +356,8 @@ impl WorkspaceLayoutRuntime {
         )
     }
 
-    fn close_session_hook_command(&self, workspace: &TmuxWorkspaceHandle) -> String {
-        let shell_command = close_session_hook_shell_command(
+    fn main_pane_died_hook_command(&self, workspace: &TmuxWorkspaceHandle) -> String {
+        let shell_command = main_pane_died_hook_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace.socket_name.as_str(),
             workspace.session_name.as_str(),
@@ -421,18 +421,20 @@ fn chrome_refresh_all_hook_shell_command(executable: &str) -> String {
     .join(" ")
 }
 
-fn close_session_hook_shell_command(
+fn main_pane_died_hook_shell_command(
     executable: &str,
     socket_name: &str,
     session_name: &str,
 ) -> String {
     [
         shell_escape(executable),
-        shell_escape("__close-session"),
+        shell_escape("__main-pane-died"),
         shell_escape("--socket-name"),
         shell_escape(socket_name),
         shell_escape("--session-name"),
         shell_escape(session_name),
+        shell_escape("--pane-id"),
+        shell_escape("#{hook_pane}"),
     ]
     .join(" ")
 }
@@ -464,8 +466,8 @@ fn should_refresh_workspace_chrome(
 #[cfg(test)]
 mod tests {
     use super::{
-        chrome_refresh_all_hook_shell_command, close_session_hook_shell_command,
-        footer_menu_shell_command, layout_reconcile_hook_shell_command,
+        chrome_refresh_all_hook_shell_command, footer_menu_shell_command,
+        layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
         should_refresh_workspace_chrome, tmux_quote_argument,
     };
     use crate::domain::session_catalog::{
@@ -520,12 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn close_session_hook_shell_command_targets_current_session() {
-        let command = close_session_hook_shell_command("/tmp/wait agent", "wa-1", "session-1");
+    fn main_pane_died_hook_shell_command_targets_current_session() {
+        let command = main_pane_died_hook_shell_command("/tmp/wait agent", "wa-1", "session-1");
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__close-session' '--socket-name' 'wa-1' '--session-name' 'session-1'"
+            "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}'"
         );
     }
 

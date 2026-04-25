@@ -6,9 +6,11 @@ use crate::infra::tmux::{
 pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const SIDEBAR_PANE_STYLE: &str = "fg=colour250,bg=colour234";
+const MAIN_PANE_REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
+const TMUX_OPTION_ON: &str = "on";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
-const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["session-closed"];
-const MAIN_PANE_GLOBAL_REFRESH_HOOKS: [&str; 1] = ["pane-exited"];
+const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 2] = ["session-created", "session-closed"];
+const MAIN_PANE_RECOVERY_HOOKS: [&str; 1] = ["pane-died"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutFocusBehavior {
@@ -66,6 +68,12 @@ where
         self.tmux
             .set_pane_style(workspace, &sidebar_pane, SIDEBAR_PANE_STYLE)?;
         apply_width(&self.tmux, workspace, &sidebar_pane, &self.sidebar_width)?;
+        self.tmux.set_pane_option(
+            workspace,
+            &main_pane,
+            MAIN_PANE_REMAIN_ON_EXIT_OPTION,
+            TMUX_OPTION_ON,
+        )?;
 
         let panes = self.tmux.list_panes(workspace, &window)?;
         let footer_pane = match pane_with_title(&panes, FOOTER_PANE_TITLE) {
@@ -108,7 +116,7 @@ where
         main_pane: &TmuxPaneId,
         reconcile_command: &str,
         global_reconcile_command: &str,
-        pane_exit_command: &str,
+        pane_died_command: &str,
     ) -> Result<(), G::Error> {
         for hook_name in SESSION_LAYOUT_RECONCILE_HOOKS {
             self.tmux
@@ -118,9 +126,9 @@ where
             self.tmux
                 .set_global_hook(workspace, hook_name, global_reconcile_command)?;
         }
-        for hook_name in MAIN_PANE_GLOBAL_REFRESH_HOOKS {
+        for hook_name in MAIN_PANE_RECOVERY_HOOKS {
             self.tmux
-                .set_pane_hook(workspace, main_pane, hook_name, pane_exit_command)?;
+                .set_pane_hook(workspace, main_pane, hook_name, pane_died_command)?;
         }
         Ok(())
     }
@@ -198,6 +206,7 @@ mod tests {
         Respawn(String),
         SetTitle(String),
         SetPaneStyle(String, String),
+        SetPaneOption(String, String, String),
         SetWidth(String, u16),
         SetHeight(String, u16),
         SetHook(String, String),
@@ -431,6 +440,21 @@ mod tests {
             Ok(())
         }
 
+        fn set_pane_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            pane: &TmuxPaneId,
+            option_name: &str,
+            value: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::SetPaneOption(
+                pane.as_str().to_string(),
+                option_name.to_string(),
+                value.to_string(),
+            ));
+            Ok(())
+        }
+
         fn set_session_hook(
             &self,
             _workspace: &TmuxWorkspaceHandle,
@@ -534,6 +558,11 @@ mod tests {
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
+                Call::SetPaneOption(
+                    "%1".to_string(),
+                    "remain-on-exit".to_string(),
+                    "on".to_string(),
+                ),
                 Call::SplitBottom,
                 Call::SetTitle("%3".to_string()),
                 Call::SetHeight("%3".to_string(), 1),
@@ -586,6 +615,11 @@ mod tests {
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
+                Call::SetPaneOption(
+                    "%1".to_string(),
+                    "remain-on-exit".to_string(),
+                    "on".to_string(),
+                ),
                 Call::Respawn("%3".to_string()),
                 Call::SetTitle("%3".to_string()),
                 Call::SetHeight("%3".to_string(), 1),
@@ -638,6 +672,11 @@ mod tests {
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
                 Call::SetWidth("%2".to_string(), 24),
+                Call::SetPaneOption(
+                    "%1".to_string(),
+                    "remain-on-exit".to_string(),
+                    "on".to_string(),
+                ),
                 Call::SetTitle("%3".to_string()),
                 Call::SetHeight("%3".to_string(), 1),
                 Call::SelectMain("%3".to_string()),
@@ -656,7 +695,7 @@ mod tests {
                 &TmuxPaneId::new("%1"),
                 "run-shell -b 'waitagent __layout-reconcile'",
                 "run-shell -b 'waitagent __chrome-refresh-all'",
-                "run-shell -b 'waitagent __close-session --socket-name wa-wk-1 --session-name waitagent-wk-1'",
+                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'",
             )
             .expect("hook registration should succeed");
 
@@ -677,8 +716,8 @@ mod tests {
                 ),
                 Call::SetPaneHook(
                     "%1".to_string(),
-                    "pane-exited".to_string(),
-                    "run-shell -b 'waitagent __close-session --socket-name wa-wk-1 --session-name waitagent-wk-1'".to_string(),
+                    "pane-died".to_string(),
+                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'".to_string(),
                 ),
             ]
         );

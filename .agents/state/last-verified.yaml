@@ -32,6 +32,9 @@ checks:
   - id: event-r2a-switching-path-root-cause-review
     command: targeted review of `src/runtime/main_slot_runtime.rs`, `src/runtime/event_driven_tmux_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and tmux backend layout helpers confirming that same-socket switching now uses tmux-native main-slot rebinding while cross-socket attach remains an explicit fallback
     status: pass
+  - id: event-r2a-live-tmux-session-identity-exit-cleanup
+    command: manual tmux-level validation by launching `./target/debug/waitagent`, creating a second local target with `__new-target`, sending `exit` to the active main-slot shell, and confirming the target-host catalog shrinks by one, `@waitagent_active_target` advances to the surviving identity, and the final target exit removes the last target plus workspace socket without leaving a zombie target-host session
+    status: pass
   - id: event-r3-cargo-test-quiet
     command: cargo test --quiet after replacing accepted-path app loop ticks with deadline-driven waits, wiring server accepts into explicit runtime events, and moving resize handling onto SIGWINCH-fed runtime events
     status: pass

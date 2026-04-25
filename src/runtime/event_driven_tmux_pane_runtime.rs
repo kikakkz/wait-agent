@@ -108,10 +108,9 @@ where
     ) -> Result<EventDrivenChromeRenderUpdate, LifecycleError> {
         let sessions = self
             .session_service
-            .list_sessions()
+            .list_sessions_on_socket(&TmuxSocketName::new(command.socket_name.clone()))
             .map_err(tmux_pane_error)?
             .into_iter()
-            .filter(|session| session.address.server_id() == command.socket_name)
             .collect::<Vec<_>>();
         let active_target = self
             .gateway
@@ -191,8 +190,8 @@ mod tests {
         WorkspaceInstanceConfig, WorkspaceInstanceId, WorkspaceSessionRole,
     };
     use crate::infra::tmux::{
-        TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxWindowHandle,
-        TmuxWorkspaceHandle,
+        TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxSocketName,
+        TmuxWindowHandle, TmuxWorkspaceHandle,
     };
     use std::path::PathBuf;
 
@@ -276,6 +275,18 @@ mod tests {
     impl TmuxSessionGateway for FakeGateway {
         fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
             Ok(self.sessions.clone())
+        }
+
+        fn list_sessions_on_socket(
+            &self,
+            socket_name: &TmuxSocketName,
+        ) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+            Ok(self
+                .sessions
+                .iter()
+                .filter(|session| session.address.server_id() == socket_name.as_str())
+                .cloned()
+                .collect())
         }
 
         fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error> {

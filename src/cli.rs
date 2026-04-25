@@ -15,6 +15,7 @@ pub enum Command {
     UiFooter(UiPaneCommand),
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
+    MainPaneDied(MainPaneDiedCommand),
     FooterMenu(FooterMenuCommand),
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
@@ -118,6 +119,13 @@ pub struct NewTargetCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct MainPaneDiedCommand {
+    pub socket_name: String,
+    pub session_name: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct CloseSessionCommand {
     pub socket_name: String,
     pub session_name: String,
@@ -167,6 +175,10 @@ impl Cli {
             "__new-target" => {
                 args.remove(0);
                 Command::NewTarget(parse_new_target(args)?)
+            }
+            "__main-pane-died" => {
+                args.remove(0);
+                Command::MainPaneDied(parse_main_pane_died(args)?)
             }
             "__footer-menu" => {
                 args.remove(0);
@@ -527,6 +539,31 @@ fn parse_new_target(args: Vec<String>) -> Result<NewTargetCommand, CliError> {
     })
 }
 
+fn parse_main_pane_died(args: Vec<String>) -> Result<MainPaneDiedCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+    let mut pane_id = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(MainPaneDiedCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+        pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
+    })
+}
+
 fn parse_close_session(args: Vec<String>) -> Result<CloseSessionCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
@@ -847,6 +884,27 @@ mod tests {
             Command::CloseSession(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_main_pane_died_command() {
+        match parse(&[
+            "waitagent",
+            "__main-pane-died",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--pane-id",
+            "%9",
+        ]) {
+            Command::MainPaneDied(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.pane_id, "%9");
             }
             other => panic!("unexpected command: {other:?}"),
         }

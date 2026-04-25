@@ -18,6 +18,7 @@ done_criteria:
   - sidebar and footer or menu target activation keeps workspace chrome mounted, does not reveal the shell, and does not rebuild the workspace client
   - the visible workspace is modeled as one persistent chrome layout with a fixed sidebar, a fixed main slot, and a fixed footer or menu, where target changes only rebind the main slot
   - local target switching no longer depends on `detach-client -E "waitagent attach <target>"`; it uses tmux-native rebinding inside one backend instead
+  - sidebar items remain session identities rather than reusable host slots; when the active local target shell exits, that target identity is removed from the catalog and the next surviving target, if any, is rebound into the main slot
   - target identity and activation remain transport-agnostic so future remote targets can bind into the same main slot through a bridge runtime
   - `waitagent` versus `waitagent attach` semantics are explicit and preserved: the default entry boots or creates a backend, while `attach` joins an existing backend only
 verification:
@@ -48,5 +49,6 @@ notes:
   - Treat the shell reveal and flicker on target switching as a root-cause architecture problem, not a redraw bug.
   - Do not patch over detach or reattach with delayed respawns or redraw suppression; replace the switching model so the current client never leaves the workspace during in-workspace target activation.
   - Local realization may use parked panes, parked windows, `swap-pane`, `join-pane`, `move-pane`, or equivalent tmux-native rebinding primitives as long as the visible chrome stays fixed.
+  - 2026-04-25 refinement: session identity, not host-slot reuse, is the accepted sidebar contract for local targets; active target exit must retire that target-host session and shrink the visible catalog.
   - Remote targets are not part of this implementation slice, but the target model for local work must not block a later bridge-backed main-slot renderer.
   - This task starts the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

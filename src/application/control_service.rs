@@ -372,6 +372,16 @@ mod tests {
             unreachable!("not used")
         }
 
+        fn set_pane_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _pane: &TmuxPaneId,
+            _option_name: &str,
+            _value: &str,
+        ) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
+
         fn set_session_hook(
             &self,
             _workspace: &TmuxWorkspaceHandle,

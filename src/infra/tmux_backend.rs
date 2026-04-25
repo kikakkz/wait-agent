@@ -197,6 +197,7 @@ impl EmbeddedTmuxBackend {
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<(), TmuxError> {
         let window_name = default_window_name();
+        let default_shell = default_shell_path().unwrap_or_else(|| "/bin/bash".to_string());
         let mut args = vec![
             "set-option".to_string(),
             "-g".to_string(),
@@ -230,6 +231,7 @@ impl EmbeddedTmuxBackend {
             "-F".to_string(),
             "#{session_name}".to_string(),
         ]);
+        args.push(default_shell);
         let output = self.run_workspace_command(workspace, &args)?;
         let session_name = parse_tmux_identifier(&output.stdout, "session name")?;
         if session_name != workspace.session_name.as_str() {
@@ -631,8 +633,7 @@ fn workspace_chrome_refresh_channel(session_name: &str) -> String {
 }
 
 fn default_window_name() -> String {
-    std::env::var("SHELL")
-        .ok()
+    default_shell_path()
         .and_then(|value| {
             Path::new(&value)
                 .file_name()
@@ -640,6 +641,10 @@ fn default_window_name() -> String {
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "shell".to_string())
+}
+
+fn default_shell_path() -> Option<String> {
+    std::env::var("SHELL").ok().filter(|value| !value.is_empty())
 }
 
 impl TmuxGateway for EmbeddedTmuxBackend {
@@ -808,6 +813,13 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
         Ok(sessions)
     }
 
+    fn list_sessions_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+        EmbeddedTmuxBackend::list_sessions_on_socket(self, socket_name)
+    }
+
     fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error> {
         self.find_managed_session(target)
     }
@@ -879,6 +891,7 @@ mod tests {
         TmuxSocketName, TmuxSplitSize, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
     };
     use std::path::Path;
+    use std::process::Command;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -1018,6 +1031,43 @@ mod tests {
         kill_server(&backend, &workspace);
 
         assert!(output.stdout.contains("history-limit 100000"));
+    }
+
+    #[test]
+    fn embedded_backend_creates_non_login_shell_for_new_workspace_session() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("shell-kind"))
+            .expect("workspace bootstrap should succeed");
+
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{pane_pid}".to_string(),
+                ],
+            )
+            .expect("pane pid should resolve");
+        let pane_pid = output
+            .stdout
+            .lines()
+            .next()
+            .expect("workspace should have a pane")
+            .trim()
+            .to_string();
+        let ps = Command::new("ps")
+            .args(["-o", "args=", "-p", &pane_pid])
+            .output()
+            .expect("ps should run");
+        kill_server(&backend, &workspace);
+
+        let command_line = String::from_utf8_lossy(&ps.stdout).trim().to_string();
+        assert!(!command_line.starts_with('-'));
+        assert!(command_line.contains("bash") || command_line.contains("sh"));
     }
 
     #[test]

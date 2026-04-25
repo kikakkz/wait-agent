@@ -2,7 +2,7 @@ use crate::application::session_service::SessionService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DaemonCommand, DetachCommand, ListCommand,
-    NewTargetCommand, WorkspaceCommand,
+    MainPaneDiedCommand, NewTargetCommand, WorkspaceCommand,
 };
 use crate::config::AppConfig;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
@@ -123,6 +123,10 @@ impl WorkspaceCommandRuntime {
 
     pub fn run_new_target(&self, command: NewTargetCommand) -> Result<(), LifecycleError> {
         self.main_slot_runtime.run_new_target(command)
+    }
+
+    pub fn run_main_pane_died(&self, command: MainPaneDiedCommand) -> Result<(), LifecycleError> {
+        self.main_slot_runtime.run_main_pane_died(command)
     }
 
     pub fn run_list(&self, _command: ListCommand) -> Result<(), LifecycleError> {

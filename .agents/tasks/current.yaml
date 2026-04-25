@@ -19,6 +19,7 @@ done_criteria:
   - sidebar and footer or menu target activation keeps workspace chrome mounted, does not reveal the shell, and does not rebuild the workspace client
   - the visible workspace is modeled as one persistent chrome layout with a fixed sidebar, a fixed main slot, and a fixed footer or menu, where target changes only rebind the main slot
   - local target switching no longer depends on `detach-client -E "waitagent attach <target>"`; it uses tmux-native rebinding inside one backend instead
+  - sidebar items remain session identities rather than reusable host slots; when the active local target shell exits, that target identity is removed from the catalog and the next surviving target, if any, is rebound into the main slot
   - target identity and activation remain transport-agnostic so future remote targets can bind into the same main slot through a bridge runtime
   - `waitagent` versus `waitagent attach` semantics are explicit and preserved: the default entry boots or creates a backend, while `attach` joins an existing backend only
 verification:
@@ -48,6 +49,7 @@ notes:
   - `task.event-r2` is complete and the accepted `task.event-r2a` architecture is now partially landed: same-socket activation no longer uses `detach-client -E "waitagent attach <target>"`; it swaps panes through tmux-native main-slot rebinding and keeps workspace chrome ownership local to one visible workspace session.
   - The runtime now distinguishes `workspace_chrome` versus `target_host` sessions, stores session role metadata in tmux, and treats target hosts as the visible activation catalog once they exist on a socket.
   - Sidebar, footer, and footer menu projection now consume the workspace `@waitagent_active_target` option and target-host session catalog rather than inferring the active target from the visible workspace chrome session.
+  - 2026-04-25 session-identity refinement: `pane-died` cleanup now retires the exited active target-host session instead of leaving a reusable filler host behind, so local sidebar items shrink when their shell exits and the last target exit tears down the workspace cleanly.
   - 2026-04-25 live tmux validation confirmed that hidden `__new-target` and `__activate-target` keep the tmux client attached to the workspace chrome session, update `@waitagent_active_target`, and no longer allow target-host sessions to accumulate sidebar or footer panes.
   - Remaining acceptance work for `task.event-r2a` is terminal validation of the no-shell-reveal and no-flicker contract on the landed same-socket rebinding path, plus any follow-up fixes required by that validation.
   - Treat shell reveal or flicker on target switching as a root-cause architecture problem, not a redraw bug.

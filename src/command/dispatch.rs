@@ -51,6 +51,10 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_new_target(command)
                 .map_err(AppError::from),
+            Command::MainPaneDied(command) => self
+                .workspace_runtime
+                .run_main_pane_died(command)
+                .map_err(AppError::from),
             Command::FooterMenu(command) => self
                 .footer_menu_runtime
                 .run(command)

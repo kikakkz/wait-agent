@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: task.event-r2a
-focus_statement: task.event-r2a remains the current gate while same-socket main-slot rebinding is validated in a real terminal; the attach-detach switching path is no longer the accepted same-socket implementation, and the next coding pass should audit event-r3 only from the new fixed-chrome rebinding baseline
+focus_statement: task.event-r2a remains the current gate while the fixed-chrome main-slot rebinding path receives final real-terminal flicker acceptance; the same-socket path now preserves session identity on local target exit, and event-r3 must build only on that refined baseline
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

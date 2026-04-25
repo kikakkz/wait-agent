@@ -225,6 +225,7 @@ impl App {
             | Command::UiFooter(_)
             | Command::ActivateTarget(_)
             | Command::NewTarget(_)
+            | Command::MainPaneDied(_)
             | Command::FooterMenu(_)
             | Command::CloseSession(_)
             | Command::LayoutReconcile(_)

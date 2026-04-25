@@ -253,6 +253,25 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
+    fn set_pane_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-option".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            option_name.to_string(),
+            value.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
     fn set_session_hook(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -277,13 +296,7 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         hook_name: &str,
         command: &str,
     ) -> Result<(), Self::Error> {
-        let args = vec![
-            "set-hook".to_string(),
-            "-t".to_string(),
-            pane.as_str().to_string(),
-            hook_name.to_string(),
-            command.to_string(),
-        ];
+        let args = set_pane_hook_args(pane, hook_name, command);
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
@@ -392,6 +405,17 @@ fn kill_pane_args(pane: &TmuxPaneId) -> Vec<String> {
     ]
 }
 
+fn set_pane_hook_args(pane: &TmuxPaneId, hook_name: &str, command: &str) -> Vec<String> {
+    vec![
+        "set-hook".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        hook_name.to_string(),
+        command.to_string(),
+    ]
+}
+
 fn parse_break_pane_result(
     workspace: &TmuxWorkspaceHandle,
     output: &str,
@@ -426,7 +450,8 @@ fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxErro
 #[cfg(test)]
 mod tests {
     use super::{
-        break_pane_args, join_pane_args, kill_pane_args, parse_break_pane_result, swap_panes_args,
+        break_pane_args, join_pane_args, kill_pane_args, parse_break_pane_result,
+        set_pane_hook_args, swap_panes_args,
     };
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::infra::tmux::{TmuxPaneId, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
@@ -464,6 +489,10 @@ mod tests {
         assert_eq!(
             kill_pane_args(&TmuxPaneId::new("%2")),
             vec!["kill-pane", "-t", "%2"]
+        );
+        assert_eq!(
+            set_pane_hook_args(&TmuxPaneId::new("%2"), "pane-died", "run-shell true"),
+            vec!["set-hook", "-p", "-t", "%2", "pane-died", "run-shell true",]
         );
     }
 

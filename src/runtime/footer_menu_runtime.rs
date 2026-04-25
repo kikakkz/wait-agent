@@ -39,10 +39,9 @@ impl FooterMenuRuntime {
     pub fn run(&self, command: FooterMenuCommand) -> Result<(), LifecycleError> {
         let sessions = self
             .session_service
-            .list_sessions()
+            .list_sessions_on_socket(&TmuxSocketName::new(command.socket_name.clone()))
             .map_err(footer_menu_error)?
             .into_iter()
-            .filter(|session| session.address.server_id() == command.socket_name)
             .collect::<Vec<_>>();
         let active_target = self
             .backend

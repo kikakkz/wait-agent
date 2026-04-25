@@ -191,6 +191,11 @@ pub trait TmuxGateway {
 pub trait TmuxSessionGateway: TmuxGateway {
     fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error>;
 
+    fn list_sessions_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, Self::Error>;
+
     fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error>;
 
     fn attach_workspace(&self, workspace: &TmuxWorkspaceHandle) -> Result<(), Self::Error>;
@@ -288,6 +293,14 @@ pub trait TmuxLayoutGateway: TmuxGateway {
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
         style: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn set_pane_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        option_name: &str,
+        value: &str,
     ) -> Result<(), Self::Error>;
 
     fn set_session_hook(
