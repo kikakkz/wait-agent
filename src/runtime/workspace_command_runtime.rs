@@ -62,6 +62,10 @@ impl WorkspaceCommandRuntime {
     ) -> Result<(), LifecycleError> {
         let workspace_dir = self.bootstrap.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
+        self.main_slot_runtime.ensure_initial_target_materialized(
+            &workspace.workspace_handle,
+            &workspace.workspace_dir,
+        )?;
         self.session_service
             .attach_workspace(&workspace.workspace_handle)
             .map_err(tmux_runtime_error)

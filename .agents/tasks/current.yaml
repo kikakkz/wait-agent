@@ -4,10 +4,9 @@ version: 1
 title: replace cross-session attach switching with fixed-chrome main-slot target activation
 status: in_progress
 priority: critical
-target_task_reference: task.event-r2a
 source_of_truth:
-  file: .agents/tasks/backlog.yaml
-  reference: next
+  file: .agents/tasks/queued/task.event-r2a.yaml
+  reference: current
 depends_on:
   - task.event-r2.done
 linked_primitives:
@@ -20,11 +19,13 @@ done_criteria:
   - the visible workspace is modeled as one persistent chrome layout with a fixed sidebar, a fixed main slot, and a fixed footer or menu, where target changes only rebind the main slot
   - local target switching no longer depends on `detach-client -E "waitagent attach <target>"`; it uses tmux-native rebinding inside one backend instead
   - sidebar items remain session identities rather than reusable host slots; when the active local target shell exits, that target identity is removed from the catalog and the next surviving target, if any, is rebound into the main slot
+  - the startup shell is already materialized as a real target-host identity, so first ctrl-n creates exactly one additional target and follows the same activation path as later ctrl-n runs
   - target identity and activation remain transport-agnostic so future remote targets can bind into the same main slot through a bridge runtime
   - `waitagent` versus `waitagent attach` semantics are explicit and preserved: the default entry boots or creates a backend, while `attach` joins an existing backend only
 verification:
   - cargo test
   - manual: in a real terminal, sidebar Enter and footer menu switching keep sidebar and footer fixed, return focus to the shell area, and change only the main view without shell reveal or flicker
+  - manual: in a fresh terminal, confirm startup immediately materializes one target-host identity and first ctrl-n adds exactly one additional target
   - targeted review of target activation flow across `src/runtime`, `src/application`, `src/domain`, and the tmux backend boundaries
 touched_paths:
   - src/runtime
@@ -36,21 +37,15 @@ touched_paths:
   - docs/event-driven-local-runtime-architecture.md
   - docs/execution-status-board.md
   - .agents/tasks/current.yaml
-  - .agents/tasks/backlog.yaml
   - .agents/tasks/queued/task.event-r2a.yaml
-  - .agents/tasks/queued/task.event-r3.yaml
+  - .agents/tasks/queued/task.event-r2a1.yaml
+  - .agents/tasks/queued/task.event-r2a2.yaml
+  - .agents/tasks/queued/task.event-r2a3.yaml
   - .agents/state/current-focus.yaml
   - .agents/state/open-blockers.yaml
-  - .agents/state/task-history.yaml
   - .agents/state/last-verified.yaml
-  - .agents/context/constraints.yaml
   - .agents/index.yaml
 notes:
-  - `task.event-r2` is complete and the accepted `task.event-r2a` architecture is now partially landed: same-socket activation no longer uses `detach-client -E "waitagent attach <target>"`; it swaps panes through tmux-native main-slot rebinding and keeps workspace chrome ownership local to one visible workspace session.
-  - The runtime now distinguishes `workspace_chrome` versus `target_host` sessions, stores session role metadata in tmux, and treats target hosts as the visible activation catalog once they exist on a socket.
-  - Sidebar, footer, and footer menu projection now consume the workspace `@waitagent_active_target` option and target-host session catalog rather than inferring the active target from the visible workspace chrome session.
-  - 2026-04-25 session-identity refinement: `pane-died` cleanup now retires the exited active target-host session instead of leaving a reusable filler host behind, so local sidebar items shrink when their shell exits and the last target exit tears down the workspace cleanly.
-  - 2026-04-25 live tmux validation confirmed that hidden `__new-target` and `__activate-target` keep the tmux client attached to the workspace chrome session, update `@waitagent_active_target`, and no longer allow target-host sessions to accumulate sidebar or footer panes.
-  - Remaining acceptance work for `task.event-r2a` is terminal validation of the no-shell-reveal and no-flicker contract on the landed same-socket rebinding path, plus any follow-up fixes required by that validation.
-  - Treat shell reveal or flicker on target switching as a root-cause architecture problem, not a redraw bug.
-  - This task remains the first slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`; coding on `task.event-r3` may proceed only from the new main-slot rebinding path, and no network, remote, or optional local polish slice should overtake that batch.
+  - `task.event-r2a1`, `task.event-r2a2`, and `task.event-r2a3` are complete. The remaining gate is umbrella acceptance evidence for the full fixed-chrome target-activation contract before moving on to `task.event-r3`.
+  - 2026-04-25 terminal profiling after `r2a2` showed workspace-local `__chrome-refresh` at about 56ms versus `__chrome-refresh-all` at about 1947ms on this machine, while steady-state `__new-target` produced current-socket session visibility in about 29ms and sidebar item visibility in about 131ms.
+  - 2026-04-25 fresh-startup validation after `r2a3` showed a new workspace now starts with two sessions on its socket (`workspace_chrome` plus one `target_host`), `@waitagent_active_target` is populated before attach, and the first `__new-target` adds exactly one new target session instead of implicitly materializing an extra host.

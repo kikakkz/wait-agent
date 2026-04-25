@@ -1,7 +1,22 @@
 kind: state
 version: 1
-last_updated_from: fixed-chrome main-slot rebinding validation refreshed on 2026-04-25
+last_updated_from: task.event-r2a2 verification refreshed on 2026-04-25
 checks:
+  - id: event-r2a1-terminal-ctrl-n-phase-profile-fresh
+    command: manual terminal profiling on a fresh workspace by timing hidden `__new-target`, current-socket tmux session visibility, and sidebar item visibility
+    status: pass
+  - id: event-r2a1-terminal-ctrl-n-phase-profile-steady-state
+    command: manual terminal profiling on a multi-target workspace by timing hidden `__new-target`, current-socket tmux session visibility, and sidebar item visibility
+    status: pass
+  - id: event-r2a1-waitagent-ls-vs-current-socket-tmux-latency
+    command: manual terminal measurement comparing `./target/debug/waitagent ls` with current-socket `tmux -L <socket> ls`
+    status: pass
+  - id: event-r2a2-terminal-chrome-refresh-all-latency
+    command: manual terminal measurement comparing workspace-local `./target/debug/waitagent __chrome-refresh --socket-name <socket> --session-name <session> --workspace-dir <dir>` with global `./target/debug/waitagent __chrome-refresh-all`, plus ctrl-n and session-close sidebar convergence on a live workspace
+    status: pass
+  - id: event-r2a3-fresh-startup-initial-target-materialization
+    command: manual fresh-terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` in a new workspace directory, confirming the new socket starts with `workspace_chrome + target_host`, confirming `@waitagent_active_target` is populated before attach, and confirming the first hidden `__new-target` adds exactly one additional target session
+    status: pass
   - id: event-r2a-cargo-test-quiet
     command: cargo test --quiet after landing same-socket tmux-native main-slot rebinding, target-host session roles, and active-target projection into sidebar/footer/menu surfaces
     status: pass

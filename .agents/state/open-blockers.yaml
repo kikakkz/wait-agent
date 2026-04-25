@@ -1,17 +1,3 @@
 kind: state
 version: 1
-blockers:
-  - id: blocker.event-r2a-terminal-acceptance
-    summary: same-socket fixed-chrome main-slot rebinding and session-identity exit cleanup are implemented and tmux-level terminal evidence now shows no client detach, no shell handoff, and correct local target shrink-on-exit semantics, but a direct visual acceptance rerun for flicker-free sidebar Enter and footer-menu switching is still needed before task.event-r2a can close
-    affects:
-      - task.event-r2a
-      - task.event-r3
-      - task.event-r4
-    evidence:
-      - 2026-04-25 code review: `src/runtime/main_slot_runtime.rs` now swaps panes through tmux-native rebinding on the same socket and records `@waitagent_active_target`
-      - 2026-04-25 regression validation: `cargo test --quiet` passed with 372 tests, including `event_driven_tmux_pane_runtime`, `footer_menu_runtime`, `workspace`, and `tmux_backend`
-      - 2026-04-25 live tmux validation: after launching `./target/debug/waitagent`, hidden `__new-target` and `__activate-target` commands kept the tmux client attached to the workspace chrome session, updated `@waitagent_active_target`, and left target-host sessions with only a single main pane
-      - 2026-04-25 live tmux validation: with two local target items on one socket, `exit` reduced the target-host catalog from two items to one, advanced `@waitagent_active_target` to the surviving identity, and a second `exit` removed the final target and shut down the socket without leaving a zombie target-host session
-      - direct human visual confirmation of no flicker on sidebar Enter and footer-menu switching has not yet been rerun in this work cycle
-    unblock_when:
-      - a real terminal confirms sidebar Enter and footer menu switching keep chrome mounted and do not flicker on the new rebinding path
+blockers: []

@@ -115,7 +115,7 @@ where
         workspace: &TmuxWorkspaceHandle,
         main_pane: &TmuxPaneId,
         reconcile_command: &str,
-        global_reconcile_command: &str,
+        chrome_refresh_command: &str,
         pane_died_command: &str,
     ) -> Result<(), G::Error> {
         for hook_name in SESSION_LAYOUT_RECONCILE_HOOKS {
@@ -124,7 +124,7 @@ where
         }
         for hook_name in GLOBAL_LAYOUT_RECONCILE_HOOKS {
             self.tmux
-                .set_global_hook(workspace, hook_name, global_reconcile_command)?;
+                .set_global_hook(workspace, hook_name, chrome_refresh_command)?;
         }
         for hook_name in MAIN_PANE_RECOVERY_HOOKS {
             self.tmux
@@ -694,7 +694,7 @@ mod tests {
                 &workspace(),
                 &TmuxPaneId::new("%1"),
                 "run-shell -b 'waitagent __layout-reconcile'",
-                "run-shell -b 'waitagent __chrome-refresh-all'",
+                "run-shell -b 'waitagent __chrome-refresh --socket-name wa-wk-1 --session-name waitagent-wk-1 --workspace-dir /tmp/demo'",
                 "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'",
             )
             .expect("hook registration should succeed");
@@ -708,11 +708,11 @@ mod tests {
                 ),
                 Call::SetGlobalHook(
                     "session-created".to_string(),
-                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh --socket-name wa-wk-1 --session-name waitagent-wk-1 --workspace-dir /tmp/demo'".to_string(),
                 ),
                 Call::SetGlobalHook(
                     "session-closed".to_string(),
-                    "run-shell -b 'waitagent __chrome-refresh-all'".to_string(),
+                    "run-shell -b 'waitagent __chrome-refresh --socket-name wa-wk-1 --session-name waitagent-wk-1 --workspace-dir /tmp/demo'".to_string(),
                 ),
                 Call::SetPaneHook(
                     "%1".to_string(),

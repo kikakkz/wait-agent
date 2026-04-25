@@ -644,7 +644,9 @@ fn default_window_name() -> String {
 }
 
 fn default_shell_path() -> Option<String> {
-    std::env::var("SHELL").ok().filter(|value| !value.is_empty())
+    std::env::var("SHELL")
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 impl TmuxGateway for EmbeddedTmuxBackend {

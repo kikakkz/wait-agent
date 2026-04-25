@@ -45,7 +45,7 @@ directories:
 active_context:
   project_phase: phase-1
   current_stage: tmux-first-local-architecture-migration
-  current_focus: replace cross-session attach switching with fixed-chrome main-slot target activation before resuming attach-side event cleanup
+  current_focus: rerun event-r2a umbrella acceptance now that ctrl-n hot paths, workspace-local hook refresh, and startup-time initial target materialization are all landed
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

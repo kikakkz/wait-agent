@@ -54,8 +54,8 @@ Project status at a glance:
 - the tmux-first local path already owns the visible workspace chrome
 - the accepted new direction is now stricter than the earlier tmux-window switching model: sidebar and footer stay fixed while only the main view changes
 - `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
-- `task.event-r2a` is materially advanced: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, and active-target projection now comes from workspace state instead of the visible chrome session id
-- the remaining `task.event-r2a` blocker is acceptance evidence, not missing architecture direction: the new same-socket rebinding path still needs real-terminal validation for no shell reveal and no flicker
+- `task.event-r2a` is materially advanced: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection now comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks now refresh only the affected workspace chrome, and startup now materializes the initial target identity before attach
+- the remaining `task.event-r2a` work is umbrella acceptance rerun rather than architectural rework: the batch root causes have been addressed and the next step is to clear the remaining fixed-chrome switching evidence in a real terminal before moving to `event-r3`
 - future remote work remains deferred until the fixed local chrome and main-slot activation model is stable
 
 ## 4. Milestone Summary
@@ -84,7 +84,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `event-r2a` Replace cross-session attach switching with fixed-chrome main-slot target activation
+- `event-r2a` Rerun umbrella acceptance on the fixed-chrome target-activation model now that ctrl-n hot paths, workspace-local hook refresh, and startup-time initial target materialization are all landed
 
 Accepted local architecture direction:
 

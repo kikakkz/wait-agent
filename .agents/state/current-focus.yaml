@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: task.event-r2a
-focus_statement: task.event-r2a remains the current gate while the fixed-chrome main-slot rebinding path receives final real-terminal flicker acceptance; the same-socket path now preserves session identity on local target exit, and event-r3 must build only on that refined baseline
+focus_statement: task.event-r2a1 through task.event-r2a3 are complete, so the active gate returns to task.event-r2a umbrella acceptance: rerun real-terminal fixed-chrome switching checks and clear the remaining stale acceptance evidence before moving to task.event-r3
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

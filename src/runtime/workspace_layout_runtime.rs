@@ -140,7 +140,7 @@ impl WorkspaceLayoutRuntime {
                 ],
             )
             .map_err(tmux_layout_error)?;
-        self.run_chrome_refresh_all()
+        Ok(())
     }
 
     fn reconcile_layout(
@@ -216,7 +216,7 @@ impl WorkspaceLayoutRuntime {
         let sidebar_program = self.sidebar_program(workspace, workspace_dir);
         let footer_program = self.footer_program(workspace, workspace_dir);
         let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
-        let global_reconcile_command = self.chrome_refresh_all_hook_command();
+        let chrome_refresh_command = self.chrome_refresh_hook_command(workspace, workspace_dir);
         let pane_died_command = self.main_pane_died_hook_command(workspace);
         let layout = self
             .layout_service
@@ -238,7 +238,7 @@ impl WorkspaceLayoutRuntime {
                 workspace,
                 &layout.main_pane,
                 &reconcile_command,
-                &global_reconcile_command,
+                &chrome_refresh_command,
                 &pane_died_command,
             )
             .map_err(tmux_layout_error)?;
@@ -346,9 +346,15 @@ impl WorkspaceLayoutRuntime {
         )
     }
 
-    fn chrome_refresh_all_hook_command(&self) -> String {
-        let shell_command = chrome_refresh_all_hook_shell_command(
+    fn chrome_refresh_hook_command(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+    ) -> String {
+        let shell_command = chrome_refresh_hook_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &workspace_dir.display().to_string(),
         );
         format!(
             "run-shell -b {}",
@@ -413,10 +419,20 @@ fn layout_reconcile_hook_shell_command(
     .join(" ")
 }
 
-fn chrome_refresh_all_hook_shell_command(executable: &str) -> String {
+fn chrome_refresh_hook_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    workspace_dir: &str,
+) -> String {
     [
         shell_escape(executable),
-        shell_escape("__chrome-refresh-all"),
+        shell_escape("__chrome-refresh"),
+        shell_escape("--socket-name"),
+        shell_escape(workspace.socket_name.as_str()),
+        shell_escape("--session-name"),
+        shell_escape(workspace.session_name.as_str()),
+        shell_escape("--workspace-dir"),
+        shell_escape(workspace_dir),
     ]
     .join(" ")
 }
@@ -466,7 +482,7 @@ fn should_refresh_workspace_chrome(
 #[cfg(test)]
 mod tests {
     use super::{
-        chrome_refresh_all_hook_shell_command, footer_menu_shell_command,
+        chrome_refresh_hook_shell_command, footer_menu_shell_command,
         layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
         should_refresh_workspace_chrome, tmux_quote_argument,
     };
@@ -515,10 +531,16 @@ mod tests {
     }
 
     #[test]
-    fn chrome_refresh_all_hook_shell_command_runs_global_refresh() {
-        let command = chrome_refresh_all_hook_shell_command("/tmp/wait agent");
+    fn chrome_refresh_hook_shell_command_targets_current_workspace() {
+        let workspace = workspace();
 
-        assert_eq!(command, "'/tmp/wait agent' '__chrome-refresh-all'");
+        let command =
+            chrome_refresh_hook_shell_command("/tmp/wait agent", &workspace, "/tmp/demo path");
+
+        assert_eq!(
+            command,
+            "'/tmp/wait agent' '__chrome-refresh' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path'"
+        );
     }
 
     #[test]

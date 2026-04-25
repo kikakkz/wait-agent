@@ -1,0 +1,33 @@
+id: task.event-r2a2
+kind: task
+version: 1
+title: scope session-created and session-closed chrome refresh to the current workspace
+status: done
+priority: critical
+source_of_truth:
+  file: .agents/state/last-verified.yaml
+  reference: event-r2a2
+depends_on:
+  - task.event-r2a1
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - tmux native session lifecycle hooks refresh only the affected workspace chrome instead of running global `__chrome-refresh-all`
+  - sidebar and footer updates converge close to tmux topology changes on ctrl-n, exit, and same-socket activation
+  - `__chrome-refresh-all` remains available only as an explicit maintenance or repair path and is removed from hot event hooks
+verification:
+  - cargo test --quiet layout_service workspace_layout_runtime event_driven_tmux_pane_runtime
+  - manual: profile ctrl-n and confirm sidebar item visibility tracks session creation instead of trailing by global refresh latency
+touched_paths:
+  - src/application/layout_service.rs
+  - src/runtime/workspace_layout_runtime.rs
+  - src/runtime/event_driven_tmux_pane_runtime.rs
+  - .agents/tasks/queued/task.event-r2a2.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice preserves tmux-native event delivery; it only narrows refresh scope from global waitagent enumeration to the active workspace.
+  - 2026-04-25 completed: workspace hooks now run `__chrome-refresh --socket-name ... --session-name ... --workspace-dir ...`, and `__close-session` no longer performs a second manual refresh after `kill-session`.
+  - 2026-04-25 terminal profiling showed workspace-local `__chrome-refresh` at about 56ms versus `__chrome-refresh-all` at about 1947ms, with sidebar convergence after `__new-target` dropping to about 131ms and after `kill-session` to about 106ms.

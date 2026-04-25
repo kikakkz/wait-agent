@@ -50,5 +50,7 @@ notes:
   - Do not patch over detach or reattach with delayed respawns or redraw suppression; replace the switching model so the current client never leaves the workspace during in-workspace target activation.
   - Local realization may use parked panes, parked windows, `swap-pane`, `join-pane`, `move-pane`, or equivalent tmux-native rebinding primitives as long as the visible chrome stays fixed.
   - 2026-04-25 refinement: session identity, not host-slot reuse, is the accepted sidebar contract for local targets; active target exit must retire that target-host session and shrink the visible catalog.
+  - 2026-04-25 refinement: execution now proceeds through ordered sub-slices `task.event-r2a1 -> task.event-r2a2 -> task.event-r2a3` to remove ctrl-n latency from global catalog scans and global chrome refresh before closing the umbrella acceptance task.
+  - 2026-04-25 progress update: `task.event-r2a1` and `task.event-r2a2` are complete, so the remaining umbrella work is `task.event-r2a3`, which removes the startup-time implicit workspace-host shell and aligns first ctrl-n with steady-state target semantics.
   - Remote targets are not part of this implementation slice, but the target model for local work must not block a later bridge-backed main-slot renderer.
   - This task starts the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

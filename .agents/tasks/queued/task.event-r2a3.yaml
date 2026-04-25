@@ -1,0 +1,33 @@
+id: task.event-r2a3
+kind: task
+version: 1
+title: materialize the initial local target at workspace startup so first ctrl-n is no longer special
+status: done
+priority: high
+source_of_truth:
+  file: .agents/state/last-verified.yaml
+  reference: event-r2a3
+depends_on:
+  - task.event-r2a2
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - the visible shell shown at workspace startup already corresponds to a real target-host session identity rather than an implicit workspace-host placeholder
+  - first ctrl-n creates exactly one additional target session and follows the same activation path as later ctrl-n runs
+  - the special first-switch capture path can be removed or reduced to a startup-time materialization step without regressing startup focus, chrome ownership, or target semantics
+verification:
+  - cargo test --quiet main_slot_runtime workspace_layout_runtime
+  - manual: in a fresh terminal, confirm the first sidebar item is a real target identity and first ctrl-n behaves like subsequent ones
+touched_paths:
+  - src/runtime/main_slot_runtime.rs
+  - src/runtime/workspace_entry_runtime.rs
+  - src/runtime/workspace_layout_runtime.rs
+  - .agents/tasks/queued/task.event-r2a3.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This is a semantic cleanup slice; it should only begin after the hot path and workspace-local refresh scopes are fixed.
+  - 2026-04-25 completed: startup now materializes an initial target host before attach, sets `@waitagent_active_target`, and removes the remaining first-switch special case.
+  - 2026-04-25 fresh terminal validation showed the new workspace socket starts with `workspace_chrome + target_host`, and the first `__new-target` increases the socket session count by exactly one.
