@@ -7,7 +7,8 @@ const FULLSCREEN_TOGGLE_PREFIX_KEY: &str = "z";
 const SIDEBAR_FOCUS_KEY: &str = "Right";
 const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
-const FOOTER_CREATE_KEY: &str = "c";
+const CREATE_SESSION_KEY: &str = "C-n";
+const CREATE_SESSION_PREFIX_KEY: &str = "c";
 const FOOTER_SESSIONS_KEY: &str = "s";
 const FOOTER_SWITCH_KEY: &str = "Enter";
 const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
@@ -145,15 +146,14 @@ where
             return Ok(());
         };
 
-        self.tmux.bind_waitagent_footer_action(
+        self.tmux.bind_key_without_prefix(
             workspace,
-            FOOTER_CREATE_KEY,
-            &layout.footer_pane,
-            &footer_bindings.create_session_command,
+            CREATE_SESSION_KEY,
+            &[footer_bindings.create_session_command.clone()],
         )?;
         self.tmux.bind_command_with_prefix(
             workspace,
-            FOOTER_CREATE_KEY,
+            CREATE_SESSION_PREFIX_KEY,
             &footer_bindings.create_session_command,
         )?;
         self.tmux.bind_waitagent_footer_action(
@@ -635,10 +635,9 @@ mod tests {
                     "%1".to_string(),
                     1,
                 ),
-                Call::BindWaitagentFooterAction(
-                    "c".to_string(),
-                    "%3".to_string(),
-                    "detach-client -E 'waitagent'".to_string(),
+                Call::BindWithoutPrefix(
+                    "C-n".to_string(),
+                    vec!["detach-client -E 'waitagent'".to_string(),],
                 ),
                 Call::BindCommandWithPrefix(
                     "c".to_string(),

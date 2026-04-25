@@ -16,6 +16,7 @@ impl ChromeSurfaceSize {
 pub struct SidebarViewModel {
     pub active_socket: String,
     pub active_session: String,
+    pub active_target: Option<String>,
     pub selected_target: Option<String>,
     pub sessions: Vec<ManagedSessionRecord>,
     pub surface: ChromeSurfaceSize,
@@ -25,6 +26,7 @@ pub struct SidebarViewModel {
 pub struct FooterViewModel {
     pub active_socket: String,
     pub active_session: String,
+    pub active_target: Option<String>,
     pub sessions: Vec<ManagedSessionRecord>,
     pub width: usize,
     pub fullscreen: bool,

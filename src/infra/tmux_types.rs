@@ -216,6 +216,12 @@ pub trait TmuxChromeGateway: TmuxSessionGateway {
         socket_name: &str,
         pane_target: &str,
     ) -> Result<bool, Self::Error>;
+
+    fn show_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<Option<String>, Self::Error>;
 }
 
 pub trait TmuxLayoutGateway: TmuxGateway {

@@ -13,6 +13,8 @@ pub enum Command {
     WorkspaceInternal(WorkspaceCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
+    ActivateTarget(ActivateTargetCommand),
+    NewTarget(NewTargetCommand),
     FooterMenu(FooterMenuCommand),
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
@@ -103,6 +105,19 @@ pub struct FooterMenuCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ActivateTargetCommand {
+    pub current_socket_name: String,
+    pub current_session_name: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NewTargetCommand {
+    pub current_socket_name: String,
+    pub current_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct CloseSessionCommand {
     pub socket_name: String,
     pub session_name: String,
@@ -144,6 +159,14 @@ impl Cli {
             "__ui-footer" => {
                 args.remove(0);
                 Command::UiFooter(parse_ui_pane(args)?)
+            }
+            "__activate-target" => {
+                args.remove(0);
+                Command::ActivateTarget(parse_activate_target(args)?)
+            }
+            "__new-target" => {
+                args.remove(0);
+                Command::NewTarget(parse_new_target(args)?)
             }
             "__footer-menu" => {
                 args.remove(0);
@@ -446,6 +469,61 @@ fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
+    })
+}
+
+fn parse_activate_target(args: Vec<String>) -> Result<ActivateTargetCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut current_socket_name = None;
+    let mut current_session_name = None;
+    let mut target = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--current-socket-name" => {
+                current_socket_name = Some(expect_value("--current-socket-name", &mut iter)?)
+            }
+            "--current-session-name" => {
+                current_session_name = Some(expect_value("--current-session-name", &mut iter)?)
+            }
+            "--target" => target = Some(expect_value("--target", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ActivateTargetCommand {
+        current_socket_name: current_socket_name
+            .ok_or_else(|| CliError::MissingValue("--current-socket-name".to_string()))?,
+        current_session_name: current_session_name
+            .ok_or_else(|| CliError::MissingValue("--current-session-name".to_string()))?,
+        target: target.ok_or_else(|| CliError::MissingValue("--target".to_string()))?,
+    })
+}
+
+fn parse_new_target(args: Vec<String>) -> Result<NewTargetCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut current_socket_name = None;
+    let mut current_session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--current-socket-name" => {
+                current_socket_name = Some(expect_value("--current-socket-name", &mut iter)?)
+            }
+            "--current-session-name" => {
+                current_session_name = Some(expect_value("--current-session-name", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(NewTargetCommand {
+        current_socket_name: current_socket_name
+            .ok_or_else(|| CliError::MissingValue("--current-socket-name".to_string()))?,
+        current_session_name: current_session_name
+            .ok_or_else(|| CliError::MissingValue("--current-session-name".to_string()))?,
     })
 }
 

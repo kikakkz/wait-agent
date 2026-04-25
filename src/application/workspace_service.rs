@@ -51,6 +51,19 @@ where
             workspace_handle,
         })
     }
+
+    pub fn ensure_workspace_for_config(
+        &self,
+        instance_config: WorkspaceInstanceConfig,
+    ) -> Result<BootstrappedWorkspace, G::Error> {
+        let workspace_handle = self.ensure_workspace(&instance_config)?;
+
+        Ok(BootstrappedWorkspace {
+            workspace_dir: instance_config.workspace_dir.clone(),
+            instance_config,
+            workspace_handle,
+        })
+    }
 }
 
 #[cfg(test)]

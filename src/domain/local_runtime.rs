@@ -4,9 +4,11 @@ use crate::event::{EventBusMessage, EventGroup};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocalRuntimeProducer {
     TmuxHookBridge,
+    WorkspaceController,
     SessionCatalogProjector,
     SidebarPaneRuntime,
     FooterPaneRuntime,
+    MainSlotRuntime,
     AttachClientRuntime,
     SchedulerRuntime,
 }
@@ -17,6 +19,7 @@ pub enum LocalRuntimeConsumer {
     SessionCatalogProjector,
     SidebarPaneRuntime,
     FooterPaneRuntime,
+    MainSlotRuntime,
     AttachClientRuntime,
     SchedulerRuntime,
 }
@@ -26,6 +29,7 @@ pub enum LocalRuntimeEventKind {
     TmuxHook,
     SessionCatalog,
     Chrome,
+    TargetActivation,
     Attach,
     Scheduler,
 }
@@ -50,6 +54,7 @@ pub enum LocalRuntimeEvent {
     TmuxHook(TmuxHookEvent),
     SessionCatalog(SessionCatalogEvent),
     Chrome(ChromeEvent),
+    TargetActivation(TargetActivationEvent),
     Attach(AttachEvent),
     Scheduler(SchedulerEvent),
 }
@@ -60,6 +65,7 @@ impl LocalRuntimeEvent {
             Self::TmuxHook(_) => LocalRuntimeEventKind::TmuxHook,
             Self::SessionCatalog(_) => LocalRuntimeEventKind::SessionCatalog,
             Self::Chrome(_) => LocalRuntimeEventKind::Chrome,
+            Self::TargetActivation(_) => LocalRuntimeEventKind::TargetActivation,
             Self::Attach(_) => LocalRuntimeEventKind::Attach,
             Self::Scheduler(_) => LocalRuntimeEventKind::Scheduler,
         }
@@ -68,11 +74,15 @@ impl LocalRuntimeEvent {
     pub fn producer(&self) -> LocalRuntimeProducer {
         match self {
             Self::TmuxHook(_) => LocalRuntimeProducer::TmuxHookBridge,
+            Self::TargetActivation(TargetActivationEvent::Requested { .. }) => {
+                LocalRuntimeProducer::WorkspaceController
+            }
             Self::SessionCatalog(_) => LocalRuntimeProducer::SessionCatalogProjector,
             Self::Chrome(ChromeEvent::SidebarSelectionChanged { .. }) => {
                 LocalRuntimeProducer::SidebarPaneRuntime
             }
             Self::Chrome(_) => LocalRuntimeProducer::FooterPaneRuntime,
+            Self::TargetActivation(_) => LocalRuntimeProducer::MainSlotRuntime,
             Self::Attach(_) => LocalRuntimeProducer::AttachClientRuntime,
             Self::Scheduler(_) => LocalRuntimeProducer::SchedulerRuntime,
         }
@@ -94,6 +104,17 @@ impl LocalRuntimeEvent {
                 LocalRuntimeConsumer::FooterPaneRuntime,
             ],
             Self::Chrome(_) => vec![LocalRuntimeConsumer::WorkspaceController],
+            Self::TargetActivation(TargetActivationEvent::Requested { .. }) => vec![
+                LocalRuntimeConsumer::MainSlotRuntime,
+                LocalRuntimeConsumer::SidebarPaneRuntime,
+                LocalRuntimeConsumer::FooterPaneRuntime,
+                LocalRuntimeConsumer::SchedulerRuntime,
+            ],
+            Self::TargetActivation(_) => vec![
+                LocalRuntimeConsumer::SidebarPaneRuntime,
+                LocalRuntimeConsumer::FooterPaneRuntime,
+                LocalRuntimeConsumer::SchedulerRuntime,
+            ],
             Self::Attach(AttachEvent::ClientResized { .. }) => vec![
                 LocalRuntimeConsumer::WorkspaceController,
                 LocalRuntimeConsumer::SchedulerRuntime,
@@ -115,7 +136,7 @@ impl EventBusMessage for LocalRuntimeEvent {
     fn event_group(&self) -> EventGroup {
         match self {
             Self::TmuxHook(_) | Self::Chrome(_) => EventGroup::Console,
-            Self::SessionCatalog(_) => EventGroup::Session,
+            Self::SessionCatalog(_) | Self::TargetActivation(_) => EventGroup::Session,
             Self::Attach(_) => EventGroup::Transport,
             Self::Scheduler(_) => EventGroup::Scheduler,
         }
@@ -133,6 +154,7 @@ pub enum SessionCatalogEvent {
     SnapshotUpdated {
         active_socket: String,
         active_session: String,
+        active_target: Option<String>,
         sessions: Vec<ManagedSessionRecord>,
     },
     SnapshotPublished {
@@ -161,6 +183,13 @@ pub enum ChromeEvent {
         surface: ChromeSurface,
         reason: &'static str,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetActivationEvent {
+    Requested { target: String },
+    Rebound { target: String },
+    Committed { target: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +230,7 @@ mod tests {
     use super::{
         AttachEvent, ChromeEvent, ChromeSurface, LocalRuntimeConsumer, LocalRuntimeEvent,
         LocalRuntimeEventKind, LocalRuntimeProducer, SchedulerEvent, SessionCatalogEvent,
-        TmuxHookEvent, TmuxHookName,
+        TargetActivationEvent, TmuxHookEvent, TmuxHookName,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -233,10 +262,12 @@ mod tests {
         let event = LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
             active_socket: "wa-1".to_string(),
             active_session: "sess-1".to_string(),
+            active_target: Some("wa-1:sess-1".to_string()),
             sessions: vec![ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "sess-1"),
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: None,
+                session_role: None,
                 attached_clients: 1,
                 window_count: 1,
                 command_name: Some("bash".to_string()),
@@ -301,5 +332,32 @@ mod tests {
             chrome_event.producer(),
             LocalRuntimeProducer::FooterPaneRuntime
         );
+    }
+
+    #[test]
+    fn target_activation_events_flow_through_workspace_and_main_slot_layers() {
+        let requested = LocalRuntimeEvent::TargetActivation(TargetActivationEvent::Requested {
+            target: "wa-1:sess-2".to_string(),
+        });
+        let committed = LocalRuntimeEvent::TargetActivation(TargetActivationEvent::Committed {
+            target: "wa-1:sess-2".to_string(),
+        });
+
+        assert_eq!(requested.kind(), LocalRuntimeEventKind::TargetActivation);
+        assert_eq!(requested.event_group(), EventGroup::Session);
+        assert_eq!(
+            requested.producer(),
+            LocalRuntimeProducer::WorkspaceController
+        );
+        assert_eq!(
+            requested.consumers(),
+            vec![
+                LocalRuntimeConsumer::MainSlotRuntime,
+                LocalRuntimeConsumer::SidebarPaneRuntime,
+                LocalRuntimeConsumer::FooterPaneRuntime,
+                LocalRuntimeConsumer::SchedulerRuntime
+            ]
+        );
+        assert_eq!(committed.producer(), LocalRuntimeProducer::MainSlotRuntime);
     }
 }

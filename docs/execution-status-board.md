@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.6`  
+Version: `v1.7`  
 Status: `Active`  
-Date: `2026-04-24`
+Date: `2026-04-25`
 
 ## 1. Purpose
 
@@ -40,8 +40,8 @@ Current gate:
 Why this is the current gate:
 
 - the pane-side chrome path is already event-driven enough to expose the real remaining architecture problem
-- terminal repro confirmed that sidebar Enter and footer switching still detach the client and relaunch through `waitagent attach <target>`
-- that switching path exits to the shell and then re-enters WaitAgent, so it cannot satisfy the accepted fixed-chrome, no-shell-reveal, and no-flicker product contract
+- the same-socket switching path has now been rewritten around tmux-native main-slot rebinding, but the product contract still needs real-terminal acceptance on that new path
+- closing this gate is still required before the remaining attach or scheduler cleanup can be called done against the accepted architecture
 - attach or scheduler event cleanup is still needed, but it is not the current root blocker
 - this work is now the first slice in a locked batch: `event-r2a -> event-r3 -> event-r4`
 
@@ -54,7 +54,8 @@ Project status at a glance:
 - the tmux-first local path already owns the visible workspace chrome
 - the accepted new direction is now stricter than the earlier tmux-window switching model: sidebar and footer stay fixed while only the main view changes
 - `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
-- the current blocker is architectural, not cosmetic: in-workspace target switching still depends on `detach-client -E "waitagent attach <target>"`
+- `task.event-r2a` is materially advanced: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, and active-target projection now comes from workspace state instead of the visible chrome session id
+- the remaining `task.event-r2a` blocker is acceptance evidence, not missing architecture direction: the new same-socket rebinding path still needs real-terminal validation for no shell reveal and no flicker
 - future remote work remains deferred until the fixed local chrome and main-slot activation model is stable
 
 ## 4. Milestone Summary

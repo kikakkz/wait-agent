@@ -4,6 +4,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkspaceSessionRole {
+    WorkspaceChrome,
+    TargetHost,
+}
+
+impl WorkspaceSessionRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WorkspaceChrome => "workspace-chrome",
+            Self::TargetHost => "target-host",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "workspace-chrome" => Some(Self::WorkspaceChrome),
+            "target-host" => Some(Self::TargetHost),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceInstanceId(String);
 
@@ -23,6 +46,7 @@ pub struct WorkspaceInstanceConfig {
     pub workspace_key: String,
     pub socket_name: String,
     pub session_name: String,
+    pub session_role: WorkspaceSessionRole,
     pub initial_rows: Option<u16>,
     pub initial_cols: Option<u16>,
 }
@@ -43,9 +67,37 @@ impl WorkspaceInstanceConfig {
             socket_name: format!("wa-{workspace_key}"),
             session_name: workspace_key.clone(),
             workspace_key,
+            session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: rows,
             initial_cols: cols,
         }
+    }
+
+    pub fn for_new_target_on_socket_with_size(
+        workspace_dir: &Path,
+        socket_name: impl Into<String>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Self {
+        let workspace_key = next_session_key();
+        Self {
+            workspace_dir: workspace_dir.to_path_buf(),
+            socket_name: socket_name.into(),
+            session_name: workspace_key.clone(),
+            workspace_key,
+            session_role: WorkspaceSessionRole::TargetHost,
+            initial_rows: rows,
+            initial_cols: cols,
+        }
+    }
+
+    pub fn for_new_session_on_socket_with_size(
+        workspace_dir: &Path,
+        socket_name: impl Into<String>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Self {
+        Self::for_new_target_on_socket_with_size(workspace_dir, socket_name, rows, cols)
     }
 }
 
@@ -73,7 +125,9 @@ pub fn stable_workspace_key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_session_key, stable_workspace_key, WorkspaceInstanceConfig};
+    use super::{
+        next_session_key, stable_workspace_key, WorkspaceInstanceConfig, WorkspaceSessionRole,
+    };
     use std::path::Path;
 
     #[test]
@@ -90,8 +144,39 @@ mod tests {
         assert!(config.workspace_key.len() == 16);
         assert_eq!(config.socket_name, format!("wa-{}", config.workspace_key));
         assert_eq!(config.session_name, config.workspace_key);
+        assert_eq!(config.session_role, WorkspaceSessionRole::WorkspaceChrome);
         assert_eq!(config.initial_rows, None);
         assert_eq!(config.initial_cols, None);
+    }
+
+    #[test]
+    fn workspace_instance_config_can_reuse_an_existing_socket_for_new_target_sessions() {
+        let config = WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+            Path::new("/tmp/waitagent/ws"),
+            "wa-existing",
+            Some(40),
+            Some(120),
+        );
+
+        assert_eq!(config.workspace_dir, Path::new("/tmp/waitagent/ws"));
+        assert_eq!(config.socket_name, "wa-existing");
+        assert_eq!(config.session_name, config.workspace_key);
+        assert_eq!(config.session_role, WorkspaceSessionRole::TargetHost);
+        assert_eq!(config.initial_rows, Some(40));
+        assert_eq!(config.initial_cols, Some(120));
+    }
+
+    #[test]
+    fn workspace_session_role_round_trips_through_stable_labels() {
+        assert_eq!(
+            WorkspaceSessionRole::parse(WorkspaceSessionRole::WorkspaceChrome.as_str()),
+            Some(WorkspaceSessionRole::WorkspaceChrome)
+        );
+        assert_eq!(
+            WorkspaceSessionRole::parse(WorkspaceSessionRole::TargetHost.as_str()),
+            Some(WorkspaceSessionRole::TargetHost)
+        );
+        assert_eq!(WorkspaceSessionRole::parse("unknown"), None);
     }
 
     #[test]

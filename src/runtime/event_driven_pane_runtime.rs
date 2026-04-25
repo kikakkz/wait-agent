@@ -41,9 +41,10 @@ impl EventDrivenPaneRuntime {
         let pane_target = current_tmux_pane_target();
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
-        let event_rx = spawn_pane_event_stream(true).map_err(|error| {
-            LifecycleError::Io("failed to install pane resize watcher".to_string(), error)
-        })?;
+        let event_rx =
+            spawn_pane_event_stream(self.backend.clone(), &command, true).map_err(|error| {
+                LifecycleError::Io("failed to install pane event watchers".to_string(), error)
+            })?;
         let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
         let mut last_buffer = String::new();
 
@@ -65,7 +66,7 @@ impl EventDrivenPaneRuntime {
                         self.apply_sidebar_activation(&command, activation)?;
                     }
                 }
-                PaneEvent::Resize => redraw_sidebar(
+                PaneEvent::Resize | PaneEvent::Refresh => redraw_sidebar(
                     chrome
                         .refresh_sidebar_for_pane(&command, pane_target.as_deref().unwrap_or(""))?,
                     &mut last_buffer,
@@ -76,9 +77,10 @@ impl EventDrivenPaneRuntime {
 
     pub fn run_footer(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
         let pane_target = current_tmux_pane_target();
-        let event_rx = spawn_pane_event_stream(false).map_err(|error| {
-            LifecycleError::Io("failed to install pane resize watcher".to_string(), error)
-        })?;
+        let event_rx =
+            spawn_pane_event_stream(self.backend.clone(), &command, false).map_err(|error| {
+                LifecycleError::Io("failed to install pane event watchers".to_string(), error)
+            })?;
         let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
         let mut last_buffer = String::new();
         let workspace = workspace_handle(&command);
@@ -91,7 +93,7 @@ impl EventDrivenPaneRuntime {
                 Ok(event) => event,
                 Err(_) => return Ok(()),
             };
-            if matches!(event, PaneEvent::Resize) {
+            if matches!(event, PaneEvent::Resize | PaneEvent::Refresh) {
                 let update = chrome
                     .refresh_footer_for_pane(&command, pane_target.as_deref().unwrap_or(""))?;
                 apply_footer_update(&self.backend, &workspace, update, &mut last_buffer)?;
@@ -112,19 +114,16 @@ impl EventDrivenPaneRuntime {
                     &["select-pane".to_string(), "-L".to_string()],
                 )
                 .map_err(event_pane_error),
-            EventDrivenSidebarActivation::AttachSession { target } => self
+            EventDrivenSidebarActivation::ActivateTarget { target } => self
                 .backend
                 .run_socket_command(
                     &TmuxSocketName::new(&command.socket_name),
-                    &[
-                        "detach-client".to_string(),
-                        "-E".to_string(),
-                        format!(
-                            "{} attach {}",
-                            shell_escape(&current_executable_string()?),
-                            shell_escape(&target)
-                        ),
-                    ],
+                    &activate_target_run_shell_args(
+                        &current_executable_string()?,
+                        &command.socket_name,
+                        &command.session_name,
+                        &target,
+                    ),
                 )
                 .map_err(event_pane_error),
         }
@@ -188,6 +187,7 @@ fn write_buffer(stdout: &mut impl Write, buffer: &str) -> io::Result<()> {
 enum PaneEvent {
     Input(Vec<u8>),
     Resize,
+    Refresh,
 }
 
 struct PaneResizeWatcher {
@@ -200,12 +200,22 @@ impl Drop for PaneResizeWatcher {
     }
 }
 
-fn spawn_pane_event_stream(include_input: bool) -> io::Result<Receiver<PaneEvent>> {
+fn spawn_pane_event_stream(
+    backend: EmbeddedTmuxBackend,
+    command: &UiPaneCommand,
+    include_input: bool,
+) -> io::Result<Receiver<PaneEvent>> {
     let (tx, rx) = mpsc::channel();
     if include_input {
         spawn_input_thread(tx.clone());
     }
-    let _resize_watcher = spawn_resize_watcher(tx)?;
+    let _resize_watcher = spawn_resize_watcher(tx.clone())?;
+    spawn_chrome_refresh_watcher(
+        backend,
+        command.socket_name.clone(),
+        command.session_name.clone(),
+        tx,
+    );
     thread::spawn(move || {
         let _keep_resize_watcher_alive = _resize_watcher;
         thread::park();
@@ -231,8 +241,64 @@ fn spawn_input_thread(tx: mpsc::Sender<PaneEvent>) {
     });
 }
 
+fn spawn_chrome_refresh_watcher(
+    backend: EmbeddedTmuxBackend,
+    socket_name: String,
+    session_name: String,
+    tx: mpsc::Sender<PaneEvent>,
+) {
+    thread::spawn(move || loop {
+        if backend
+            .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
+            .is_err()
+        {
+            break;
+        }
+        if tx.send(PaneEvent::Refresh).is_err() {
+            break;
+        }
+    });
+}
+
 fn current_tmux_pane_target() -> Option<String> {
     std::env::var("TMUX_PANE").ok()
+}
+
+fn activate_target_shell_command(
+    executable: &str,
+    current_socket_name: &str,
+    current_session_name: &str,
+    target: &str,
+) -> String {
+    [
+        shell_escape(executable),
+        shell_escape("__activate-target"),
+        shell_escape("--current-socket-name"),
+        shell_escape(current_socket_name),
+        shell_escape("--current-session-name"),
+        shell_escape(current_session_name),
+        shell_escape("--target"),
+        shell_escape(target),
+    ]
+    .join(" ")
+}
+
+fn activate_target_run_shell_args(
+    executable: &str,
+    current_socket_name: &str,
+    current_session_name: &str,
+    target: &str,
+) -> Vec<String> {
+    vec![
+        "run-shell".to_string(),
+        "-b".to_string(),
+        activate_target_shell_command(
+            executable,
+            current_socket_name,
+            current_session_name,
+            target,
+        ),
+    ]
 }
 
 fn spawn_resize_watcher(tx: mpsc::Sender<PaneEvent>) -> io::Result<PaneResizeWatcher> {
@@ -304,7 +370,7 @@ extern "C" fn pane_sigwinch_handler(_signal: c_int) {
 
 #[cfg(test)]
 mod tests {
-    use super::write_buffer;
+    use super::{activate_target_run_shell_args, write_buffer};
 
     #[test]
     fn single_line_pane_render_does_not_issue_clear_below_buffer() {
@@ -327,5 +393,25 @@ mod tests {
         assert!(rendered.contains("\x1b[1;1Hline1\x1b[K"));
         assert!(rendered.contains("\x1b[2;1Hline2\x1b[K"));
         assert!(!rendered.contains("\x1b[J"));
+    }
+
+    #[test]
+    fn activate_target_run_shell_args_pass_shell_command_without_tmux_layer_requoting() {
+        let args = activate_target_run_shell_args(
+            "/tmp/wait agent",
+            "wa-1",
+            "session-1",
+            "wa-1:session-2",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "run-shell".to_string(),
+                "-b".to_string(),
+                "'/tmp/wait agent' '__activate-target' '--current-socket-name' 'wa-1' '--current-session-name' 'session-1' '--target' 'wa-1:session-2'"
+                    .to_string(),
+            ]
+        );
     }
 }

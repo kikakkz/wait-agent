@@ -1,17 +1,16 @@
 kind: state
 version: 1
 blockers:
-  - id: blocker.fixed-chrome-switching-detach-attach
-    summary: current in-workspace target switching still detaches the client and runs `waitagent attach <target>`, so the shell becomes visible and the workspace chrome cannot stay fixed
+  - id: blocker.event-r2a-terminal-acceptance
+    summary: same-socket fixed-chrome main-slot rebinding is implemented and tmux-level terminal evidence now shows no client detach or shell handoff, but a direct visual acceptance rerun for flicker-free sidebar Enter and footer-menu switching is still needed before task.event-r2a can close
     affects:
       - task.event-r2a
       - task.event-r3
       - task.event-r4
     evidence:
-      - manual terminal repro on 2026-04-24: pressing Enter on a sidebar item exits to the shell and then re-enters waitagent
-      - `src/runtime/event_driven_pane_runtime.rs` still launches `detach-client -E "waitagent attach <target>"`
-      - `src/runtime/footer_menu_runtime.rs` still routes menu switching through the same cross-session attach path
-      - `src/runtime/workspace_command_runtime.rs` still makes `attach` the cross-session client handoff path
+      - 2026-04-25 code review: `src/runtime/main_slot_runtime.rs` now swaps panes through tmux-native rebinding on the same socket and records `@waitagent_active_target`
+      - 2026-04-25 regression validation: `cargo test --quiet` passed with 372 tests, including `event_driven_tmux_pane_runtime`, `footer_menu_runtime`, `workspace`, and `tmux_backend`
+      - 2026-04-25 live tmux validation: after launching `./target/debug/waitagent`, hidden `__new-target` and `__activate-target` commands kept the tmux client attached to the workspace chrome session, updated `@waitagent_active_target`, and left target-host sessions with only a single main pane
+      - direct human visual confirmation of no flicker on sidebar Enter and footer-menu switching has not yet been rerun in this work cycle
     unblock_when:
-      - in-workspace target activation rebinds the main slot without detaching the current client
-      - sidebar and footer or menu remain mounted while only the main view changes
+      - a real terminal confirms sidebar Enter and footer menu switching keep chrome mounted and do not flicker on the new rebinding path

@@ -36,6 +36,7 @@ impl EventDrivenChromeRuntime {
             let pane_buffer = FooterUi::render(
                 &model.active_socket,
                 &model.active_session,
+                model.active_target.as_deref(),
                 &model.sessions,
                 model.width,
             );
@@ -48,6 +49,7 @@ impl EventDrivenChromeRuntime {
             let fullscreen_buffer = FooterUi::render_fullscreen(
                 &model.active_socket,
                 &model.active_session,
+                model.active_target.as_deref(),
                 &model.sessions,
                 fullscreen_width,
             );
@@ -115,6 +117,7 @@ mod tests {
             &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
             }),
             0,
@@ -133,7 +136,7 @@ mod tests {
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-b c] new"))
+            .map(|buffer| buffer.contains("[Ctrl-n] new"))
             .unwrap_or(false));
     }
 
@@ -152,6 +155,7 @@ mod tests {
         let event = LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
             active_socket: "wa-1".to_string(),
             active_session: "sess-1".to_string(),
+            active_target: Some("wa-1:sess-1".to_string()),
             sessions: vec![session("wa-1", "sess-1", "bash")],
         });
         let first = runtime.apply_event(&event, 0);
@@ -176,6 +180,7 @@ mod tests {
             &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
             }),
             0,
@@ -192,7 +197,7 @@ mod tests {
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-b c] new"))
+            .map(|buffer| buffer.contains("[Ctrl-n] new"))
             .unwrap_or(false));
     }
 
@@ -201,6 +206,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux(socket, session),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: None,
+            session_role: None,
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

@@ -1,13 +1,17 @@
 use crate::application::session_service::SessionService;
 use crate::cli::FooterMenuCommand;
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
+use crate::domain::workspace::WorkspaceInstanceId;
+use crate::infra::tmux::{
+    EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+};
 use crate::lifecycle::LifecycleError;
 use std::io;
 use std::path::PathBuf;
 
 const FOOTER_MENU_TITLE: &str = "WaitAgent Menu";
 const MAX_SESSION_SHORTCUTS: usize = 9;
+const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub struct FooterMenuRuntime {
     backend: EmbeddedTmuxBackend,
@@ -36,8 +40,24 @@ impl FooterMenuRuntime {
         let sessions = self
             .session_service
             .list_sessions()
+            .map_err(footer_menu_error)?
+            .into_iter()
+            .filter(|session| session.address.server_id() == command.socket_name)
+            .collect::<Vec<_>>();
+        let active_target = self
+            .backend
+            .show_session_option(
+                &workspace_handle(&command.socket_name, &command.session_name),
+                WAITAGENT_ACTIVE_TARGET_OPTION,
+            )
             .map_err(footer_menu_error)?;
-        let args = build_footer_menu_args(&command, &self.current_executable, &sessions);
+        let visible_sessions = visible_target_sessions(&sessions, &command.session_name);
+        let args = build_footer_menu_args(
+            &command,
+            &self.current_executable,
+            active_target.as_deref(),
+            &visible_sessions,
+        );
         self.backend
             .run_socket_command(&TmuxSocketName::new(command.socket_name), &args)
             .map(|_| ())
@@ -48,9 +68,10 @@ impl FooterMenuRuntime {
 fn build_footer_menu_args(
     command: &FooterMenuCommand,
     executable: &std::path::Path,
+    active_target: Option<&str>,
     sessions: &[ManagedSessionRecord],
 ) -> Vec<String> {
-    let active = active_session(command, sessions);
+    let active = active_session(command, active_target, sessions);
     let mut args = vec![
         "display-menu".to_string(),
         "-c".to_string(),
@@ -85,7 +106,7 @@ fn build_footer_menu_args(
         &mut args,
         "New Session",
         "c",
-        &create_session_command(executable),
+        &create_session_command(executable, command),
     );
     if active.is_some() {
         push_action_item(
@@ -107,9 +128,9 @@ fn build_footer_menu_args(
     for (index, session) in sessions.iter().take(MAX_SESSION_SHORTCUTS).enumerate() {
         push_action_item(
             &mut args,
-            &menu_label(command, session),
+            &menu_label_with_active_target(command, active_target, session),
             &(index + 1).to_string(),
-            &attach_session_command(executable, session),
+            &activate_target_command(executable, command, session),
         );
     }
 
@@ -118,17 +139,33 @@ fn build_footer_menu_args(
 
 fn active_session<'a>(
     command: &FooterMenuCommand,
+    active_target: Option<&str>,
     sessions: &'a [ManagedSessionRecord],
 ) -> Option<&'a ManagedSessionRecord> {
-    sessions.iter().find(|session| {
-        session.address.server_id() == command.socket_name
-            && session.address.session_id() == command.session_name
-    })
+    active_target
+        .and_then(|target| {
+            sessions
+                .iter()
+                .find(|session| session.address.qualified_target() == target)
+        })
+        .or_else(|| {
+            sessions.iter().find(|session| {
+                session.address.server_id() == command.socket_name
+                    && session.address.session_id() == command.session_name
+            })
+        })
 }
 
-fn menu_label(command: &FooterMenuCommand, session: &ManagedSessionRecord) -> String {
-    let marker = if session.address.server_id() == command.socket_name
-        && session.address.session_id() == command.session_name
+fn menu_label_with_active_target(
+    command: &FooterMenuCommand,
+    active_target: Option<&str>,
+    session: &ManagedSessionRecord,
+) -> String {
+    let qualified_target = session.address.qualified_target();
+    let marker = if active_target == Some(qualified_target.as_str())
+        || (active_target.is_none()
+            && session.address.server_id() == command.socket_name
+            && session.address.session_id() == command.session_name)
     {
         "*"
     } else {
@@ -167,22 +204,38 @@ fn push_action_item(args: &mut Vec<String>, label: &str, key: &str, command: &st
     args.push(command.to_string());
 }
 
-fn create_session_command(executable: &std::path::Path) -> String {
-    format!(
-        "detach-client -E {}",
-        shell_escape(&executable.display().to_string())
-    )
+fn create_session_command(executable: &std::path::Path, command: &FooterMenuCommand) -> String {
+    let shell_command = [
+        shell_escape(&executable.display().to_string()),
+        shell_escape("__new-target"),
+        shell_escape("--current-socket-name"),
+        shell_escape(&command.socket_name),
+        shell_escape("--current-session-name"),
+        shell_escape(&command.session_name),
+    ]
+    .join(" ");
+
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
 }
 
-fn attach_session_command(executable: &std::path::Path, session: &ManagedSessionRecord) -> String {
-    format!(
-        "detach-client -E {}",
-        shell_escape(&format!(
-            "{} attach {}",
-            executable.display(),
-            session.address.qualified_target()
-        ))
-    )
+fn activate_target_command(
+    executable: &std::path::Path,
+    command: &FooterMenuCommand,
+    session: &ManagedSessionRecord,
+) -> String {
+    let shell_command = [
+        shell_escape(&executable.display().to_string()),
+        shell_escape("__activate-target"),
+        shell_escape("--current-socket-name"),
+        shell_escape(&command.socket_name),
+        shell_escape("--current-session-name"),
+        shell_escape(&command.session_name),
+        shell_escape("--target"),
+        shell_escape(&session.address.qualified_target()),
+    ]
+    .join(" ");
+
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
 }
 
 fn close_session_command(executable: &std::path::Path, command: &FooterMenuCommand) -> String {
@@ -201,6 +254,10 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn tmux_quote_argument(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn footer_menu_error(error: TmuxError) -> LifecycleError {
     LifecycleError::Io(
         "failed to open waitagent footer menu".to_string(),
@@ -208,13 +265,42 @@ fn footer_menu_error(error: TmuxError) -> LifecycleError {
     )
 }
 
+fn visible_target_sessions(
+    sessions: &[ManagedSessionRecord],
+    workspace_session_name: &str,
+) -> Vec<ManagedSessionRecord> {
+    let target_hosts = sessions
+        .iter()
+        .filter(|session| session.is_target_host())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !target_hosts.is_empty() {
+        return target_hosts;
+    }
+
+    sessions
+        .iter()
+        .filter(|session| session.address.session_id() == workspace_session_name)
+        .cloned()
+        .collect()
+}
+
+fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandle {
+    TmuxWorkspaceHandle {
+        workspace_id: WorkspaceInstanceId::new(session_name.to_string()),
+        socket_name: TmuxSocketName::new(socket_name.to_string()),
+        session_name: TmuxSessionName::new(session_name.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_footer_menu_args, FOOTER_MENU_TITLE};
+    use super::{build_footer_menu_args, visible_target_sessions, FOOTER_MENU_TITLE};
     use crate::cli::FooterMenuCommand;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
+    use crate::domain::workspace::WorkspaceSessionRole;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -226,10 +312,12 @@ mod tests {
                 client_tty: "/dev/pts/7".to_string(),
             },
             Path::new("/tmp/waitagent"),
+            Some("wa-1:1"),
             &[ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "1"),
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: None,
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
                 attached_clients: 1,
                 window_count: 1,
                 command_name: Some("codex".to_string()),
@@ -253,9 +341,16 @@ mod tests {
         assert!(args
             .iter()
             .any(|value| value == "* codex@local [I] cwd: /tmp/demo"));
-        assert!(args
-            .iter()
-            .any(|value| value.contains("detach-client -E '/tmp/waitagent attach wa-1:1'")));
+        assert!(args.iter().any(|value| {
+            value.contains("run-shell -b ")
+                && value.contains("'__activate-target'")
+                && value.contains("'--current-socket-name'")
+                && value.contains("'wa-1'")
+                && value.contains("'--current-session-name'")
+                && value.contains("'1'")
+                && value.contains("'--target'")
+                && value.contains("'wa-1:1'")
+        }));
         assert!(args.iter().any(|value| {
             value.contains(
                 "detach-client -E '/tmp/waitagent __close-session --socket-name wa-1 --session-name 1'",
@@ -272,10 +367,45 @@ mod tests {
                 client_tty: "/dev/pts/7".to_string(),
             },
             Path::new("/tmp/waitagent"),
+            None,
             &[],
         );
 
         assert!(args.iter().any(|value| value == "New Session"));
         assert!(args.iter().any(|value| value == "- No Sessions"));
+    }
+
+    #[test]
+    fn visible_target_sessions_hides_workspace_chrome_once_target_hosts_exist() {
+        let sessions = visible_target_sessions(
+            &[
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::local_tmux("wa-1", "workspace"),
+                    workspace_dir: Some(PathBuf::from("/tmp/demo")),
+                    workspace_key: None,
+                    session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                    attached_clients: 1,
+                    window_count: 1,
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/demo")),
+                    task_state: ManagedSessionTaskState::Input,
+                },
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
+                    workspace_dir: Some(PathBuf::from("/tmp/demo")),
+                    workspace_key: None,
+                    session_role: Some(WorkspaceSessionRole::TargetHost),
+                    attached_clients: 0,
+                    window_count: 1,
+                    command_name: Some("codex".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/demo")),
+                    task_state: ManagedSessionTaskState::Running,
+                },
+            ],
+            "workspace",
+        );
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].address.session_id(), "target-1");
     }
 }

@@ -1,9 +1,14 @@
 use crate::application::session_service::SessionService;
 use crate::application::workspace_service::WorkspaceService;
-use crate::cli::{AttachCommand, DaemonCommand, DetachCommand, ListCommand, WorkspaceCommand};
+use crate::cli::{
+    ActivateTargetCommand, AttachCommand, DaemonCommand, DetachCommand, ListCommand,
+    NewTargetCommand, WorkspaceCommand,
+};
 use crate::config::AppConfig;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::main_slot_runtime::MainSlotRuntime;
+use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_bootstrap_runtime::WorkspaceBootstrapRuntime;
 use crate::runtime::workspace_daemon_runtime::WorkspaceDaemonRuntime;
 use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
@@ -15,21 +20,38 @@ use std::io;
 pub struct WorkspaceCommandRuntime {
     bootstrap: WorkspaceBootstrapRuntime,
     entry_runtime: WorkspaceEntryRuntime,
+    main_slot_runtime: MainSlotRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
 }
 
 impl WorkspaceCommandRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_runtime_error)?;
+        let current_executable = std::env::current_exe().map_err(|error| {
+            LifecycleError::Io(
+                "failed to locate current waitagent executable".to_string(),
+                error,
+            )
+        })?;
         let entry_runtime = WorkspaceEntryRuntime::new(
             WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
             WorkspaceLayoutRuntime::from_build_env()?,
         );
+        let session_service = SessionService::new(backend.clone());
+        let main_slot_backend = backend.clone();
+        let target_host_runtime = TargetHostRuntime::from_backend(backend.clone());
 
         Ok(Self {
             bootstrap: WorkspaceBootstrapRuntime::default(),
             entry_runtime,
-            session_service: SessionService::new(backend),
+            main_slot_runtime: MainSlotRuntime::new(
+                main_slot_backend.clone(),
+                target_host_runtime,
+                WorkspaceLayoutRuntime::from_build_env()?,
+                SessionService::new(main_slot_backend),
+                current_executable,
+            ),
+            session_service,
         })
     }
 
@@ -90,6 +112,17 @@ impl WorkspaceCommandRuntime {
                         .map_err(tmux_runtime_error)
                 }),
         }
+    }
+
+    pub fn run_activate_target(
+        &self,
+        command: ActivateTargetCommand,
+    ) -> Result<(), LifecycleError> {
+        self.main_slot_runtime.run_activate_target(command)
+    }
+
+    pub fn run_new_target(&self, command: NewTargetCommand) -> Result<(), LifecycleError> {
+        self.main_slot_runtime.run_new_target(command)
     }
 
     pub fn run_list(&self, _command: ListCommand) -> Result<(), LifecycleError> {

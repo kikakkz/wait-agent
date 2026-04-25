@@ -43,6 +43,14 @@ impl CommandDispatcher {
                 .pane_runtime
                 .run_footer(command)
                 .map_err(AppError::from),
+            Command::ActivateTarget(command) => self
+                .workspace_runtime
+                .run_activate_target(command)
+                .map_err(AppError::from),
+            Command::NewTarget(command) => self
+                .workspace_runtime
+                .run_new_target(command)
+                .map_err(AppError::from),
             Command::FooterMenu(command) => self
                 .footer_menu_runtime
                 .run(command)

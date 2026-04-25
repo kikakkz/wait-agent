@@ -1,13 +1,37 @@
 kind: state
 version: 1
-last_updated_from: fixed-chrome switching validation refreshed on 2026-04-24
+last_updated_from: fixed-chrome main-slot rebinding validation refreshed on 2026-04-25
 checks:
+  - id: event-r2a-cargo-test-quiet
+    command: cargo test --quiet after landing same-socket tmux-native main-slot rebinding, target-host session roles, and active-target projection into sidebar/footer/menu surfaces
+    status: pass
+  - id: event-r2a-cargo-build-quiet
+    command: cargo build --quiet after landing same-socket tmux-native main-slot rebinding, target-host session roles, and active-target projection into sidebar/footer/menu surfaces
+    status: pass
+  - id: event-r2a-event-driven-tmux-pane-runtime
+    command: cargo test event_driven_tmux_pane_runtime -- --nocapture after making pane snapshots consume `@waitagent_active_target` and target-host-only visible catalogs
+    status: pass
+  - id: event-r2a-event-driven-ui-pane-runtime
+    command: cargo test event_driven_ui_pane_runtime -- --nocapture after making session snapshots carry explicit active-target state
+    status: pass
+  - id: event-r2a-chrome-projection-service
+    command: cargo test chrome_projection_service -- --nocapture after making chrome projection consume explicit active-target snapshot state instead of inferring it from the visible workspace session
+    status: pass
+  - id: event-r2a-footer-menu-runtime
+    command: cargo test footer_menu_runtime -- --nocapture after making the footer menu list target-host sessions and respect the workspace active-target option
+    status: pass
+  - id: event-r2a-workspace-and-tmux-backend
+    command: cargo test workspace -- --nocapture and cargo test tmux_backend -- --nocapture after landing tmux-native pane break, join, swap, and kill helpers for same-socket rebinding
+    status: pass
+  - id: event-r2a-live-tmux-main-slot-rebinding
+    command: manual tmux-level validation by launching `./target/debug/waitagent`, invoking `__new-target` and `__activate-target` on the live socket, and confirming `list-clients` stays on the workspace chrome session, `@waitagent_active_target` changes, and target-host sessions retain only a single main pane
+    status: pass
   - id: event-r2a-sidebar-enter-fixed-chrome-manual-repro
     command: manual terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent`, pressing `Enter` on a sidebar item, and confirming whether sidebar and footer stay mounted while only the main view changes
     status: fail
   - id: event-r2a-switching-path-root-cause-review
-    command: targeted review of `src/runtime/event_driven_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and `src/runtime/workspace_command_runtime.rs` confirming that in-workspace switching still flows through `detach-client -E \"waitagent attach <target>\"`
-    status: fail
+    command: targeted review of `src/runtime/main_slot_runtime.rs`, `src/runtime/event_driven_tmux_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and tmux backend layout helpers confirming that same-socket switching now uses tmux-native main-slot rebinding while cross-socket attach remains an explicit fallback
+    status: pass
   - id: event-r3-cargo-test-quiet
     command: cargo test --quiet after replacing accepted-path app loop ticks with deadline-driven waits, wiring server accepts into explicit runtime events, and moving resize handling onto SIGWINCH-fed runtime events
     status: pass

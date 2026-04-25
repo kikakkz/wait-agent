@@ -4,6 +4,48 @@ use crate::infra::tmux_types::{
     TmuxWindowId, TmuxWorkspaceHandle,
 };
 
+impl EmbeddedTmuxBackend {
+    pub(crate) fn break_pane_to_window(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        window_name: Option<&str>,
+    ) -> Result<(TmuxWindowHandle, TmuxPaneId), TmuxError> {
+        let output = self.run_workspace_command(workspace, &break_pane_args(pane, window_name))?;
+        parse_break_pane_result(workspace, &output.stdout)
+    }
+
+    pub(crate) fn join_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        source: &TmuxPaneId,
+        destination: &TmuxPaneId,
+        full_size: bool,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(workspace, &join_pane_args(source, destination, full_size))?;
+        Ok(())
+    }
+
+    pub(crate) fn swap_panes(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        source: &TmuxPaneId,
+        destination: &TmuxPaneId,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(workspace, &swap_panes_args(source, destination))?;
+        Ok(())
+    }
+
+    pub(crate) fn kill_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(workspace, &kill_pane_args(pane))?;
+        Ok(())
+    }
+}
+
 impl TmuxLayoutGateway for EmbeddedTmuxBackend {
     fn current_window(
         &self,
@@ -299,6 +341,78 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
     }
 }
 
+fn break_pane_args(pane: &TmuxPaneId, window_name: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "break-pane".to_string(),
+        "-d".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{window_id}\t#{pane_id}".to_string(),
+        "-s".to_string(),
+        pane.as_str().to_string(),
+    ];
+    if let Some(window_name) = window_name {
+        args.push("-n".to_string());
+        args.push(window_name.to_string());
+    }
+    args
+}
+
+fn join_pane_args(source: &TmuxPaneId, destination: &TmuxPaneId, full_size: bool) -> Vec<String> {
+    let mut args = vec![
+        "join-pane".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        source.as_str().to_string(),
+        "-t".to_string(),
+        destination.as_str().to_string(),
+    ];
+    if full_size {
+        args.push("-f".to_string());
+    }
+    args
+}
+
+fn swap_panes_args(source: &TmuxPaneId, destination: &TmuxPaneId) -> Vec<String> {
+    vec![
+        "swap-pane".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        source.as_str().to_string(),
+        "-t".to_string(),
+        destination.as_str().to_string(),
+    ]
+}
+
+fn kill_pane_args(pane: &TmuxPaneId) -> Vec<String> {
+    vec![
+        "kill-pane".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+    ]
+}
+
+fn parse_break_pane_result(
+    workspace: &TmuxWorkspaceHandle,
+    output: &str,
+) -> Result<(TmuxWindowHandle, TmuxPaneId), TmuxError> {
+    let mut parts = output.trim().split('\t');
+    let Some(window_id) = parts.next() else {
+        return Err(TmuxError::new("tmux break-pane did not return a window id"));
+    };
+    let Some(pane_id) = parts.next() else {
+        return Err(TmuxError::new("tmux break-pane did not return a pane id"));
+    };
+
+    Ok((
+        TmuxWindowHandle {
+            workspace_id: workspace.workspace_id.clone(),
+            window_id: TmuxWindowId::new(parse_tmux_id(window_id, '@', "window id")?),
+        },
+        TmuxPaneId::new(parse_tmux_id(pane_id, '%', "pane id")?),
+    ))
+}
+
 fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxError> {
     match size {
         TmuxSplitSize::Cells(value) if *value > 0 => Ok(()),
@@ -306,5 +420,65 @@ fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxErro
         TmuxSplitSize::Cells(value) => Err(TmuxError::new(format!(
             "{label} must be at least 1 cell, got {value}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        break_pane_args, join_pane_args, kill_pane_args, parse_break_pane_result, swap_panes_args,
+    };
+    use crate::domain::workspace::WorkspaceInstanceId;
+    use crate::infra::tmux::{TmuxPaneId, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
+
+    #[test]
+    fn break_pane_args_request_detached_window_and_parseable_output() {
+        let args = break_pane_args(&TmuxPaneId::new("%7"), Some("waitagent-target"));
+
+        assert_eq!(
+            args,
+            vec![
+                "break-pane",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}\t#{pane_id}",
+                "-s",
+                "%7",
+                "-n",
+                "waitagent-target",
+            ]
+        );
+    }
+
+    #[test]
+    fn join_swap_and_kill_args_use_native_tmux_primitives() {
+        assert_eq!(
+            join_pane_args(&TmuxPaneId::new("%2"), &TmuxPaneId::new("%9"), true),
+            vec!["join-pane", "-d", "-s", "%2", "-t", "%9", "-f"]
+        );
+        assert_eq!(
+            swap_panes_args(&TmuxPaneId::new("%2"), &TmuxPaneId::new("%9")),
+            vec!["swap-pane", "-d", "-s", "%2", "-t", "%9"]
+        );
+        assert_eq!(
+            kill_pane_args(&TmuxPaneId::new("%2")),
+            vec!["kill-pane", "-t", "%2"]
+        );
+    }
+
+    #[test]
+    fn parse_break_pane_result_returns_window_and_pane_handles() {
+        let workspace = TmuxWorkspaceHandle {
+            workspace_id: WorkspaceInstanceId::new("sess-1"),
+            socket_name: TmuxSocketName::new("wa-1"),
+            session_name: TmuxSessionName::new("sess-1"),
+        };
+
+        let (window, pane) =
+            parse_break_pane_result(&workspace, "@4\t%11").expect("break-pane output should parse");
+
+        assert_eq!(window.window_id.as_str(), "@4");
+        assert_eq!(pane.as_str(), "%11");
     }
 }

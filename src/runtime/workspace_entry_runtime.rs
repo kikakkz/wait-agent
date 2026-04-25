@@ -1,4 +1,5 @@
 use crate::application::workspace_service::{BootstrappedWorkspace, WorkspaceService};
+use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
@@ -46,6 +47,19 @@ impl WorkspaceEntryRuntime {
         let workspace = self
             .workspace_runtime
             .ensure_workspace_for_dir_with_size(workspace_dir, rows, cols)
+            .map_err(tmux_bootstrap_error)?;
+        self.layout_runtime
+            .ensure_layout(&workspace.workspace_handle, &workspace.workspace_dir)?;
+        Ok(workspace)
+    }
+
+    pub fn bootstrap_workspace_with_config(
+        &self,
+        config: WorkspaceInstanceConfig,
+    ) -> Result<BootstrappedWorkspace, LifecycleError> {
+        let workspace = self
+            .workspace_runtime
+            .ensure_workspace_for_config(config)
             .map_err(tmux_bootstrap_error)?;
         self.layout_runtime
             .ensure_layout(&workspace.workspace_handle, &workspace.workspace_dir)?;

@@ -45,7 +45,10 @@ touched_paths:
   - .agents/context/constraints.yaml
   - .agents/index.yaml
 notes:
-  - `task.event-r2` is complete: the default chrome path is event-driven, but current in-workspace switching still exits the client because sidebar and footer activation flow through `detach-client -E "waitagent attach <target>"`.
-  - Treat the shell reveal and flicker on target switching as a root-cause architecture problem, not a redraw bug.
-  - Do not patch over detach or reattach with delayed respawns or redraw suppression; replace the switching model so the current client never leaves the workspace during in-workspace target activation.
-  - This task is the first slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`; no network, remote, or optional local polish slice should overtake that batch.
+  - `task.event-r2` is complete and the accepted `task.event-r2a` architecture is now partially landed: same-socket activation no longer uses `detach-client -E "waitagent attach <target>"`; it swaps panes through tmux-native main-slot rebinding and keeps workspace chrome ownership local to one visible workspace session.
+  - The runtime now distinguishes `workspace_chrome` versus `target_host` sessions, stores session role metadata in tmux, and treats target hosts as the visible activation catalog once they exist on a socket.
+  - Sidebar, footer, and footer menu projection now consume the workspace `@waitagent_active_target` option and target-host session catalog rather than inferring the active target from the visible workspace chrome session.
+  - 2026-04-25 live tmux validation confirmed that hidden `__new-target` and `__activate-target` keep the tmux client attached to the workspace chrome session, update `@waitagent_active_target`, and no longer allow target-host sessions to accumulate sidebar or footer panes.
+  - Remaining acceptance work for `task.event-r2a` is terminal validation of the no-shell-reveal and no-flicker contract on the landed same-socket rebinding path, plus any follow-up fixes required by that validation.
+  - Treat shell reveal or flicker on target switching as a root-cause architecture problem, not a redraw bug.
+  - This task remains the first slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`; coding on `task.event-r3` may proceed only from the new main-slot rebinding path, and no network, remote, or optional local polish slice should overtake that batch.

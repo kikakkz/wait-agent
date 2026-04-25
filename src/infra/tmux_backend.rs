@@ -1,7 +1,9 @@
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
 };
-use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
+use crate::domain::workspace::{
+    WorkspaceInstanceConfig, WorkspaceInstanceId, WorkspaceSessionRole,
+};
 use crate::infra::tmux_error::{
     parse_tmux_id, parse_tmux_identifier, tmux_socket_dir, validate_percent, TmuxCommandOutput,
     TmuxCommandRunner, TmuxError,
@@ -22,10 +24,12 @@ mod layout;
 const WAITAGENT_SOCKET_PREFIX: &str = "wa-";
 const WAITAGENT_WORKSPACE_DIR_ENV: &str = "WAITAGENT_WORKSPACE_DIR";
 const WAITAGENT_WORKSPACE_KEY_ENV: &str = "WAITAGENT_WORKSPACE_KEY";
+const WAITAGENT_SESSION_ROLE_ENV: &str = "WAITAGENT_SESSION_ROLE";
 const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
+const WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX: &str = "waitagent-chrome-refresh";
 const DEFAULT_HISTORY_LIMIT: &str = "100000";
 const TMUX_MOUSE_OPTION: &str = "mouse";
 const TMUX_OPTION_ON: &str = "on";
@@ -42,6 +46,7 @@ pub struct EmbeddedTmuxBackend {
 struct TmuxSessionMetadata {
     workspace_dir: Option<PathBuf>,
     workspace_key: Option<String>,
+    session_role: Option<WorkspaceSessionRole>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -253,6 +258,11 @@ impl EmbeddedTmuxBackend {
         )?;
         self.set_session_environment(
             workspace,
+            WAITAGENT_SESSION_ROLE_ENV,
+            config.session_role.as_str(),
+        )?;
+        self.set_session_environment(
+            workspace,
             WAITAGENT_TRANSPORT_ENV,
             WAITAGENT_TRANSPORT_LOCAL_TMUX,
         )?;
@@ -376,6 +386,7 @@ impl EmbeddedTmuxBackend {
                 ),
                 workspace_dir: metadata.workspace_dir,
                 workspace_key: metadata.workspace_key,
+                session_role: metadata.session_role,
                 attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
                 window_count: window_count.parse::<usize>().unwrap_or(1),
                 command_name: runtime.command_name,
@@ -408,6 +419,9 @@ impl EmbeddedTmuxBackend {
                     }
                     WAITAGENT_WORKSPACE_KEY_ENV => {
                         metadata.workspace_key = Some(value.to_string());
+                    }
+                    WAITAGENT_SESSION_ROLE_ENV => {
+                        metadata.session_role = WorkspaceSessionRole::parse(value);
                     }
                     _ => {}
                 }
@@ -496,6 +510,37 @@ impl EmbeddedTmuxBackend {
         Ok((width, height))
     }
 
+    pub(crate) fn wait_for_chrome_refresh_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &[
+                "wait-for".to_string(),
+                workspace_chrome_refresh_channel(session_name),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn signal_chrome_refresh_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &[
+                "wait-for".to_string(),
+                "-S".to_string(),
+                workspace_chrome_refresh_channel(session_name),
+            ],
+        )
+        .map(|_| ())
+    }
+
     pub fn capture_pane_text_on_socket(
         &self,
         socket_name: &str,
@@ -579,6 +624,10 @@ impl EmbeddedTmuxBackend {
             is_dead: dead == "1",
         })
     }
+}
+
+fn workspace_chrome_refresh_channel(session_name: &str) -> String {
+    format!("{WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX}-{session_name}")
 }
 
 fn default_window_name() -> String {
@@ -807,12 +856,22 @@ impl TmuxChromeGateway for EmbeddedTmuxBackend {
     ) -> Result<bool, Self::Error> {
         EmbeddedTmuxBackend::window_zoomed_on_socket(self, socket_name, pane_target)
     }
+
+    fn show_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<Option<String>, Self::Error> {
+        EmbeddedTmuxBackend::show_session_option(self, workspace, option_name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::EmbeddedTmuxBackend;
-    use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
+    use crate::domain::workspace::{
+        WorkspaceInstanceConfig, WorkspaceInstanceId, WorkspaceSessionRole,
+    };
     use crate::infra::tmux_error::tmux_socket_dir;
     use crate::infra::tmux_glue::TmuxGlueBuildStatus;
     use crate::infra::tmux_types::{
@@ -820,6 +879,9 @@ mod tests {
         TmuxSocketName, TmuxSplitSize, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
     };
     use std::path::Path;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn workspace_config() -> WorkspaceInstanceConfig {
@@ -828,6 +890,7 @@ mod tests {
             workspace_key: "wk-1".to_string(),
             socket_name: "sock-1".to_string(),
             session_name: "sess-1".to_string(),
+            session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
         }
@@ -1059,6 +1122,47 @@ mod tests {
         assert!(socket_dir.to_string_lossy().contains("/tmux-"));
     }
 
+    #[test]
+    fn chrome_refresh_signal_wakes_multiple_workspace_waiters() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("chrome-refresh"))
+            .expect("workspace bootstrap should succeed");
+        let (done_tx, done_rx) = mpsc::channel();
+
+        for _ in 0..2 {
+            let backend = backend.clone();
+            let socket_name = workspace.socket_name.as_str().to_string();
+            let session_name = workspace.session_name.as_str().to_string();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                backend
+                    .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
+                    .expect("wait-for should unblock cleanly");
+                done_tx
+                    .send(())
+                    .expect("waiter completion should be reported");
+            });
+        }
+
+        thread::sleep(Duration::from_millis(100));
+        backend
+            .signal_chrome_refresh_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("chrome refresh signal should succeed");
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first waiter should wake");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second waiter should wake");
+        kill_server(&backend, &workspace);
+    }
+
     fn unique_workspace_config(prefix: &str) -> WorkspaceInstanceConfig {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1072,6 +1176,7 @@ mod tests {
             workspace_key: format!("{prefix}-{nonce:x}"),
             socket_name: format!("wa-test-{nonce:x}"),
             session_name: format!("waitagent-test-{prefix}-{nonce:x}"),
+            session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
         }

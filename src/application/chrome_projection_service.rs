@@ -1,6 +1,6 @@
 use crate::domain::chrome::{ChromeSurfaceSize, FooterViewModel, SidebarViewModel};
 use crate::domain::local_runtime::{
-    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
+    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 
@@ -19,11 +19,14 @@ impl ChromeProjectionService {
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket,
                 active_session,
+                active_target,
                 sessions,
             }) => {
                 self.state.active_socket = active_socket.clone();
                 self.state.active_session = active_session.clone();
+                self.state.active_target = active_target.clone();
                 self.state.sessions = sessions.clone();
+                self.state.ensure_active_target();
                 self.ensure_selected_target();
                 self.emit_both()
             }
@@ -46,6 +49,18 @@ impl ChromeProjectionService {
                     .find(|session| session.address.session_id() == session_id)
                     .map(|session| session.address.qualified_target());
                 self.emit_sidebar()
+            }
+            LocalRuntimeEvent::TargetActivation(TargetActivationEvent::Requested { target }) => {
+                self.state.selected_target = Some(target.clone());
+                self.emit_sidebar()
+            }
+            LocalRuntimeEvent::TargetActivation(
+                TargetActivationEvent::Rebound { target }
+                | TargetActivationEvent::Committed { target },
+            ) => {
+                self.state.active_target = Some(target.clone());
+                self.state.selected_target = Some(target.clone());
+                self.emit_both()
             }
             LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
                 surface,
@@ -94,12 +109,7 @@ impl ChromeProjectionService {
 
         self.state.selected_target = self
             .state
-            .sessions
-            .iter()
-            .find(|session| {
-                session.address.server_id() == self.state.active_socket
-                    && session.address.session_id() == self.state.active_session
-            })
+            .active_session_record()
             .or_else(|| self.state.sessions.first())
             .map(|session| session.address.qualified_target());
     }
@@ -133,6 +143,7 @@ impl ChromeProjectionService {
         Some(SidebarViewModel {
             active_socket: self.state.active_socket.clone(),
             active_session: self.state.active_session.clone(),
+            active_target: self.state.active_target.clone(),
             selected_target: self.state.selected_target.clone(),
             sessions: self.state.sessions.clone(),
             surface: self.state.sidebar_surface,
@@ -154,6 +165,7 @@ impl ChromeProjectionService {
         Some(FooterViewModel {
             active_socket: self.state.active_socket.clone(),
             active_session: self.state.active_session.clone(),
+            active_target: self.state.active_target.clone(),
             sessions: self.state.sessions.clone(),
             width,
             fullscreen: self.state.fullscreen,
@@ -165,12 +177,43 @@ impl ChromeProjectionService {
 struct ChromeProjectionState {
     active_socket: String,
     active_session: String,
+    active_target: Option<String>,
     selected_target: Option<String>,
     sessions: Vec<ManagedSessionRecord>,
     sidebar_surface: ChromeSurfaceSize,
     footer_width: usize,
     fullscreen_footer_width: usize,
     fullscreen: bool,
+}
+
+impl ChromeProjectionState {
+    fn ensure_active_target(&mut self) {
+        let active_is_still_valid = self.active_target.as_ref().map(|target| {
+            self.sessions
+                .iter()
+                .any(|session| session.address.qualified_target() == *target)
+        }) == Some(true);
+        if active_is_still_valid {
+            return;
+        }
+
+        self.active_target = self
+            .sessions
+            .iter()
+            .find(|session| {
+                session.address.server_id() == self.active_socket
+                    && session.address.session_id() == self.active_session
+            })
+            .map(|session| session.address.qualified_target());
+    }
+
+    fn active_session_record(&self) -> Option<&ManagedSessionRecord> {
+        self.active_target.as_ref().and_then(|target| {
+            self.sessions
+                .iter()
+                .find(|session| session.address.qualified_target() == *target)
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -183,7 +226,7 @@ pub struct ChromeProjectionUpdate {
 mod tests {
     use super::ChromeProjectionService;
     use crate::domain::local_runtime::{
-        ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
+        ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -208,6 +251,7 @@ mod tests {
             SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
             },
         ));
@@ -217,6 +261,14 @@ mod tests {
             Some(24)
         );
         assert_eq!(update.footer.as_ref().map(|view| view.width), Some(80));
+        assert_eq!(
+            update
+                .sidebar
+                .as_ref()
+                .and_then(|view| view.active_target.clone())
+                .as_deref(),
+            Some("wa-1:sess-1")
+        );
         assert_eq!(
             update
                 .sidebar
@@ -239,6 +291,7 @@ mod tests {
             SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![
                     session("wa-1", "sess-1", "bash"),
                     session("wa-2", "sess-2", "codex"),
@@ -280,6 +333,7 @@ mod tests {
             SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
             },
         ));
@@ -296,11 +350,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn target_activation_commit_updates_active_and_selected_targets() {
+        let mut service = ChromeProjectionService::new();
+        service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::SidebarPane,
+            width: 24,
+            height: 18,
+        }));
+        service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::FooterPane,
+            width: 80,
+            height: 1,
+        }));
+        service.apply_event(&LocalRuntimeEvent::SessionCatalog(
+            SessionCatalogEvent::SnapshotUpdated {
+                active_socket: "wa-1".to_string(),
+                active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
+                sessions: vec![
+                    session("wa-1", "sess-1", "bash"),
+                    session("wa-1", "sess-2", "codex"),
+                ],
+            },
+        ));
+
+        let update = service.apply_event(&LocalRuntimeEvent::TargetActivation(
+            TargetActivationEvent::Committed {
+                target: "wa-1:sess-2".to_string(),
+            },
+        ));
+
+        assert_eq!(
+            update
+                .sidebar
+                .as_ref()
+                .and_then(|view| view.active_target.clone())
+                .as_deref(),
+            Some("wa-1:sess-2")
+        );
+        assert_eq!(
+            update
+                .footer
+                .as_ref()
+                .and_then(|view| view.active_target.clone())
+                .as_deref(),
+            Some("wa-1:sess-2")
+        );
+    }
+
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket, session),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: None,
+            session_role: None,
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

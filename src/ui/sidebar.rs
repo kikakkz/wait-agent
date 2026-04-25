@@ -13,6 +13,7 @@ impl SidebarUi {
         Self::render(
             &model.active_socket,
             &model.active_session,
+            model.active_target.as_deref(),
             model.selected_target.as_deref(),
             &model.sessions,
             model.surface.width,
@@ -24,6 +25,7 @@ impl SidebarUi {
     pub fn render(
         active_socket: &str,
         active_session: &str,
+        active_target: Option<&str>,
         selected_target: Option<&str>,
         sessions: &[ManagedSessionRecord],
         width: usize,
@@ -64,15 +66,20 @@ impl SidebarUi {
             return lines.join("\n");
         }
 
-        let selected = selected_session(active_socket, active_session, selected_target, sessions)
-            .unwrap_or(&sessions[0]);
+        let selected = selected_session(
+            active_socket,
+            active_session,
+            active_target,
+            selected_target,
+            sessions,
+        )
+        .unwrap_or(&sessions[0]);
         let detail_line = selected_detail_line(selected, width);
         let session_capacity = height.saturating_sub(lines.len() + 2);
         for session in sessions.iter().take(session_capacity) {
-            let is_current = session.address.server_id() == active_socket
-                && session.address.session_id() == active_session;
-            let is_selected =
-                session.address.qualified_target() == selected.address.qualified_target();
+            let qualified_target = session.address.qualified_target();
+            let is_current = active_target == Some(qualified_target.as_str());
+            let is_selected = qualified_target == selected.address.qualified_target();
             lines.push(render_session_row(
                 session,
                 is_current,
@@ -103,6 +110,7 @@ fn render_collapsed(width: usize, height: usize) -> String {
 fn selected_session<'a>(
     active_socket: &str,
     active_session: &str,
+    active_target: Option<&str>,
     selected_target: Option<&str>,
     sessions: &'a [ManagedSessionRecord],
 ) -> Option<&'a ManagedSessionRecord> {
@@ -111,6 +119,13 @@ fn selected_session<'a>(
             sessions
                 .iter()
                 .find(|session| session.address.qualified_target() == target)
+        })
+        .or_else(|| {
+            active_target.and_then(|target| {
+                sessions
+                    .iter()
+                    .find(|session| session.address.qualified_target() == target)
+            })
         })
         .or_else(|| {
             sessions.iter().find(|session| {
@@ -198,12 +213,14 @@ mod tests {
         let output = SidebarUi::render(
             "wa-1",
             "waitagent-1",
+            Some("wa-1:waitagent-1"),
             Some("wa-2:waitagent-2"),
             &[
                 ManagedSessionRecord {
                     address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("1234".to_string()),
+                    session_role: None,
                     attached_clients: 2,
                     window_count: 1,
                     command_name: Some("bash".to_string()),
@@ -214,6 +231,7 @@ mod tests {
                     address: ManagedSessionAddress::local_tmux("wa-2", "waitagent-2"),
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("5678".to_string()),
+                    session_role: None,
                     attached_clients: 1,
                     window_count: 1,
                     command_name: Some("codex".to_string()),
@@ -242,7 +260,7 @@ mod tests {
 
     #[test]
     fn sidebar_ui_renders_collapsed_marker_for_hidden_width() {
-        let output = SidebarUi::render("wa-1", "waitagent-1", None, &[], 1, 3, 0);
+        let output = SidebarUi::render("wa-1", "waitagent-1", None, None, &[], 1, 3, 0);
 
         assert!(output.contains("<"));
     }

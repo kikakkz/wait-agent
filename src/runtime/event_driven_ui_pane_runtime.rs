@@ -3,7 +3,7 @@ use crate::application::local_runtime_event_service::{
 };
 use crate::application::session_catalog_projection_service::SessionCatalogProjectionService;
 use crate::domain::local_runtime::{
-    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
+    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::event::EventEnvelope;
@@ -46,12 +46,14 @@ impl EventDrivenUiPaneRuntime {
         &mut self,
         active_socket: &str,
         active_session: &str,
+        active_target: Option<&str>,
         sessions: Vec<ManagedSessionRecord>,
     ) -> EventDrivenChromeRenderUpdate {
         self.session_catalog_projection.publish_snapshot(
             &mut self.bus,
             active_socket,
             active_session,
+            active_target,
             sessions,
         );
         self.drain_pending_events(now_millis())
@@ -140,6 +142,17 @@ impl EventDrivenUiPaneRuntime {
         self.state.active_target()
     }
 
+    pub fn publish_target_activation_committed(
+        &mut self,
+        target: &str,
+    ) -> EventDrivenChromeRenderUpdate {
+        self.publish(LocalRuntimeEvent::TargetActivation(
+            TargetActivationEvent::Committed {
+                target: target.to_string(),
+            },
+        ))
+    }
+
     fn publish(&mut self, event: LocalRuntimeEvent) -> EventDrivenChromeRenderUpdate {
         self.bus.publish(event);
         self.drain_pending_events(now_millis())
@@ -163,6 +176,7 @@ impl EventDrivenUiPaneRuntime {
 struct EventDrivenUiPaneState {
     active_socket: String,
     active_session: String,
+    active_target: Option<String>,
     sessions: Vec<ManagedSessionRecord>,
     selected_session_id: Option<String>,
 }
@@ -173,11 +187,21 @@ impl EventDrivenUiPaneState {
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket,
                 active_session,
+                active_target,
                 sessions,
             }) => {
                 self.active_socket = active_socket.clone();
                 self.active_session = active_session.clone();
+                self.active_target = active_target.clone();
                 self.sessions = sessions.clone();
+                self.ensure_active_target();
+                self.ensure_selected_session();
+            }
+            LocalRuntimeEvent::TargetActivation(
+                TargetActivationEvent::Rebound { target }
+                | TargetActivationEvent::Committed { target },
+            ) => {
+                self.active_target = Some(target.clone());
                 self.ensure_selected_session();
             }
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SelectionChanged {
@@ -216,14 +240,29 @@ impl EventDrivenUiPaneState {
         }
 
         self.selected_session_id = self
+            .active_session_record()
+            .or_else(|| self.sessions.first())
+            .map(|session| session.address.session_id().to_string());
+    }
+
+    fn ensure_active_target(&mut self) {
+        let active_is_still_valid = self.active_target.as_ref().map(|target| {
+            self.sessions
+                .iter()
+                .any(|session| session.address.qualified_target() == *target)
+        }) == Some(true);
+        if active_is_still_valid {
+            return;
+        }
+
+        self.active_target = self
             .sessions
             .iter()
             .find(|session| {
                 session.address.server_id() == self.active_socket
                     && session.address.session_id() == self.active_session
             })
-            .or_else(|| self.sessions.first())
-            .map(|session| session.address.session_id().to_string());
+            .map(|session| session.address.qualified_target());
     }
 
     fn step_selection(&self, delta: isize) -> Option<String> {
@@ -251,11 +290,7 @@ impl EventDrivenUiPaneState {
     }
 
     fn active_target(&self) -> Option<String> {
-        if self.active_socket.is_empty() || self.active_session.is_empty() {
-            return None;
-        }
-
-        Some(format!("{}:{}", self.active_socket, self.active_session))
+        self.active_target.clone()
     }
 
     fn activation(&self) -> Option<EventDrivenSidebarActivation> {
@@ -264,7 +299,7 @@ impl EventDrivenUiPaneState {
             return Some(EventDrivenSidebarActivation::SelectMainPane);
         }
 
-        Some(EventDrivenSidebarActivation::AttachSession {
+        Some(EventDrivenSidebarActivation::ActivateTarget {
             target: selected_target,
         })
     }
@@ -277,13 +312,16 @@ impl EventDrivenUiPaneState {
                     .iter()
                     .find(|session| session.address.session_id() == session_id)
             })
-            .or_else(|| {
-                self.sessions.iter().find(|session| {
-                    session.address.server_id() == self.active_socket
-                        && session.address.session_id() == self.active_session
-                })
-            })
+            .or_else(|| self.active_session_record())
             .or_else(|| self.sessions.first())
+    }
+
+    fn active_session_record(&self) -> Option<&ManagedSessionRecord> {
+        self.active_target.as_ref().and_then(|target| {
+            self.sessions
+                .iter()
+                .find(|session| session.address.qualified_target() == *target)
+        })
     }
 }
 
@@ -296,7 +334,7 @@ pub struct EventDrivenSidebarInputOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventDrivenSidebarActivation {
     SelectMainPane,
-    AttachSession { target: String },
+    ActivateTarget { target: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +427,7 @@ mod tests {
         let update = runtime.publish_session_snapshot(
             "wa-1",
             "sess-1",
+            Some("wa-1:sess-1"),
             vec![session("wa-1", "sess-1", "bash")],
         );
 
@@ -405,7 +444,7 @@ mod tests {
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-b c] new"))
+            .map(|buffer| buffer.contains("[Ctrl-n] new"))
             .unwrap_or(false));
     }
 
@@ -416,6 +455,7 @@ mod tests {
         runtime.publish_session_snapshot(
             "wa-1",
             "sess-1",
+            Some("wa-1:sess-1"),
             vec![
                 session("wa-1", "sess-1", "bash"),
                 session("wa-2", "sess-2", "codex"),
@@ -441,6 +481,7 @@ mod tests {
         runtime.publish_session_snapshot(
             "wa-1",
             "sess-1",
+            Some("wa-1:sess-1"),
             vec![
                 session("wa-1", "sess-1", "bash"),
                 session("wa-2", "sess-2", "codex"),
@@ -457,10 +498,37 @@ mod tests {
         let other = runtime.apply_sidebar_input_bytes(b"\r");
         assert_eq!(
             other.activation,
-            Some(EventDrivenSidebarActivation::AttachSession {
+            Some(EventDrivenSidebarActivation::ActivateTarget {
                 target: "wa-2:sess-2".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn committed_target_activation_updates_active_target_without_resetting_selection() {
+        let mut runtime = EventDrivenUiPaneRuntime::new();
+        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
+        runtime.publish_surface_resize(ChromeSurface::FooterPane, 96, 1);
+        runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("wa-1:sess-1"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                session("wa-1", "sess-2", "codex"),
+            ],
+        );
+
+        runtime.apply_sidebar_input_bytes(b"\x1b[B");
+        let update = runtime.publish_target_activation_committed("wa-1:sess-2");
+
+        assert_eq!(runtime.active_target().as_deref(), Some("wa-1:sess-2"));
+        assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-2"));
+        assert!(update
+            .sidebar
+            .as_ref()
+            .map(|buffer| buffer.contains("codex@local"))
+            .unwrap_or(false));
     }
 
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {
@@ -468,6 +536,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux(socket, session),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: None,
+            session_role: None,
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

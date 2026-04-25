@@ -9,6 +9,7 @@ pub enum EventDrivenRuntimeModule {
     SessionCatalogProjector,
     SidebarPaneRuntime,
     FooterPaneRuntime,
+    MainSlotRuntime,
     AttachClientRuntime,
     SchedulerRuntime,
 }
@@ -45,6 +46,7 @@ pub fn default_event_driven_runtime_contract() -> EventDrivenRuntimeContract {
             EventDrivenRuntimeModule::SessionCatalogProjector,
             EventDrivenRuntimeModule::SidebarPaneRuntime,
             EventDrivenRuntimeModule::FooterPaneRuntime,
+            EventDrivenRuntimeModule::MainSlotRuntime,
             EventDrivenRuntimeModule::AttachClientRuntime,
             EventDrivenRuntimeModule::SchedulerRuntime,
         ],
@@ -79,6 +81,29 @@ pub fn default_event_driven_runtime_contract() -> EventDrivenRuntimeContract {
                 ],
                 owner: EventDrivenRuntimeModule::SidebarPaneRuntime,
                 purpose: "surface explicit sidebar selection and navigation intent without polling session state",
+            },
+            EventDrivenFlow {
+                producer: LocalRuntimeProducer::WorkspaceController,
+                event_kind: LocalRuntimeEventKind::TargetActivation,
+                consumers: vec![
+                    LocalRuntimeConsumer::MainSlotRuntime,
+                    LocalRuntimeConsumer::SidebarPaneRuntime,
+                    LocalRuntimeConsumer::FooterPaneRuntime,
+                    LocalRuntimeConsumer::SchedulerRuntime,
+                ],
+                owner: EventDrivenRuntimeModule::WorkspaceController,
+                purpose: "request target activation through an explicit runtime event rather than hidden attach semantics",
+            },
+            EventDrivenFlow {
+                producer: LocalRuntimeProducer::MainSlotRuntime,
+                event_kind: LocalRuntimeEventKind::TargetActivation,
+                consumers: vec![
+                    LocalRuntimeConsumer::SidebarPaneRuntime,
+                    LocalRuntimeConsumer::FooterPaneRuntime,
+                    LocalRuntimeConsumer::SchedulerRuntime,
+                ],
+                owner: EventDrivenRuntimeModule::MainSlotRuntime,
+                purpose: "publish target rebind and activation commit after tmux-native main-slot switching succeeds",
             },
             EventDrivenFlow {
                 producer: LocalRuntimeProducer::AttachClientRuntime,
@@ -187,6 +212,25 @@ mod tests {
         assert!(contract.flows.iter().any(|flow| {
             flow.owner == EventDrivenRuntimeModule::SchedulerRuntime
                 && flow.producer == LocalRuntimeProducer::SchedulerRuntime
+        }));
+    }
+
+    #[test]
+    fn contract_declares_target_activation_flow_through_main_slot_runtime() {
+        let contract = default_event_driven_runtime_contract();
+
+        assert!(contract.flows.iter().any(|flow| {
+            flow.owner == EventDrivenRuntimeModule::WorkspaceController
+                && flow.producer == LocalRuntimeProducer::WorkspaceController
+                && flow.event_kind == LocalRuntimeEventKind::TargetActivation
+                && flow
+                    .consumers
+                    .contains(&LocalRuntimeConsumer::MainSlotRuntime)
+        }));
+        assert!(contract.flows.iter().any(|flow| {
+            flow.owner == EventDrivenRuntimeModule::MainSlotRuntime
+                && flow.producer == LocalRuntimeProducer::MainSlotRuntime
+                && flow.event_kind == LocalRuntimeEventKind::TargetActivation
         }));
     }
 }

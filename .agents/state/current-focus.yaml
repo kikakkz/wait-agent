@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: task.event-r2a
-focus_statement: task.event-r2a is now the head of the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`, centered on replacing cross-session detach or attach switching with a fixed-chrome main-slot activation model before any attach cleanup, route cutover, or remote work resumes
+focus_statement: task.event-r2a remains the current gate while same-socket main-slot rebinding is validated in a real terminal; the attach-detach switching path is no longer the accepted same-socket implementation, and the next coding pass should audit event-r3 only from the new fixed-chrome rebinding baseline
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -1,13 +1,19 @@
 use crate::application::session_service::SessionService;
 use crate::cli::UiPaneCommand;
 use crate::domain::local_runtime::ChromeSurface;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxChromeGateway};
+use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::domain::workspace::WorkspaceInstanceId;
+use crate::infra::tmux::{
+    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::event_driven_chrome_runtime::EventDrivenChromeRenderUpdate;
 use crate::runtime::event_driven_ui_pane_runtime::{
     EventDrivenSidebarInputOutcome, EventDrivenUiPaneRuntime,
 };
 use std::io;
+
+const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub struct EventDrivenTmuxPaneRuntime<G> {
     gateway: G,
@@ -103,12 +109,49 @@ where
         let sessions = self
             .session_service
             .list_sessions()
+            .map_err(tmux_pane_error)?
+            .into_iter()
+            .filter(|session| session.address.server_id() == command.socket_name)
+            .collect::<Vec<_>>();
+        let active_target = self
+            .gateway
+            .show_session_option(&workspace_handle(command), WAITAGENT_ACTIVE_TARGET_OPTION)
             .map_err(tmux_pane_error)?;
+        let visible_sessions = visible_target_sessions(&sessions, &command.session_name);
         Ok(self.pane_runtime.publish_session_snapshot(
             &command.socket_name,
             &command.session_name,
-            sessions,
+            active_target.as_deref(),
+            visible_sessions,
         ))
+    }
+}
+
+fn visible_target_sessions(
+    sessions: &[ManagedSessionRecord],
+    workspace_session_name: &str,
+) -> Vec<ManagedSessionRecord> {
+    let target_hosts = sessions
+        .iter()
+        .filter(|session| session.is_target_host())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !target_hosts.is_empty() {
+        return target_hosts;
+    }
+
+    sessions
+        .iter()
+        .filter(|session| session.address.session_id() == workspace_session_name)
+        .cloned()
+        .collect()
+}
+
+fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
+    TmuxWorkspaceHandle {
+        workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
+        socket_name: TmuxSocketName::new(command.socket_name.clone()),
+        session_name: TmuxSessionName::new(command.session_name.clone()),
     }
 }
 
@@ -139,12 +182,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::EventDrivenTmuxPaneRuntime;
+    use super::{EventDrivenTmuxPaneRuntime, WAITAGENT_ACTIVE_TARGET_OPTION};
     use crate::cli::UiPaneCommand;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
-    use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
+    use crate::domain::workspace::{
+        WorkspaceInstanceConfig, WorkspaceInstanceId, WorkspaceSessionRole,
+    };
     use crate::infra::tmux::{
         TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxWindowHandle,
         TmuxWorkspaceHandle,
@@ -156,6 +201,7 @@ mod tests {
         sessions: Vec<ManagedSessionRecord>,
         pane_size: (usize, usize),
         zoomed: bool,
+        active_target: Option<String>,
     }
 
     impl TmuxGateway for FakeGateway {
@@ -283,6 +329,15 @@ mod tests {
         ) -> Result<bool, Self::Error> {
             Ok(self.zoomed)
         }
+
+        fn show_session_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            option_name: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            assert_eq!(option_name, WAITAGENT_ACTIVE_TARGET_OPTION);
+            Ok(self.active_target.clone())
+        }
     }
 
     #[test]
@@ -291,6 +346,7 @@ mod tests {
             sessions: vec![session("wa-1", "sess-1", "bash")],
             pane_size: (28, 9),
             zoomed: false,
+            active_target: None,
         });
 
         let update = runtime
@@ -311,6 +367,7 @@ mod tests {
             sessions: vec![session("wa-1", "sess-1", "bash")],
             pane_size: (96, 1),
             zoomed: true,
+            active_target: None,
         });
 
         let update = runtime
@@ -333,11 +390,12 @@ mod tests {
     fn sidebar_input_acts_on_state_loaded_from_tmux_refresh() {
         let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
             sessions: vec![
-                session("wa-1", "sess-1", "bash"),
-                session("wa-2", "sess-2", "codex"),
+                session_with_role("wa-1", "sess-1", "bash", WorkspaceSessionRole::TargetHost),
+                session_with_role("wa-1", "sess-2", "codex", WorkspaceSessionRole::TargetHost),
             ],
             pane_size: (28, 9),
             zoomed: false,
+            active_target: Some("wa-1:sess-1".to_string()),
         });
         runtime
             .refresh_sidebar_for_pane(&command(), "%11")
@@ -351,7 +409,46 @@ mod tests {
             .as_ref()
             .map(|buffer| buffer.contains("> codex@local"))
             .unwrap_or(false));
-        assert_eq!(runtime.selected_target().as_deref(), Some("wa-2:sess-2"));
+        assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-2"));
+    }
+
+    #[test]
+    fn snapshot_prefers_target_hosts_and_workspace_active_target() {
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
+            sessions: vec![
+                session_with_role(
+                    "wa-1",
+                    "workspace",
+                    "bash",
+                    WorkspaceSessionRole::WorkspaceChrome,
+                ),
+                session_with_role(
+                    "wa-1",
+                    "target-a",
+                    "codex",
+                    WorkspaceSessionRole::TargetHost,
+                ),
+                session_with_role("wa-1", "target-b", "bash", WorkspaceSessionRole::TargetHost),
+            ],
+            pane_size: (28, 9),
+            zoomed: false,
+            active_target: Some("wa-1:target-b".to_string()),
+        });
+
+        let update = runtime
+            .refresh_sidebar_for_pane(
+                &UiPaneCommand {
+                    socket_name: "wa-1".to_string(),
+                    session_name: "workspace".to_string(),
+                },
+                "%11",
+            )
+            .expect("sidebar refresh should succeed");
+
+        let buffer = update.sidebar.expect("sidebar buffer should render");
+        assert!(!buffer.contains("workspace@local"));
+        assert!(buffer.contains("> bash@local"));
+        assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:target-b"));
     }
 
     fn command() -> UiPaneCommand {
@@ -362,10 +459,25 @@ mod tests {
     }
 
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {
+        session_with_role(
+            socket,
+            session,
+            command,
+            WorkspaceSessionRole::WorkspaceChrome,
+        )
+    }
+
+    fn session_with_role(
+        socket: &str,
+        session: &str,
+        command: &str,
+        session_role: WorkspaceSessionRole,
+    ) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket, session),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some(WorkspaceInstanceId::new(session).as_str().to_string()),
+            session_role: Some(session_role),
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

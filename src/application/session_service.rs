@@ -34,9 +34,10 @@ where
         G::Error: From<&'static str>,
     {
         let sessions = self.gateway.list_sessions()?;
-        match sessions.len() {
+        let preferred = preferred_default_attach_sessions(sessions);
+        match preferred.len() {
             0 => Err("no waitagent tmux sessions running".into()),
-            1 => Ok(sessions.into_iter().next().expect("single session should exist")),
+            1 => Ok(preferred.into_iter().next().expect("single session should exist")),
             _ => Err("multiple waitagent tmux sessions running; use `waitagent ls` and `waitagent attach <session>`".into()),
         }
     }
@@ -57,13 +58,28 @@ where
     }
 }
 
+fn preferred_default_attach_sessions(
+    sessions: Vec<ManagedSessionRecord>,
+) -> Vec<ManagedSessionRecord> {
+    let workspace_sessions = sessions
+        .iter()
+        .filter(|session| session.is_workspace_chrome())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !workspace_sessions.is_empty() {
+        return workspace_sessions;
+    }
+
+    sessions
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionService;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
-    use crate::domain::workspace::WorkspaceInstanceId;
+    use crate::domain::workspace::{WorkspaceInstanceId, WorkspaceSessionRole};
     use crate::infra::tmux::{
         TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
         TmuxWindowHandle, TmuxWorkspaceHandle,
@@ -96,6 +112,7 @@ mod tests {
                     address: ManagedSessionAddress::local_tmux("wa-1234", "1234"),
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("1234".to_string()),
+                    session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
                     attached_clients: 1,
                     window_count: 1,
                     command_name: Some("bash".to_string()),
@@ -317,6 +334,7 @@ mod tests {
                 address: ManagedSessionAddress::local_tmux("wa-1", "1111"),
                 workspace_dir: None,
                 workspace_key: None,
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
                 attached_clients: 0,
                 window_count: 1,
                 command_name: Some("bash".to_string()),
@@ -327,6 +345,7 @@ mod tests {
                 address: ManagedSessionAddress::local_tmux("wa-2", "2222"),
                 workspace_dir: None,
                 workspace_key: None,
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
                 attached_clients: 0,
                 window_count: 1,
                 command_name: Some("codex".to_string()),
@@ -343,5 +362,42 @@ mod tests {
         assert!(error
             .to_string()
             .contains("multiple waitagent tmux sessions"));
+    }
+
+    #[test]
+    fn session_service_prefers_workspace_chrome_for_default_attach() {
+        let gateway = FakeGateway::new();
+        gateway.set_sessions(vec![
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "workspace"),
+                workspace_dir: Some(PathBuf::from("/tmp/ws")),
+                workspace_key: Some("wk-1".to_string()),
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                attached_clients: 1,
+                window_count: 3,
+                command_name: Some("bash".to_string()),
+                current_path: Some(PathBuf::from("/tmp/ws")),
+                task_state: ManagedSessionTaskState::Input,
+            },
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "target-a"),
+                workspace_dir: Some(PathBuf::from("/tmp/ws")),
+                workspace_key: Some("wk-1".to_string()),
+                session_role: Some(WorkspaceSessionRole::TargetHost),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("codex".to_string()),
+                current_path: Some(PathBuf::from("/tmp/ws")),
+                task_state: ManagedSessionTaskState::Running,
+            },
+        ]);
+        let service = SessionService::new(gateway);
+
+        let session = service
+            .resolve_default_attach_session()
+            .expect("workspace chrome session should win");
+
+        assert_eq!(session.address.session_id(), "workspace");
+        assert!(session.is_workspace_chrome());
     }
 }

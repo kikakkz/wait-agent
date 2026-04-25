@@ -15,6 +15,7 @@ impl SessionCatalogProjectionService {
         publisher: &mut P,
         active_socket: &str,
         active_session: &str,
+        active_target: Option<&str>,
         sessions: Vec<ManagedSessionRecord>,
     ) -> usize
     where
@@ -24,6 +25,7 @@ impl SessionCatalogProjectionService {
             SessionCatalogEvent::SnapshotUpdated {
                 active_socket: active_socket.to_string(),
                 active_session: active_session.to_string(),
+                active_target: active_target.map(str::to_string),
                 sessions,
             },
         ))
@@ -60,7 +62,13 @@ mod tests {
         let (_subscriber_id, rx) = bus.subscribe();
 
         assert_eq!(
-            service.publish_snapshot(&mut bus, "wa-1", "sess-1", vec![session("wa-1", "sess-1")]),
+            service.publish_snapshot(
+                &mut bus,
+                "wa-1",
+                "sess-1",
+                Some("wa-1:sess-1"),
+                vec![session("wa-1", "sess-1")],
+            ),
             1
         );
 
@@ -69,10 +77,12 @@ mod tests {
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket,
                 active_session,
+                active_target,
                 sessions,
             }) => {
                 assert_eq!(active_socket, "wa-1");
                 assert_eq!(active_session, "sess-1");
+                assert_eq!(active_target.as_deref(), Some("wa-1:sess-1"));
                 assert_eq!(sessions.len(), 1);
             }
             other => panic!("unexpected event payload: {other:?}"),
@@ -101,6 +111,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux(socket, session),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: None,
+            session_role: None,
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),

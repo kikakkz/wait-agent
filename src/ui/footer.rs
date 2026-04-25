@@ -16,6 +16,7 @@ impl FooterUi {
             Self::render_fullscreen(
                 &model.active_socket,
                 &model.active_session,
+                model.active_target.as_deref(),
                 &model.sessions,
                 model.width,
             )
@@ -23,6 +24,7 @@ impl FooterUi {
             Self::render(
                 &model.active_socket,
                 &model.active_session,
+                model.active_target.as_deref(),
                 &model.sessions,
                 model.width,
             )
@@ -32,12 +34,14 @@ impl FooterUi {
     pub fn render(
         active_socket: &str,
         active_session: &str,
+        active_target: Option<&str>,
         sessions: &[ManagedSessionRecord],
         width: usize,
     ) -> String {
         render_footer(
             active_socket,
             active_session,
+            active_target,
             sessions,
             width,
             FooterProjection::Pane,
@@ -47,12 +51,14 @@ impl FooterUi {
     pub fn render_fullscreen(
         active_socket: &str,
         active_session: &str,
+        active_target: Option<&str>,
         sessions: &[ManagedSessionRecord],
         width: usize,
     ) -> String {
         render_footer(
             active_socket,
             active_session,
+            active_target,
             sessions,
             width,
             FooterProjection::FullscreenStatus,
@@ -63,12 +69,13 @@ impl FooterUi {
 fn render_footer(
     active_socket: &str,
     active_session: &str,
+    active_target: Option<&str>,
     sessions: &[ManagedSessionRecord],
     width: usize,
     projection: FooterProjection,
 ) -> String {
     let width = width.max(1);
-    let active = active_session_record(active_socket, active_session, sessions);
+    let active = active_session_record(active_socket, active_session, active_target, sessions);
     let counts = task_counts(sessions);
     let left = match projection {
         FooterProjection::Pane => {
@@ -76,7 +83,7 @@ fn render_footer(
                 .to_string()
         }
         FooterProjection::FullscreenStatus => format!(
-            "keys: [Ctrl-b c] new  [Ctrl-b s] sessions  [Ctrl-o] full off | total:{} R:{} I:{} C:{} U:{}",
+            "keys: [Ctrl-n] new  [Ctrl-b s] sessions  [Ctrl-o] full off | total:{} R:{} I:{} C:{} U:{}",
             sessions.len(),
             counts.running,
             counts.input,
@@ -103,12 +110,21 @@ fn render_footer(
 fn active_session_record<'a>(
     active_socket: &str,
     active_session: &str,
+    active_target: Option<&str>,
     sessions: &'a [ManagedSessionRecord],
 ) -> Option<&'a ManagedSessionRecord> {
-    sessions.iter().find(|session| {
-        session.address.server_id() == active_socket
-            && session.address.session_id() == active_session
-    })
+    active_target
+        .and_then(|target| {
+            sessions
+                .iter()
+                .find(|session| session.address.qualified_target() == target)
+        })
+        .or_else(|| {
+            sessions.iter().find(|session| {
+                session.address.server_id() == active_socket
+                    && session.address.session_id() == active_session
+            })
+        })
 }
 
 #[derive(Default)]
@@ -180,10 +196,12 @@ mod tests {
         let output = FooterUi::render(
             "wa-1",
             "waitagent-1",
+            Some("wa-1:waitagent-1"),
             &[ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: None,
+                session_role: None,
                 attached_clients: 1,
                 window_count: 1,
                 command_name: Some("codex".to_string()),
@@ -206,10 +224,12 @@ mod tests {
         let output = FooterUi::render_fullscreen(
             "wa-1",
             "waitagent-1",
+            Some("wa-1:waitagent-1"),
             &[ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: None,
+                session_role: None,
                 attached_clients: 1,
                 window_count: 1,
                 command_name: Some("bash".to_string()),
@@ -219,7 +239,7 @@ mod tests {
             120,
         );
 
-        assert!(output.contains("[Ctrl-b c] new"));
+        assert!(output.contains("[Ctrl-n] new"));
         assert!(output.contains("[Ctrl-b s] sessions"));
         assert!(output.contains("[Ctrl-o] full off"));
         assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));

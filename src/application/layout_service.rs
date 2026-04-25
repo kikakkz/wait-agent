@@ -7,7 +7,7 @@ pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const SIDEBAR_PANE_STYLE: &str = "fg=colour250,bg=colour234";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
-const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 2] = ["session-created", "session-closed"];
+const GLOBAL_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["session-closed"];
 const MAIN_PANE_GLOBAL_REFRESH_HOOKS: [&str; 1] = ["pane-exited"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

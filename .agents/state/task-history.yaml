@@ -3,6 +3,12 @@ version: 1
 history:
   - task_id: task.event-r2a
     status: in_progress
+    summary: same-socket fixed-chrome switching now rebinds the workspace main slot through tmux-native pane swaps, target-host sessions are modeled explicitly, and sidebar or footer projection now reads the workspace active-target option instead of treating the visible workspace chrome session as the active target
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r2a
+    status: in_progress
     summary: terminal repro and runtime review showed that sidebar and footer switching still detach the client and relaunch through `waitagent attach <target>`, so active work moves to a fixed-chrome main-slot activation model before more attach or scheduler cleanup
     source_of_truth:
       file: .agents/tasks/current.yaml

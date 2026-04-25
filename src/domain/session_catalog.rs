@@ -1,3 +1,4 @@
+use crate::domain::workspace::WorkspaceSessionRole;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -128,6 +129,7 @@ pub struct ManagedSessionRecord {
     pub address: ManagedSessionAddress,
     pub workspace_dir: Option<PathBuf>,
     pub workspace_key: Option<String>,
+    pub session_role: Option<WorkspaceSessionRole>,
     pub attached_clients: usize,
     pub window_count: usize,
     pub command_name: Option<String>,
@@ -136,6 +138,14 @@ pub struct ManagedSessionRecord {
 }
 
 impl ManagedSessionRecord {
+    pub fn is_workspace_chrome(&self) -> bool {
+        self.session_role == Some(WorkspaceSessionRole::WorkspaceChrome)
+    }
+
+    pub fn is_target_host(&self) -> bool {
+        self.session_role == Some(WorkspaceSessionRole::TargetHost)
+    }
+
     pub fn matches_target(&self, value: &str) -> bool {
         value == self.address.display_session_id()
             || value == self.address.session_id()
@@ -189,6 +199,7 @@ mod tests {
     use super::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
     };
+    use crate::domain::workspace::WorkspaceSessionRole;
     use std::path::PathBuf;
 
     #[test]
@@ -197,6 +208,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some("1234".to_string()),
+            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),
@@ -219,6 +231,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some("1234".to_string()),
+            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
             attached_clients: 2,
             window_count: 3,
             command_name: Some("codex".to_string()),
@@ -236,6 +249,7 @@ mod tests {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
             workspace_dir: None,
             workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::TargetHost),
             attached_clients: 0,
             window_count: 1,
             command_name: Some("codex".to_string()),
@@ -244,6 +258,37 @@ mod tests {
         };
 
         assert_eq!(record.display_label(), "codex@local");
+    }
+
+    #[test]
+    fn managed_session_exposes_workspace_role_helpers() {
+        let chrome = ManagedSessionRecord {
+            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Unknown,
+        };
+        let target = ManagedSessionRecord {
+            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-5678"),
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Unknown,
+        };
+
+        assert!(chrome.is_workspace_chrome());
+        assert!(!chrome.is_target_host());
+        assert!(target.is_target_host());
+        assert!(!target.is_workspace_chrome());
     }
 
     #[test]

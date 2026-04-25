@@ -39,4 +39,11 @@ where
         self.workspace_service
             .ensure_workspace_for_dir_with_size(workspace_dir, rows, cols)
     }
+
+    pub fn ensure_workspace_for_config(
+        &self,
+        config: WorkspaceInstanceConfig,
+    ) -> Result<BootstrappedWorkspace, G::Error> {
+        self.workspace_service.ensure_workspace_for_config(config)
+    }
 }
