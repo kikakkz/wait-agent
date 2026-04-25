@@ -159,13 +159,6 @@ impl MainSlotRuntime {
         self.backend
             .swap_panes(workspace, &target_main_pane, &workspace_main_pane)
             .map_err(main_slot_error)?;
-        self.backend
-            .respawn_pane(
-                workspace,
-                &target_main_pane,
-                &workspace_host_program(workspace_dir),
-            )
-            .map_err(main_slot_error)?;
         self.set_active_target(workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(workspace, workspace_dir)?;
@@ -261,24 +254,20 @@ impl MainSlotRuntime {
             return Ok(());
         }
 
-        let workspace_main_pane = self.workspace_main_pane(&workspace)?;
+        let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
 
         if let Some(active_target) = self.active_target(&workspace)? {
             if let Some(active_session) =
                 self.find_session_matching_on_socket(&workspace.socket_name, &active_target)?
             {
-                self.restore_active_target_to_host(
+                // tmux moves the source pane into the destination slot, so the visible
+                // workspace main-pane identity becomes `active_host_pane` after restore.
+                workspace_main_pane = self.restore_active_target_to_host(
                     &workspace,
                     &active_session,
                     &workspace_main_pane,
                 )?;
             }
-        } else {
-            self.capture_embedded_main_into_target_host(
-                &workspace,
-                &current_workspace.workspace_dir,
-                &workspace_main_pane,
-            )?;
         }
 
         let target_main_pane = self.target_main_pane(target)?;
@@ -288,7 +277,8 @@ impl MainSlotRuntime {
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
-        Ok(())
+        self.layout_runtime
+            .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir)
     }
 
     fn activate_target_after_main_pane_exit(
@@ -325,37 +315,12 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         active_session: &crate::domain::session_catalog::ManagedSessionRecord,
         workspace_main_pane: &TmuxPaneId,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<TmuxPaneId, LifecycleError> {
         let active_host_pane = self.target_main_pane(active_session)?;
         self.backend
             .swap_panes(workspace, &active_host_pane, workspace_main_pane)
-            .map_err(main_slot_error)
-    }
-
-    fn capture_embedded_main_into_target_host(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        workspace_dir: &Path,
-        workspace_main_pane: &TmuxPaneId,
-    ) -> Result<(), LifecycleError> {
-        let (rows, cols) = current_terminal_target_size();
-        let host = self
-            .target_host_runtime
-            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                workspace_dir,
-                workspace.socket_name.as_str(),
-                rows,
-                cols,
-            ))
             .map_err(main_slot_error)?;
-        let host_session = self.resolve_session_on_socket(
-            &host.workspace_handle.socket_name,
-            host.workspace_handle.session_name.as_str(),
-        )?;
-        let host_main_pane = self.target_main_pane(&host_session)?;
-        self.backend
-            .swap_panes(workspace, &host_main_pane, workspace_main_pane)
-            .map_err(main_slot_error)
+        Ok(active_host_pane)
     }
 
     fn target_main_pane(
