@@ -70,6 +70,7 @@ pub struct TmuxWindowHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxPaneInfo {
     pub pane_id: TmuxPaneId,
+    pub pane_pid: Option<u32>,
     pub title: String,
     pub current_command: Option<String>,
     pub current_path: Option<PathBuf>,

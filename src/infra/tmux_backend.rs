@@ -15,6 +15,7 @@ use crate::infra::tmux_types::{
     TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram, TmuxSessionGateway,
     TmuxSessionName, TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
 };
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -445,13 +446,11 @@ impl EmbeddedTmuxBackend {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
         let pane_text = self.capture_pane_text(socket_name, &main_pane.pane_id)?;
+        let command_name = normalized_pane_command(main_pane);
         Ok(TmuxSessionRuntimeMetadata {
-            command_name: main_pane.current_command.clone(),
+            command_name: command_name.clone(),
             current_path: main_pane.current_path.clone(),
-            task_state: ManagedSessionTaskState::infer(
-                main_pane.current_command.as_deref(),
-                &pane_text,
-            ),
+            task_state: ManagedSessionTaskState::infer(command_name.as_deref(), &pane_text),
         })
     }
 
@@ -465,7 +464,7 @@ impl EmbeddedTmuxBackend {
             "-t".to_string(),
             target.to_string(),
             "-F".to_string(),
-            "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
+            "#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
                 .to_string(),
         ];
         let output = self.run_on_socket(socket_name, &args)?;
@@ -611,8 +610,9 @@ impl EmbeddedTmuxBackend {
     }
 
     fn pane_info_for_line(line: &str) -> Result<TmuxPaneInfo, TmuxError> {
-        let mut parts = line.splitn(5, '\t');
+        let mut parts = line.splitn(6, '\t');
         let pane_id = parts.next().unwrap_or_default();
+        let pane_pid = parts.next().unwrap_or_default();
         let title = parts.next().unwrap_or_default();
         let current_command = parts.next().unwrap_or_default();
         let current_path = parts.next().unwrap_or_default();
@@ -620,12 +620,166 @@ impl EmbeddedTmuxBackend {
 
         Ok(TmuxPaneInfo {
             pane_id: TmuxPaneId::new(parse_tmux_id(pane_id, '%', "pane id")?),
+            pane_pid: pane_pid.parse::<u32>().ok(),
             title: title.to_string(),
             current_command: (!current_command.is_empty()).then(|| current_command.to_string()),
             current_path: (!current_path.is_empty()).then(|| PathBuf::from(current_path)),
             is_dead: dead == "1",
         })
     }
+}
+
+fn normalized_pane_command(pane: &TmuxPaneInfo) -> Option<String> {
+    let current_command = pane.current_command.as_deref()?;
+    let foreground_argv = foreground_process_argv_for_pane_shell(pane.pane_pid);
+    Some(normalized_command_name(current_command, foreground_argv.as_deref()).to_string())
+}
+
+fn normalized_command_name<'a>(current_command: &'a str, argv: Option<&[String]>) -> &'a str {
+    match current_command {
+        "node" => wrapped_node_command_name(argv).unwrap_or(current_command),
+        _ => current_command,
+    }
+}
+
+fn wrapped_node_command_name(argv: Option<&[String]>) -> Option<&'static str> {
+    let argv = argv?;
+    argv.iter().skip(1).find_map(|arg| wrapped_cli_name(arg))
+}
+
+fn foreground_process_argv_for_pane_shell(pane_pid: Option<u32>) -> Option<Vec<String>> {
+    let pane_pid = pane_pid?;
+    let shell_stat = read_process_stat(pane_pid).ok()?;
+    let foreground_pid = foreground_process_id_for_shell(
+        &shell_stat,
+        &descendant_process_stats(pane_pid),
+    )
+    .or_else(|| {
+        (shell_stat.process_group_id == shell_stat.foreground_process_group_id).then_some(pane_pid)
+    })?;
+    process_argv(foreground_pid).ok()
+}
+
+fn foreground_process_id_for_shell(
+    shell_stat: &ProcessStat,
+    descendants: &[ProcessStat],
+) -> Option<u32> {
+    if shell_stat.foreground_process_group_id <= 0 {
+        return None;
+    }
+
+    let mut matches = descendants
+        .iter()
+        .filter(|stat| {
+            stat.tty_nr == shell_stat.tty_nr
+                && stat.process_group_id == shell_stat.foreground_process_group_id
+        })
+        .map(|stat| stat.pid)
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+
+    matches
+        .iter()
+        .copied()
+        .find(|pid| *pid == shell_stat.foreground_process_group_id as u32)
+        .or_else(|| matches.into_iter().next())
+}
+
+fn wrapped_cli_name(arg: &str) -> Option<&'static str> {
+    match Path::new(arg).file_name()?.to_str()? {
+        "codex" | "codex.js" => Some("codex"),
+        "claude" | "claude.js" => Some("claude"),
+        _ => None,
+    }
+}
+
+fn process_argv(pid: u32) -> std::io::Result<Vec<String>> {
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
+    Ok(cmdline
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+        .collect())
+}
+
+fn descendant_process_stats(root_pid: u32) -> Vec<ProcessStat> {
+    let mut visited = BTreeSet::new();
+    let mut pending = VecDeque::from(read_process_children(root_pid).unwrap_or_default());
+    let mut descendants = Vec::new();
+
+    while let Some(pid) = pending.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        if let Ok(stat) = read_process_stat(pid) {
+            pending.extend(read_process_children(pid).unwrap_or_default());
+            descendants.push(stat);
+        }
+    }
+
+    descendants
+}
+
+fn read_process_children(pid: u32) -> std::io::Result<Vec<u32>> {
+    let children = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))?;
+    Ok(parse_process_children(&children))
+}
+
+fn parse_process_children(children: &str) -> Vec<u32> {
+    children
+        .split_whitespace()
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect()
+}
+
+fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_process_stat(&stat).map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))
+}
+
+fn parse_process_stat(stat: &str) -> Result<ProcessStat, String> {
+    let stat = stat.trim();
+    let command_end = stat
+        .rfind(')')
+        .ok_or_else(|| format!("process stat is missing command terminator: `{stat}`"))?;
+    let fields = stat[command_end + 2..]
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if fields.len() < 6 {
+        return Err(format!("process stat has too few fields: `{stat}`"));
+    }
+
+    Ok(ProcessStat {
+        pid: parse_process_stat_field(stat, 0, "pid")?,
+        process_group_id: parse_process_stat_field(fields[2], 0, "process group id")?,
+        tty_nr: parse_process_stat_field(fields[4], 0, "tty nr")?,
+        foreground_process_group_id: parse_process_stat_field(
+            fields[5],
+            0,
+            "foreground process group id",
+        )?,
+    })
+}
+
+fn parse_process_stat_field<T>(source: &str, index: usize, field_name: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+{
+    let value = source
+        .split_whitespace()
+        .nth(index)
+        .ok_or_else(|| format!("process stat is missing {field_name}"))?;
+    value
+        .parse::<T>()
+        .map_err(|_| format!("failed to parse {field_name} from `{value}`"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessStat {
+    pid: u32,
+    process_group_id: i32,
+    tty_nr: i32,
+    foreground_process_group_id: i32,
 }
 
 fn workspace_chrome_refresh_channel(session_name: &str) -> String {
@@ -898,6 +1052,107 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pane_info_parser_reads_current_command_path_and_pid() {
+        let pane = EmbeddedTmuxBackend::pane_info_for_line("%1\t4242\tmain\tbash\t/tmp/demo\t0")
+            .expect("pane line should parse");
+
+        assert_eq!(pane.pane_id.as_str(), "%1");
+        assert_eq!(pane.pane_pid, Some(4242));
+        assert_eq!(pane.title, "main");
+        assert_eq!(pane.current_command.as_deref(), Some("bash"));
+        assert_eq!(pane.current_path.as_deref(), Some(Path::new("/tmp/demo")));
+        assert!(!pane.is_dead);
+    }
+
+    #[test]
+    fn wrapped_cli_name_recognizes_codex_node_entrypoint() {
+        assert_eq!(
+            super::wrapped_cli_name("/usr/local/lib/node_modules/@openai/codex/bin/codex.js"),
+            Some("codex")
+        );
+        assert_eq!(
+            super::wrapped_cli_name("/usr/local/bin/codex"),
+            Some("codex")
+        );
+        assert_eq!(super::wrapped_cli_name("/tmp/app.js"), None);
+    }
+
+    #[test]
+    fn normalized_command_name_promotes_known_node_wrappers() {
+        let argv = vec!["node".to_string(), "/usr/local/bin/codex".to_string()];
+        assert_eq!(
+            super::normalized_command_name("node", Some(argv.as_slice())),
+            "codex"
+        );
+        assert_eq!(super::normalized_command_name("node", None), "node");
+        assert_eq!(
+            super::normalized_command_name("bash", Some(argv.as_slice())),
+            "bash"
+        );
+    }
+
+    #[test]
+    fn parse_process_children_reads_pid_list() {
+        assert_eq!(
+            super::parse_process_children("1279695 1279696\n"),
+            vec![1279695, 1279696]
+        );
+        assert!(super::parse_process_children("").is_empty());
+    }
+
+    #[test]
+    fn parse_process_stat_reads_foreground_process_group() {
+        let stat =
+            "1279306 (bash) S 1279214 1279306 1279214 34828 1279695 4194560 8421 150 0 0 12 3 0 0 20 0 1 0 1 2 3";
+        let parsed = super::parse_process_stat(stat).expect("stat should parse");
+
+        assert_eq!(
+            parsed,
+            super::ProcessStat {
+                pid: 1279306,
+                process_group_id: 1279306,
+                tty_nr: 34828,
+                foreground_process_group_id: 1279695,
+            }
+        );
+    }
+
+    #[test]
+    fn foreground_process_prefers_group_leader_on_same_tty() {
+        let shell = super::ProcessStat {
+            pid: 100,
+            process_group_id: 100,
+            tty_nr: 42,
+            foreground_process_group_id: 200,
+        };
+        let descendants = vec![
+            super::ProcessStat {
+                pid: 201,
+                process_group_id: 200,
+                tty_nr: 42,
+                foreground_process_group_id: 200,
+            },
+            super::ProcessStat {
+                pid: 200,
+                process_group_id: 200,
+                tty_nr: 42,
+                foreground_process_group_id: 200,
+            },
+            super::ProcessStat {
+                pid: 300,
+                process_group_id: 300,
+                tty_nr: 99,
+                foreground_process_group_id: 300,
+            },
+        ];
+
+        assert_eq!(
+            super::foreground_process_id_for_shell(&shell, &descendants),
+            Some(200)
+        );
+    }
 
     fn workspace_config() -> WorkspaceInstanceConfig {
         WorkspaceInstanceConfig {

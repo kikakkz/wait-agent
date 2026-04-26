@@ -3,10 +3,10 @@ use crate::application::layout_service::{
     LayoutFocusBehavior, LayoutService, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE,
 };
 use crate::application::session_service::SessionService;
-use crate::cli::{CloseSessionCommand, LayoutReconcileCommand};
+use crate::cli::{CloseSessionCommand, LayoutReconcileCommand, UiPaneCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxProgram, TmuxSessionName,
+    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
     TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const STARTUP_CHROME_READY_TIMEOUT: Duration = Duration::from_millis(300);
 const STARTUP_CHROME_READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
+const WAITAGENT_MAIN_PANE_PIPE_OPTION: &str = "@waitagent_main_pane_pipe_id";
 
 pub struct WorkspaceLayoutRuntime {
     backend: EmbeddedTmuxBackend,
@@ -129,6 +130,27 @@ impl WorkspaceLayoutRuntime {
         Ok(())
     }
 
+    pub fn run_chrome_refresh_stream(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
+        use std::io::Read;
+
+        let mut stdin = std::io::stdin().lock();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stdin.read(&mut buffer).map_err(|error| {
+                LifecycleError::Io(
+                    "failed to read main-pane output refresh stream".to_string(),
+                    error,
+                )
+            })?;
+            if read == 0 {
+                return Ok(());
+            }
+            self.backend
+                .signal_chrome_refresh_on_socket(&command.socket_name, &command.session_name)
+                .map_err(tmux_layout_error)?;
+        }
+    }
+
     pub fn run_close_session(&self, command: CloseSessionCommand) -> Result<(), LifecycleError> {
         self.backend
             .run_socket_command(
@@ -233,6 +255,7 @@ impl WorkspaceLayoutRuntime {
                 layout.main_pane.as_str(),
             )
             .map_err(tmux_layout_error)?;
+        self.ensure_main_pane_output_bridge(workspace, &layout.main_pane)?;
         self.layout_service
             .ensure_layout_hooks(
                 workspace,
@@ -243,6 +266,51 @@ impl WorkspaceLayoutRuntime {
             )
             .map_err(tmux_layout_error)?;
         Ok(layout)
+    }
+
+    fn ensure_main_pane_output_bridge(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
+    ) -> Result<(), LifecycleError> {
+        let previous_pipe = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_PIPE_OPTION)
+            .map_err(tmux_layout_error)?;
+        if let Some(previous_pipe) = previous_pipe.as_deref() {
+            if previous_pipe != main_pane.as_str() {
+                match self
+                    .backend
+                    .clear_pane_pipe(workspace, &TmuxPaneId::new(previous_pipe))
+                {
+                    Ok(()) => {}
+                    Err(error) if error.is_command_failure() => {}
+                    Err(error) => return Err(tmux_layout_error(error)),
+                }
+            }
+        }
+
+        if previous_pipe.as_deref() != Some(main_pane.as_str()) {
+            self.backend
+                .pipe_pane_output(
+                    workspace,
+                    main_pane,
+                    &main_pane_output_refresh_shell_command(
+                        self.current_executable.to_string_lossy().as_ref(),
+                        workspace,
+                    ),
+                )
+                .map_err(tmux_layout_error)?;
+            self.backend
+                .set_session_option(
+                    workspace,
+                    WAITAGENT_MAIN_PANE_PIPE_OPTION,
+                    main_pane.as_str(),
+                )
+                .map_err(tmux_layout_error)?;
+        }
+
+        Ok(())
     }
 
     fn wait_for_initial_chrome_render(
@@ -455,6 +523,24 @@ fn main_pane_died_hook_shell_command(
     .join(" ")
 }
 
+fn main_pane_output_refresh_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+) -> String {
+    format!(
+        "{} >/dev/null 2>&1",
+        [
+            shell_escape(executable),
+            shell_escape("__chrome-refresh-stream"),
+            shell_escape("--socket-name"),
+            shell_escape(workspace.socket_name.as_str()),
+            shell_escape("--session-name"),
+            shell_escape(workspace.session_name.as_str()),
+        ]
+        .join(" ")
+    )
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -484,7 +570,8 @@ mod tests {
     use super::{
         chrome_refresh_hook_shell_command, footer_menu_shell_command,
         layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
-        should_refresh_workspace_chrome, tmux_quote_argument,
+        main_pane_output_refresh_shell_command, should_refresh_workspace_chrome,
+        tmux_quote_argument,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -550,6 +637,17 @@ mod tests {
         assert_eq!(
             command,
             "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}'"
+        );
+    }
+
+    #[test]
+    fn main_pane_output_refresh_shell_command_targets_current_session() {
+        let workspace = workspace();
+        let command = main_pane_output_refresh_shell_command("/tmp/wait agent", &workspace);
+
+        assert_eq!(
+            command,
+            "'/tmp/wait agent' '__chrome-refresh-stream' '--socket-name' 'wa-1' '--session-name' 'session-1' >/dev/null 2>&1"
         );
     }
 

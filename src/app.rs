@@ -223,6 +223,7 @@ impl App {
             }
             Command::UiSidebar(_)
             | Command::UiFooter(_)
+            | Command::ChromeRefreshStream(_)
             | Command::ActivateTarget(_)
             | Command::NewTarget(_)
             | Command::MainPaneDied(_)

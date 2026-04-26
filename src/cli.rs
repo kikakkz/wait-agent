@@ -13,6 +13,7 @@ pub enum Command {
     WorkspaceInternal(WorkspaceCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
+    ChromeRefreshStream(UiPaneCommand),
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
     MainPaneDied(MainPaneDiedCommand),
@@ -167,6 +168,10 @@ impl Cli {
             "__ui-footer" => {
                 args.remove(0);
                 Command::UiFooter(parse_ui_pane(args)?)
+            }
+            "__chrome-refresh-stream" => {
+                args.remove(0);
+                Command::ChromeRefreshStream(parse_ui_pane(args)?)
             }
             "__activate-target" => {
                 args.remove(0);
@@ -858,6 +863,24 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_chrome_refresh_stream_command() {
+        match parse(&[
+            "waitagent",
+            "__chrome-refresh-stream",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+        ]) {
+            Command::ChromeRefreshStream(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
             }
             other => panic!("unexpected command: {other:?}"),
         }

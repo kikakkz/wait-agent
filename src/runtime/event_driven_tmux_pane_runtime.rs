@@ -1,7 +1,6 @@
 use crate::application::session_service::SessionService;
 use crate::cli::UiPaneCommand;
 use crate::domain::local_runtime::ChromeSurface;
-use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
@@ -11,6 +10,7 @@ use crate::runtime::event_driven_chrome_runtime::EventDrivenChromeRenderUpdate;
 use crate::runtime::event_driven_ui_pane_runtime::{
     EventDrivenSidebarInputOutcome, EventDrivenUiPaneRuntime,
 };
+use crate::runtime::tmux_visible_sessions::visible_target_sessions;
 use std::io;
 
 const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
@@ -116,7 +116,8 @@ where
             .gateway
             .show_session_option(&workspace_handle(command), WAITAGENT_ACTIVE_TARGET_OPTION)
             .map_err(tmux_pane_error)?;
-        let visible_sessions = visible_target_sessions(&sessions, &command.session_name);
+        let visible_sessions =
+            visible_target_sessions(&sessions, &command.session_name, active_target.as_deref());
         Ok(self.pane_runtime.publish_session_snapshot(
             &command.socket_name,
             &command.session_name,
@@ -124,26 +125,6 @@ where
             visible_sessions,
         ))
     }
-}
-
-fn visible_target_sessions(
-    sessions: &[ManagedSessionRecord],
-    workspace_session_name: &str,
-) -> Vec<ManagedSessionRecord> {
-    let target_hosts = sessions
-        .iter()
-        .filter(|session| session.is_target_host())
-        .cloned()
-        .collect::<Vec<_>>();
-    if !target_hosts.is_empty() {
-        return target_hosts;
-    }
-
-    sessions
-        .iter()
-        .filter(|session| session.address.session_id() == workspace_session_name)
-        .cloned()
-        .collect()
 }
 
 fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
@@ -424,7 +405,40 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_prefers_target_hosts_and_workspace_active_target() {
+    fn snapshot_keeps_target_hosts_visible_until_target_is_activated() {
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
+            sessions: vec![
+                session_with_role(
+                    "wa-1",
+                    "workspace",
+                    "codex",
+                    WorkspaceSessionRole::WorkspaceChrome,
+                ),
+                session_with_role("wa-1", "target-a", "bash", WorkspaceSessionRole::TargetHost),
+            ],
+            pane_size: (28, 9),
+            zoomed: false,
+            active_target: None,
+        });
+
+        let update = runtime
+            .refresh_sidebar_for_pane(
+                &UiPaneCommand {
+                    socket_name: "wa-1".to_string(),
+                    session_name: "workspace".to_string(),
+                },
+                "%11",
+            )
+            .expect("sidebar refresh should succeed");
+
+        let buffer = update.sidebar.expect("sidebar buffer should render");
+        assert!(buffer.contains("> bash@local"));
+        assert!(!buffer.contains("codex@local"));
+        assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:target-a"));
+    }
+
+    #[test]
+    fn snapshot_prefers_target_hosts_once_target_is_activated() {
         let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
             sessions: vec![
                 session_with_role(

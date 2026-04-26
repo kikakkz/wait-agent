@@ -6,6 +6,7 @@ use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::tmux_visible_sessions::visible_target_sessions;
 use std::io;
 use std::path::PathBuf;
 
@@ -50,7 +51,8 @@ impl FooterMenuRuntime {
                 WAITAGENT_ACTIVE_TARGET_OPTION,
             )
             .map_err(footer_menu_error)?;
-        let visible_sessions = visible_target_sessions(&sessions, &command.session_name);
+        let visible_sessions =
+            visible_target_sessions(&sessions, &command.session_name, active_target.as_deref());
         let args = build_footer_menu_args(
             &command,
             &self.current_executable,
@@ -264,26 +266,6 @@ fn footer_menu_error(error: TmuxError) -> LifecycleError {
     )
 }
 
-fn visible_target_sessions(
-    sessions: &[ManagedSessionRecord],
-    workspace_session_name: &str,
-) -> Vec<ManagedSessionRecord> {
-    let target_hosts = sessions
-        .iter()
-        .filter(|session| session.is_target_host())
-        .cloned()
-        .collect::<Vec<_>>();
-    if !target_hosts.is_empty() {
-        return target_hosts;
-    }
-
-    sessions
-        .iter()
-        .filter(|session| session.address.session_id() == workspace_session_name)
-        .cloned()
-        .collect()
-}
-
 fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandle {
     TmuxWorkspaceHandle {
         workspace_id: WorkspaceInstanceId::new(session_name.to_string()),
@@ -294,7 +276,7 @@ fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandl
 
 #[cfg(test)]
 mod tests {
-    use super::{build_footer_menu_args, visible_target_sessions, FOOTER_MENU_TITLE};
+    use super::{build_footer_menu_args, FOOTER_MENU_TITLE};
     use crate::cli::FooterMenuCommand;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -372,39 +354,5 @@ mod tests {
 
         assert!(args.iter().any(|value| value == "New Session"));
         assert!(args.iter().any(|value| value == "- No Sessions"));
-    }
-
-    #[test]
-    fn visible_target_sessions_hides_workspace_chrome_once_target_hosts_exist() {
-        let sessions = visible_target_sessions(
-            &[
-                ManagedSessionRecord {
-                    address: ManagedSessionAddress::local_tmux("wa-1", "workspace"),
-                    workspace_dir: Some(PathBuf::from("/tmp/demo")),
-                    workspace_key: None,
-                    session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
-                    attached_clients: 1,
-                    window_count: 1,
-                    command_name: Some("bash".to_string()),
-                    current_path: Some(PathBuf::from("/tmp/demo")),
-                    task_state: ManagedSessionTaskState::Input,
-                },
-                ManagedSessionRecord {
-                    address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
-                    workspace_dir: Some(PathBuf::from("/tmp/demo")),
-                    workspace_key: None,
-                    session_role: Some(WorkspaceSessionRole::TargetHost),
-                    attached_clients: 0,
-                    window_count: 1,
-                    command_name: Some("codex".to_string()),
-                    current_path: Some(PathBuf::from("/tmp/demo")),
-                    task_state: ManagedSessionTaskState::Running,
-                },
-            ],
-            "workspace",
-        );
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].address.session_id(), "target-1");
     }
 }

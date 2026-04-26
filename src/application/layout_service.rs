@@ -351,6 +351,7 @@ mod tests {
             let pane = TmuxPaneId::new("%2");
             self.panes.borrow_mut().push(TmuxPaneInfo {
                 pane_id: pane.clone(),
+                pane_pid: None,
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
@@ -371,6 +372,7 @@ mod tests {
             let pane = TmuxPaneId::new("%3");
             self.panes.borrow_mut().push(TmuxPaneInfo {
                 pane_id: pane.clone(),
+                pane_pid: None,
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
@@ -531,6 +533,7 @@ mod tests {
     fn layout_service_creates_missing_sidebar_and_footer_and_returns_focus_to_main() {
         let gateway = FakeGateway::new(vec![TmuxPaneInfo {
             pane_id: TmuxPaneId::new("%1"),
+            pane_pid: None,
             title: String::new(),
             current_command: Some("bash".to_string()),
             current_path: None,
@@ -576,6 +579,7 @@ mod tests {
         let gateway = FakeGateway::new(vec![
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%1"),
+                pane_pid: None,
                 title: String::new(),
                 current_command: Some("bash".to_string()),
                 current_path: None,
@@ -583,6 +587,7 @@ mod tests {
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%2"),
+                pane_pid: None,
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
@@ -590,6 +595,7 @@ mod tests {
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%3"),
+                pane_pid: None,
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
@@ -633,6 +639,7 @@ mod tests {
         let gateway = FakeGateway::new(vec![
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%1"),
+                pane_pid: None,
                 title: String::new(),
                 current_command: Some("bash".to_string()),
                 current_path: None,
@@ -640,6 +647,7 @@ mod tests {
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%2"),
+                pane_pid: None,
                 title: SIDEBAR_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
@@ -647,6 +655,7 @@ mod tests {
             },
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%3"),
+                pane_pid: None,
                 title: FOOTER_PANE_TITLE.to_string(),
                 current_command: Some("waitagent".to_string()),
                 current_path: None,
