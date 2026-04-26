@@ -1,0 +1,41 @@
+id: task.tmux-r8c
+kind: task
+version: 1
+title: remove transitional daemon and composed-display paths and complete final tmux-first acceptance
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r8b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the transitional waitagent daemon, socket, attach protocol, and composed-display paths are deleted or isolated as inactive historical compatibility code
+  - legacy modules no longer own the default local workspace path
+  - shell and Codex validation confirm that the branded tmux route solves the regressions that triggered the architecture change
+  - task and doc state record one clear primary local runtime path with no competing daemon-centered local runtime model
+verification:
+  - cargo test
+  - manual: shell validation in a real terminal
+  - manual: Codex validation in a real terminal
+  - targeted review of retired-path deletion
+touched_paths:
+  - src/app.rs
+  - src/lifecycle.rs
+  - src/legacy
+  - src/runtime
+  - src/application
+  - src/domain
+  - docs/execution-status-board.md
+  - docs/tmux-native-realignment-review.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/queued/task.tmux-r8c.yaml
+notes:
+  - This is the final cleanup slice after the chrome contract and tmux-style local session semantics have both stabilized.
+  - The expected output of this task is one obvious local runtime model: branded tmux plus waitagent-owned sidebar, footer, and management surfaces.
+  - Superseded on 2026-04-23 after the local runtime plan was redirected to an event-driven rewrite queue.

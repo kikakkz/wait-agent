@@ -2,7 +2,7 @@ id: task.lifecycle-2
 kind: task
 version: 1
 title: add workspace-local daemon discovery and single-client attach
-status: done
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -32,3 +32,4 @@ touched_paths:
 notes:
   - Keep this phase local-only; do not merge it with the broader network transport queue.
   - Single-client attach is sufficient for phase one as long as reclaim behavior is explicit.
+  - Superseded on 2026-04-22 because workspace-local daemon identity is no longer the intended long-lived runtime identity.

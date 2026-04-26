@@ -1,0 +1,37 @@
+id: task.t5-07
+kind: task
+version: 1
+title: implement remote target input and resize routing through the server control plane
+status: deferred
+priority: medium
+target_task_reference: task.t5-07
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r4.done
+  - task.t5-06.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - remote input and resize routing flows through the server control plane to the PTY-owning node rather than by pretending the server owns a remote PTY locally
+  - remote target routing consumes the shared transport-agnostic target catalog introduced by `task.t5-06`
+  - local fixed-chrome main-slot activation semantics remain the reference model for target selection, while remote targets bind through a transport runtime rather than through local tmux attach semantics
+  - docs and task state record the accepted remote routing boundary explicitly
+verification:
+  - cargo test
+  - targeted review of remote input, resize, and transport ownership boundaries
+touched_paths:
+  - src/server.rs
+  - src/transport.rs
+  - src/client.rs
+  - .agents/tasks/queued/task.t5-07.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/execution-status-board.md
+notes:
+  - This task remains deferred until the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` closes.
+  - Do not route remote interaction by creating a fake local PTY ownership layer on the server.
+  - Do not bypass the shared target catalog with transport-specific side registries.

@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-06
-focus_statement: the fullscreen-history acceptance slice is closed, the deferred architecture cleanup remains visible in backlog, and the next active delivery work resumes on the aggregate server session registry
+current_task: task.event-r2a
+focus_statement: task.event-r2a1 through task.event-r2a3 are complete, so the active gate returns to task.event-r2a umbrella acceptance: rerun real-terminal fixed-chrome switching checks and clear the remaining stale acceptance evidence before moving to task.event-r3
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -1,10 +1,16 @@
 # WaitAgent Architecture
 
-Version: `v1.0`  
+Version: `v1.1`  
 Status: `Draft`  
-Date: `2026-04-07`
+Date: `2026-04-23`
 
 ## 1. Purpose
+
+Current note:
+
+- the accepted replacement for the old custom local fullscreen and live-surface path is documented in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
+- the accepted code-level runtime reorganization for that migration is documented in [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
+- until this architecture document is fully revised, treat the tmux-first plan as the authoritative local workspace display direction
 
 This document translates the product requirements in [wait-agent-prd.md](wait-agent-prd.md) into a build-oriented system architecture.
 
@@ -46,6 +52,7 @@ Network mode only adds:
 - A transport layer
 - Remote client nodes
 - Session registration and broadcast
+- A server-side interaction surface for remote sessions routed through the server control plane
 
 ## 4. Runtime Topology
 
@@ -91,6 +98,20 @@ Local PTY Runtime   Local PTY Runtime
 Managed Sessions    Managed Sessions
 ```
 
+### 4.3 Remote Session Connection Model
+
+For future remote sessions, the accepted interaction path is:
+
+- the remote waitagent node maintains a long-lived connection to the server
+- the remote node remains the PTY owner for its sessions
+- the server maintains aggregate session state and routes control messages
+- server-side user interaction runs through a waitagent `interact` surface, not through a server-owned PTY pretending to be local
+
+Anti-goal:
+
+- do not model remote sessions as if the server directly owns their PTY
+- do not reduce the server-side experience to a point-to-point mirror CLI that bypasses the server control plane
+
 ## 5. Core Architectural Components
 
 ### 5.1 Workspace Entry
@@ -124,6 +145,7 @@ Notes:
 
 - Every attached console gets its own Console Runtime
 - The same session may be visible from more than one Console Runtime
+- In future network mode, a server-side console interacting with a remote session does so through server-routed control and stream messages rather than direct PTY ownership
 
 ### 5.3 Session Registry
 
@@ -150,6 +172,11 @@ Implementation note for local-first delivery:
 - The server maintains an aggregate replicated view, not PTY authority
 
 This distinction must stay explicit in code to avoid over-designing the local MVP around distributed ownership.
+
+Future compatibility note:
+
+- sidebar, footer, menu, and session selection should depend on transport-agnostic session records
+- local tmux discovery is one producer of those records, not the universal source of truth
 
 ### 5.4 PTY Runtime
 
@@ -191,6 +218,7 @@ Responsibilities in network mode:
 - Route events to the correct client or server console
 - Broadcast PTY output to attached consoles
 - Support reconnect and replay
+- Carry server-side `interact` traffic for remote sessions over the same control plane used for registry and lifecycle events
 
 ### 5.8 Aggregate Session View
 
@@ -208,6 +236,18 @@ It must not:
 - Own the canonical session screen state for client-owned PTYs
 - Require the local MVP to implement replication logic before local interaction works
 
+### 5.9 Server Interact Surface
+
+Responsibilities:
+
+- provide the server-side interactive view for a selected remote session
+- consume terminal stream data routed by the server
+- send raw input and resize events back through the server control plane
+- remain separate from PTY ownership
+
+This is not a PTY host and not a direct remote-mirror shortcut around the server.
+It is the server-visible interaction surface for a host-owned session.
+
 ## 6. State Ownership
 
 ### 6.1 Authoritative State
@@ -222,6 +262,11 @@ Authoritative fields include:
 - Current screen buffer snapshot
 - Last resize applied
 
+In future network mode:
+
+- the remote node remains authoritative for remote PTY-backed sessions
+- the server is authoritative for routing, attach state, and interaction leases, but not for the remote PTY itself
+
 ### 6.2 Replicated State
 
 Replicated state is synchronized outward for scheduling and rendering elsewhere.
@@ -234,6 +279,7 @@ Replicated fields include:
 - Screen snapshot version
 - Activity timestamps
 - Attach list
+- Host-published command label, path, task-state, and screen or stream version metadata
 
 ### 6.3 Derived State
 
@@ -246,6 +292,19 @@ Derived fields include:
 - `switch_lock`
 - `interaction_round_active`
 - `focus_candidate_rank`
+
+## 6.4 Interaction Lease
+
+Remote interactive sessions require an explicit interaction lease.
+
+The lease determines:
+
+- which attached console currently has write authority
+- which console's resize is authoritative for the PTY-backed session
+- which observers are read-only mirrors at that moment
+
+This lease is required because one PTY can only have one effective terminal size at a time.
+The server should coordinate the lease, while the PTY host remains authoritative for applying the resulting input and resize events.
 
 ## 7. Data Model
 

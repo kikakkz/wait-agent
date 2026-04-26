@@ -32,3 +32,4 @@ notes:
   - The preferred user interaction remains a fullscreen handoff rather than dashboard-local shell scrolling.
   - Entry and return foundations landed here, but the task is superseded because snapshot-based fullscreen history cannot satisfy the accepted old-history contract.
   - Remaining work is split into `task.display-2a`, `task.display-2b`, and `task.display-2c` so the replay model, fullscreen integration, and acceptance evidence can evolve on explicit boundaries.
+  - The entire custom fullscreen direction is now historical only because the tmux-first workspace plan replaces it as the accepted local architecture baseline.

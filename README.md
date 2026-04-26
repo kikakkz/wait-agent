@@ -65,6 +65,8 @@ Current documents:
 
 - [Product PRD](docs/wait-agent-prd.md)
 - [Architecture](docs/architecture.md)
+- [Tmux-First Workspace Plan](docs/tmux-first-workspace-plan.md)
+- [Tmux-First Runtime Architecture](docs/tmux-first-runtime-architecture.md)
 - [Functional Design](docs/functional-design.md)
 - [Module Design](docs/module-design.md)
 - [UI Design](docs/ui-design.md)
@@ -74,9 +76,25 @@ Current documents:
 - [Local Acceptance Checklist](docs/local-acceptance-checklist.md)
 - [Execution Status Board](docs/execution-status-board.md)
 
+## Build Prerequisites
+
+WaitAgent now compiles vendored tmux as part of the default `cargo build` path.
+
+To install the required system packages, run:
+
+```bash
+./scripts/install-build-deps.sh
+```
+
+To preview the detected package-manager command without executing it, run:
+
+```bash
+./scripts/install-build-deps.sh --print
+```
+
 ## Recommended Next Step
 
-- Finish local workspace acceptance and refine auto-switch behavior in real agent workflows, then resume network aggregation work on top of that entry model
+- Finish the tmux-first local workspace migration on top of the vendored tmux glue-layer backend, then resume network aggregation work on the stabilized local ownership model
 
 ## Why This Exists
 

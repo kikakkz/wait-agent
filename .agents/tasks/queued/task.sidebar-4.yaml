@@ -2,7 +2,7 @@ id: task.sidebar-4
 kind: task
 version: 1
 title: polish the default-visible sidebar detail area and enter-to-switch behavior
-status: deferred
+status: superseded
 priority: medium
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -35,3 +35,4 @@ notes:
   - `Enter`-to-switch and selection alignment are already live in the current prototype.
   - The sidebar detail row is now dedicated to the selected session label and status, while the current working directory is rendered at the far right of the shared bottom info bar.
   - The remaining scope in this slice, if real usage demands it, is better footer and sidebar presentation polish without regressing the stabilized render path.
+  - Superseded on 2026-04-22 because the accepted destination is a tmux-owned sidebar and footer surface rather than further polishing the old composed display path.

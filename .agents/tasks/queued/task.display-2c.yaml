@@ -2,7 +2,7 @@ id: task.display-2c
 kind: task
 version: 1
 title: validate native fullscreen history handoff across shell and Codex-style sessions
-status: done
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -35,3 +35,4 @@ notes:
   - Shell-path validation is complete on a clean daemon-backed `./waitagent` repro: fullscreen replay widened wrapped history correctly once the stale daemon and command-bar repaint were removed from the experiment.
   - Codex-style validation is also complete on a real resume repro: old history replays at full terminal width, `/fullscreen` no longer repaints dashboard chrome over the handoff, and raw `Ctrl-O` returns cleanly to the dashboard.
   - A later clean release PTY rerun on 2026-04-21 also confirmed that alternate-screen history now seeds native fullscreen from transcript replay instead of dropping old rows behind the former sidebar-width snapshot.
+  - This validation record remains useful as historical evidence, but the verified path is no longer the accepted target baseline after the tmux-first architecture decision.

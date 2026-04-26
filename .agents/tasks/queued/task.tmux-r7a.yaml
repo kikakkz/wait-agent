@@ -1,0 +1,39 @@
+id: task.tmux-r7a
+kind: task
+version: 1
+title: keep the waitagent menu visible while the main session is zoomed fullscreen
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r7.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - entering fullscreen for the main session does not hide the waitagent menu surface
+  - the fullscreen interaction model remains tmux-native for the main pane while the menu stays visible through an explicit, documented ownership model
+  - menu visibility in fullscreen does not regress tmux pane history, copy-mode, sidebar restore, or session switching behavior
+  - the implementation does not reintroduce the old waitagent-owned fullscreen compositor or replay path
+verification:
+  - cargo test
+  - manual: shell fullscreen retains a visible waitagent menu surface
+  - manual: Codex fullscreen retains a visible waitagent menu surface
+  - manual: exiting fullscreen restores the normal sidebar and footer layout cleanly
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - src/infra/tmux.rs
+  - docs/tmux-first-workspace-plan.md
+  - .agents/tasks/queued/task.tmux-r7a.yaml
+notes:
+  - This slice is specifically about keeping menu visibility during fullscreen; it should not reopen the accepted tmux-owned fullscreen baseline.
+  - The solution must explain which surface owns the persistent menu while the main pane is zoomed, rather than relying on accidental leftover chrome.
+  - Accepted ownership model for this slice: normal mode keeps the footer pane as the visible menu surface, while fullscreen mirrors waitagent menu chrome into the tmux status line and leaves tmux zoom in control of the main pane.
+  - Fullscreen menu actions must not steal raw shell or agent keystrokes from the zoomed main pane; prefixed tmux bindings are the safe entry path for fullscreen-only session actions.
+  - Sidebar visibility during fullscreen remains a separate product decision; this task only requires the menu to stay available.

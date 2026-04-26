@@ -1,0 +1,31 @@
+id: task.tmux-3
+kind: task
+version: 1
+title: implement persistent sidebar and footer panes as tmux-native UI panes
+status: superseded
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: historical
+depends_on:
+  - task.tmux-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - each managed session window uses a stable three-pane layout with main pane, sidebar pane, and footer pane
+  - sidebar and footer are rendered by dedicated waitagent UI processes or commands in their own panes rather than as overlays on the main pane
+  - the sidebar remains visible in normal mode and reflects the current session registry without corrupting main-pane output
+verification:
+  - cargo test
+  - manual: run Codex and shell sessions in the main pane while sidebar and footer remain visible and uncorrupted
+touched_paths:
+  - src/tmux.rs
+  - src/lifecycle.rs
+  - src/session.rs
+  - src/renderer.rs
+  - .agents/tasks/queued/task.tmux-3.yaml
+notes:
+  - This slice is superseded only as part of the first queue definition; the product goal remains valid and is replaced by the rewrite queue entry that lands after command cutover.

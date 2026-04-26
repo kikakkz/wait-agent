@@ -1,0 +1,36 @@
+id: task.event-r3
+kind: task
+version: 1
+title: move attach, resize, and scheduler control onto explicit runtime events
+status: not_started
+priority: critical
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r2a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - attach flow reacts to socket input, stdin input, daemon output, and terminal resize through explicit events rather than fixed client ticks
+  - scheduler recomputation is triggered by named session-state transitions, input, output, focus, and resize events rather than periodic wakeups
+  - new local control flow no longer relies on `recv_timeout(EVENT_LOOP_TICK)` as the primary coordination mechanism
+  - new runtime modules make event propagation and ownership easier to audit than the old mixed app loop
+verification:
+  - cargo test
+  - manual: attach, resize, and auto-switch behavior in a real terminal without visible tick-latency artifacts
+  - targeted review of the new event loop modules and scheduler triggers
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/domain
+  - src/app.rs
+  - .agents/tasks/queued/task.event-r3.yaml
+notes:
+  - This slice should build the new control path, not patch the historical tick loop in place unless that is the smallest route to isolate it behind a new boundary.
+  - 2026-04-24 pause: do not resume this slice until in-workspace target switching stops leaving the current client. The current `detach-client -E "waitagent attach <target>"` path is an upstream blocker because it cannot satisfy fixed chrome, no shell reveal, or no flicker.
+  - When this slice resumes, audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
+  - This task is the second slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

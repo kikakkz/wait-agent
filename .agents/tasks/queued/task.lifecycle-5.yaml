@@ -2,7 +2,7 @@ id: task.lifecycle-5
 kind: task
 version: 1
 title: support tmux-style attach workflows with multi-client attach and daemon listing
-status: done
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -40,3 +40,4 @@ notes:
   - Keep the behavior aligned with tmux attach semantics.
   - Do not introduce custom controller roles, observer-only clients, or extra user-facing coordination features in this task.
   - Assume most hosts will run one primary waitagent instance, but the implementation must support and expose multiple daemon-backed workspaces when users choose to run them.
+  - Superseded on 2026-04-22 because `attach` and `ls` should now converge on tmux-native targets instead of daemon-backed workspace instances.

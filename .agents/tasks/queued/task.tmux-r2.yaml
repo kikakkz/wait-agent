@@ -1,0 +1,35 @@
+id: task.tmux-r2
+kind: task
+version: 1
+title: implement the real vendored tmux control adapter behind the new runtime interfaces
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: historical
+depends_on:
+  - task.tmux-r1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `src/infra/tmux.rs` stops acting as a placeholder and exposes real typed tmux control behavior behind trait boundaries
+  - the default build fails fast if vendored tmux is missing instead of silently compiling a runtime without the required backend
+  - the adapter owns stable workspace, window, and pane identities without duplicating workspace-key policy in legacy modules
+  - adapter tests validate the glue-layer contract and real control-surface ownership assumptions needed by later runtime slices
+verification:
+  - cargo test
+  - targeted review of vendored tmux adapter behavior and build guarantees
+touched_paths:
+  - build.rs
+  - src/infra/tmux.rs
+  - src/infra/tmux_glue.rs
+  - src/infra/tmux_glue_build_script.rs
+  - src/domain/workspace.rs
+  - src/application/workspace_service.rs
+  - src/runtime/workspace_runtime.rs
+  - .agents/tasks/queued/task.tmux-r2.yaml
+notes:
+  - The retained vendored tmux build work from the superseded queue is input to this slice, not proof that the runtime adapter is already complete.

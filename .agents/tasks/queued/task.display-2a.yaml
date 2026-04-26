@@ -2,7 +2,7 @@ id: task.display-2a
 kind: task
 version: 1
 title: establish a replayable normal-screen transcript model for native fullscreen history
-status: done
+status: superseded
 priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -38,3 +38,4 @@ notes:
   - This slice is architecture-first: it exists to replace the invalid assumption that fullscreen old-history can be reconstructed from the live narrow-width snapshot alone.
   - The output history model should be reusable by later fullscreen and restore work instead of becoming another one-off fullscreen helper.
   - Legacy code cleanup is in scope for this slice; obsolete fullscreen-history branches should be deleted as replacement structure becomes available rather than deferred into a vague later cleanup pass.
+  - This task is now historical only because the tmux-first migration replaces custom fullscreen history replay as the primary local fullscreen strategy.

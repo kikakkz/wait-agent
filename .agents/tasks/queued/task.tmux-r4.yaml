@@ -1,0 +1,46 @@
+id: task.tmux-r4
+kind: task
+version: 1
+title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases
+status: done
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.tmux-r3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `waitagent workspace` remains available as a workspace bootstrap alias, but runtime identity is expressed in tmux-native targets rather than waitagent-owned daemon sockets
+  - `waitagent attach`, `ls`, and `detach` resolve tmux sessions or targets and reuse tmux capabilities instead of a custom waitagent daemon protocol
+  - the old `status` command is removed from the default branded-tmux command surface rather than preserved as a custom local-runtime command
+  - the default command path no longer depends on waitagent-owned daemon identity, socket discovery, or attach protocol semantics
+  - command compatibility is preserved while transitional bridge paths and waitagent-specific lifecycle wrappers are removed or demoted to compatibility-only code
+  - the composition root owns dependency construction for the branded tmux command surface
+verification:
+  - cargo test
+  - manual: fresh workspace bootstrap plus tmux-like attach, list, and detach behavior through the waitagent command surface
+touched_paths:
+  - docs/tmux-native-realignment-review.md
+  - docs/tmux-first-runtime-architecture.md
+  - src/cli.rs
+  - src/bootstrap.rs
+  - src/command
+  - src/runtime
+  - src/application
+  - src/domain
+  - src/infra/tmux.rs
+  - src/lifecycle.rs
+  - src/legacy
+  - .agents/tasks/queued/task.tmux-r4.yaml
+notes:
+  - This slice should minimize waitagent-owned runtime logic and prefer direct tmux-native behavior wherever tmux already has the required feature.
+  - The transitional daemon/socket/attach stack from lifecycle work and the first tmux-r3/tmux-r4 cut is no longer the accepted endpoint; this task should remove or demote it rather than extending it.
+  - Do not implement sidebar, footer, fullscreen polish, or extra management UI here; this task is only about command semantics and target identity.
+  - Do not invent a replacement `status` command in this slice; tmux-native command parity takes precedence unless a later waitagent-specific management need justifies additional commands.
+  - 2026-04-22 progress: `workspace`, `attach`, `ls`, and `detach` now route through the vendored tmux adapter plus a managed-session catalog shape instead of the daemon socket listing path; manual attach or detach acceptance is still pending before closure.
+  - 2026-04-22 progress: network-flavored top-level `waitagent --node-id/--connect` entry remains on the legacy path for now so the local tmux-native cutover does not silently regress mirrored or server-connected behavior before the shared session-registry work lands.

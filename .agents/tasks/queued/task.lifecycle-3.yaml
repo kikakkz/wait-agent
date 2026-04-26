@@ -2,7 +2,7 @@ id: task.lifecycle-3
 kind: task
 version: 1
 title: implement detach, reattach, and resize forwarding for the daemon envelope
-status: done
+status: superseded
 priority: high
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -32,3 +32,4 @@ touched_paths:
   - .agents/tasks/queued/task.lifecycle-3.yaml
 notes:
   - Preserve the current workspace rendering and interaction semantics; this task only moves lifecycle ownership outward.
+  - Superseded on 2026-04-22 because detach, reattach, and resize should converge on tmux-native behavior rather than a waitagent-owned daemon envelope.

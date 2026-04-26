@@ -1,7 +1,259 @@
 kind: state
 version: 1
-last_updated_from: fullscreen transcript replay and task-source resync at 2026-04-21
+last_updated_from: task.event-r2a2 verification refreshed on 2026-04-25
 checks:
+  - id: event-r2a1-terminal-ctrl-n-phase-profile-fresh
+    command: manual terminal profiling on a fresh workspace by timing hidden `__new-target`, current-socket tmux session visibility, and sidebar item visibility
+    status: pass
+  - id: event-r2a1-terminal-ctrl-n-phase-profile-steady-state
+    command: manual terminal profiling on a multi-target workspace by timing hidden `__new-target`, current-socket tmux session visibility, and sidebar item visibility
+    status: pass
+  - id: event-r2a1-waitagent-ls-vs-current-socket-tmux-latency
+    command: manual terminal measurement comparing `./target/debug/waitagent ls` with current-socket `tmux -L <socket> ls`
+    status: pass
+  - id: event-r2a2-terminal-chrome-refresh-all-latency
+    command: manual terminal measurement comparing workspace-local `./target/debug/waitagent __chrome-refresh --socket-name <socket> --session-name <session> --workspace-dir <dir>` with global `./target/debug/waitagent __chrome-refresh-all`, plus ctrl-n and session-close sidebar convergence on a live workspace
+    status: pass
+  - id: event-r2a3-fresh-startup-initial-target-materialization
+    command: manual fresh-terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` in a new workspace directory, confirming the new socket starts with `workspace_chrome + target_host`, confirming `@waitagent_active_target` is populated before attach, and confirming the first hidden `__new-target` adds exactly one additional target session
+    status: pass
+  - id: event-r2a-cargo-test-quiet
+    command: cargo test --quiet after landing same-socket tmux-native main-slot rebinding, target-host session roles, and active-target projection into sidebar/footer/menu surfaces
+    status: pass
+  - id: event-r2a-cargo-build-quiet
+    command: cargo build --quiet after landing same-socket tmux-native main-slot rebinding, target-host session roles, and active-target projection into sidebar/footer/menu surfaces
+    status: pass
+  - id: event-r2a-event-driven-tmux-pane-runtime
+    command: cargo test event_driven_tmux_pane_runtime -- --nocapture after making pane snapshots consume `@waitagent_active_target` and target-host-only visible catalogs
+    status: pass
+  - id: event-r2a-event-driven-ui-pane-runtime
+    command: cargo test event_driven_ui_pane_runtime -- --nocapture after making session snapshots carry explicit active-target state
+    status: pass
+  - id: event-r2a-chrome-projection-service
+    command: cargo test chrome_projection_service -- --nocapture after making chrome projection consume explicit active-target snapshot state instead of inferring it from the visible workspace session
+    status: pass
+  - id: event-r2a-footer-menu-runtime
+    command: cargo test footer_menu_runtime -- --nocapture after making the footer menu list target-host sessions and respect the workspace active-target option
+    status: pass
+  - id: event-r2a-workspace-and-tmux-backend
+    command: cargo test workspace -- --nocapture and cargo test tmux_backend -- --nocapture after landing tmux-native pane break, join, swap, and kill helpers for same-socket rebinding
+    status: pass
+  - id: event-r2a-live-tmux-main-slot-rebinding
+    command: manual tmux-level validation by launching `./target/debug/waitagent`, invoking `__new-target` and `__activate-target` on the live socket, and confirming `list-clients` stays on the workspace chrome session, `@waitagent_active_target` changes, and target-host sessions retain only a single main pane
+    status: pass
+  - id: event-r2a-sidebar-enter-fixed-chrome-manual-repro
+    command: manual terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent`, pressing `Enter` on a sidebar item, and confirming whether sidebar and footer stay mounted while only the main view changes
+    status: fail
+  - id: event-r2a-switching-path-root-cause-review
+    command: targeted review of `src/runtime/main_slot_runtime.rs`, `src/runtime/event_driven_tmux_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and tmux backend layout helpers confirming that same-socket switching now uses tmux-native main-slot rebinding while cross-socket attach remains an explicit fallback
+    status: pass
+  - id: event-r2a-live-tmux-session-identity-exit-cleanup
+    command: manual tmux-level validation by launching `./target/debug/waitagent`, creating a second local target with `__new-target`, sending `exit` to the active main-slot shell, and confirming the target-host catalog shrinks by one, `@waitagent_active_target` advances to the surviving identity, and the final target exit removes the last target plus workspace socket without leaving a zombie target-host session
+    status: pass
+  - id: event-r3-cargo-test-quiet
+    command: cargo test --quiet after replacing accepted-path app loop ticks with deadline-driven waits, wiring server accepts into explicit runtime events, and moving resize handling onto SIGWINCH-fed runtime events
+    status: pass
+  - id: event-r3-cli-tests
+    command: cargo test cli -- --nocapture after replacing accepted-path app loop ticks with deadline-driven waits and explicit server accept events
+    status: pass
+  - id: event-r3-event-driven-tests
+    command: cargo test event_driven -- --nocapture after replacing accepted-path app loop ticks with deadline-driven waits and explicit server accept events
+    status: pass
+  - id: event-r3-cargo-build-quiet
+    command: cargo build --quiet after replacing accepted-path app loop ticks with deadline-driven waits, explicit listener events, and SIGWINCH resize watchers
+    status: pass
+  - id: event-r2-terminal-global-refresh-command
+    command: manual terminal validation by running `./target/debug/waitagent __chrome-refresh-all` and confirming an existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-bootstrap-cross-session-refresh
+    command: manual terminal validation by launching a fresh `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` session and confirming another existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-explicit-close-cross-session-refresh
+    command: manual terminal validation by running `./target/debug/waitagent __close-session --socket-name wa-<session> --session-name <session>` for a fresh session and confirming another existing session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-terminal-shell-exit-cross-session-refresh
+    command: manual terminal validation by launching two fresh `env -u TMUX TERM=xterm-256color ./target/debug/waitagent` sessions, sending `exit` to the second session's main shell pane, confirming `waitagent ls` removes the exited session, and confirming the surviving session's sidebar or footer pane pid changes on vendored tmux inspection
+    status: pass
+  - id: event-r2-layout-service-hooks
+    command: cargo test layout_service -- --nocapture after expanding tmux chrome refresh hooks and moving default pane refresh to explicit hook-driven respawns
+    status: pass
+  - id: event-r2-chrome-refresh-cli
+    command: cargo test chrome_refresh -- --nocapture after adding the hidden `__chrome-refresh` command and hook-shell wiring
+    status: pass
+  - id: event-r2-event-driven-tmux-pane-runtime
+    command: cargo test event_driven_tmux_pane_runtime -- --nocapture after adding the tmux-backed bridge that publishes pane dimensions, fullscreen state, and session snapshots into the new pane orchestrator
+    status: pass
+  - id: event-r2-event-driven-runtime-regression
+    command: cargo test event_driven -- --nocapture after adding the tmux-backed pane bridge alongside the existing event-driven chrome runtime modules
+    status: pass
+  - id: event-r2-event-driven-ui-pane-runtime
+    command: cargo test event_driven_ui_pane_runtime -- --nocapture after adding the new pane-side event orchestrator for session snapshots, resize/fullscreen events, sidebar navigation, and submit intents
+    status: pass
+  - id: event-r2-local-runtime-contract
+    command: cargo test local_runtime -- --nocapture after extending the event-driven pane path on top of the local runtime event contract
+    status: pass
+  - id: event-r2-event-driven-runtime
+    command: cargo test event_driven -- --nocapture after wiring the new event-driven ui pane runtime into the chrome runtime module set
+    status: pass
+  - id: tmux-r8a-release-build
+    command: cargo build --release after restoring tmux native status-bar coexistence, adding tmux-owned sidebar selection commands, bringing back legacy sidebar or footer colors, and expanding the footer popup command section
+    status: pass
+  - id: tmux-r8a-cargo-test-quiet
+    command: cargo test --quiet after restoring tmux native status-bar coexistence, adding tmux-owned sidebar selection commands, bringing back legacy sidebar or footer colors, and expanding the footer popup command section
+    status: pass
+  - id: tmux-r7a-codex-fullscreen-status-line-manual-release-validation
+    command: manual release validation by launching env -u TMUX TERM=xterm-256color ./target/release/waitagent, starting `codex`, confirming Ctrl-O keeps the waitagent menu visible on the tmux status line while Codex is focused, and confirming a second Ctrl-O restores the normal sidebar and footer layout
+    status: pass
+  - id: tmux-r7a-shell-fullscreen-status-line-manual-release-validation
+    command: manual release validation by launching env -u TMUX TERM=xterm-256color ./target/release/waitagent, entering fullscreen with Ctrl-O, confirming waitagent menu chrome remains visible on the tmux status line, and confirming Ctrl-B s still opens the waitagent session menu while zoomed
+    status: pass
+  - id: tmux-r7a-release-build
+    command: cargo build --release after projecting fullscreen waitagent menu hints onto the tmux status line and adding prefixed tmux bindings for fullscreen-safe session actions
+    status: pass
+  - id: tmux-r7a-cargo-test-quiet
+    command: cargo test --quiet after projecting fullscreen waitagent menu hints onto the tmux status line and adding prefixed tmux bindings for fullscreen-safe session actions
+    status: pass
+  - id: tmux-r7-footer-menu-contract-release-build
+    command: cargo build --release after upgrading the tmux-native footer menu to include current-session headers, sectioned session items, and legacy-aligned footer chrome wording while keeping switching on detach-client -E attach semantics
+    status: pass
+  - id: tmux-r7-footer-menu-contract-cargo-test-quiet
+    command: cargo test --quiet after upgrading the tmux-native footer menu to include current-session headers, empty-state coverage, sidebar selected-session id detail, and legacy-aligned footer chrome wording
+    status: pass
+  - id: tmux-r6-codex-fullscreen-and-detach-manual-release-validation
+    command: manual release validation by launching ./target/release/waitagent, starting `codex` in the main pane, confirming the tmux root binding `C-o` toggles `#{window_zoomed_flag}` from 0 to 1 and back to 0 on the vendored tmux session, and confirming `Ctrl-B d` detaches the client while the session stays alive
+    status: pass
+  - id: tmux-r6-shell-fullscreen-history-copy-detach-manual-release-validation
+    command: manual release validation by launching ./target/release/waitagent, confirming `C-o` toggles tmux zoom on the main pane, running `seq 1 5000` and verifying vendored tmux `capture-pane -S -5005` retains lines 1 through 5000, confirming `Ctrl-B [` enters copy-mode (`#{pane_in_mode}=1`) and `q` exits it, and confirming `Ctrl-B d` detaches the client
+    status: pass
+  - id: tmux-r6-release-build
+    command: cargo build --release after replacing waitagent-owned fullscreen control with tmux root-key zoom binding, enabling tmux-native mouse or copy-mode session options, and setting new-session history defaults before pane creation
+    status: pass
+  - id: tmux-r6-cargo-test-quiet
+    command: cargo test --quiet after replacing waitagent-owned fullscreen control with tmux root-key zoom binding, enabling tmux-native mouse or copy-mode session options, and setting new-session history defaults before pane creation
+    status: pass
+  - id: tmux-r5-status-bar-disabled-manual-release-validation
+    command: manual release validation by launching env -u TMUX ./target/release/waitagent and confirming the rebuilt session shows only the waitagent footer pane on the bottom edge after `status off` is applied to the tmux session
+    status: pass
+  - id: tmux-r5-multi-client-footer-single-row-manual-release-validation
+    command: manual release validation by attaching a second differently-sized client to a live waitagent session, detaching it, and confirming the final pane geometry remains sidebar width 24 and footer height 1
+    status: pass
+  - id: tmux-r5-metadata-rendering-release-build
+    command: cargo build --release after adding transport-aware sidebar labels, inferred task state, directory-aware footer rendering, stale-socket-tolerant session enumeration, and tmux status-bar shutdown for waitagent sessions
+    status: pass
+  - id: tmux-r5-metadata-rendering-cargo-test-quiet
+    command: cargo test --quiet after adding transport-aware sidebar labels, inferred task state, directory-aware footer rendering, stale-socket-tolerant session enumeration, and tmux status-bar shutdown for waitagent sessions
+    status: pass
+  - id: tmux-r5-same-directory-multi-launch-creates-independent-backends
+    command: manual release validation by launching env -u TMUX ./target/release/waitagent twice from /opt/data/workspace/wait-agent, confirming waitagent ls reports two distinct session ids, and verifying each vendored tmux socket owns its own single attached session
+    status: pass
+  - id: tmux-r5-per-invocation-session-identity-release-build
+    command: cargo build --release after switching default waitagent launches from workspace-bound identities to per-invocation tmux session ids and changing ls output to tmux-like session summaries
+    status: pass
+  - id: tmux-r5-per-invocation-session-identity-cargo-test-quiet
+    command: cargo test --quiet after switching default waitagent launches from workspace-bound identities to per-invocation tmux session ids and changing ls output to tmux-like session summaries
+    status: pass
+  - id: tmux-r5-native-hook-reconcile-maximized-terminal
+    command: manual release validation by launching ./target/release/waitagent in a maximized desktop gnome-terminal and confirming the final live tmux geometry remains sidebar width 24 and footer height 1 at a 204x54 client after attach-time and window-manager resize hooks fire
+    status: pass
+  - id: tmux-r5-native-hook-reconcile-release-build
+    command: cargo build --release after adding native tmux client-attached and client-resized layout-reconcile hooks plus the single-row footer baseline
+    status: pass
+  - id: tmux-r5-native-hook-reconcile-cargo-test-quiet
+    command: cargo test --quiet after adding native tmux client-attached and client-resized layout-reconcile hooks plus the single-row footer baseline
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-manual-restore
+    command: manual release validation by attaching ./target/release/waitagent in /opt/data/workspace/wait-agent, forcing sidebar and footer panes to 35x5 with the matching vendored tmux client, then running env -u TMUX ./target/release/waitagent detach and confirming the final pane geometry returns to sidebar width 24 and footer height 2
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-release-ls-smoke
+    command: ./target/release/waitagent ls after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-release-build
+    command: cargo build --release after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-existing-pane-geometry-normalization-cargo-test-quiet
+    command: cargo test --quiet after adding explicit geometry normalization for existing sidebar and footer panes during tmux layout restore
+    status: pass
+  - id: tmux-r5-fixed-size-menu-release-ls-smoke
+    command: ./target/release/waitagent ls after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-fixed-size-menu-release-build
+    command: cargo build --release after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-fixed-size-menu-cargo-test-quiet
+    command: cargo test --quiet after switching sidebar and footer pane sizing to fixed tmux-native cells, adding the footer menu skeleton, and recording the fullscreen complete-history requirement for tmux-r6
+    status: pass
+  - id: tmux-r5-release-ls-smoke
+    command: ./target/release/waitagent ls after adding tmux-owned sidebar and footer pane bootstrap plus hidden pane-program commands
+    status: pass
+  - id: tmux-r5-release-build
+    command: cargo build --release after adding tmux-owned sidebar and footer pane bootstrap plus hidden pane-program commands
+    status: pass
+  - id: tmux-r5-layout-and-pane-runtime-cargo-test-quiet
+    command: cargo test --quiet after splitting the tmux adapter below 1000 lines, adding the layout service, hidden pane runtimes, and tmux-owned sidebar or footer bootstrap
+    status: pass
+  - id: tmux-r4-release-ls-smoke
+    command: ./target/release/waitagent ls after moving workspace-facing commands onto the tmux-native command runtime and managed session catalog
+    status: pass
+  - id: tmux-r4-release-build
+    command: cargo build --release after moving workspace-facing commands onto the tmux-native command runtime and managed session catalog
+    status: pass
+  - id: tmux-r4-command-cutover-cargo-test-quiet-session-catalog
+    command: cargo test --quiet after adding the tmux-native attach or ls or detach runtime path, the transport-agnostic managed session catalog shape, and composition-root dispatcher wiring
+    status: pass
+  - id: tmux-r4-status-command-removal-cargo-test-quiet
+    command: cargo test --quiet after removing the custom status command from the branded tmux command surface and tightening the persistent-pane and session-registry architecture constraints
+    status: pass
+  - id: tmux-r4-command-cutover-cargo-test-quiet
+    command: cargo test --quiet after routing workspace-facing command dispatch through WorkspaceCommandRuntime and demoting src/lifecycle.rs to the shared error boundary
+    status: pass
+  - id: tmux-r3-lifecycle-stack-complete-cargo-test-quiet
+    command: cargo test --quiet after moving daemon status management, attach runtime, daemon runtime, and workspace-readiness helpers out of src/lifecycle.rs into new runtime and application/domain modules
+    status: pass
+  - id: tmux-r3-workspace-bootstrap-extraction-cargo-test-quiet
+    command: cargo test --quiet after moving workspace path derivation and daemon bootstrap policy into new domain, application, and runtime modules
+    status: pass
+  - id: tmux-r2-real-vendored-tmux-adapter-tests
+    command: cargo test --quiet infra::tmux::tests after replacing the placeholder backend with a real vendored tmux control adapter and fail-fast build behavior
+    status: pass
+  - id: tmux-r2-full-cargo-test-quiet
+    command: cargo test --quiet after replacing the placeholder backend with a real vendored tmux control adapter and fail-fast build behavior
+    status: pass
+  - id: tmux-1-default-vendored-build-cargo-build-quiet
+    command: cargo build --quiet after moving build.rs orchestration into the tmux glue module, enabling default vendored tmux compilation, and installing the required system toolchain
+    status: pass
+  - id: tmux-1-default-vendored-build-cargo-test-quiet
+    command: cargo test --quiet after moving build.rs orchestration into the tmux glue module, enabling default vendored tmux compilation, and installing the required system toolchain
+    status: pass
+  - id: tmux-1-build-status-cargo-test-quiet
+    command: cargo test --quiet after introducing typed vendored tmux build status and wiring it through the backend and build.rs
+    status: pass
+  - id: tmux-1-executor-guarded-build-cargo-test-quiet
+    command: cargo test --quiet after adding the tmux glue executor, structured execution errors, and the guarded vendored-build entrypoint behind WAITAGENT_BUILD_VENDORED_TMUX
+    status: pass
+  - id: tmux-1-toolchain-probe-cargo-test-quiet
+    command: cargo test --quiet after adding vendored tmux toolchain probing on top of the typed autotools orchestration model
+    status: pass
+  - id: tmux-1-orchestration-model-cargo-test-quiet
+    command: cargo test --quiet after adding vendored tmux source metadata discovery, typed autotools build-step modeling, and build.rs version export
+    status: pass
+  - id: tmux-1-shared-glue-contract-cargo-test-quiet
+    command: cargo test --quiet after extracting the vendored tmux glue contract into a shared module used by both build.rs and the runtime backend
+    status: pass
+  - id: tmux-1-glue-module-split-cargo-test-quiet
+    command: cargo test --quiet after splitting vendored tmux source and artifact modeling into src/infra/tmux_glue.rs and keeping src/infra/tmux.rs focused on typed backend capabilities
+    status: pass
+  - id: tmux-1-vendored-submodule-cargo-test-quiet
+    command: cargo test --quiet after adding the pinned third_party/tmux submodule, crate build.rs integration, and the vendored tmux glue-layer skeleton
+    status: pass
+  - id: tmux-0-bootstrap-dispatch-cargo-test-quiet
+    command: cargo test --quiet after moving top-level command dispatch into bootstrap and routing legacy execution through the new legacy wrapper
+    status: pass
+  - id: tmux-0-cargo-test-quiet
+    command: cargo test --quiet after suppressing expected dead-code warnings for the initial architecture skeleton modules
+    status: pass
+  - id: tmux-0-cargo-test
+    command: cargo test after adding bootstrap entry and the initial application/domain/runtime/infra/ui module skeleton
+    status: pass
   - id: fullscreen-release-build
     command: cargo build --release --quiet after the unified fullscreen transcript replay change
     status: pass

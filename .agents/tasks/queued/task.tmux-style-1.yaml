@@ -1,0 +1,37 @@
+id: task.tmux-style-1
+kind: task
+version: 1
+title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
+status: done
+priority: high
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.sidebar-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the legacy sidebar and footer or menu information contract is traced to concrete historical sources rather than recalled from memory
+  - the analysis separates reusable product-facing style requirements from implementation details that belonged only to the old composed display pipeline
+  - the analysis names which elements belong in the current tmux-pane layout slice and which interaction behaviors remain deferred to the later tmux-native menu and switching slice
+  - the current tmux-pane task is amended so the accepted legacy-style contract is explicit and testable
+verification:
+  - review historical task and design sources for the accepted sidebar and menu contract
+  - review legacy rendering tests and literals for concrete header, row, badge, and footer content patterns
+touched_paths:
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.tmux-style-1.yaml
+  - .agents/tasks/queued/task.tmux-r5.yaml
+  - .agents/tasks/queued/task.tmux-r7.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - Historical evidence reviewed for this task includes `.agents/tasks/queued/task.sidebar-1.yaml`, `docs/ui-design.md`, and legacy sidebar or footer literals and tests in `src/app.rs`.
+  - Reusable legacy contract evidence includes the sidebar header pattern `Sessions  [h] hide`, one-line session rows shaped like `bash@local` or `codex@local`, right-edge wait-state badges such as `INPUT` and `CONFIRM`, a bottom detail area rather than floating detail chrome, and footer strings shaped like `WaitAgent | ...` plus current-session context.
+  - Non-reusable historical details include the old overlay compositor, redraw-diff logic, transcript-damage tracking, and any behavior that depended on painting sidebar or footer content onto the same terminal surface as the main session output.
+  - Outcome mapping: the persistent chrome information hierarchy belongs in `task.tmux-r5`, while working menu actions, sidebar hide or reveal shortcuts, and session-switch popups belong in `task.tmux-r7`.

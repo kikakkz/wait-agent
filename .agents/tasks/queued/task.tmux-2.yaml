@@ -1,0 +1,30 @@
+id: task.tmux-2
+kind: task
+version: 1
+title: route workspace entry and attach lifecycle through tmux-backed instances
+status: superseded
+priority: highest
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: historical
+depends_on:
+  - task.tmux-1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - `waitagent workspace`, attach, and related lifecycle entrypoints can create or recover a tmux-backed workspace instance instead of relying on the old custom `__workspace-internal` display process as the default path
+  - the workspace instance can be attached or resumed without losing managed session state
+  - the migration keeps bounded compatibility around daemon discovery and instance status rather than deleting lifecycle behavior wholesale
+verification:
+  - cargo test
+  - manual: create a fresh workspace instance, detach, reattach, and confirm the tmux-backed instance resumes correctly
+touched_paths:
+  - src/lifecycle.rs
+  - src/cli.rs
+  - src/tmux.rs
+  - .agents/tasks/queued/task.tmux-2.yaml
+notes:
+  - This split is superseded by the rewrite review because the attempted route introduced a new runtime wrapper that still delegated into `lifecycle.rs`, which is explicitly not the accepted migration shape.
