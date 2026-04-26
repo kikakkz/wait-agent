@@ -32,8 +32,6 @@ const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX: &str = "waitagent-chrome-refresh";
 const DEFAULT_HISTORY_LIMIT: &str = "100000";
-const TMUX_MOUSE_OPTION: &str = "mouse";
-const TMUX_OPTION_ON: &str = "on";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedTmuxBackend {
@@ -204,11 +202,6 @@ impl EmbeddedTmuxBackend {
             "-g".to_string(),
             "history-limit".to_string(),
             DEFAULT_HISTORY_LIMIT.to_string(),
-            ";".to_string(),
-            "set-option".to_string(),
-            "-g".to_string(),
-            TMUX_MOUSE_OPTION.to_string(),
-            TMUX_OPTION_ON.to_string(),
             ";".to_string(),
             "new-session".to_string(),
             "-d".to_string(),

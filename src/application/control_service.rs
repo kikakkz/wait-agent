@@ -12,8 +12,6 @@ const CREATE_SESSION_PREFIX_KEY: &str = "c";
 const FOOTER_SESSIONS_KEY: &str = "s";
 const FOOTER_SWITCH_KEY: &str = "Enter";
 const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
-const TMUX_MOUSE_OPTION: &str = "mouse";
-const TMUX_OPTION_ON: &str = "on";
 const TMUX_STATUS_OPTION: &str = "status";
 const TMUX_STATUS_ON: &str = "on";
 const TMUX_STATUS_POSITION_OPTION: &str = "status-position";
@@ -47,8 +45,6 @@ where
         layout: &WorkspaceChromeLayout,
         footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
-        self.tmux
-            .set_session_option(workspace, TMUX_MOUSE_OPTION, TMUX_OPTION_ON)?;
         self.configure_session_chrome(workspace, layout)?;
         self.bind_main_pane_fullscreen_toggle(workspace, layout)?;
         self.bind_waitagent_sidebar_controls(workspace, layout)?;
@@ -576,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn control_service_enables_mouse_and_binds_ctrl_o_to_main_pane_zoom() {
+    fn control_service_binds_ctrl_o_to_main_pane_zoom() {
         let gateway = FakeGateway::default();
         let service = ControlService::new(gateway.clone());
         let workspace = TmuxWorkspaceHandle {
@@ -609,7 +605,6 @@ mod tests {
         assert_eq!(
             gateway.calls(),
             vec![
-                Call::SetSessionOption("mouse".to_string(), "on".to_string()),
                 Call::SetSessionOption("status".to_string(), "on".to_string()),
                 Call::SetSessionOption("status-position".to_string(), "bottom".to_string()),
                 Call::SetWindowOption("automatic-rename".to_string(), "off".to_string()),

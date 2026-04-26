@@ -2630,27 +2630,6 @@ impl App {
         }
     }
 
-    fn write_native_fullscreen_live_snapshot(
-        &self,
-        session: &SessionAddress,
-        hosted: &HashMap<SessionAddress, HostedSession>,
-    ) -> Result<(), AppError> {
-        let Some(snapshot) = hosted
-            .get(session)
-            .map(|runtime| runtime.screen_engine.state().active_snapshot().clone())
-        else {
-            return Ok(());
-        };
-
-        self.write_terminal_snapshot_with_scroll_region(
-            "native fullscreen live snapshot",
-            &snapshot,
-            true,
-            0,
-            snapshot.size.rows.saturating_sub(1),
-        )
-    }
-
     fn trigger_native_fullscreen_live_redraw(
         &mut self,
         session: &SessionAddress,
@@ -2702,8 +2681,8 @@ impl App {
             NativeFullscreenSeedMode::ReplaySnapshot => {
                 self.write_native_fullscreen_seed(&session, hosted, terminal_size)?;
             }
-            NativeFullscreenSeedMode::WaitForLiveRedraw => {
-                self.write_native_fullscreen_live_snapshot(&session, hosted)?;
+            NativeFullscreenSeedMode::ReplaySnapshotThenLiveRedraw => {
+                self.write_native_fullscreen_seed(&session, hosted, terminal_size)?;
                 self.trigger_native_fullscreen_live_redraw(&session, hosted, terminal_size)?;
             }
         }
@@ -5294,7 +5273,7 @@ struct NativeFullscreenInputOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFullscreenSeedMode {
     ReplaySnapshot,
-    WaitForLiveRedraw,
+    ReplaySnapshotThenLiveRedraw,
 }
 
 impl NativeFullscreenState {
@@ -6268,7 +6247,7 @@ fn native_fullscreen_seed_mode(
     resized_for_fullscreen: bool,
 ) -> NativeFullscreenSeedMode {
     if session_prefers_live_surface && resized_for_fullscreen {
-        NativeFullscreenSeedMode::WaitForLiveRedraw
+        NativeFullscreenSeedMode::ReplaySnapshotThenLiveRedraw
     } else {
         NativeFullscreenSeedMode::ReplaySnapshot
     }
@@ -10803,10 +10782,10 @@ mod tests {
     }
 
     #[test]
-    fn native_fullscreen_seed_mode_waits_for_live_redraw_after_resize() {
+    fn native_fullscreen_seed_mode_replays_snapshot_before_live_redraw_after_resize() {
         assert_eq!(
             native_fullscreen_seed_mode(true, true),
-            NativeFullscreenSeedMode::WaitForLiveRedraw
+            NativeFullscreenSeedMode::ReplaySnapshotThenLiveRedraw
         );
     }
 
