@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.8`  
+Version: `v1.9`  
 Status: `Active`  
 Date: `2026-04-27`
 
@@ -54,8 +54,9 @@ Project status at a glance:
 - `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
 - `task.event-r2a` is now accepted for the local product goal: same-socket switching uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks refresh only the affected workspace chrome, startup materializes the initial target identity before attach, and real-terminal sidebar or footer switching keeps the fixed chrome mounted
 - local acceptance is no longer blocked on deleted legacy interaction features, because they are not part of the accepted current product scope
-- `task.event-r3` is now the active local gate: move remaining attach, resize, and scheduler control off accepted-path tick or timeout coordination and onto explicit runtime events
-- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable and the remaining attach-side event cleanup lands
+- `task.event-r3` is now closed for the accepted local scope: attach and resize validation passed, explicit runtime events now own the accepted control path, and stale auto-switch wording has been retired because auto-switch is not part of the current product contract
+- `task.event-r4` is now the active local gate: make the event-driven route the single accepted default local path and isolate any remaining polling history
+- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable and the default route is fully aligned with the event-driven stack
 
 ## 4. Milestone Summary
 
@@ -83,7 +84,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- execute `task.event-r3` on the accepted local path, then close `task.event-r4` before remote session design resumes
+- execute `task.event-r4` on the accepted local path, then resume remote session design only after the event-driven route is the single clear default baseline
 
 Accepted local architecture direction:
 

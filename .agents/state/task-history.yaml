@@ -1,6 +1,18 @@
 kind: state
 version: 1
 history:
+  - task_id: task.event-r4
+    status: in_progress
+    summary: with task.event-r3 now closed after attach and resize validation passed, active work moves to making the event-driven route the single accepted default local path and isolating any remaining polling history behind inactive or historical boundaries
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r3
+    status: done
+    summary: the attach, resize, and scheduler event slice is now closed: accepted-path control no longer depends on the old tick contract, attach and resize validation passed, and stale auto-switch wording was retired from the verification contract because auto-switch is no longer in scope
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r3.yaml
+      reference: status
   - task_id: task.event-r3
     status: in_progress
     summary: the accepted local path now re-establishes a main-pane output bridge with pipe-pane output forwarding, but the bridge only emits a lightweight refresh signal, so shell-to-agent command identity changes like bash to codex update sidebar labels without waiting for fullscreen and without invoking a full layout refresh on every output line

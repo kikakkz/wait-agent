@@ -2,7 +2,7 @@ id: task.event-r3
 kind: task
 version: 1
 title: move attach, resize, and scheduler control onto explicit runtime events
-status: in_progress
+status: done
 priority: critical
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -21,7 +21,7 @@ done_criteria:
   - new runtime modules make event propagation and ownership easier to audit than the old mixed app loop
 verification:
   - cargo test
-  - manual: attach, resize, and auto-switch behavior in a real terminal without visible tick-latency artifacts
+  - manual: attach and resize behavior in a real terminal without visible tick-latency artifacts
   - targeted review of the new event loop modules and scheduler triggers
 touched_paths:
   - src/infra/tmux_backend.rs
@@ -38,5 +38,6 @@ notes:
   - 2026-04-27 resumed: `task.event-r2a` umbrella acceptance is closed, so active work now moves to removing remaining accepted-path tick, timeout, and sleep-driven coordination from attach, resize, and scheduler control.
   - 2026-04-27 progress: startup chrome readiness now flows through explicit sidebar and footer ready signals rather than pane-text polling with fixed sleeps, while pane-identity session options keep the wait robust when pane processes render before waiters attach.
   - 2026-04-27 progress: the accepted path now re-establishes a main-pane output bridge with `pipe-pane -O`, but the bridge only emits a lightweight `__chrome-refresh-signal`; pane runtimes consume the signal and refresh snapshots themselves, so command-identity changes in the active target can update sidebar labels without waiting for fullscreen or layout reconciliation.
+  - 2026-04-27 completed: manual attach and resize validation passed on the accepted path, and the stale auto-switch verification wording was retired because auto-switch is no longer part of the current local product contract.
   - When this slice resumes, audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
   - This task is the second slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

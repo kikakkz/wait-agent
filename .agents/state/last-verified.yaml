@@ -1,7 +1,10 @@
 kind: state
 version: 1
-last_updated_from: task.event-r3 verification refreshed on 2026-04-27
+last_updated_from: task.event-r3 closed and task.event-r4 opened on 2026-04-27
 checks:
+  - id: event-r3-manual-attach-and-resize-validation
+    command: manual terminal validation confirming attach and resize behavior on the accepted local path without visible tick-latency artifacts; stale auto-switch wording removed because auto-switch is no longer part of the current product scope
+    status: pass
   - id: event-r3-initial-chrome-ready-backend-test
     command: cargo test --quiet infra::tmux_backend::tests::initial_chrome_ready_signals_wake_sidebar_and_footer_waiters after replacing startup pane-text polling with explicit sidebar and footer ready wait-for channels
     status: pass

@@ -1,42 +1,38 @@
-id: task.event-r3
+id: task.event-r4
 kind: task
 version: 1
-title: move attach, resize, and scheduler control onto explicit runtime events
+title: route the default local path through the new event-driven stack and isolate polling history
 status: in_progress
 priority: critical
 source_of_truth:
-  file: .agents/tasks/queued/task.event-r3.yaml
+  file: .agents/tasks/queued/task.event-r4.yaml
   reference: current
 depends_on:
-  - task.event-r2a.done
+  - task.event-r3.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - attach flow reacts to socket input, stdin input, daemon output, and terminal resize through explicit events rather than fixed client ticks
-  - scheduler recomputation is triggered by named session-state transitions, input, output, focus, and resize events rather than periodic wakeups
-  - new local control flow no longer relies on `recv_timeout(EVENT_LOOP_TICK)` as the primary coordination mechanism
-  - new runtime modules make event propagation and ownership easier to audit than the old mixed app loop
+  - the default local workspace and attach path runs through the new event-driven stack
+  - fixed polling loops that remain are no longer on the primary local path and are clearly marked historical or inactive
+  - shell and Codex validation confirm the new event-driven path is the accepted baseline
+  - docs and task state record one clear primary local runtime direction
 verification:
   - cargo test
-  - manual: attach, resize, and auto-switch behavior in a real terminal without visible tick-latency artifacts
-  - targeted review of the new event loop modules and scheduler triggers
+  - manual: shell validation in a real terminal
+  - manual: Codex validation in a real terminal
+  - targeted review of default-route ownership
 touched_paths:
-  - src/infra/tmux_backend.rs
   - src/runtime
-  - src/runtime/event_driven_pane_runtime.rs
-  - src/runtime/workspace_layout_runtime.rs
   - src/application
   - src/domain
-  - src/app.rs
-  - .agents/tasks/queued/task.event-r3.yaml
+  - docs/tmux-first-workspace-plan.md
+  - docs/execution-status-board.md
+  - .agents/tasks/queued/task.event-r4.yaml
+  - .agents/state/task-history.yaml
 notes:
-  - This slice should build the new control path, not patch the historical tick loop in place unless that is the smallest route to isolate it behind a new boundary.
-  - 2026-04-24 pause: do not resume this slice until in-workspace target switching stops leaving the current client. The current `detach-client -E "waitagent attach <target>"` path is an upstream blocker because it cannot satisfy fixed chrome, no shell reveal, or no flicker.
-  - 2026-04-27 resume: `task.event-r2a` umbrella acceptance is now complete, including real-terminal validation that sidebar Enter and footer menu switching keep the workspace chrome mounted while only the main slot target changes.
-  - 2026-04-27 progress: startup chrome readiness no longer polls pane text with fixed sleeps on the accepted path; sidebar and footer now mark initial readiness through explicit tmux wait-for channels plus pane-identity session options, and workspace layout waits on those signals with a bounded timeout fallback.
-  - 2026-04-27 progress: the accepted path now re-establishes a main-pane output bridge with `pipe-pane -O`, but that bridge only emits a lightweight `__chrome-refresh-signal`; pane runtimes consume the signal and refresh snapshots themselves, so shell-to-agent command identity changes such as `bash -> codex` update sidebar labels without requiring a fullscreen round-trip or a full layout refresh.
-  - When this slice resumes, audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
-  - This task is the second slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.
+  - This slice closes the architecture reset by making the new event-driven route the only accepted default local path.
+  - 2026-04-27 resume: `task.event-r3` is now closed after accepted-path attach and resize validation passed and the obsolete auto-switch wording was removed from the manual verification contract.
+  - This task is the final slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

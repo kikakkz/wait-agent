@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.event-r3
-focus_statement: task.event-r2a umbrella acceptance is now closed, so the active gate moves to task.event-r3: remove remaining accepted-path attach, resize, and scheduler tick or timeout coordination in favor of explicit runtime events
+current_task: task.event-r4
+focus_statement: task.event-r3 is now closed, so the active gate moves to task.event-r4: make the event-driven local route the single accepted default path and isolate any remaining polling history behind inactive or historical boundaries
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

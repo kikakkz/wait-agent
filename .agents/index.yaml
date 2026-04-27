@@ -45,7 +45,7 @@ directories:
 active_context:
   project_phase: phase-1
   current_stage: tmux-first-local-architecture-migration
-  current_focus: execute event-r3 now that event-r2a umbrella acceptance is closed, starting with accepted-path attach, resize, and scheduler control that still relies on tick, timeout, or sleep-based coordination
+  current_focus: execute event-r4 now that event-r3 is closed, making the event-driven local route the single accepted default path and isolating any remaining polling history
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh
