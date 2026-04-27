@@ -1,8 +1,8 @@
 # WaitAgent Event-Driven Local Runtime Architecture
 
-Version: `v1.1`  
+Version: `v1.2`  
 Status: `Accepted`  
-Date: `2026-04-24`
+Date: `2026-04-27`
 
 ## 1. Purpose
 
@@ -36,24 +36,43 @@ Historical polling code may remain temporarily while the new path is landing, bu
 
 ## 3. Accepted Runtime Modules
 
-The new local runtime is split into these event-owning modules:
+The accepted local runtime is now anchored on the modules that actually own the
+default route in code:
 
-1. `TmuxHookBridge`
-   Converts tmux hooks and pane-geometry changes into typed runtime events.
-2. `WorkspaceController`
-   Owns command-side effects, layout changes, focus changes, and session-switch commits.
-3. `SessionCatalogProjector`
-   Produces authoritative session-catalog updates from tmux and workspace state.
-4. `SidebarPaneRuntime`
-   Renders sidebar chrome and emits explicit selection intent.
-5. `FooterPaneRuntime`
-   Renders footer or status-line chrome and emits explicit menu intent.
-6. `MainSlotRuntime`
-   Owns target activation inside the persistent workspace chrome and rebinds the main slot without leaving the current client.
-7. `AttachClientRuntime`
-   Translates client stdin, daemon output, attach lifecycle, and terminal resize into runtime events.
-8. `SchedulerRuntime`
-   Produces focus and autoswitch decisions only when upstream runtime state changes.
+1. `bootstrap::run`
+   Parses CLI input and hands every command to one dispatcher boundary.
+2. `command::dispatch::CommandDispatcher`
+   Routes `workspace`, `attach`, and other user-facing commands into the
+   accepted runtime owners rather than historical mixed loops.
+3. `runtime::WorkspaceCommandRuntime`
+   Owns the default local command path for workspace bootstrap, attach,
+   target activation, fullscreen, detach, and list behavior.
+4. `runtime::WorkspaceEntryRuntime`
+   Bootstraps or resolves the local workspace, applies the fixed chrome layout,
+   and returns the accepted tmux-backed workspace handle.
+5. `runtime::MainSlotRuntime`
+   Owns target activation inside the persistent workspace chrome and rebinds
+   the main slot without leaving the current client.
+6. `runtime::WorkspaceLayoutRuntime`
+   Owns layout reconciliation, chrome refresh signaling, main-pane output
+   bridging, and fullscreen-aware chrome updates.
+7. `runtime::EventDrivenPaneRuntime`
+   Owns hidden sidebar and footer pane processes, consumes explicit refresh and
+   resize signals, and emits activation intent.
+8. `runtime::EventDrivenTmuxPaneRuntime`
+   Projects tmux pane state and workspace session snapshots into the pane-side
+   event-driven chrome runtime.
+9. `runtime::EventDrivenUiPaneRuntime`
+   Owns sidebar and footer render-state transitions once a pane snapshot or
+   input event arrives.
+
+The critical event-r4 rule is:
+
+- `workspace` and `attach` must continue to enter through
+  `bootstrap::run -> CommandDispatcher -> WorkspaceCommandRuntime`
+- hidden pane rendering must continue to enter through
+  `CommandDispatcher -> EventDrivenPaneRuntime`
+- no historical runtime path is allowed to own the default local route
 
 ## 4. Accepted Event Classes
 
@@ -61,7 +80,8 @@ The new event contract is represented in code by:
 
 - [local_runtime.rs](/opt/data/workspace/wait-agent/src/domain/local_runtime.rs)
 - [local_runtime_event_service.rs](/opt/data/workspace/wait-agent/src/application/local_runtime_event_service.rs)
-- [event_driven_runtime.rs](/opt/data/workspace/wait-agent/src/runtime/event_driven_runtime.rs)
+- [event_driven_pane_runtime.rs](/opt/data/workspace/wait-agent/src/runtime/event_driven_pane_runtime.rs)
+- [workspace_command_runtime.rs](/opt/data/workspace/wait-agent/src/runtime/workspace_command_runtime.rs)
 
 The accepted top-level event classes are:
 
@@ -70,25 +90,21 @@ The accepted top-level event classes are:
    Examples: `client-attached`, `client-detached`, `client-resized`, `client-session-changed`
    Consumers: `WorkspaceController`, `SessionCatalogProjector`
 2. `SessionCatalog`
-   Source: `SessionCatalogProjector`
-   Examples: snapshot published, selection changed, active session changed
-   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`, `SchedulerRuntime`
+   Source: session-service and pane-state projection on the accepted tmux path
+   Examples: snapshot published, selected target changed, active target changed
+   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`
 3. `Chrome`
    Source: pane runtimes
    Examples: sidebar selection changed, footer render requested, status-line projection changed
    Consumers: `WorkspaceController`, `MainSlotRuntime`, sibling chrome runtime when needed
 4. `TargetActivation`
-   Source: `WorkspaceController`, `MainSlotRuntime`
+   Source: `WorkspaceCommandRuntime`, `MainSlotRuntime`
    Examples: target activation requested, target rebound into main slot, target activation committed
-   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`, `SchedulerRuntime`
+   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`
 5. `Attach`
-   Source: `AttachClientRuntime`
-   Examples: client attached, input read, client resized, daemon output received
-   Consumers: `WorkspaceController`, `SchedulerRuntime`
-6. `Scheduler`
-   Source: `SchedulerRuntime`
-   Examples: focus changed, autoswitch requested, autoswitch committed
-   Consumers: `WorkspaceController`, chrome runtimes
+   Source: `WorkspaceCommandRuntime`
+   Examples: workspace attached, target attached, current client detached
+   Consumers: tmux backend and workspace layout runtime ownership
 
 ## 5. Explicit Producer And Consumer Contract
 
@@ -102,10 +118,9 @@ tmux hooks
 session catalog updates
   -> SidebarPaneRuntime
   -> FooterPaneRuntime
-  -> SchedulerRuntime
 
 sidebar selection intent
-  -> WorkspaceController
+  -> WorkspaceCommandRuntime
   -> MainSlotRuntime
   -> FooterPaneRuntime
 
@@ -113,14 +128,13 @@ target activation
   -> MainSlotRuntime
   -> SidebarPaneRuntime
   -> FooterPaneRuntime
-  -> SchedulerRuntime
 
-attach input / attach resize / daemon output
-  -> WorkspaceController
-  -> SchedulerRuntime
+attach command / attach target resolution
+  -> WorkspaceCommandRuntime
+  -> SessionService
 
-scheduler focus / autoswitch decisions
-  -> WorkspaceController
+main-pane output bridge signal
+  -> WorkspaceLayoutRuntime
   -> SidebarPaneRuntime
   -> FooterPaneRuntime
 ```
@@ -141,14 +155,14 @@ The following paths are now historical and have explicit replacement owners in t
    Current mechanism: fixed `200ms` sleep and unconditional redraw
    Replacement owner: `FooterPaneRuntime`
 3. `src/runtime/workspace_attach_runtime.rs::run`
-   Current mechanism: fixed `50ms` client tick for resize and startup-refresh logic
-   Replacement owner: `AttachClientRuntime`
+   Historical mechanism: fixed `50ms` client tick for resize and startup-refresh logic
+   Replacement owner: `WorkspaceCommandRuntime` plus `WorkspaceLayoutRuntime`
 4. `src/runtime/workspace_bootstrap_runtime.rs::wait_for_existing_daemon_ready`
-   Current mechanism: sleep-and-retry readiness loop
-   Replacement owner: `WorkspaceController`
+   Historical mechanism: sleep-and-retry readiness loop
+   Replacement owner: `WorkspaceEntryRuntime` plus `WorkspaceLayoutRuntime`
 5. `src/app.rs` managed console and passthrough loops
-   Current mechanism: fixed `50ms` event-loop tick for scheduler and resize checks
-   Replacement owner: `SchedulerRuntime`
+   Historical mechanism: fixed `50ms` event-loop tick for scheduler and resize checks
+   Replacement owner: `WorkspaceCommandRuntime` plus `EventDrivenPaneRuntime`
 
 These paths may remain while migration is incomplete, but they are not allowed to absorb new feature work.
 
@@ -158,7 +172,36 @@ Additional rejected path:
    Current mechanism: `detach-client -E "waitagent attach <target>"`
    Replacement owner: `MainSlotRuntime`
 
-## 7. Slice Mapping
+## 7. Default Route Ownership
+
+The accepted default local route is now:
+
+```text
+main
+  -> bootstrap::run
+  -> CommandDispatcher
+  -> WorkspaceCommandRuntime
+     -> WorkspaceEntryRuntime
+     -> WorkspaceLayoutRuntime
+     -> MainSlotRuntime
+     -> SessionService / tmux backend
+```
+
+The accepted hidden-pane route is:
+
+```text
+tmux pane program
+  -> CommandDispatcher
+  -> EventDrivenPaneRuntime
+  -> EventDrivenTmuxPaneRuntime
+  -> EventDrivenUiPaneRuntime
+```
+
+If a local behavior does not enter through one of those two routes, it is not
+on the accepted default path and must be treated as historical, inactive, or
+explicitly transitional.
+
+## 8. Slice Mapping
 
 The accepted follow-on queue is:
 
@@ -173,7 +216,7 @@ The accepted follow-on queue is:
 5. `task.event-r4`
    Route the default local path through the new event-driven stack and isolate polling history.
 
-## 8. Migration Rule
+## 9. Migration Rule
 
 Do not patch historical polling loops to make them slightly cleaner and call that event-driven.
 

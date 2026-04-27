@@ -227,6 +227,12 @@ Priority rule:
 
 Earlier `tmux-*` slices remain valid historical implementation record, but they are not the current planning surface.
 
+Current event-r4 refinement:
+
+- the default local route is now explicitly anchored on `bootstrap::run -> CommandDispatcher -> WorkspaceCommandRuntime`
+- hidden pane ownership is explicitly anchored on `EventDrivenPaneRuntime`
+- stale references to deleted files such as `src/app.rs` or non-existent placeholders such as `event_driven_runtime.rs` should be retired wherever they still appear in architecture or agent-control docs
+
 ## 11. Acceptance Criteria
 
 The tmux-first migration is accepted only if all of the following become true:

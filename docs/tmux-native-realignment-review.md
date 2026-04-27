@@ -11,6 +11,11 @@ This review re-evaluates the implemented and planned tmux migration work under t
 - waitagent should be a branded tmux-like tool
 - except for waitagent-owned sidebar, footer/menu, and management affordances, implementation should maximize reuse of tmux native behavior and targets
 
+This document is historical design rationale, not the active execution queue.
+Current default-route ownership and task ordering now live in
+[event-driven-local-runtime-architecture.md](event-driven-local-runtime-architecture.md),
+[execution-status-board.md](execution-status-board.md), and `.agents/tasks/`.
+
 ## 2. Review Result
 
 ### 2.1 Retain As Foundation

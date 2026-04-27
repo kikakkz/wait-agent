@@ -1,6 +1,30 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-06
+    status: in_progress
+    summary: with task.event-r4 now closed after user-reported shell and Codex visible-behavior acceptance, active work resumes the first deferred network slice: establish one shared transport-agnostic target registry for local and remote targets
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r4
+    status: done
+    summary: the local event-driven route is now accepted as the default baseline: user-reported shell and Codex visible-behavior validation passed, current control-plane docs point at the real bootstrap-to-dispatcher-to-workspace-command path, and remote work may resume from the shared registry slice
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r4.yaml
+      reference: status
+  - task_id: task.event-r4
+    status: in_progress
+    summary: the assistant control-plane entrypoints, project context, and current architecture docs now all point at event-r4 and the accepted default route `bootstrap::run -> CommandDispatcher -> WorkspaceCommandRuntime`; remaining event-r4 work is final manual shell and Codex validation plus any last historical-boundary cleanup
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r4
+    status: in_progress
+    summary: default-route ownership is now being tightened around the real bootstrap to dispatcher to workspace-command path, while stale src/app.rs and event_driven_runtime.rs references are being removed from architecture and agent-control docs so the event-driven local baseline is auditable
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
   - task_id: task.event-r4
     status: in_progress
     summary: with task.event-r3 now closed after attach and resize validation passed, active work moves to making the event-driven route the single accepted default local path and isolating any remaining polling history behind inactive or historical boundaries

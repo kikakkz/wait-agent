@@ -2,7 +2,7 @@ id: task.t5-06
 kind: task
 version: 1
 title: implement the aggregate transport-agnostic target registry
-status: deferred
+status: in_progress
 priority: medium
 target_task_reference: task.t5-06
 source_of_truth:
@@ -34,6 +34,7 @@ touched_paths:
   - docs/execution-status-board.md
   - docs/tmux-first-workspace-plan.md
 notes:
-  - This task is deferred behind the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4`.
+  - This task was deferred behind the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` and is now the active resumed network slice.
   - This task is the first network slice only after the fixed-chrome main-slot model becomes the accepted default local path.
   - Do not fork a separate remote-only registry shape; local and remote targets must converge on one shared catalog.
+  - 2026-04-27 resumed: `task.event-r4` is now closed after user-reported shell and Codex visible-behavior acceptance, so active work moves to the shared transport-agnostic registry baseline.

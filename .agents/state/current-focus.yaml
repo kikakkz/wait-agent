@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.event-r4
-focus_statement: task.event-r3 is now closed, so the active gate moves to task.event-r4: make the event-driven local route the single accepted default path and isolate any remaining polling history behind inactive or historical boundaries
+current_task: task.t5-06
+focus_statement: task.event-r4 is now closed, so active work resumes the first deferred network slice: build the shared transport-agnostic target registry on top of the accepted local fixed-chrome baseline
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

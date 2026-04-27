@@ -39,4 +39,4 @@ notes:
   - This slice is architecture-only. Do not spend effort rehabilitating old polling loops.
   - The user explicitly chose an event-driven direction for all new local runtime work.
   - Old tmux cleanup slices are now historical unless a concrete event-driven replacement path depends on one of their artifacts.
-  - Completed on 2026-04-23 with an explicit local-runtime event contract in `src/domain/local_runtime.rs`, an application event-bus boundary in `src/application/local_runtime_event_service.rs`, a runtime replacement map in `src/runtime/event_driven_runtime.rs`, and the corresponding architecture notes in `docs/event-driven-local-runtime-architecture.md`.
+  - Completed on 2026-04-23 with an explicit local-runtime event contract in `src/domain/local_runtime.rs`, an application event-bus boundary in `src/application/local_runtime_event_service.rs`, an accepted event-driven runtime replacement map documented against the active `workspace_command_runtime` and `event_driven_pane_runtime` path, and the corresponding architecture notes in `docs/event-driven-local-runtime-architecture.md`.

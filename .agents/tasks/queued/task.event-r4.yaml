@@ -2,7 +2,7 @@ id: task.event-r4
 kind: task
 version: 1
 title: route the default local path through the new event-driven stack and isolate polling history
-status: in_progress
+status: done
 priority: critical
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -17,13 +17,14 @@ linked_primitives:
 done_criteria:
   - the default local workspace and attach path runs through the new event-driven stack
   - fixed polling loops that remain are no longer on the primary local path and are clearly marked historical or inactive
-  - shell and Codex validation confirm the new event-driven path is the accepted baseline
+  - shell and Codex manual acceptance confirm visible behavior on the accepted local path
+  - route ownership and historical-boundary review confirm the new event-driven path is the accepted baseline
   - docs and task state record one clear primary local runtime direction
 verification:
   - cargo test
-  - manual: shell validation in a real terminal
-  - manual: Codex validation in a real terminal
-  - targeted review of default-route ownership
+  - manual: shell visible-behavior validation in a real terminal
+  - manual: Codex visible-behavior validation in a real terminal
+  - review: default-route ownership and historical-boundary audit
 touched_paths:
   - src/runtime
   - src/application
@@ -35,4 +36,7 @@ touched_paths:
 notes:
   - This slice closes the architecture reset by making the new event-driven route the only accepted default local path.
   - 2026-04-27 resumed: `task.event-r3` is now closed after accepted-path attach and resize validation passed, so active work moves to making the event-driven route the single clear default local baseline.
+  - 2026-04-27 progress: default-route ownership is now documented against the real code path `bootstrap::run -> CommandDispatcher -> WorkspaceCommandRuntime`, hidden pane ownership is documented against `EventDrivenPaneRuntime`, and stale `src/app.rs` or `event_driven_runtime.rs` references are being retired from architecture and agent-control docs.
+  - 2026-04-27 progress: `.agents/index.yaml`, `.agents/context/project.yaml`, and the current human control-plane docs now point to `task.event-r4`, while `docs/tmux-first-runtime-architecture.md` now names the real accepted runtime modules instead of stale placeholder files.
+  - 2026-04-27 done: user-reported shell and Codex manual visible-behavior validation completed, so the local event-driven path is accepted as the default baseline and remote work may resume from `task.t5-06`.
   - This task is the final slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

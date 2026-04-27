@@ -1,38 +1,38 @@
-id: task.event-r4
+id: task.t5-06
 kind: task
 version: 1
-title: route the default local path through the new event-driven stack and isolate polling history
+title: implement the aggregate transport-agnostic target registry
 status: in_progress
-priority: critical
+priority: medium
 source_of_truth:
-  file: .agents/tasks/queued/task.event-r4.yaml
+  file: .agents/tasks/queued/task.t5-06.yaml
   reference: current
 depends_on:
-  - task.event-r3.done
+  - task.event-r4.done
 linked_primitives:
+  - primitive.network-registry-scope
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - the default local workspace and attach path runs through the new event-driven stack
-  - fixed polling loops that remain are no longer on the primary local path and are clearly marked historical or inactive
-  - shell and Codex validation confirm the new event-driven path is the accepted baseline
-  - docs and task state record one clear primary local runtime direction
+  - the aggregate server tracks local and remote targets in one authoritative transport-agnostic registry instead of relying on one-off publication paths
+  - registry state matches the shared target catalog and main-slot activation model used by the local tmux-first path, so later remote input, resize, and server-side console work can consume it without another schema rewrite
+  - the registry does not assume local tmux inspection, superseded daemon attach identity, or server-owned remote PTYs as the universal session model
+  - local fixed-chrome workspace behavior remains intact while aggregate registration is introduced
+  - task board and verification state are refreshed together with the implementation slice
 verification:
   - cargo test
-  - manual: shell validation in a real terminal
-  - manual: Codex validation in a real terminal
-  - targeted review of default-route ownership
+  - targeted review of registry ownership and update paths across the server, transport, and session layers
 touched_paths:
-  - src/runtime
-  - src/application
-  - src/domain
-  - docs/tmux-first-workspace-plan.md
+  - src/server.rs
+  - src/session.rs
+  - src/transport.rs
+  - .agents/tasks/queued/task.t5-06.yaml
+  - .agents/tasks/backlog.yaml
   - docs/execution-status-board.md
-  - .agents/tasks/queued/task.event-r4.yaml
-  - .agents/state/task-history.yaml
+  - docs/tmux-first-workspace-plan.md
 notes:
-  - This slice closes the architecture reset by making the new event-driven route the only accepted default local path.
-  - 2026-04-27 resume: `task.event-r3` is now closed after accepted-path attach and resize validation passed and the obsolete auto-switch wording was removed from the manual verification contract.
-  - This task is the final slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.
+  - This task is the first network slice after the local event-driven route became the accepted default baseline.
+  - 2026-04-27 resumed: `task.event-r4` is now closed after user-reported shell and Codex manual visible-behavior validation completed, so active work moves to the shared transport-agnostic target registry.
+  - Do not fork a separate remote-only registry shape; local and remote targets must converge on one shared catalog.

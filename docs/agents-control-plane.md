@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.2`  
+Version: `v1.3`  
 Status: `Active`  
-Date: `2026-04-21`
+Date: `2026-04-27`
 
 ## 1. Purpose
 
@@ -70,22 +70,24 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.tmux-0`:
+The current default task is `task.t5-06`:
 
-> Establish the new modular runtime architecture, unified entry model, and migration skeleton.
+> Implement the aggregate transport-agnostic target registry.
 
 That task intentionally routes assistants through:
 
 - `primitive.verification-refresh`
-- `primitive.task-switch-current`
+- `primitive.network-registry-scope`
+- `primitive.task-history-update`
 - `primitive.task-board-sync`
+- `primitive.agents-self-maintenance`
 
 This keeps assistants focused on:
 
-- the accepted tmux-first workspace architecture
-- the accepted tmux-first runtime architecture
-- removing ambiguity about the retired custom fullscreen baseline
-- bounded delivery slices that stabilize local UX before more network work resumes
+- one shared target catalog for local and remote targets
+- preserving the accepted local fixed-chrome activation model while network work resumes
+- avoiding remote designs that assume local tmux inspection, daemon attach identity, or server-owned remote PTYs
+- sequencing remote registry work before remote input, resize, or server-console features
 
 ## 5. Maintenance Rules
 

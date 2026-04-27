@@ -6,6 +6,10 @@ use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::ui::banner::print_banner;
 
+// This dispatcher is the single command-side ownership boundary for the
+// accepted local default route. `workspace` and `attach` must continue to flow
+// into `WorkspaceCommandRuntime`, while hidden chrome panes stay on the
+// dedicated event-driven pane runtimes.
 pub struct CommandDispatcher {
     workspace_runtime: WorkspaceCommandRuntime,
     pane_runtime: EventDrivenPaneRuntime,

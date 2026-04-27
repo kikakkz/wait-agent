@@ -7,20 +7,20 @@ summary:
   language: rust
   package_manager: cargo
   architecture_style: tmux_first_local_workspace_runtime
-  active_business_goal: stabilize the tmux-first local workspace architecture before extending mirrored network interaction
+  active_business_goal: resume mirrored network interaction on top of the accepted tmux-first local workspace baseline
   framework_policy: prefer mature maintained Rust components over custom infrastructure, and avoid weakly maintained dependencies across the codebase
 current_phase:
-  phase_id: phase-1
-  phase_title: local workspace MVP
-  stage_id: tmux-first-local-architecture-migration
-  stage_title: replace the retired custom fullscreen baseline with tmux-native workspace ownership
+  phase_id: phase-2
+  phase_title: network aggregation MVP
+  stage_id: network-registry-reset
+  stage_title: resume remote design from the accepted tmux-first local baseline
 current_focus:
-  default_task_id: task.tmux-r3
-  focus_statement: build a new workspace lifecycle stack outside the legacy lifecycle module now that the vendored tmux control adapter is in place
+  default_task_id: task.t5-06
+  focus_statement: build the shared transport-agnostic target registry that remote interaction will consume, without regressing the accepted local fixed-chrome baseline
 upcoming_focus:
-  - cut workspace-facing commands over to the new tmux-first lifecycle stack
-  - move sidebar, menu, fullscreen, and session switching onto tmux-native ownership boundaries
-  - resume aggregate server registry work after the local tmux-first base is stable
+  - route remote input and resize through the server control plane on top of the shared target catalog
+  - introduce the server-side workspace console as a target-activation surface
+  - keep local and remote target identity transport-agnostic instead of reviving local-only PTY assumptions
 source_of_truth:
   - docs/execution-status-board.md
   - docs/local-acceptance-checklist.md

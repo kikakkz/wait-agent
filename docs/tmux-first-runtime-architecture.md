@@ -16,14 +16,20 @@ This document answers a different question:
 
 ## 2. Why A New Architecture Is Needed
 
-The current structure is not a good long-term base for the tmux-first migration.
+The historical structure that this migration replaces was not a good long-term
+base for the tmux-first direction.
 
 Visible signals:
 
-- `src/app.rs` is over 11k lines and mixes command dispatch, workspace runtime, fullscreen logic, sidebar behavior, rendering, PTY ownership, and tests
-- `src/lifecycle.rs` mixes daemon lifecycle, attach protocol, child-process management, and rendering bootstrap
-- entry logic is split between `main`, `app`, and `lifecycle` in a way that is functional but not cleanly layered
-- the old fullscreen path left a large amount of UI, resize, passthrough, and restore behavior coupled into one runtime file
+- a retired monolithic local-runtime surface mixed command dispatch,
+  workspace runtime, fullscreen logic, sidebar behavior, rendering, PTY
+  ownership, and tests in one place
+- legacy lifecycle code mixed daemon lifecycle, attach protocol,
+  child-process management, and rendering bootstrap
+- entry logic was split across multiple styles instead of one explicit
+  bootstrap and dispatcher boundary
+- the old fullscreen path left a large amount of UI, resize, passthrough,
+  and restore behavior coupled into one runtime surface
 
 If tmux-first work is added directly on top of that structure, the local architecture will improve at the product level but remain hard to evolve at the code level.
 
@@ -52,7 +58,9 @@ The tmux-first architecture follows these principles:
    tmux, terminal, PTY, IPC, and transport code should be treated as replaceable adapters behind narrow interfaces.
    For tmux specifically, the adapter is a vendored submodule plus a Rust glue layer, not a shell-command wrapper around a user-installed binary.
 5. Strangler migration
-   old code may coexist temporarily, but new tmux-first work should land in new modules and pull responsibility out of `app.rs`, not add to it.
+   old code may coexist temporarily, but new tmux-first work should land in
+   explicit runtime modules and pull responsibility out of retired monolithic
+   compatibility surfaces instead of adding to them.
 6. Command compatibility over code compatibility
    preserve the user-facing command surface where needed, but do not preserve old module structure or runtime plumbing when a clean replacement is clearer.
 7. Trait-oriented boundaries
@@ -202,15 +210,15 @@ Responsibilities:
 - own layout restore rules for persistent sidebar and footer panes plus main-slot zoom restore
 - own the stable main-slot binding or rebinding path used by sidebar and footer activation
 
-Typical modules:
+Representative modules on the accepted current path are:
 
-- `runtime/workspace_runtime.rs`
-- `runtime/workspace_bootstrap_runtime.rs`
-- `runtime/layout_runtime.rs`
+- `runtime/workspace_command_runtime.rs`
+- `runtime/workspace_entry_runtime.rs`
+- `runtime/workspace_layout_runtime.rs`
 - `runtime/main_slot_runtime.rs`
-- `runtime/sidebar_runtime.rs`
-- `runtime/footer_runtime.rs`
-- `runtime/ui_runtime.rs`
+- `runtime/event_driven_pane_runtime.rs`
+- `runtime/event_driven_tmux_pane_runtime.rs`
+- `runtime/event_driven_ui_pane_runtime.rs`
 
 Compatibility rule for future remote sessions:
 
@@ -335,13 +343,15 @@ Future-proofing rule:
 - a future remote session selected on the server may render through a waitagent `interact` runtime in the main slot while sidebar and footer continue to consume the same transport-agnostic session catalog
 - local fullscreen, copy-mode, and tmux-native focus semantics remain the baseline for local sessions only; remote sessions will require separate server-routed interaction policy without changing the shared catalog shape
 
-This is better than the current split where command ownership is spread across `app.rs` and `lifecycle.rs` with different runtime styles.
+This is better than the historical split where command ownership was spread
+across monolithic local-runtime and lifecycle surfaces with different runtime
+styles.
 
 ## 7. Coding Rules For The Migration
 
 Effective immediately:
 
-- new tmux-first logic should not be added to `src/app.rs` unless the change is strictly bridging or deletion-related
+- new tmux-first logic should not be added to retired monolithic compatibility surfaces unless the change is strictly bridging or deletion-related
 - new runtime boundaries should be introduced in new files first
 - old modules should lose responsibility over time instead of gaining new tmux-specific branches
 - command handling should move toward one style and naming convention
@@ -363,17 +373,21 @@ Effective immediately:
 
 ## 8. Suggested First Concrete Module Split
 
-Before large feature migration, establish these files:
+That seed split is now materially in place. The current equivalents that define
+the accepted route are:
 
 - `src/bootstrap.rs`
 - `src/infra/tmux.rs`
 - `src/domain/workspace.rs`
 - `src/application/workspace_service.rs`
-- `src/runtime/workspace_runtime.rs`
-- `src/ui/sidebar.rs`
-- `src/ui/footer.rs`
+- `src/runtime/workspace_command_runtime.rs`
+- `src/runtime/workspace_entry_runtime.rs`
+- `src/runtime/workspace_layout_runtime.rs`
+- `src/runtime/main_slot_runtime.rs`
+- `src/runtime/event_driven_pane_runtime.rs`
 
-These are the minimum pieces needed to stop the tmux migration from collapsing back into the old monolith.
+These are the minimum pieces that keep the tmux-first migration from
+collapsing back into retired monolithic runtime ownership.
 
 ## 9. Migration Sequence
 
@@ -391,7 +405,7 @@ The code migration should happen in this order:
 
 The architecture migration is successful only if:
 
-- `src/app.rs` stops being the default landing zone for new local-runtime behavior
+- retired monolithic compatibility surfaces stop being the default landing zone for new local-runtime behavior
 - new tmux-first work enters through unified bootstrap and explicit runtime or application modules
 - at least the tmux backend, workspace runtime, main-slot activation path, and pane UI entrypoints live outside the old monolithic files
 - the resulting entry structure is simpler to explain than the current `main -> app + lifecycle + legacy fullscreen` split

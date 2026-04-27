@@ -8,10 +8,12 @@ use_when:
 inputs:
   - docs/local-acceptance-checklist.md
   - docs/execution-status-board.md
-  - src/app.rs
+  - src/bootstrap.rs
+  - src/command/dispatch.rs
+  - src/runtime/workspace_command_runtime.rs
+  - src/runtime/event_driven_pane_runtime.rs
+  - src/runtime/workspace_layout_runtime.rs
   - src/terminal.rs
-  - src/console.rs
-  - src/scheduler.rs
 steps:
   - prefer targeted validation that matches the touched surface
   - run cargo test when code changes could affect automated coverage

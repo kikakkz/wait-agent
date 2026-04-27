@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.tmux-0
+  default_task: task.t5-06
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -43,9 +43,9 @@ directories:
   schemas: .agents/schemas
   generated: .agents/generated
 active_context:
-  project_phase: phase-1
-  current_stage: tmux-first-local-architecture-migration
-  current_focus: execute event-r4 now that event-r3 is closed, making the event-driven local route the single accepted default path and isolating any remaining polling history
+  project_phase: phase-2
+  current_stage: network-registry-reset
+  current_focus: resume network work with task.t5-06 now that the event-driven local route is accepted as the default baseline
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

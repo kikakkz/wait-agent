@@ -31,17 +31,17 @@ Use `.agents/` for:
 
 Current phase:
 
-- `Phase 1: Local Workspace MVP`
+- `Phase 2: Network Aggregation MVP`
 
 Current gate:
 
-- `local-cleanup` close local legacy cleanup and reset the remote design baseline
+- `network-registry-reset` resume remote design from the cleaned local baseline
 
 Why this is the current gate:
 
-- the local tmux-native workspace path is now usable enough to end the current acceptance phase
-- the most important remaining risk is no longer local interaction breakage, but stale legacy assumptions in code and docs
-- remote session work should restart from the cleaned local architecture rather than from deleted network-era surfaces
+- the local tmux-native workspace path has now cleared the current acceptance gate
+- resumed remote work still needs one shared transport-agnostic registry before input, resize, or server-console slices can land cleanly
+- remote session work must restart from the cleaned local architecture rather than from deleted network-era surfaces
 
 ## 3. Current Snapshot
 
@@ -55,8 +55,9 @@ Project status at a glance:
 - `task.event-r2a` is now accepted for the local product goal: same-socket switching uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks refresh only the affected workspace chrome, startup materializes the initial target identity before attach, and real-terminal sidebar or footer switching keeps the fixed chrome mounted
 - local acceptance is no longer blocked on deleted legacy interaction features, because they are not part of the accepted current product scope
 - `task.event-r3` is now closed for the accepted local scope: attach and resize validation passed, explicit runtime events now own the accepted control path, and stale auto-switch wording has been retired because auto-switch is not part of the current product contract
-- `task.event-r4` is now the active local gate: make the event-driven route the single accepted default local path and isolate any remaining polling history
-- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable and the default route is fully aligned with the event-driven stack
+- `task.event-r4` is now closed: the event-driven local route is accepted as the default baseline after user-reported shell and Codex visible-behavior validation
+- event-r4 cleanup aligned `.agents` entrypoints, project context, and current architecture docs on the real default path `bootstrap -> CommandDispatcher -> WorkspaceCommandRuntime`
+- `task.t5-06` is now the active gate: build the shared transport-agnostic target registry that later remote input, resize, and server-console work will consume
 
 ## 4. Milestone Summary
 
@@ -64,7 +65,7 @@ Project status at a glance:
 | --- | --- | --- |
 | `M0` | Product and design baseline completed | `done` |
 | `M1` | Local single-machine workspace UX usable end to end | `done` |
-| `M2` | Network aggregation MVP usable end to end | `not_started` |
+| `M2` | Network aggregation MVP usable end to end | `in_progress` |
 | `M3` | Hardening, observability, and developer usability | `not_started` |
 
 ## 5. Track Summary
@@ -76,7 +77,7 @@ Execution tracks at human-summary level:
 - `T2` Event-driven control path: complete enough for the accepted local scope
 - `T3` Terminal UI and rendering: the old custom fullscreen and shared-surface path remains retired
 - `T4` Local workspace UX and validation: complete enough for the current local scope
-- `T5` Network transport and registration: foundations exist, but resumed network work remains intentionally deferred
+- `T5` Network transport and registration: active again, with the shared transport-agnostic target registry now the first resumed delivery slice
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
 
@@ -84,7 +85,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- execute `task.event-r4` on the accepted local path, then resume remote session design only after the event-driven route is the single clear default baseline
+- execute `task.t5-06` and re-establish remote work on top of one shared transport-agnostic target catalog
 
 Accepted local architecture direction:
 
@@ -108,12 +109,11 @@ Priority rule:
 - no deleted legacy surface should be revived during remote planning
 - remote and local session management should be redesigned on top of the cleaned tmux-native workspace baseline
 
-Deferred queue after local stabilization:
+Next remote queue after the shared registry baseline:
 
-1. `T5-06` Implement the aggregate transport-agnostic target registry
-2. `T5-07` Implement remote target input and resize routing through the server control plane
-3. `T6-01` Implement the server-side workspace console as a target-activation surface
-4. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
+1. `T5-07` Implement remote target input and resize routing through the server control plane
+2. `T6-01` Implement the server-side workspace console as a target-activation surface
+3. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

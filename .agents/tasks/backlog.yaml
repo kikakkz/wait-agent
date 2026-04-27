@@ -28,7 +28,7 @@ next:
     status: done
   - id: task.event-r4
     title: route the default local path through the new event-driven stack and isolate polling history
-    status: in_progress
+    status: done
   - id: task.tmux-r4
     title: cut workspace-facing commands over to tmux-native targets and bootstrap aliases
     status: done
@@ -118,7 +118,7 @@ next:
     status: superseded
   - id: task.t5-06
     title: implement the aggregate transport-agnostic target registry
-    status: deferred
+    status: in_progress
   - id: task.scroll-1
     title: implement tmux-style pane history with mouse-draggable gutter scrolling
     status: superseded

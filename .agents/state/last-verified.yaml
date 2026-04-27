@@ -1,7 +1,16 @@
 kind: state
 version: 1
-last_updated_from: task.event-r3 closed and task.event-r4 opened on 2026-04-27
+last_updated_from: task.event-r4 closed and task.t5-06 opened on 2026-04-27
 checks:
+  - id: event-r4-manual-shell-visible-behavior-acceptance
+    command: user-reported manual shell validation confirming visible behavior on the accepted local path after the event-r4 cleanup
+    status: pass
+  - id: event-r4-manual-codex-visible-behavior-acceptance
+    command: user-reported manual Codex validation confirming visible behavior on the accepted local path after the event-r4 cleanup
+    status: pass
+  - id: event-r4-cargo-build-quiet-control-plane-sync
+    command: cargo build --quiet after aligning `.agents/index.yaml`, `.agents/context/project.yaml`, and the current architecture or control-plane docs with the accepted default route `bootstrap::run -> CommandDispatcher -> WorkspaceCommandRuntime`
+    status: pass
   - id: event-r3-manual-attach-and-resize-validation
     command: manual terminal validation confirming attach and resize behavior on the accepted local path without visible tick-latency artifacts; stale auto-switch wording removed because auto-switch is no longer part of the current product scope
     status: pass

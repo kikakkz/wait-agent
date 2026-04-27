@@ -5,30 +5,30 @@ summary:
   layout: repository structure most relevant to planning and execution
 module_map:
   implementation:
-    - path: src/app.rs
-      responsibility: application bootstrap and runtime wiring
+    - path: src/bootstrap.rs
+      responsibility: top-level CLI bootstrap into the accepted default local route
     - path: src/cli.rs
       responsibility: command-line parsing and public entrypoints
-    - path: src/config.rs
-      responsibility: runtime configuration
-    - path: src/console.rs
-      responsibility: console-local focus and interaction state
-    - path: src/session.rs
-      responsibility: session registry and lifecycle
-    - path: src/pty.rs
-      responsibility: PTY ownership and IO
-    - path: src/scheduler.rs
-      responsibility: waiting detection and one-enter one-switch scheduling
-    - path: src/renderer.rs
-      responsibility: focused and peek rendering
+    - path: src/command/dispatch.rs
+      responsibility: default command-side ownership boundary for workspace, attach, and hidden pane entrypoints
+    - path: src/runtime/workspace_command_runtime.rs
+      responsibility: accepted default local path for workspace bootstrap, attach, target activation, fullscreen, list, and detach
+    - path: src/runtime/workspace_entry_runtime.rs
+      responsibility: tmux-backed workspace bootstrap and initial fixed-chrome layout application
+    - path: src/runtime/workspace_layout_runtime.rs
+      responsibility: layout reconciliation, chrome refresh signaling, main-pane output bridging, and fullscreen-aware chrome ownership
+    - path: src/runtime/main_slot_runtime.rs
+      responsibility: fixed-chrome main-slot target activation inside one tmux backend
+    - path: src/runtime/event_driven_pane_runtime.rs
+      responsibility: hidden sidebar and footer pane processes on the accepted event-driven local path
+    - path: src/runtime/event_driven_tmux_pane_runtime.rs
+      responsibility: tmux-backed session snapshot and pane-state projection for chrome panes
+    - path: src/runtime/event_driven_ui_pane_runtime.rs
+      responsibility: pane-local render-state transitions and sidebar selection intent
+    - path: src/application/session_service.rs
+      responsibility: transport-aware session catalog lookup and attach or detach operations
     - path: src/terminal.rs
       responsibility: terminal raw mode and VT state handling
-    - path: src/server.rs
-      responsibility: server runtime baseline
-    - path: src/client.rs
-      responsibility: client runtime baseline and publication helpers
-    - path: src/transport.rs
-      responsibility: transport envelope and protocol types
     - path: src/event.rs
       responsibility: internal runtime event bus
   design_docs:

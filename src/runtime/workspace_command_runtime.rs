@@ -16,6 +16,9 @@ use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
 use std::io;
 
+// This runtime owns the accepted default local command path for workspace
+// bootstrap, attach, target activation, fullscreen, and detach semantics.
+// Event-r4 keeps these user-facing entrypoints off historical polling paths.
 pub struct WorkspaceCommandRuntime {
     path_service: WorkspacePathService,
     entry_runtime: WorkspaceEntryRuntime,
