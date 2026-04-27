@@ -1,6 +1,5 @@
-use crate::app::AppError;
 use crate::cli::Command;
-use crate::config::AppConfig;
+use crate::error::AppError;
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
@@ -24,16 +23,11 @@ impl CommandDispatcher {
         })
     }
 
-    pub fn dispatch(&self, command: Command, config: AppConfig) -> Result<(), AppError> {
+    pub fn dispatch(&self, command: Command) -> Result<(), AppError> {
         match command {
-            Command::Workspace(command)
-                if command.node_id.is_some() || command.connect.is_some() =>
-            {
-                crate::legacy::run_command(Command::Workspace(command), config)
-            }
-            Command::Workspace(command) => self
+            Command::Workspace => self
                 .workspace_runtime
-                .run_workspace_entry(config, command)
+                .run_workspace_entry()
                 .map_err(AppError::from),
             Command::UiSidebar(command) => self
                 .pane_runtime
@@ -79,18 +73,11 @@ impl CommandDispatcher {
                 .layout_runtime
                 .run_chrome_refresh_all()
                 .map_err(AppError::from),
-            Command::Daemon(command) => self
-                .workspace_runtime
-                .run_daemon(config, command)
-                .map_err(AppError::from),
             Command::Attach(command) => self
                 .workspace_runtime
                 .run_attach(command)
                 .map_err(AppError::from),
-            Command::List(command) => self
-                .workspace_runtime
-                .run_list(command)
-                .map_err(AppError::from),
+            Command::List => self.workspace_runtime.run_list().map_err(AppError::from),
             Command::Detach(command) => self
                 .workspace_runtime
                 .run_detach(command)
@@ -100,7 +87,6 @@ impl CommandDispatcher {
                 println!("{help}");
                 Ok(())
             }
-            other => crate::legacy::run_command(other, config),
         }
     }
 }

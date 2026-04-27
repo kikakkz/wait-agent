@@ -10,8 +10,7 @@ The target UX is workspace-first:
 
 - On a single machine, the user starts one `waitagent`
 - Inside that WaitAgent workspace, the user creates and manages multiple background sessions
-- In multi-machine mode, those same local workspaces connect to one `waitagent server`
-- Local and server-side interaction stay synchronized and follow the same single-focus model
+- Remote session aggregation is a future product area and is not part of the current command surface
 
 ## Current Positioning
 
@@ -23,22 +22,12 @@ The core goals of WaitAgent are:
 - Detect sessions that are likely waiting for user input
 - Allow at most one automatic switch after the user submits input
 - Preserve raw TTY behavior without semantic parsing or agent-specific behavior changes
-- Keep local mode and network mode behaviorally identical from the user’s perspective
 
-## Deployment Modes
+## Deployment Mode
 
 ### Local Mode
 
 The user starts one `waitagent` workspace on the machine and creates multiple managed sessions inside it.
-
-### Network Mode
-
-The user configures one access point for the same `waitagent` workspace:
-
-- Local sessions become visible on the server side automatically
-- The local CLI remains fully interactive
-- The server side can also interact with those sessions
-- Terminal results and state changes are synchronized automatically across both sides
 
 ## Core Experience
 
@@ -55,11 +44,9 @@ This repository contains product documentation and an active Rust implementation
 Current implementation status:
 
 - Local workspace-first interaction is now the primary local UX: one `waitagent` can create and manage multiple shell-backed sessions inside the same terminal
-- Local PTY runtime, scheduler, Peek, renderer, and validation coverage exist
 - Terminal fidelity has been hardened for Codex-like TUIs, including terminal capability replies, application cursor keys, managed viewport sizing, UTF-8 handling, cursor visibility, and wide-character rendering
-- Network transport, server runtime, client runtime, node registration, and remote session publication baselines exist
 - The remaining local MVP work is acceptance and stabilization, with auto-switch behavior still requiring more real-workflow validation
-- Mirrored multi-console network UX is still the next major product milestone after the local workspace path is accepted
+- Remote session connection and management will be redesigned on top of the tmux-native local architecture rather than carried forward from the deleted legacy runtime
 
 Current documents:
 
@@ -94,7 +81,7 @@ To preview the detected package-manager command without executing it, run:
 
 ## Recommended Next Step
 
-- Finish the tmux-first local workspace migration on top of the vendored tmux glue-layer backend, then resume network aggregation work on the stabilized local ownership model
+- Continue refining the local tmux-native workspace path, then design remote session connection and management on top of that unified architecture
 
 ## Why This Exists
 

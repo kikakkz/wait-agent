@@ -5,6 +5,10 @@ Status: `Draft`
 Date: `2026-04-07`  
 Working name: `WaitAgent`
 
+> Note
+> This document still contains future remote-session design material.
+> The current implemented product surface is local tmux-native workspace management only; remote connection and aggregation are deferred to a fresh design pass.
+
 ## 1. Product Definition
 
 One-line definition:
@@ -16,8 +20,7 @@ Primary UX model:
 - On one machine, the user starts one `waitagent`
 - That `waitagent` instance becomes the workspace shell for creating and managing sessions
 - Each managed session is a PTY-backed work context where the user can still run `codex`, `claude`, `kilo`, `cd`, scripts, and normal shell workflows
-- In network mode, the same local workspace may connect to one `waitagent server`
-- The server becomes an additional interaction surface, not a different product
+- Remote session connection and aggregation are a future product area that should be redesigned on top of the tmux-native local architecture
 
 WaitAgent is not an agent, not an IDE, and not an orchestrator. It is a:
 
@@ -30,10 +33,11 @@ It sits between the user and multiple agent sessions and decides:
 - Which session is most likely worth the user’s attention
 - How to switch safely without breaking raw TTY behavior
 
-WaitAgent supports two deployment modes:
+WaitAgent currently supports one deployed product mode:
 
 - `Local mode`: one `waitagent` instance hosts multiple managed sessions on one machine
-- `Network mode`: the user configures one access point; the same local workspace becomes visible on a server-side console, while the local CLI remains fully interactive and both sides stay synchronized
+
+Future remote session support should be treated as a new design pass, not as a continuation of the removed legacy client/server surface.
 
 ## 2. Background and Problem
 
@@ -69,21 +73,15 @@ WaitAgent does not try to make agents smarter. It tries to:
 
 - Support multiple independent agent sessions behind one terminal experience
 - Make one `waitagent` instance the default entrypoint per machine
-- Support sessions from multiple machines inside one interaction plane
 - Expose only one session for active interaction at a time within a given console
-- Keep local mode and network mode behaviorally consistent
 - Detect sessions that are likely waiting for user input
 - Allow at most one automatic switch after the user submits input
 - Preserve raw TTY semantics and avoid changing agent behavior or in-session command habits
-- Let a user configure a single access point and have sessions become naturally available on the server side
-- Keep both the local CLI and the server-side console interactive in network mode, with automatic synchronization
 
 ### 3.2 Success Criteria
 
 - The user no longer needs to maintain a many-terminal mental model
 - On a single machine, the user only needs to start one `waitagent`
-- The user can manage sessions from multiple client machines on one server console
-- The user does not lose the local CLI interaction model when enabling network mode
 - The user can always tell where input is going within the active console
 - Waiting sessions are surfaced quickly enough to matter
 - Automatic switching does not interrupt continuous interaction in the current session

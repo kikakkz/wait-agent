@@ -113,31 +113,10 @@ pub fn next_session_key() -> String {
     format!("{lower:016x}")
 }
 
-fn stable_identity_key(value: &str) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
-}
-
-pub fn stable_workspace_key(path: &Path) -> String {
-    stable_identity_key(&path.to_string_lossy())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        next_session_key, stable_workspace_key, WorkspaceInstanceConfig, WorkspaceSessionRole,
-    };
+    use super::{next_session_key, WorkspaceInstanceConfig, WorkspaceSessionRole};
     use std::path::Path;
-
-    #[test]
-    fn stable_workspace_key_is_deterministic() {
-        let path = Path::new("/tmp/waitagent/workspace");
-        assert_eq!(stable_workspace_key(path), stable_workspace_key(path));
-    }
 
     #[test]
     fn workspace_instance_config_derives_new_tmux_session_identity() {

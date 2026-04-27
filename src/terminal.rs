@@ -1,6 +1,4 @@
 #![allow(dead_code)]
-
-use crate::pty::PtySize;
 use std::fmt;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
@@ -73,28 +71,6 @@ impl Default for TerminalSize {
             cols: 80,
             pixel_width: 0,
             pixel_height: 0,
-        }
-    }
-}
-
-impl From<TerminalSize> for PtySize {
-    fn from(value: TerminalSize) -> Self {
-        Self {
-            rows: value.rows,
-            cols: value.cols,
-            pixel_width: value.pixel_width,
-            pixel_height: value.pixel_height,
-        }
-    }
-}
-
-impl From<PtySize> for TerminalSize {
-    fn from(value: PtySize) -> Self {
-        Self {
-            rows: value.rows,
-            cols: value.cols,
-            pixel_width: value.pixel_width,
-            pixel_height: value.pixel_height,
         }
     }
 }
