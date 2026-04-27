@@ -4,6 +4,10 @@ Version: `v1.0`
 Status: `Draft`  
 Date: `2026-04-07`
 
+> Note
+> Remote/network flows in this document are deferred future design material.
+> The current implemented product surface is the local tmux-native workspace path.
+
 ## 1. Purpose
 
 This document defines the main user interaction flows for WaitAgent.
@@ -11,11 +15,11 @@ This document defines the main user interaction flows for WaitAgent.
 It describes how the product should behave step by step in:
 
 - Local mode
-- Network mode
+- Deferred future remote mode
 - Focus switching
 - Auto-scheduling
 - Peek
-- Mirrored local/server interaction
+- Deferred future mirrored interaction
 - Disconnect and recovery paths
 
 It complements:
@@ -230,20 +234,20 @@ Result:
 
 ## 4. Network Flows
 
-### 4.1 Configure Access Point Flow
+### 4.1 Future Remote Configure Flow (Deferred)
 
 Trigger:
 
-- The user configures a WaitAgent server access point for a local workspace
+- This is a deferred future flow for remote session connection
 
 Preconditions:
 
-- Local workspace runtime is installed
-- Network credentials are available
+- Remote session architecture has been designed
+- Required credentials and transport configuration exist
 
 Main path:
 
-1. User starts `waitagent --connect <access-point>` or sets equivalent configuration.
+1. User starts the future remote-connect entrypoint for a local workspace.
 2. The local workspace establishes a connection to the server.
 3. The local workspace authenticates.
 4. The local workspace publishes node metadata.
@@ -255,23 +259,22 @@ Result:
 - Local sessions become visible on the server side.
 - Local CLI behavior remains unchanged.
 
-### 4.2 Server Console Flow
+### 4.2 Future Remote Console Flow (Deferred)
 
 Trigger:
 
-- The user starts a server-side WaitAgent runtime
+- This is a deferred future flow for remote session aggregation
 
 Preconditions:
 
-- At least one client node is connected or one server-local session exists
+- At least one remote workspace is connected
 
 Main path:
 
-1. User runs `waitagent server`.
-2. Server creates a console runtime.
-3. Server builds the aggregate session view.
-4. Server selects an initial focused session.
-5. Renderer displays that focused session.
+1. User starts the future remote aggregation runtime.
+2. The runtime builds the aggregate session view.
+3. The runtime selects an initial focused session.
+4. Renderer displays that focused session.
 
 Result:
 

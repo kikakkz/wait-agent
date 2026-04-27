@@ -9,7 +9,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    Workspace(WorkspaceCommand),
+    Workspace,
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
     ActivateTarget(ActivateTargetCommand),
@@ -22,21 +22,15 @@ pub enum Command {
     ChromeRefresh(LayoutReconcileCommand),
     ChromeRefreshAll,
     Attach(AttachCommand),
-    List(ListCommand),
+    List,
     Detach(DetachCommand),
     Help(String),
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct WorkspaceCommand {}
-
-#[derive(Debug, Clone, Default)]
 pub struct AttachCommand {
     pub target: Option<String>,
 }
-
-#[derive(Debug, Clone, Default)]
-pub struct ListCommand {}
 
 #[derive(Debug, Clone, Default)]
 pub struct DetachCommand {
@@ -115,7 +109,7 @@ impl Cli {
 
         if args.is_empty() {
             return Ok(Self {
-                command: Command::Workspace(WorkspaceCommand::default()),
+                command: Command::Workspace,
             });
         }
 
@@ -171,7 +165,8 @@ impl Cli {
             }
             "ls" => {
                 args.remove(0);
-                Command::List(parse_list(args)?)
+                parse_no_args(args)?;
+                Command::List
             }
             "detach" => {
                 args.remove(0);
@@ -181,7 +176,8 @@ impl Cli {
             "--help" | "-h" => Command::Help(help_text()),
             other => {
                 if other.starts_with("--") {
-                    Command::Workspace(parse_workspace(args)?)
+                    parse_no_args(args)?;
+                    Command::Workspace
                 } else {
                     return Err(CliError::UnknownSubcommand(other.to_string()));
                 }
@@ -190,17 +186,6 @@ impl Cli {
 
         Ok(Self { command })
     }
-}
-
-fn parse_workspace(args: Vec<String>) -> Result<WorkspaceCommand, CliError> {
-    for arg in args {
-        match arg.as_str() {
-            "--help" | "-h" => {}
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(WorkspaceCommand::default())
 }
 
 fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
@@ -212,20 +197,6 @@ fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
             "--help" | "-h" => return Ok(command),
             _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
             _ if command.target.is_none() => command.target = Some(arg),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(command)
-}
-
-fn parse_list(args: Vec<String>) -> Result<ListCommand, CliError> {
-    let mut iter = args.into_iter();
-    let command = ListCommand::default();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(command),
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
     }
@@ -510,10 +481,7 @@ mod tests {
 
     #[test]
     fn defaults_to_workspace_command_without_subcommand() {
-        match parse(&["waitagent"]) {
-            Command::Workspace(_) => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(parse(&["waitagent"]), Command::Workspace));
     }
 
     #[test]
@@ -549,10 +517,7 @@ mod tests {
 
     #[test]
     fn parses_list_command() {
-        match parse(&["waitagent", "ls"]) {
-            Command::List(_) => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(parse(&["waitagent", "ls"]), Command::List));
     }
 
     #[test]

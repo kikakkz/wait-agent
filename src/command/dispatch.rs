@@ -25,9 +25,9 @@ impl CommandDispatcher {
 
     pub fn dispatch(&self, command: Command) -> Result<(), AppError> {
         match command {
-            Command::Workspace(command) => self
+            Command::Workspace => self
                 .workspace_runtime
-                .run_workspace_entry(command)
+                .run_workspace_entry()
                 .map_err(AppError::from),
             Command::UiSidebar(command) => self
                 .pane_runtime
@@ -77,10 +77,7 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_attach(command)
                 .map_err(AppError::from),
-            Command::List(command) => self
-                .workspace_runtime
-                .run_list(command)
-                .map_err(AppError::from),
+            Command::List => self.workspace_runtime.run_list().map_err(AppError::from),
             Command::Detach(command) => self
                 .workspace_runtime
                 .run_detach(command)

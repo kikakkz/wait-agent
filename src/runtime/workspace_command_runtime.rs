@@ -2,8 +2,8 @@ use crate::application::session_service::SessionService;
 use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
-    ActivateTargetCommand, AttachCommand, DetachCommand, ListCommand, MainPaneDiedCommand,
-    NewTargetCommand, ToggleFullscreenCommand, WorkspaceCommand,
+    ActivateTargetCommand, AttachCommand, DetachCommand, MainPaneDiedCommand, NewTargetCommand,
+    ToggleFullscreenCommand,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
@@ -60,7 +60,7 @@ impl WorkspaceCommandRuntime {
         })
     }
 
-    pub fn run_workspace_entry(&self, _command: WorkspaceCommand) -> Result<(), LifecycleError> {
+    pub fn run_workspace_entry(&self) -> Result<(), LifecycleError> {
         let workspace_dir = self.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
         self.main_slot_runtime.ensure_initial_target_materialized(
@@ -73,7 +73,7 @@ impl WorkspaceCommandRuntime {
     }
 
     pub fn run_attach(&self, command: AttachCommand) -> Result<(), LifecycleError> {
-        match attach_target_path(&command) {
+        match command.target.clone() {
             Some(target) => {
                 let session = self.attachable_session(target)?;
                 self.session_service
@@ -114,7 +114,7 @@ impl WorkspaceCommandRuntime {
         self.fullscreen_runtime.run_toggle(command)
     }
 
-    pub fn run_list(&self, _command: ListCommand) -> Result<(), LifecycleError> {
+    pub fn run_list(&self) -> Result<(), LifecycleError> {
         let sessions = self
             .session_service
             .list_sessions()
@@ -131,9 +131,7 @@ impl WorkspaceCommandRuntime {
     }
 
     pub fn run_detach(&self, command: DetachCommand) -> Result<(), LifecycleError> {
-        if let Some(target) = attach_target_path(&AttachCommand {
-            target: command.target.clone(),
-        }) {
+        if let Some(target) = command.target.clone() {
             let session = self.attachable_session(target)?;
             self.session_service
                 .detach_session_clients(&session)
@@ -188,10 +186,6 @@ impl WorkspaceCommandRuntime {
             .ok_or_else(|| LifecycleError::Protocol(format!("unknown tmux target `{target}`")))?;
         Ok(session)
     }
-}
-
-fn attach_target_path(command: &AttachCommand) -> Option<String> {
-    command.target.as_ref().cloned()
 }
 
 fn tmux_runtime_error(error: TmuxError) -> LifecycleError {

@@ -4,6 +4,10 @@ Version: `v1.0`
 Status: `Draft`  
 Date: `2026-04-07`
 
+> Note
+> Remote and cross-machine sections in this document are future design notes.
+> The current public command surface is local-only: `waitagent`, `waitagent attach`, `waitagent ls`, and `waitagent detach`.
+
 ## 1. Purpose
 
 This document defines the user-visible functions of WaitAgent and the exact expected behavior for each function.
@@ -20,7 +24,7 @@ WaitAgent provides three layers of functionality:
 - Workspace hosting
 - Session hosting
 - Attention scheduling
-- Optional cross-machine aggregation
+- Deferred future remote aggregation
 
 ## 3. Functional Areas
 
@@ -31,13 +35,11 @@ WaitAgent provides three layers of functionality:
 The system must allow a user to start one local WaitAgent workspace through:
 
 - `waitagent`
-- `waitagent --connect <server-endpoint>`
 
 Expected behavior:
 
 - Bootstrap one local workspace runtime
 - Attach the current terminal as the active console
-- Load any configured access point
 - Restore or initialize the local session registry
 - Render the currently focused session or an empty workspace state
 
@@ -82,17 +84,17 @@ When a session exits:
 
 ### 3.3 Console Runtime and Mirrored Visibility
 
-The current public command surface does not expose dedicated `attach` or `client` commands.
+The current public command surface is local-only.
 
-Target model:
+Current model:
 
 - `waitagent` starts a local workspace
-- `waitagent --connect <server-endpoint>` starts the same local workspace and mirrors it to the server
-- `waitagent server` starts the aggregate server runtime
+- `waitagent attach [<target>]` attaches to an existing local tmux-managed workspace session
+- `waitagent ls` and `waitagent detach [<target>]` manage the local tmux session set
 
-Current implementation note:
+Future note:
 
-- `waitagent run ...` may continue to exist as a temporary bridge during implementation, but it is not the intended long-term UX
+- Remote session connection and mirrored visibility need a fresh design on top of the tmux-native local architecture
 
 #### 3.3.1 Multi-Console Attach
 
