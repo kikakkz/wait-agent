@@ -20,6 +20,7 @@ pub enum Command {
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
     ChromeRefresh(LayoutReconcileCommand),
+    ChromeRefreshSignal(UiPaneCommand),
     ChromeRefreshAll,
     Attach(AttachCommand),
     List,
@@ -153,6 +154,10 @@ impl Cli {
             "__chrome-refresh" => {
                 args.remove(0);
                 Command::ChromeRefresh(parse_layout_reconcile(args)?)
+            }
+            "__chrome-refresh-signal" => {
+                args.remove(0);
+                Command::ChromeRefreshSignal(parse_ui_pane(args)?)
             }
             "__chrome-refresh-all" => {
                 args.remove(0);
@@ -586,6 +591,24 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_chrome_refresh_signal_command() {
+        match parse(&[
+            "waitagent",
+            "__chrome-refresh-signal",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+        ]) {
+            Command::ChromeRefreshSignal(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
             }
             other => panic!("unexpected command: {other:?}"),
         }

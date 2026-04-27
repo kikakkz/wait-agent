@@ -3,7 +3,7 @@ use crate::application::layout_service::{
     LayoutFocusBehavior, LayoutService, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE,
 };
 use crate::application::session_service::SessionService;
-use crate::cli::{CloseSessionCommand, LayoutReconcileCommand};
+use crate::cli::{CloseSessionCommand, LayoutReconcileCommand, UiPaneCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
@@ -12,13 +12,19 @@ use crate::infra::tmux::{
 use crate::lifecycle::LifecycleError;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const STARTUP_CHROME_READY_TIMEOUT: Duration = Duration::from_millis(300);
-const STARTUP_CHROME_READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
 const WAITAGENT_MAIN_PANE_PIPE_OPTION: &str = "@waitagent_main_pane_pipe_id";
+
+#[derive(Clone, Copy)]
+enum InitialChromePane {
+    Sidebar,
+    Footer,
+}
 
 pub struct WorkspaceLayoutRuntime {
     backend: EmbeddedTmuxBackend,
@@ -119,6 +125,12 @@ impl WorkspaceLayoutRuntime {
             session_name: TmuxSessionName::new(command.session_name),
         };
         self.refresh_chrome(&workspace, &workspace_dir)
+    }
+
+    pub fn run_chrome_refresh_signal(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
+        self.backend
+            .signal_chrome_refresh_on_socket(&command.socket_name, &command.session_name)
+            .map_err(tmux_layout_error)
     }
 
     pub fn run_chrome_refresh_all(&self) -> Result<(), LifecycleError> {
@@ -239,6 +251,8 @@ impl WorkspaceLayoutRuntime {
         let footer_program = self.footer_program(workspace, workspace_dir);
         let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
         let chrome_refresh_command = self.chrome_refresh_hook_command(workspace, workspace_dir);
+        let main_pane_pipe_command =
+            self.main_pane_output_bridge_shell_command(workspace, workspace_dir);
         let pane_died_command = self.main_pane_died_hook_command(workspace);
         let layout = self
             .layout_service
@@ -261,7 +275,7 @@ impl WorkspaceLayoutRuntime {
                 layout.main_pane.as_str(),
             )
             .map_err(tmux_layout_error)?;
-        self.clear_main_pane_output_bridge(workspace, &layout.main_pane)?;
+        self.ensure_main_pane_output_bridge(workspace, &layout.main_pane, &main_pane_pipe_command)?;
         self.layout_service
             .ensure_layout_hooks(
                 workspace,
@@ -274,10 +288,11 @@ impl WorkspaceLayoutRuntime {
         Ok(layout)
     }
 
-    fn clear_main_pane_output_bridge(
+    fn ensure_main_pane_output_bridge(
         &self,
         workspace: &TmuxWorkspaceHandle,
         main_pane: &TmuxPaneId,
+        command: &str,
     ) -> Result<(), LifecycleError> {
         let previous_pipe = self
             .backend
@@ -302,15 +317,13 @@ impl WorkspaceLayoutRuntime {
             Err(error) => return Err(tmux_layout_error(error)),
         }
         self.backend
-            .run_socket_command(
-                &workspace.socket_name,
-                &[
-                    "set-option".to_string(),
-                    "-u".to_string(),
-                    "-t".to_string(),
-                    workspace.session_name.as_str().to_string(),
-                    WAITAGENT_MAIN_PANE_PIPE_OPTION.to_string(),
-                ],
+            .set_pane_pipe(workspace, main_pane, command)
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_MAIN_PANE_PIPE_OPTION,
+                main_pane.as_str(),
             )
             .map_err(tmux_layout_error)?;
 
@@ -322,34 +335,80 @@ impl WorkspaceLayoutRuntime {
         workspace: &TmuxWorkspaceHandle,
         layout: &crate::domain::workspace_layout::WorkspaceChromeLayout,
     ) {
+        let mut sidebar_ready = self
+            .backend
+            .sidebar_ready_matches(workspace, layout.sidebar_pane.as_str())
+            .unwrap_or(false);
+        let mut footer_ready = self
+            .backend
+            .footer_ready_matches(workspace, layout.footer_pane.as_str())
+            .unwrap_or(false);
+        if sidebar_ready && footer_ready {
+            return;
+        }
+
+        let (done_tx, done_rx) = mpsc::channel();
+        if !sidebar_ready {
+            let backend = self.backend.clone();
+            let socket_name = workspace.socket_name.as_str().to_string();
+            let session_name = workspace.session_name.as_str().to_string();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                if backend
+                    .wait_for_sidebar_ready_on_socket(&socket_name, &session_name)
+                    .is_ok()
+                {
+                    let _ = done_tx.send(InitialChromePane::Sidebar);
+                }
+            });
+        }
+        if !footer_ready {
+            let backend = self.backend.clone();
+            let socket_name = workspace.socket_name.as_str().to_string();
+            let session_name = workspace.session_name.as_str().to_string();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                if backend
+                    .wait_for_footer_ready_on_socket(&socket_name, &session_name)
+                    .is_ok()
+                {
+                    let _ = done_tx.send(InitialChromePane::Footer);
+                }
+            });
+        }
+        drop(done_tx);
+
         let deadline = Instant::now() + STARTUP_CHROME_READY_TIMEOUT;
-        loop {
-            let sidebar_ready = self
-                .backend
-                .capture_pane_text_on_socket(
-                    workspace.socket_name.as_str(),
-                    layout.sidebar_pane.as_str(),
-                )
-                .map(|text| text.contains("Sessions"))
-                .unwrap_or(false);
-            let footer_ready = self
-                .backend
-                .capture_pane_text_on_socket(
-                    workspace.socket_name.as_str(),
-                    layout.footer_pane.as_str(),
-                )
-                .map(|text| text.contains("keys: ^W cmd"))
-                .unwrap_or(false);
-
-            if sidebar_ready && footer_ready {
-                return;
+        while !(sidebar_ready && footer_ready) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            match done_rx.recv_timeout(remaining) {
+                Ok(InitialChromePane::Sidebar) => {
+                    sidebar_ready = self
+                        .backend
+                        .sidebar_ready_matches(workspace, layout.sidebar_pane.as_str())
+                        .unwrap_or(true);
+                }
+                Ok(InitialChromePane::Footer) => {
+                    footer_ready = self
+                        .backend
+                        .footer_ready_matches(workspace, layout.footer_pane.as_str())
+                        .unwrap_or(true);
+                }
+                Err(_) => break,
             }
+        }
 
-            if Instant::now() >= deadline {
-                return;
-            }
-
-            thread::sleep(STARTUP_CHROME_READY_POLL_INTERVAL);
+        if !(sidebar_ready && footer_ready) {
+            let _ = self.backend.signal_sidebar_ready_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            );
+            let _ = self.backend.signal_footer_ready_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            );
         }
     }
 
@@ -450,6 +509,18 @@ impl WorkspaceLayoutRuntime {
         format!(
             "run-shell -b {}",
             tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
+        )
+    }
+
+    fn main_pane_output_bridge_shell_command(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+    ) -> String {
+        main_pane_output_bridge_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &workspace_dir.display().to_string(),
         )
     }
 
@@ -566,6 +637,23 @@ fn main_pane_died_hook_shell_command(
     .join(" ")
 }
 
+fn main_pane_output_bridge_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    _workspace_dir: &str,
+) -> String {
+    let signal_command = [
+        shell_escape(executable),
+        shell_escape("__chrome-refresh-signal"),
+        shell_escape("--socket-name"),
+        shell_escape(workspace.socket_name.as_str()),
+        shell_escape("--session-name"),
+        shell_escape(workspace.session_name.as_str()),
+    ]
+    .join(" ");
+    format!("while IFS= read -r _; do {signal_command}; done")
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -595,7 +683,8 @@ mod tests {
     use super::{
         chrome_refresh_hook_shell_command, footer_menu_shell_command,
         fullscreen_toggle_tmux_command, layout_reconcile_hook_shell_command,
-        main_pane_died_hook_shell_command, should_refresh_workspace_chrome, tmux_quote_argument,
+        main_pane_died_hook_shell_command, main_pane_output_bridge_shell_command,
+        should_refresh_workspace_chrome, tmux_quote_argument,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -674,6 +763,19 @@ mod tests {
         assert_eq!(
             command,
             "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}'"
+        );
+    }
+
+    #[test]
+    fn main_pane_output_bridge_shell_command_refreshes_on_output_lines() {
+        let workspace = workspace();
+
+        let command =
+            main_pane_output_bridge_shell_command("/tmp/wait agent", &workspace, "/tmp/demo path");
+
+        assert_eq!(
+            command,
+            "while IFS= read -r _; do '/tmp/wait agent' '__chrome-refresh-signal' '--socket-name' 'wa-1' '--session-name' 'session-1'; done"
         );
     }
 

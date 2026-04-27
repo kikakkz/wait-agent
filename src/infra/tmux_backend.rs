@@ -12,8 +12,9 @@ use crate::infra::tmux_glue::{
     TmuxGlueArtifacts, TmuxGlueBuildConfig, TmuxGlueBuildStatus, VendoredTmuxSource,
 };
 use crate::infra::tmux_types::{
-    TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram, TmuxSessionGateway,
-    TmuxSessionName, TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
+    TmuxChromeGateway, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram,
+    TmuxSessionGateway, TmuxSessionName, TmuxSocketName, TmuxWindowHandle, TmuxWindowId,
+    TmuxWorkspaceHandle,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -31,6 +32,10 @@ const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX: &str = "waitagent-chrome-refresh";
+const WAITAGENT_SIDEBAR_READY_CHANNEL_PREFIX: &str = "waitagent-sidebar-ready";
+const WAITAGENT_FOOTER_READY_CHANNEL_PREFIX: &str = "waitagent-footer-ready";
+const WAITAGENT_SIDEBAR_READY_OPTION: &str = "@waitagent_sidebar_ready_pane";
+const WAITAGENT_FOOTER_READY_OPTION: &str = "@waitagent_footer_ready_pane";
 const DEFAULT_HISTORY_LIMIT: &str = "100000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +584,92 @@ impl EmbeddedTmuxBackend {
         .map(|_| ())
     }
 
+    pub(crate) fn wait_for_sidebar_ready_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.wait_for_workspace_channel_on_socket(
+            socket_name,
+            workspace_sidebar_ready_channel(session_name),
+        )
+    }
+
+    pub(crate) fn signal_sidebar_ready_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.signal_workspace_channel_on_socket(
+            socket_name,
+            workspace_sidebar_ready_channel(session_name),
+        )
+    }
+
+    pub(crate) fn wait_for_footer_ready_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.wait_for_workspace_channel_on_socket(
+            socket_name,
+            workspace_footer_ready_channel(session_name),
+        )
+    }
+
+    pub(crate) fn signal_footer_ready_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.signal_workspace_channel_on_socket(
+            socket_name,
+            workspace_footer_ready_channel(session_name),
+        )
+    }
+
+    pub(crate) fn mark_sidebar_ready(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_target: &str,
+    ) -> Result<(), TmuxError> {
+        self.set_session_option(workspace, WAITAGENT_SIDEBAR_READY_OPTION, pane_target)?;
+        self.signal_sidebar_ready_on_socket(
+            workspace.socket_name.as_str(),
+            workspace.session_name.as_str(),
+        )
+    }
+
+    pub(crate) fn mark_footer_ready(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_target: &str,
+    ) -> Result<(), TmuxError> {
+        self.set_session_option(workspace, WAITAGENT_FOOTER_READY_OPTION, pane_target)?;
+        self.signal_footer_ready_on_socket(
+            workspace.socket_name.as_str(),
+            workspace.session_name.as_str(),
+        )
+    }
+
+    pub(crate) fn sidebar_ready_matches(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_target: &str,
+    ) -> Result<bool, TmuxError> {
+        self.show_session_option(workspace, WAITAGENT_SIDEBAR_READY_OPTION)
+            .map(|value| value.as_deref() == Some(pane_target))
+    }
+
+    pub(crate) fn footer_ready_matches(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_target: &str,
+    ) -> Result<bool, TmuxError> {
+        self.show_session_option(workspace, WAITAGENT_FOOTER_READY_OPTION)
+            .map(|value| value.as_deref() == Some(pane_target))
+    }
+
     pub fn capture_pane_text_on_socket(
         &self,
         socket_name: &str,
@@ -594,6 +685,30 @@ impl EmbeddedTmuxBackend {
         ];
         let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
         Ok(output.stdout)
+    }
+
+    fn wait_for_workspace_channel_on_socket(
+        &self,
+        socket_name: &str,
+        channel_name: String,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &["wait-for".to_string(), channel_name],
+        )
+        .map(|_| ())
+    }
+
+    fn signal_workspace_channel_on_socket(
+        &self,
+        socket_name: &str,
+        channel_name: String,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &["wait-for".to_string(), "-S".to_string(), channel_name],
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn pane_in_mode_on_socket(
@@ -855,6 +970,14 @@ struct ProcessStat {
 
 fn workspace_chrome_refresh_channel(session_name: &str) -> String {
     format!("{WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX}-{session_name}")
+}
+
+fn workspace_sidebar_ready_channel(session_name: &str) -> String {
+    format!("{WAITAGENT_SIDEBAR_READY_CHANNEL_PREFIX}-{session_name}")
+}
+
+fn workspace_footer_ready_channel(session_name: &str) -> String {
+    format!("{WAITAGENT_FOOTER_READY_CHANNEL_PREFIX}-{session_name}")
 }
 
 fn default_window_name() -> String {
@@ -1516,6 +1639,69 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("second waiter should wake");
+        kill_server(&backend, &workspace);
+    }
+
+    #[test]
+    fn initial_chrome_ready_signals_wake_sidebar_and_footer_waiters() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("chrome-ready"))
+            .expect("workspace bootstrap should succeed");
+        let (done_tx, done_rx) = mpsc::channel();
+
+        {
+            let backend = backend.clone();
+            let socket_name = workspace.socket_name.as_str().to_string();
+            let session_name = workspace.session_name.as_str().to_string();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                backend
+                    .wait_for_sidebar_ready_on_socket(&socket_name, &session_name)
+                    .expect("sidebar wait-for should unblock cleanly");
+                done_tx
+                    .send("sidebar")
+                    .expect("sidebar waiter completion should be reported");
+            });
+        }
+
+        {
+            let backend = backend.clone();
+            let socket_name = workspace.socket_name.as_str().to_string();
+            let session_name = workspace.session_name.as_str().to_string();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                backend
+                    .wait_for_footer_ready_on_socket(&socket_name, &session_name)
+                    .expect("footer wait-for should unblock cleanly");
+                done_tx
+                    .send("footer")
+                    .expect("footer waiter completion should be reported");
+            });
+        }
+
+        thread::sleep(Duration::from_millis(100));
+        backend
+            .signal_sidebar_ready_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("sidebar ready signal should succeed");
+        backend
+            .signal_footer_ready_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("footer ready signal should succeed");
+
+        let first = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first waiter should wake");
+        let second = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second waiter should wake");
+        assert_ne!(first, second);
         kill_server(&backend, &workspace);
     }
 

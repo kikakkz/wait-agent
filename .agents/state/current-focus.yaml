@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.event-r2a
-focus_statement: task.event-r2a1 through task.event-r2a3 are complete, so the active gate returns to task.event-r2a umbrella acceptance: rerun real-terminal fixed-chrome switching checks and clear the remaining stale acceptance evidence before moving to task.event-r3
+current_task: task.event-r3
+focus_statement: task.event-r2a umbrella acceptance is now closed, so the active gate moves to task.event-r3: remove remaining accepted-path attach, resize, and scheduler tick or timeout coordination in favor of explicit runtime events
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

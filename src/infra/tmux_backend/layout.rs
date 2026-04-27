@@ -53,6 +53,16 @@ impl EmbeddedTmuxBackend {
         self.run_workspace_command(workspace, &clear_pane_pipe_args(pane))?;
         Ok(())
     }
+
+    pub(crate) fn set_pane_pipe(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(workspace, &set_pane_pipe_args(pane, command))?;
+        Ok(())
+    }
 }
 
 impl TmuxLayoutGateway for EmbeddedTmuxBackend {
@@ -422,6 +432,16 @@ fn clear_pane_pipe_args(pane: &TmuxPaneId) -> Vec<String> {
     ]
 }
 
+fn set_pane_pipe_args(pane: &TmuxPaneId, command: &str) -> Vec<String> {
+    vec![
+        "pipe-pane".to_string(),
+        "-O".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        command.to_string(),
+    ]
+}
+
 fn set_pane_hook_args(pane: &TmuxPaneId, hook_name: &str, command: &str) -> Vec<String> {
     vec![
         "set-hook".to_string(),
@@ -468,7 +488,7 @@ fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxErro
 mod tests {
     use super::{
         break_pane_args, clear_pane_pipe_args, join_pane_args, kill_pane_args,
-        parse_break_pane_result, set_pane_hook_args, swap_panes_args,
+        parse_break_pane_result, set_pane_hook_args, set_pane_pipe_args, swap_panes_args,
     };
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::infra::tmux::{TmuxPaneId, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
@@ -510,6 +530,10 @@ mod tests {
         assert_eq!(
             clear_pane_pipe_args(&TmuxPaneId::new("%2")),
             vec!["pipe-pane", "-t", "%2"]
+        );
+        assert_eq!(
+            set_pane_pipe_args(&TmuxPaneId::new("%2"), "echo refresh"),
+            vec!["pipe-pane", "-O", "-t", "%2", "echo refresh"]
         );
         assert_eq!(
             set_pane_hook_args(&TmuxPaneId::new("%2"), "pane-died", "run-shell true"),

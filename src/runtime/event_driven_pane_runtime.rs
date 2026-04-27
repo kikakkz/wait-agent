@@ -57,6 +57,7 @@ impl EventDrivenPaneRuntime {
             chrome.refresh_sidebar_for_pane(&command, pane_target.as_deref().unwrap_or(""))?,
             &mut last_buffer,
         )?;
+        self.mark_initial_sidebar_ready(&command, pane_target.as_deref())?;
 
         loop {
             let event = match event_rx.recv() {
@@ -92,6 +93,7 @@ impl EventDrivenPaneRuntime {
         let update =
             chrome.refresh_footer_for_pane(&command, pane_target.as_deref().unwrap_or(""))?;
         apply_footer_update(&self.backend, &workspace, update, &mut last_buffer)?;
+        self.mark_initial_footer_ready(&command, pane_target.as_deref())?;
 
         loop {
             let event = match event_rx.recv() {
@@ -132,6 +134,32 @@ impl EventDrivenPaneRuntime {
                 )
                 .map_err(event_pane_error),
         }
+    }
+
+    fn mark_initial_sidebar_ready(
+        &self,
+        command: &UiPaneCommand,
+        pane_target: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        let Some(pane_target) = pane_target else {
+            return Ok(());
+        };
+        self.backend
+            .mark_sidebar_ready(&workspace_handle(command), pane_target)
+            .map_err(event_pane_error)
+    }
+
+    fn mark_initial_footer_ready(
+        &self,
+        command: &UiPaneCommand,
+        pane_target: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        let Some(pane_target) = pane_target else {
+            return Ok(());
+        };
+        self.backend
+            .mark_footer_ready(&workspace_handle(command), pane_target)
+            .map_err(event_pane_error)
     }
 }
 

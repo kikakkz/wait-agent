@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.7`  
+Version: `v1.8`  
 Status: `Active`  
-Date: `2026-04-25`
+Date: `2026-04-27`
 
 ## 1. Purpose
 
@@ -52,9 +52,10 @@ Project status at a glance:
 - the tmux-first local path already owns the visible workspace chrome
 - the accepted new direction is now stricter than the earlier tmux-window switching model: sidebar and footer stay fixed while only the main view changes
 - `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
-- `task.event-r2a` is complete enough for the current local product goal: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection now comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks now refresh only the affected workspace chrome, and startup now materializes the initial target identity before attach
+- `task.event-r2a` is now accepted for the local product goal: same-socket switching uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks refresh only the affected workspace chrome, startup materializes the initial target identity before attach, and real-terminal sidebar or footer switching keeps the fixed chrome mounted
 - local acceptance is no longer blocked on deleted legacy interaction features, because they are not part of the accepted current product scope
-- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable
+- `task.event-r3` is now the active local gate: move remaining attach, resize, and scheduler control off accepted-path tick or timeout coordination and onto explicit runtime events
+- future remote work remains deferred until the fixed local chrome and main-slot activation model is stable and the remaining attach-side event cleanup lands
 
 ## 4. Milestone Summary
 
@@ -82,7 +83,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- remove local legacy leftovers and outdated documentation before remote session design resumes
+- execute `task.event-r3` on the accepted local path, then close `task.event-r4` before remote session design resumes
 
 Accepted local architecture direction:
 

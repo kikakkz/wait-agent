@@ -1,7 +1,22 @@
 kind: state
 version: 1
-last_updated_from: task.event-r2a2 verification refreshed on 2026-04-25
+last_updated_from: task.event-r3 verification refreshed on 2026-04-27
 checks:
+  - id: event-r3-initial-chrome-ready-backend-test
+    command: cargo test --quiet infra::tmux_backend::tests::initial_chrome_ready_signals_wake_sidebar_and_footer_waiters after replacing startup pane-text polling with explicit sidebar and footer ready wait-for channels
+    status: pass
+  - id: event-r3-event-driven-pane-runtime-tests
+    command: cargo test --quiet event_driven_pane_runtime after making sidebar and footer panes mark initial readiness through explicit tmux signals and pane-identity session options
+    status: pass
+  - id: event-r3-workspace-layout-runtime-tests
+    command: cargo test --quiet workspace_layout_runtime after making workspace startup wait for explicit sidebar and footer ready signals instead of sleeping and polling pane text
+    status: pass
+  - id: event-r3-tmux-layout-pipe-tests
+    command: cargo test --quiet infra::tmux_backend::layout::tests after restoring main-pane output bridge setup with `pipe-pane -O`
+    status: pass
+  - id: event-r3-cargo-build-quiet-refresh-signal-bridge
+    command: cargo build --quiet after switching the main-pane output bridge to emit a lightweight `__chrome-refresh-signal` instead of running the full `__chrome-refresh` command on every output line
+    status: pass
   - id: event-r2a1-terminal-ctrl-n-phase-profile-fresh
     command: manual terminal profiling on a fresh workspace by timing hidden `__new-target`, current-socket tmux session visibility, and sidebar item visibility
     status: pass
@@ -43,7 +58,10 @@ checks:
     status: pass
   - id: event-r2a-sidebar-enter-fixed-chrome-manual-repro
     command: manual terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent`, pressing `Enter` on a sidebar item, and confirming whether sidebar and footer stay mounted while only the main view changes
-    status: fail
+    status: pass
+  - id: event-r2a-footer-menu-fixed-chrome-manual-repro
+    command: manual terminal validation by launching `env -u TMUX TERM=xterm-256color ./target/debug/waitagent`, switching targets through the footer menu, and confirming sidebar and footer stay mounted while only the main view changes without shell reveal or client rebuild
+    status: pass
   - id: event-r2a-switching-path-root-cause-review
     command: targeted review of `src/runtime/main_slot_runtime.rs`, `src/runtime/event_driven_tmux_pane_runtime.rs`, `src/runtime/footer_menu_runtime.rs`, and tmux backend layout helpers confirming that same-socket switching now uses tmux-native main-slot rebinding while cross-socket attach remains an explicit fallback
     status: pass

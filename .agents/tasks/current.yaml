@@ -1,51 +1,42 @@
-id: task.event-r2a
+id: task.event-r3
 kind: task
 version: 1
-title: replace cross-session attach switching with fixed-chrome main-slot target activation
+title: move attach, resize, and scheduler control onto explicit runtime events
 status: in_progress
 priority: critical
 source_of_truth:
-  file: .agents/tasks/queued/task.event-r2a.yaml
+  file: .agents/tasks/queued/task.event-r3.yaml
   reference: current
 depends_on:
-  - task.event-r2.done
+  - task.event-r2a.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - sidebar and footer or menu target activation keeps workspace chrome mounted, does not reveal the shell, and does not rebuild the workspace client
-  - the visible workspace is modeled as one persistent chrome layout with a fixed sidebar, a fixed main slot, and a fixed footer or menu, where target changes only rebind the main slot
-  - local target switching no longer depends on `detach-client -E "waitagent attach <target>"`; it uses tmux-native rebinding inside one backend instead
-  - sidebar items remain session identities rather than reusable host slots; when the active local target shell exits, that target identity is removed from the catalog and the next surviving target, if any, is rebound into the main slot
-  - the startup shell is already materialized as a real target-host identity, so first ctrl-n creates exactly one additional target and follows the same activation path as later ctrl-n runs
-  - target identity and activation remain transport-agnostic so future remote targets can bind into the same main slot through a bridge runtime
-  - `waitagent` versus `waitagent attach` semantics are explicit and preserved: the default entry boots or creates a backend, while `attach` joins an existing backend only
+  - attach flow reacts to socket input, stdin input, daemon output, and terminal resize through explicit events rather than fixed client ticks
+  - scheduler recomputation is triggered by named session-state transitions, input, output, focus, and resize events rather than periodic wakeups
+  - new local control flow no longer relies on `recv_timeout(EVENT_LOOP_TICK)` as the primary coordination mechanism
+  - new runtime modules make event propagation and ownership easier to audit than the old mixed app loop
 verification:
   - cargo test
-  - manual: in a real terminal, sidebar Enter and footer menu switching keep sidebar and footer fixed, return focus to the shell area, and change only the main view without shell reveal or flicker
-  - manual: in a fresh terminal, confirm startup immediately materializes one target-host identity and first ctrl-n adds exactly one additional target
-  - targeted review of target activation flow across `src/runtime`, `src/application`, `src/domain`, and the tmux backend boundaries
+  - manual: attach, resize, and auto-switch behavior in a real terminal without visible tick-latency artifacts
+  - targeted review of the new event loop modules and scheduler triggers
 touched_paths:
+  - src/infra/tmux_backend.rs
   - src/runtime
+  - src/runtime/event_driven_pane_runtime.rs
+  - src/runtime/workspace_layout_runtime.rs
   - src/application
   - src/domain
-  - src/infra/tmux_backend.rs
-  - docs/tmux-first-workspace-plan.md
-  - docs/tmux-first-runtime-architecture.md
-  - docs/event-driven-local-runtime-architecture.md
-  - docs/execution-status-board.md
-  - .agents/tasks/current.yaml
-  - .agents/tasks/queued/task.event-r2a.yaml
-  - .agents/tasks/queued/task.event-r2a1.yaml
-  - .agents/tasks/queued/task.event-r2a2.yaml
-  - .agents/tasks/queued/task.event-r2a3.yaml
-  - .agents/state/current-focus.yaml
-  - .agents/state/open-blockers.yaml
-  - .agents/state/last-verified.yaml
-  - .agents/index.yaml
+  - src/app.rs
+  - .agents/tasks/queued/task.event-r3.yaml
 notes:
-  - `task.event-r2a1`, `task.event-r2a2`, and `task.event-r2a3` are complete. The remaining gate is umbrella acceptance evidence for the full fixed-chrome target-activation contract before moving on to `task.event-r3`.
-  - 2026-04-25 terminal profiling after `r2a2` showed workspace-local `__chrome-refresh` at about 56ms versus `__chrome-refresh-all` at about 1947ms on this machine, while steady-state `__new-target` produced current-socket session visibility in about 29ms and sidebar item visibility in about 131ms.
-  - 2026-04-25 fresh-startup validation after `r2a3` showed a new workspace now starts with two sessions on its socket (`workspace_chrome` plus one `target_host`), `@waitagent_active_target` is populated before attach, and the first `__new-target` adds exactly one new target session instead of implicitly materializing an extra host.
+  - This slice should build the new control path, not patch the historical tick loop in place unless that is the smallest route to isolate it behind a new boundary.
+  - 2026-04-24 pause: do not resume this slice until in-workspace target switching stops leaving the current client. The current `detach-client -E "waitagent attach <target>"` path is an upstream blocker because it cannot satisfy fixed chrome, no shell reveal, or no flicker.
+  - 2026-04-27 resume: `task.event-r2a` umbrella acceptance is now complete, including real-terminal validation that sidebar Enter and footer menu switching keep the workspace chrome mounted while only the main slot target changes.
+  - 2026-04-27 progress: startup chrome readiness no longer polls pane text with fixed sleeps on the accepted path; sidebar and footer now mark initial readiness through explicit tmux wait-for channels plus pane-identity session options, and workspace layout waits on those signals with a bounded timeout fallback.
+  - 2026-04-27 progress: the accepted path now re-establishes a main-pane output bridge with `pipe-pane -O`, but that bridge only emits a lightweight `__chrome-refresh-signal`; pane runtimes consume the signal and refresh snapshots themselves, so shell-to-agent command identity changes such as `bash -> codex` update sidebar labels without requiring a fullscreen round-trip or a full layout refresh.
+  - When this slice resumes, audit `src/app.rs` and attach-side control flow for remaining `EVENT_LOOP_TICK`, `recv_timeout`, and sleep-based coordination on the accepted local path.
+  - This task is the second slice in the locked local-priority batch `task.event-r2a -> task.event-r3 -> task.event-r4`.

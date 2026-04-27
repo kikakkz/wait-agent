@@ -1,6 +1,30 @@
 kind: state
 version: 1
 history:
+  - task_id: task.event-r3
+    status: in_progress
+    summary: the accepted local path now re-establishes a main-pane output bridge with pipe-pane output forwarding, but the bridge only emits a lightweight refresh signal, so shell-to-agent command identity changes like bash to codex update sidebar labels without waiting for fullscreen and without invoking a full layout refresh on every output line
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r3
+    status: in_progress
+    summary: startup chrome readiness on the accepted local path now waits on explicit sidebar and footer ready signals recorded against the active pane identities, replacing the old fixed-sleep pane-text polling during workspace bootstrap
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r3
+    status: in_progress
+    summary: with task.event-r2a umbrella acceptance now closed in a real terminal, active work moves to replacing remaining accepted-path attach, resize, and scheduler tick or timeout coordination with explicit runtime events
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.event-r2a
+    status: done
+    summary: the fixed-chrome main-slot activation slice is now accepted end to end, including real-terminal validation that sidebar Enter and footer menu switching keep the workspace chrome mounted while only the main slot target changes
+    source_of_truth:
+      file: .agents/tasks/queued/task.event-r2a.yaml
+      reference: status
   - task_id: task.event-r2a
     status: in_progress
     summary: same-socket fixed-chrome switching now rebinds the workspace main slot through tmux-native pane swaps, target-host sessions are modeled explicitly, and sidebar or footer projection now reads the workspace active-target option instead of treating the visible workspace chrome session as the active target

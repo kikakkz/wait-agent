@@ -22,10 +22,10 @@ active:
 next:
   - id: task.event-r2a
     title: replace cross-session attach switching with fixed-chrome main-slot target activation
-    status: in_progress
+    status: done
   - id: task.event-r3
     title: move attach, resize, and scheduler control onto explicit runtime events
-    status: not_started
+    status: in_progress
   - id: task.event-r4
     title: route the default local path through the new event-driven stack and isolate polling history
     status: not_started

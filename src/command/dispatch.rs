@@ -69,6 +69,10 @@ impl CommandDispatcher {
                 .layout_runtime
                 .run_chrome_refresh(command)
                 .map_err(AppError::from),
+            Command::ChromeRefreshSignal(command) => self
+                .layout_runtime
+                .run_chrome_refresh_signal(command)
+                .map_err(AppError::from),
             Command::ChromeRefreshAll => self
                 .layout_runtime
                 .run_chrome_refresh_all()
