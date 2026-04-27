@@ -177,6 +177,50 @@ impl EmbeddedTmuxBackend {
         }
     }
 
+    pub(crate) fn show_session_local_option_names(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<Vec<String>, TmuxError> {
+        let output = self.run_workspace_command(
+            workspace,
+            &[
+                "show-options".to_string(),
+                "-q".to_string(),
+                "-t".to_string(),
+                workspace.session_name.as_str().to_string(),
+                option_name.to_string(),
+            ],
+        )?;
+        Ok(output
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                line.split_once(' ')
+                    .map(|(name, _)| name.trim().to_string())
+            })
+            .filter(|name| !name.is_empty())
+            .collect())
+    }
+
+    pub(crate) fn unset_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(
+            workspace,
+            &[
+                "set-option".to_string(),
+                "-u".to_string(),
+                "-t".to_string(),
+                workspace.session_name.as_str().to_string(),
+                option_name.to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
     fn session_exists(&self, workspace: &TmuxWorkspaceHandle) -> Result<bool, TmuxError> {
         let args = vec![
             "has-session".to_string(),
@@ -552,6 +596,40 @@ impl EmbeddedTmuxBackend {
         Ok(output.stdout)
     }
 
+    pub(crate) fn pane_in_mode_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<bool, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+            "#{pane_in_mode}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout.trim() == "1")
+    }
+
+    pub(crate) fn cancel_pane_mode_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &[
+                "send-keys".to_string(),
+                "-X".to_string(),
+                "-t".to_string(),
+                pane_target.to_string(),
+                "cancel".to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
     pub fn window_zoomed_on_socket(
         &self,
         socket_name: &str,
@@ -917,21 +995,6 @@ impl TmuxGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
-    fn toggle_zoom(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        pane: &TmuxPaneId,
-    ) -> Result<(), Self::Error> {
-        let args = vec![
-            "resize-pane".to_string(),
-            "-t".to_string(),
-            pane.as_str().to_string(),
-            "-Z".to_string(),
-        ];
-        self.run_workspace_command(workspace, &args)?;
-        Ok(())
-    }
-
     fn enter_copy_mode(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -1237,9 +1300,6 @@ mod tests {
         backend
             .select_pane(&workspace, &right)
             .expect("pane selection should succeed");
-        backend
-            .toggle_zoom(&workspace, &right)
-            .expect("pane zoom should succeed");
         backend
             .enter_copy_mode(&workspace, &right)
             .expect("copy mode should succeed");

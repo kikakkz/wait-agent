@@ -297,14 +297,6 @@ mod tests {
             Ok(())
         }
 
-        fn toggle_zoom(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            _pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         fn enter_copy_mode(
             &self,
             _workspace: &TmuxWorkspaceHandle,

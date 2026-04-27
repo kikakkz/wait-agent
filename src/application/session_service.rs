@@ -205,14 +205,6 @@ mod tests {
             unreachable!("not used in this test")
         }
 
-        fn toggle_zoom(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            _pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            unreachable!("not used in this test")
-        }
-
         fn enter_copy_mode(
             &self,
             _workspace: &TmuxWorkspaceHandle,

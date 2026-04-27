@@ -13,11 +13,11 @@ pub enum Command {
     WorkspaceInternal(WorkspaceCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
-    ChromeRefreshStream(UiPaneCommand),
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
     MainPaneDied(MainPaneDiedCommand),
     FooterMenu(FooterMenuCommand),
+    ToggleFullscreen(ToggleFullscreenCommand),
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
     ChromeRefresh(LayoutReconcileCommand),
@@ -107,6 +107,12 @@ pub struct FooterMenuCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ToggleFullscreenCommand {
+    pub socket_name: String,
+    pub session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ActivateTargetCommand {
     pub current_socket_name: String,
     pub current_session_name: String,
@@ -169,10 +175,6 @@ impl Cli {
                 args.remove(0);
                 Command::UiFooter(parse_ui_pane(args)?)
             }
-            "__chrome-refresh-stream" => {
-                args.remove(0);
-                Command::ChromeRefreshStream(parse_ui_pane(args)?)
-            }
             "__activate-target" => {
                 args.remove(0);
                 Command::ActivateTarget(parse_activate_target(args)?)
@@ -188,6 +190,10 @@ impl Cli {
             "__footer-menu" => {
                 args.remove(0);
                 Command::FooterMenu(parse_footer_menu(args)?)
+            }
+            "__toggle-fullscreen" => {
+                args.remove(0);
+                Command::ToggleFullscreen(parse_toggle_fullscreen(args)?)
             }
             "__close-session" => {
                 args.remove(0);
@@ -486,6 +492,28 @@ fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
+    })
+}
+
+fn parse_toggle_fullscreen(args: Vec<String>) -> Result<ToggleFullscreenCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ToggleFullscreenCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
     })
 }
 
@@ -869,24 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_hidden_chrome_refresh_stream_command() {
-        match parse(&[
-            "waitagent",
-            "__chrome-refresh-stream",
-            "--socket-name",
-            "wa-1",
-            "--session-name",
-            "waitagent-1",
-        ]) {
-            Command::ChromeRefreshStream(command) => {
-                assert_eq!(command.socket_name, "wa-1");
-                assert_eq!(command.session_name, "waitagent-1");
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_hidden_chrome_refresh_all_command() {
         assert!(matches!(
             parse(&["waitagent", "__chrome-refresh-all"]),
@@ -949,6 +959,24 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.client_tty, "/dev/pts/7");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_toggle_fullscreen_command() {
+        match parse(&[
+            "waitagent",
+            "__toggle-fullscreen",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+        ]) {
+            Command::ToggleFullscreen(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
             }
             other => panic!("unexpected command: {other:?}"),
         }

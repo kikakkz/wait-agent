@@ -45,16 +45,6 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
-    pub(crate) fn pipe_pane_output(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        pane: &TmuxPaneId,
-        shell_command: &str,
-    ) -> Result<(), TmuxError> {
-        self.run_workspace_command(workspace, &pipe_pane_output_args(pane, shell_command))?;
-        Ok(())
-    }
-
     pub(crate) fn clear_pane_pipe(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -424,16 +414,6 @@ fn kill_pane_args(pane: &TmuxPaneId) -> Vec<String> {
     ]
 }
 
-fn pipe_pane_output_args(pane: &TmuxPaneId, shell_command: &str) -> Vec<String> {
-    vec![
-        "pipe-pane".to_string(),
-        "-O".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-        shell_command.to_string(),
-    ]
-}
-
 fn clear_pane_pipe_args(pane: &TmuxPaneId) -> Vec<String> {
     vec![
         "pipe-pane".to_string(),
@@ -488,7 +468,7 @@ fn validate_split_size(size: &TmuxSplitSize, label: &str) -> Result<(), TmuxErro
 mod tests {
     use super::{
         break_pane_args, clear_pane_pipe_args, join_pane_args, kill_pane_args,
-        parse_break_pane_result, pipe_pane_output_args, set_pane_hook_args, swap_panes_args,
+        parse_break_pane_result, set_pane_hook_args, swap_panes_args,
     };
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::infra::tmux::{TmuxPaneId, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
@@ -526,16 +506,6 @@ mod tests {
         assert_eq!(
             kill_pane_args(&TmuxPaneId::new("%2")),
             vec!["kill-pane", "-t", "%2"]
-        );
-        assert_eq!(
-            pipe_pane_output_args(&TmuxPaneId::new("%2"), "waitagent __chrome-refresh-stream"),
-            vec![
-                "pipe-pane",
-                "-O",
-                "-t",
-                "%2",
-                "waitagent __chrome-refresh-stream",
-            ]
         );
         assert_eq!(
             clear_pane_pipe_args(&TmuxPaneId::new("%2")),

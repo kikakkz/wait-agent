@@ -113,14 +113,17 @@ pub fn next_session_key() -> String {
     format!("{lower:016x}")
 }
 
-pub fn stable_workspace_key(path: &Path) -> String {
+fn stable_identity_key(value: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
-    let normalized = path.to_string_lossy();
-    for byte in normalized.as_bytes() {
+    for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+pub fn stable_workspace_key(path: &Path) -> String {
+    stable_identity_key(&path.to_string_lossy())
 }
 
 #[cfg(test)]

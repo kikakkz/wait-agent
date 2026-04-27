@@ -14,28 +14,6 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
-    fn bind_main_pane_zoom_toggle(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        key: &str,
-        pane: &TmuxPaneId,
-    ) -> Result<(), Self::Error> {
-        let args = bind_main_pane_zoom_toggle_args(key, pane, false);
-        self.run_workspace_command(workspace, &args)?;
-        Ok(())
-    }
-
-    fn bind_main_pane_zoom_toggle_with_prefix(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        key: &str,
-        pane: &TmuxPaneId,
-    ) -> Result<(), Self::Error> {
-        let args = bind_main_pane_zoom_toggle_args(key, pane, true);
-        self.run_workspace_command(workspace, &args)?;
-        Ok(())
-    }
-
     fn bind_command_with_prefix(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -107,27 +85,6 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
-}
-
-fn bind_main_pane_zoom_toggle_args(
-    key: &str,
-    pane: &TmuxPaneId,
-    requires_prefix: bool,
-) -> Vec<String> {
-    bind_key_args(
-        key,
-        requires_prefix,
-        vec![
-            "select-pane".to_string(),
-            "-t".to_string(),
-            pane.as_str().to_string(),
-            "\\;".to_string(),
-            "resize-pane".to_string(),
-            "-t".to_string(),
-            pane.as_str().to_string(),
-            "-Z".to_string(),
-        ],
-    )
 }
 
 fn bind_command_with_prefix_args(key: &str, command: &str) -> Vec<String> {
@@ -247,55 +204,11 @@ fn current_pane_is(pane: &TmuxPaneId) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_command_with_prefix_args, bind_main_pane_zoom_toggle_args,
-        bind_waitagent_focus_main_args, bind_waitagent_focus_sidebar_args,
-        bind_waitagent_footer_action_args, bind_waitagent_sidebar_back_args,
-        bind_waitagent_sidebar_hide_args,
+        bind_command_with_prefix_args, bind_waitagent_focus_main_args,
+        bind_waitagent_focus_sidebar_args, bind_waitagent_footer_action_args,
+        bind_waitagent_sidebar_back_args, bind_waitagent_sidebar_hide_args,
     };
     use crate::infra::tmux_types::TmuxPaneId;
-
-    #[test]
-    fn zoom_toggle_binding_targets_the_main_pane_without_prefix() {
-        let args = bind_main_pane_zoom_toggle_args("C-o", &TmuxPaneId::new("%1"), false);
-
-        assert_eq!(
-            args,
-            vec![
-                "bind-key",
-                "-n",
-                "C-o",
-                "select-pane",
-                "-t",
-                "%1",
-                "\\;",
-                "resize-pane",
-                "-t",
-                "%1",
-                "-Z",
-            ]
-        );
-    }
-
-    #[test]
-    fn zoom_toggle_binding_can_use_tmux_prefix() {
-        let args = bind_main_pane_zoom_toggle_args("z", &TmuxPaneId::new("%1"), true);
-
-        assert_eq!(
-            args,
-            vec![
-                "bind-key",
-                "z",
-                "select-pane",
-                "-t",
-                "%1",
-                "\\;",
-                "resize-pane",
-                "-t",
-                "%1",
-                "-Z",
-            ]
-        );
-    }
 
     #[test]
     fn prefixed_command_binding_preserves_tmux_command_string() {
