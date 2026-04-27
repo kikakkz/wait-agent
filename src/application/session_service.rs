@@ -49,13 +49,6 @@ where
         }
     }
 
-    pub fn detach_workspace_clients(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-    ) -> Result<(), G::Error> {
-        self.gateway.detach_workspace_clients(workspace)
-    }
-
     pub fn detach_session_clients(&self, session: &ManagedSessionRecord) -> Result<(), G::Error> {
         self.gateway.detach_session_clients(&session.address)
     }
@@ -100,7 +93,6 @@ mod tests {
     enum Call {
         AttachWorkspace(String),
         AttachSession(String),
-        DetachWorkspace(String),
         DetachSession(String),
         DetachCurrentClient,
     }
@@ -254,16 +246,6 @@ mod tests {
             Ok(())
         }
 
-        fn detach_workspace_clients(
-            &self,
-            workspace: &TmuxWorkspaceHandle,
-        ) -> Result<(), Self::Error> {
-            self.calls.borrow_mut().push(Call::DetachWorkspace(
-                workspace.session_name.as_str().to_string(),
-            ));
-            Ok(())
-        }
-
         fn detach_session_clients(
             &self,
             address: &ManagedSessionAddress,
@@ -305,9 +287,6 @@ mod tests {
             .attach_session(&session)
             .expect("session attach should succeed");
         service
-            .detach_workspace_clients(&workspace)
-            .expect("workspace detach should succeed");
-        service
             .detach_session_clients(&session)
             .expect("session detach should succeed");
         service
@@ -319,7 +298,6 @@ mod tests {
             vec![
                 Call::AttachWorkspace("1234".to_string()),
                 Call::AttachSession("wa-1234:1234".to_string()),
-                Call::DetachWorkspace("1234".to_string()),
                 Call::DetachSession("wa-1234:1234".to_string()),
                 Call::DetachCurrentClient,
             ]

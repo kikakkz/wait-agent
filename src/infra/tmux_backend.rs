@@ -1047,10 +1047,6 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
         )
     }
 
-    fn detach_workspace_clients(&self, workspace: &TmuxWorkspaceHandle) -> Result<(), Self::Error> {
-        self.detach_session_on_socket(&workspace.socket_name, workspace.session_name.as_str())
-    }
-
     fn detach_session_clients(&self, address: &ManagedSessionAddress) -> Result<(), Self::Error> {
         self.detach_session_on_socket(
             &TmuxSocketName::new(address.server_id()),

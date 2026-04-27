@@ -64,7 +64,7 @@ Responsibilities:
 - Application bootstrap
 - Dependency wiring
 - Runtime startup and shutdown
-- Mode selection: local, server, client
+- Mode selection for the local workspace runtime
 
 This should be the composition root.
 
@@ -76,7 +76,6 @@ Responsibilities:
 - Focus state for one attached console
 - Input buffer state
 - Keybinding dispatch
-- Peek lifecycle
 
 Key types:
 
@@ -133,9 +132,8 @@ Responsibilities:
 
 - Waiting detection
 - Waiting queue maintenance
-- Switch lock management
-- Continuation observation
-- Auto-switch decision making
+- Session attention signaling
+- Policy hook points for future automation
 
 Key types:
 
@@ -152,7 +150,6 @@ Responsibilities:
 
 - Render one focused session into one console
 - Draw minimal chrome
-- Render Peek mode
 - Restore session screen snapshots on switch
 
 Key types:
@@ -344,7 +341,6 @@ Should support:
 Should support:
 
 - `render_focus`
-- `render_peek`
 - `render_status_line`
 - `render_waiting_indicator`
 
@@ -418,7 +414,6 @@ Must have integration tests for:
 Must have snapshot-style tests for:
 
 - Focus switch restoration
-- Peek rendering
 - Alternate screen behavior
 - Minimal chrome rendering
 
@@ -458,7 +453,7 @@ Recommended order:
 Reasoning:
 
 - Local mode should become real before network mode
-- Scheduler correctness should be proven before remote synchronization increases complexity
+- Local interaction correctness should be proven before remote synchronization increases complexity
 
 Local-first checkpoint:
 
@@ -466,7 +461,7 @@ Local-first checkpoint:
   - run multiple sessions
   - enforce typing protection
   - switch focus
-  - render Peek
+  - preserve fullscreen and alternate-screen behavior
 
 ## 10. Open Module Questions
 

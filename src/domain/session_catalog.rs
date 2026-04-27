@@ -22,6 +22,7 @@ impl ManagedSessionAddress {
         }
     }
 
+    #[cfg(test)]
     pub fn transport(&self) -> &SessionTransport {
         &self.transport
     }

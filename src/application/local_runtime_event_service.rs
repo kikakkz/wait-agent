@@ -21,6 +21,7 @@ impl LocalRuntimeEventBus {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn subscriber_count(&self) -> usize {
         self.inner.subscriber_count()
     }
@@ -45,7 +46,7 @@ impl LocalRuntimeEventSubscriber for LocalRuntimeEventBus {
 #[cfg(test)]
 mod tests {
     use super::{LocalRuntimeEventBus, LocalRuntimeEventPublisher, LocalRuntimeEventSubscriber};
-    use crate::domain::local_runtime::{LocalRuntimeEvent, SchedulerEvent};
+    use crate::domain::local_runtime::{ChromeEvent, ChromeSurface, LocalRuntimeEvent};
 
     #[test]
     fn local_runtime_event_bus_publishes_to_subscribers() {
@@ -53,18 +54,24 @@ mod tests {
         let (_subscriber_id, rx) = bus.subscribe();
 
         assert_eq!(
-            bus.publish(LocalRuntimeEvent::Scheduler(
-                SchedulerEvent::AutoSwitchCommitted {
-                    session_id: "sess-1".to_string(),
-                }
-            )),
+            bus.publish(LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+                surface: ChromeSurface::FooterPane,
+                width: 80,
+                height: 1,
+            })),
             1
         );
 
         let envelope = rx.recv().expect("local runtime event should arrive");
         match envelope.payload {
-            LocalRuntimeEvent::Scheduler(SchedulerEvent::AutoSwitchCommitted { session_id }) => {
-                assert_eq!(session_id, "sess-1")
+            LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+                surface,
+                width,
+                height,
+            }) => {
+                assert_eq!(surface, ChromeSurface::FooterPane);
+                assert_eq!(width, 80);
+                assert_eq!(height, 1);
             }
             other => panic!("unexpected event payload: {other:?}"),
         }
@@ -78,12 +85,9 @@ mod tests {
         assert!(bus.unsubscribe(subscriber_id));
         assert_eq!(bus.subscriber_count(), 0);
         assert_eq!(
-            bus.publish(LocalRuntimeEvent::Scheduler(
-                SchedulerEvent::AutoSwitchRequested {
-                    from_session_id: "sess-a".to_string(),
-                    to_session_id: "sess-b".to_string(),
-                }
-            )),
+            bus.publish(LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
+                is_fullscreen: true,
+            })),
             0
         );
         assert!(rx.try_recv().is_err());

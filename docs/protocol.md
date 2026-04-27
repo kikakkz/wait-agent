@@ -294,7 +294,7 @@ Payload:
 - `screen_version`
 - `snapshot_ref` or inline compact snapshot
 
-This supports focus restore and Peek.
+This supports focus restore and viewport replay.
 
 ## 13. Attach and Focus Messages
 
@@ -455,66 +455,32 @@ Current implementation rule:
 
 ## 20.1 Client Runtime Skeleton Baseline
 
-The repository now includes a client runtime skeleton in:
+The earlier experimental client runtime skeleton was removed during the local-architecture reset.
 
-- `src/client.rs`
-
-This baseline currently owns:
-
-- Endpoint normalization and TCP connect setup
-- Client-side runtime connection identity
-- `ClientHello` envelope preparation
-- `Heartbeat` envelope preparation
-- Internal transport event publication
-- The temporary delegated-spawn control bridge used by `waitagent run --connect`
+The repository does not currently ship a live network client runtime.
 
 Current implementation rule:
 
-- The client runtime must remain the single boundary for connect-side network behavior
-- Temporary delegated spawn is allowed to coexist with the future transport stream until `T5-05` and `T5-06` replace it with published remote session state
+- Future remote-connect behavior must be reintroduced only on top of the cleaned tmux-native local architecture
+- No deleted `client/server/transport` surface should be treated as the source of truth for resumed remote work
 
 ## 20.2 Registration And Liveness Baseline
 
-The repository now includes the first executable registration and liveness baseline in:
-
-- `src/transport.rs`
-- `src/client.rs`
-- `src/server.rs`
-
-This baseline currently owns:
-
-- Binary envelope encoding and decoding for `ClientHello`, `ServerHello`, and `Heartbeat`
-- Client-side registration handshake before delegated spawn
-- Server-side node registration from `ClientHello`
-- Server-side heartbeat updates from `Heartbeat`
-- Server-side heartbeat timeout to transition nodes from `online` to `offline`
+The earlier executable registration and liveness baseline was also removed with the legacy network runtime.
 
 Current implementation rule:
 
-- Registration and liveness must flow through transport envelopes, not through a second ad hoc registration path
-- Delegated spawn may continue to share the same TCP connection as a temporary bridge until session publication lands
-- Local PTY ownership remains unchanged; registration only exposes node reachability and readiness
+- When remote work resumes, registration and liveness must flow through one explicit transport model
+- The next design must start from the current local session catalog and chrome/runtime ownership model rather than from deleted bridge code
 
 ## 20.3 Remote Session Publication Baseline
 
-The repository now includes the first executable remote session publication baseline in:
-
-- `src/transport.rs`
-- `src/client.rs`
-- `src/server.rs`
-
-This baseline currently owns:
-
-- Binary envelope encoding and decoding for `SessionStarted`, `SessionUpdated`, and `SessionExited`
-- Client-side preparation of session lifecycle envelopes from local session records
-- Optional client-side publication helpers for session lifecycle messages
-- Server-side intake of published session lifecycle messages as runtime events
+There is currently no live remote session publication implementation in the repository.
 
 Current implementation rule:
 
-- Session publication must reuse the same transport envelope model as registration and liveness
-- Publication intake on the server is event-only until `T5-06` materializes an aggregate registry
-- Delegated spawn remains a temporary bridge and is not yet replaced by published aggregate session state
+- Future session publication must reuse the same transport envelope model as registration and liveness
+- Remote session publication should be designed only after the unified local/remote target model is agreed
 
 ## 21. Versioning Rules
 

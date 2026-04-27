@@ -17,8 +17,7 @@ It describes how the product should behave step by step in:
 - Local mode
 - Deferred future remote mode
 - Focus switching
-- Auto-scheduling
-- Peek
+- Waiting-state visibility
 - Deferred future mirrored interaction
 - Disconnect and recovery paths
 
@@ -128,19 +127,18 @@ Main path:
 3. Automatic and manual switching are blocked.
 4. User presses `Enter`.
 5. Input is sent to the focused session PTY.
-6. WaitAgent arms one auto-switch opportunity.
-7. WaitAgent enters continuation observation state.
+6. Focus remains on the current session.
 
 Result:
 
 - The session receives the input.
-- One scheduling opportunity exists.
+- The current session remains the active interaction target.
 
-### 3.5 Continuous Interaction Protection Flow
+### 3.5 Post-Submit Focus Stability Flow
 
 Trigger:
 
-- A scheduling opportunity exists after `Enter`
+- User has just submitted input to the focused session
 
 Preconditions:
 
@@ -150,9 +148,8 @@ Main path:
 
 1. User submits input.
 2. Current session continues producing output.
-3. Scheduler classifies this as the same interaction round.
-4. Scheduler refuses to switch away yet.
-5. Scheduler waits for the round to stabilize.
+3. WaitAgent keeps focus on the same session.
+4. The user may continue interacting with that session without interruption.
 
 Result:
 
@@ -162,30 +159,25 @@ Edge notes:
 
 - This is the rule that protects `prompt1 -> input -> prompt2`.
 
-### 3.6 Automatic Switch Flow
+### 3.6 Waiting Signal Update Flow
 
 Trigger:
 
-- A scheduling opportunity exists and another session is waiting
+- A background session appears to be waiting for user input
 
 Preconditions:
 
-- Current interaction round has stabilized
-- Switch lock is clear
-- Waiting queue is non-empty
+- Another session produces output that looks like a prompt, approval request, or other waiting state
 
 Main path:
 
-1. Scheduler evaluates the waiting queue.
-2. Scheduler selects the earliest waiting session.
-3. Console focus changes to that session.
-4. Renderer restores the selected session screen.
-5. Scheduler arms switch lock.
+1. WaitAgent refreshes its session metadata.
+2. The session is marked as likely waiting.
+3. Chrome updates counts or badges to surface that state.
 
 Result:
 
-- One automatic switch occurs.
-- No further auto-switch may happen until unlock.
+- The user can notice that another session may need attention.
 
 ### 3.7 Manual Switch Flow
 
@@ -202,35 +194,33 @@ Main path:
 1. User triggers manual switch.
 2. WaitAgent resolves the target session.
 3. Console focus changes immediately.
-4. Scheduler lock clears.
-5. Renderer restores the target session.
+4. Renderer restores the target session.
 
 Result:
 
 - The user now interacts with the selected session.
 
-### 3.8 Peek Flow
+### 3.8 Fullscreen Flow
 
 Trigger:
 
-- The user invokes Peek on another session
+- The user enters fullscreen on the active session
 
 Preconditions:
 
-- Another session exists
+- A focused session exists
 
 Main path:
 
-1. User triggers Peek.
-2. WaitAgent records the original focused session.
-3. WaitAgent renders the target session in read-only mode.
-4. Input ownership stays with the original focus.
-5. User exits Peek.
-6. WaitAgent restores the original focused session viewport.
+1. User triggers fullscreen.
+2. WaitAgent zooms the active main interaction surface.
+3. The active session continues receiving normal input and output.
+4. User exits fullscreen.
+5. WaitAgent restores the fixed workspace chrome.
 
 Result:
 
-- The user inspected another session without changing focus ownership.
+- The user temporarily gets a larger view without changing the active session.
 
 ## 4. Network Flows
 
@@ -462,8 +452,8 @@ Recommended implementation order for flows:
 3. Run agent command inside a session
 4. Typing and submit
 5. Manual switch
-6. Automatic scheduling
-7. Peek
+6. Waiting-state visibility
+7. Fullscreen
 8. Access point and registration
 9. Server workspace interaction
 10. Mirrored interaction

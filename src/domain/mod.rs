@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod chrome;
 pub mod local_runtime;
 pub mod session_catalog;

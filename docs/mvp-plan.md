@@ -33,8 +33,7 @@ Included scope:
 - local workspace bootstrap
 - shell-backed session hosting
 - console focus management
-- waiting detection and one-enter one-switch scheduling
-- Peek
+- waiting detection and user-visible attention signals
 - terminal-native rendering
 - reusable local session context
 

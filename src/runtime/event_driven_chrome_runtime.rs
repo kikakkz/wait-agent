@@ -1,5 +1,5 @@
 use crate::application::chrome_projection_service::ChromeProjectionService;
-use crate::domain::local_runtime::{ChromeEvent, ChromeSurface, LocalRuntimeEvent};
+use crate::domain::local_runtime::{ChromeEvent, LocalRuntimeEvent};
 use crate::ui::footer::FooterUi;
 use crate::ui::sidebar::SidebarUi;
 
@@ -77,17 +77,6 @@ impl EventDrivenChromeRuntime {
                 self.last_fullscreen_footer_buffer = Some(fullscreen_buffer.clone());
                 update.fullscreen_status = Some(fullscreen_buffer);
             }
-        }
-
-        if matches!(
-            event,
-            LocalRuntimeEvent::Chrome(ChromeEvent::RenderRequested {
-                surface: ChromeSurface::FullscreenStatusLine,
-                ..
-            })
-        ) && update.fullscreen_status.is_none()
-        {
-            update.fullscreen_status = self.last_fullscreen_footer_buffer.clone();
         }
 
         update
@@ -224,42 +213,6 @@ mod tests {
         assert!(first.invalidate_footer);
         assert!(first.footer.is_some());
         assert!(!second.invalidate_footer);
-    }
-
-    #[test]
-    fn render_request_can_reemit_last_fullscreen_status_buffer() {
-        let mut runtime = EventDrivenChromeRuntime::new();
-        runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
-                surface: ChromeSurface::FooterPane,
-                width: 80,
-                height: 1,
-            }),
-            0,
-        );
-        runtime.apply_event(
-            &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
-                active_socket: "wa-1".to_string(),
-                active_session: "sess-1".to_string(),
-                active_target: Some("wa-1:sess-1".to_string()),
-                sessions: vec![session("wa-1", "sess-1", "bash")],
-            }),
-            0,
-        );
-
-        let update = runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::RenderRequested {
-                surface: ChromeSurface::FullscreenStatusLine,
-                reason: "force status replay",
-            }),
-            0,
-        );
-
-        assert!(update
-            .fullscreen_status
-            .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-n] new"))
-            .unwrap_or(false));
     }
 
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {

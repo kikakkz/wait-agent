@@ -2,9 +2,7 @@ use crate::application::session_service::SessionService;
 use crate::cli::UiPaneCommand;
 use crate::domain::local_runtime::ChromeSurface;
 use crate::domain::workspace::WorkspaceInstanceId;
-use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
-};
+use crate::infra::tmux::{TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::event_driven_chrome_runtime::EventDrivenChromeRenderUpdate;
 use crate::runtime::event_driven_ui_pane_runtime::{
@@ -19,13 +17,6 @@ pub struct EventDrivenTmuxPaneRuntime<G> {
     gateway: G,
     session_service: SessionService<G>,
     pane_runtime: EventDrivenUiPaneRuntime,
-}
-
-impl EventDrivenTmuxPaneRuntime<EmbeddedTmuxBackend> {
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
-        let gateway = EmbeddedTmuxBackend::from_build_env().map_err(tmux_pane_error)?;
-        Ok(Self::new(gateway))
-    }
 }
 
 impl<G> EventDrivenTmuxPaneRuntime<G>
@@ -99,13 +90,7 @@ where
         self.pane_runtime.apply_sidebar_input_bytes(bytes)
     }
 
-    pub fn request_fullscreen_status_render(&mut self) -> EventDrivenChromeRenderUpdate {
-        self.pane_runtime.request_render(
-            ChromeSurface::FullscreenStatusLine,
-            "tmux status line refresh",
-        )
-    }
-
+    #[cfg(test)]
     pub fn selected_target(&self) -> Option<String> {
         self.pane_runtime.selected_target()
     }
@@ -285,13 +270,6 @@ mod tests {
         }
 
         fn attach_session(&self, _address: &ManagedSessionAddress) -> Result<(), Self::Error> {
-            unreachable!("not used")
-        }
-
-        fn detach_workspace_clients(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-        ) -> Result<(), Self::Error> {
             unreachable!("not used")
         }
 

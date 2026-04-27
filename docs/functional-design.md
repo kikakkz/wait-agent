@@ -23,7 +23,7 @@ WaitAgent provides three layers of functionality:
 
 - Workspace hosting
 - Session hosting
-- Attention scheduling
+- Session attention visibility
 - Deferred future remote aggregation
 
 ## 3. Functional Areas
@@ -216,16 +216,15 @@ When a session becomes active again:
 
 - Remove it from the waiting queue
 
-### 3.8 Peek
+### 3.8 Fullscreen
 
-Peek is a read-only operation.
+Fullscreen is a local viewport mode for the active session.
 
 Behavior:
 
-- Show the current screen state of another session
-- Do not change the active focus
-- Do not change input ownership
-- Exit back to the original focused session
+- Expand the active main interaction surface
+- Preserve normal shell and TUI behavior
+- Exit cleanly back to the fixed workspace chrome
 
 ### 3.9 Network Access Point
 
@@ -295,11 +294,13 @@ This section defines a suggested MVP command model.
 ### 4.1 Entry Commands
 
 - `waitagent`
-- `waitagent --connect <server-endpoint>`
+- `waitagent attach <session>`
+- `waitagent ls`
+- `waitagent detach [session]`
 
-### 4.2 Network Commands
+### 4.2 Future Remote Access
 
-- `waitagent server`
+Future remote connection and management commands are deferred until the remote model is redesigned on top of the local tmux-native architecture.
 
 ### 4.3 Workspace Commands
 
@@ -307,7 +308,6 @@ This section defines a suggested MVP command model.
 - `next-session`
 - `prev-session`
 - `focus-session <session>`
-- `peek-session <session>`
 
 These may be implemented as keyboard shortcuts, prompt commands, or lightweight control actions inside the workspace rather than traditional shell subcommands.
 
@@ -318,8 +318,6 @@ The following must hold in every mode:
 - One console has one focused session
 - Input never goes to a non-focused session within the same console
 - Input-in-progress blocks switching
-- One `Enter` creates at most one automatic switch opportunity
-- Peek is read-only
 - Session output remains raw terminal output
 
 ## 6. Acceptance Matrix
@@ -333,8 +331,8 @@ The following must hold in every mode:
 - Type partial input
 - Verify switch is blocked
 - Submit input
-- Verify only one automatic switch may happen
-- Verify Peek does not change focus
+- Verify focus remains stable through the interaction
+- Verify fullscreen preserves normal interaction
 
 ### 6.2 Network Mode
 

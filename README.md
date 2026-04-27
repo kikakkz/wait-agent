@@ -20,7 +20,6 @@ The core goals of WaitAgent are:
 - Run multiple independent agent sessions behind a single terminal experience
 - Expose only one active session for interaction at a time within each attached console
 - Detect sessions that are likely waiting for user input
-- Allow at most one automatic switch after the user submits input
 - Preserve raw TTY behavior without semantic parsing or agent-specific behavior changes
 
 ## Deployment Mode
@@ -32,9 +31,7 @@ The user starts one `waitagent` workspace on the machine and creates multiple ma
 ## Core Experience
 
 - Single focus: each attached console interacts with exactly one session at a time
-- Automatic but controlled: an input submission creates at most one auto-switch opportunity
-- Continuous interaction protection: do not switch away while the current session is still in the same interaction flow
-- Peek: inspect a background session in read-only mode without taking over input
+- Session switching stays explicit in the current local product
 - Minimal UI: no multi-panel dashboard, no card layout, no summary-first interface
 
 ## Current State
@@ -45,7 +42,7 @@ Current implementation status:
 
 - Local workspace-first interaction is now the primary local UX: one `waitagent` can create and manage multiple shell-backed sessions inside the same terminal
 - Terminal fidelity has been hardened for Codex-like TUIs, including terminal capability replies, application cursor keys, managed viewport sizing, UTF-8 handling, cursor visibility, and wide-character rendering
-- The remaining local MVP work is acceptance and stabilization, with auto-switch behavior still requiring more real-workflow validation
+- The current local phase is centered on stabilization and cleanup of the tmux-native workspace path
 - Remote session connection and management will be redesigned on top of the tmux-native local architecture rather than carried forward from the deleted legacy runtime
 
 Current documents:

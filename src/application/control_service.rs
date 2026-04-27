@@ -557,7 +557,7 @@ mod tests {
                 &layout,
                 "run-shell -b \"waitagent __toggle-fullscreen\"",
                 Some(&FooterMenuBindings {
-                    create_session_command: "detach-client -E 'waitagent'".to_string(),
+                    create_session_command: "run-shell -b 'waitagent __new-target'".to_string(),
                     open_sessions_menu_command: "run-shell 'waitagent __footer-menu'".to_string(),
                 }),
             )
@@ -609,11 +609,11 @@ mod tests {
                 ),
                 Call::BindWithoutPrefix(
                     "C-n".to_string(),
-                    vec!["detach-client -E 'waitagent'".to_string(),],
+                    vec!["run-shell -b 'waitagent __new-target'".to_string(),],
                 ),
                 Call::BindCommandWithPrefix(
                     "c".to_string(),
-                    "detach-client -E 'waitagent'".to_string(),
+                    "run-shell -b 'waitagent __new-target'".to_string(),
                 ),
                 Call::BindWaitagentFooterAction(
                     "s".to_string(),

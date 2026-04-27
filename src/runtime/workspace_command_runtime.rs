@@ -27,12 +27,6 @@ pub struct WorkspaceCommandRuntime {
 impl WorkspaceCommandRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_runtime_error)?;
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
         let entry_runtime = WorkspaceEntryRuntime::new(
             WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
             WorkspaceLayoutRuntime::from_build_env()?,
@@ -49,7 +43,6 @@ impl WorkspaceCommandRuntime {
                 target_host_runtime,
                 WorkspaceLayoutRuntime::from_build_env()?,
                 SessionService::new(main_slot_backend),
-                current_executable.clone(),
             ),
             fullscreen_runtime: NativePaneFullscreenRuntime::new(
                 backend.clone(),

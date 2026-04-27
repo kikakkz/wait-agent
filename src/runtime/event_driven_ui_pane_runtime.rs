@@ -3,7 +3,7 @@ use crate::application::local_runtime_event_service::{
 };
 use crate::application::session_catalog_projection_service::SessionCatalogProjectionService;
 use crate::domain::local_runtime::{
-    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
+    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::event::EventEnvelope;
@@ -72,31 +72,12 @@ impl EventDrivenUiPaneRuntime {
         }))
     }
 
-    pub fn publish_sidebar_selection(&mut self, session_id: &str) -> EventDrivenChromeRenderUpdate {
-        self.publish(LocalRuntimeEvent::Chrome(
-            ChromeEvent::SidebarSelectionChanged {
-                session_id: session_id.to_string(),
-            },
-        ))
-    }
-
     pub fn publish_fullscreen_changed(
         &mut self,
         is_fullscreen: bool,
     ) -> EventDrivenChromeRenderUpdate {
         self.publish(LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
             is_fullscreen,
-        }))
-    }
-
-    pub fn request_render(
-        &mut self,
-        surface: ChromeSurface,
-        reason: &'static str,
-    ) -> EventDrivenChromeRenderUpdate {
-        self.publish(LocalRuntimeEvent::Chrome(ChromeEvent::RenderRequested {
-            surface,
-            reason,
         }))
     }
 
@@ -134,23 +115,9 @@ impl EventDrivenUiPaneRuntime {
         outcome
     }
 
+    #[cfg(test)]
     pub fn selected_target(&self) -> Option<String> {
         self.state.selected_target()
-    }
-
-    pub fn active_target(&self) -> Option<String> {
-        self.state.active_target()
-    }
-
-    pub fn publish_target_activation_committed(
-        &mut self,
-        target: &str,
-    ) -> EventDrivenChromeRenderUpdate {
-        self.publish(LocalRuntimeEvent::TargetActivation(
-            TargetActivationEvent::Committed {
-                target: target.to_string(),
-            },
-        ))
     }
 
     fn publish(&mut self, event: LocalRuntimeEvent) -> EventDrivenChromeRenderUpdate {
@@ -197,17 +164,7 @@ impl EventDrivenUiPaneState {
                 self.ensure_active_target();
                 self.ensure_selected_session();
             }
-            LocalRuntimeEvent::TargetActivation(
-                TargetActivationEvent::Rebound { target }
-                | TargetActivationEvent::Committed { target },
-            ) => {
-                self.active_target = Some(target.clone());
-                self.ensure_selected_session();
-            }
-            LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SelectionChanged {
-                selected_session_id,
-            })
-            | LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged {
+            LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged {
                 session_id: selected_session_id,
             }) => {
                 if self.sessions.is_empty() {
@@ -289,13 +246,9 @@ impl EventDrivenUiPaneState {
             .map(|session| session.address.qualified_target())
     }
 
-    fn active_target(&self) -> Option<String> {
-        self.active_target.clone()
-    }
-
     fn activation(&self) -> Option<EventDrivenSidebarActivation> {
         let selected_target = self.selected_target()?;
-        if self.active_target().as_deref() == Some(selected_target.as_str()) {
+        if self.active_target.as_deref() == Some(selected_target.as_str()) {
             return Some(EventDrivenSidebarActivation::SelectMainPane);
         }
 
@@ -507,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_target_activation_updates_active_target_without_resetting_selection() {
+    fn refreshed_snapshot_updates_active_target_without_resetting_selection() {
         let mut runtime = EventDrivenUiPaneRuntime::new();
         runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
         runtime.publish_surface_resize(ChromeSurface::FooterPane, 96, 1);
@@ -522,9 +475,17 @@ mod tests {
         );
 
         runtime.apply_sidebar_input_bytes(b"\x1b[B");
-        let update = runtime.publish_target_activation_committed("wa-1:sess-2");
+        let update = runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("wa-1:sess-2"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                session("wa-1", "sess-2", "codex"),
+            ],
+        );
 
-        assert_eq!(runtime.active_target().as_deref(), Some("wa-1:sess-2"));
+        assert_eq!(runtime.state.active_target.as_deref(), Some("wa-1:sess-2"));
         assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-2"));
         assert!(update
             .sidebar

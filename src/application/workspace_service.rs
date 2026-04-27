@@ -28,6 +28,7 @@ where
         self.tmux.ensure_workspace(config)
     }
 
+    #[cfg(test)]
     pub fn ensure_workspace_for_dir(
         &self,
         workspace_dir: &Path,

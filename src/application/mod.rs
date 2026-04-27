@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod chrome_projection_service;
 pub mod control_service;
 pub mod layout_service;

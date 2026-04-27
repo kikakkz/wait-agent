@@ -30,17 +30,6 @@ impl SessionCatalogProjectionService {
             },
         ))
     }
-
-    pub fn publish_selection<P>(&self, publisher: &mut P, selected_session_id: &str) -> usize
-    where
-        P: LocalRuntimeEventPublisher,
-    {
-        publisher.publish(LocalRuntimeEvent::SessionCatalog(
-            SessionCatalogEvent::SelectionChanged {
-                selected_session_id: selected_session_id.to_string(),
-            },
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -85,23 +74,6 @@ mod tests {
                 assert_eq!(active_target.as_deref(), Some("wa-1:sess-1"));
                 assert_eq!(sessions.len(), 1);
             }
-            other => panic!("unexpected event payload: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn publish_selection_emits_selection_changed_event() {
-        let service = SessionCatalogProjectionService::new();
-        let mut bus = LocalRuntimeEventBus::new();
-        let (_subscriber_id, rx) = bus.subscribe();
-
-        assert_eq!(service.publish_selection(&mut bus, "sess-9"), 1);
-
-        let envelope = rx.recv().expect("selection event should be delivered");
-        match envelope.payload {
-            LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SelectionChanged {
-                selected_session_id,
-            }) => assert_eq!(selected_session_id, "sess-9"),
             other => panic!("unexpected event payload: {other:?}"),
         }
     }

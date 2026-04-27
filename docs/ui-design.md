@@ -13,7 +13,7 @@ It focuses on:
 - Visual structure
 - Terminal-native presentation
 - Required and optional status indicators
-- Focus, waiting, Peek, and mirrored interaction states
+- Focus, waiting, fullscreen, and mirrored interaction states
 
 It complements:
 
@@ -37,7 +37,7 @@ The base layout has three zones:
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│ [devbox-1/claude-2] active | 2 waiting | lock: armed        │
+│ [devbox-1/claude-2] active | 2 waiting                      │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  Raw terminal output from the focused session                │
@@ -101,7 +101,7 @@ Suggested content:
 - `focus`
 - `node`
 - `mode`
-- small notices such as `peek`, `remote attached`, or `offline`
+- small notices such as `remote attached` or `offline`
 
 Suggested format:
 
@@ -145,54 +145,38 @@ Example:
 [claude-2] active | 3 waiting
 ```
 
-## 5.3 Auto-Switch Armed State
+## 5.3 Explicit Selection State
 
-The user has submitted input and one auto-switch opportunity is armed.
+The user has navigated to another session in chrome but has not yet activated it.
 
 Visual requirements:
 
-- Expose the state quietly
-- Avoid bright or blinking indicators
+- Show which target is selected
+- Keep the active session identity visible
 
 Example:
 
 ```text
-[claude-2] active | 2 waiting | lock: armed
+[claude-2] active | selected: claude-4
 ```
 
-## 5.4 Auto-Switch Locked State
+## 5.4 Fullscreen State
 
-One auto-switch already happened for the current input cycle.
+The main shell pane is zoomed while the workspace remains attached.
 
 Visual requirements:
 
-- Show that further auto-switching is suppressed
+- Keep the main viewport dominant
+- Preserve clear exit hints
+- Preserve normal shell and TUI rendering
 
 Example:
 
 ```text
-[claude-4] active | 1 waiting | lock: blocked
+[claude-2] active | mode: fullscreen
 ```
 
-## 5.5 Peek State
-
-Peek temporarily shows another session while preserving the original focus.
-
-Visual requirements:
-
-- Make Peek explicit
-- Show the viewed session identity
-- Preserve the original focused session identity somewhere in chrome
-
-Suggested format:
-
-```text
-[peek] devbox-2/codex-1 | return: devbox-1/claude-2
-...read-only screen snapshot...
-focus: devbox-1/claude-2 | mode: peek
-```
-
-## 5.6 Remote Attach Awareness
+## 5.5 Remote Attach Awareness
 
 A session may be attached by another console.
 
@@ -252,7 +236,6 @@ If color is used:
 - Focused session identity may be emphasized
 - Waiting count may be highlighted
 - Error or offline state may use warning color
-- Peek state may use dimmed styling
 
 Must not:
 
@@ -273,7 +256,7 @@ Show full top and bottom status lines.
 Compact the status line:
 
 ```text
-[claude-2] | 2 wait | armed
+[claude-2] | 2 wait
 ```
 
 If required:
@@ -291,7 +274,6 @@ Core interactions:
 - `Ctrl + Tab`
 - `Ctrl + Shift + Tab`
 - `Ctrl + Number`
-- `Peek` trigger
 
 The UI must expose as little keyboard legend as possible by default.
 
@@ -350,14 +332,14 @@ focus: claude-2 | mode: normal
 focus: devbox-1/claude-2 | node: devbox-1 | mode: normal
 ```
 
-### 11.3 Peek
+### 11.3 Fullscreen
 
 ```text
-[peek] devbox-2/codex-1 | return: devbox-1/claude-2
+[claude-2] active | mode: fullscreen
 
-...read-only screen snapshot...
+...raw session output...
 
-focus: devbox-1/claude-2 | mode: peek
+focus: claude-2 | mode: fullscreen
 ```
 
 ### 11.4 Unreachable Session
@@ -385,4 +367,3 @@ The UI must never:
 - Convert agent output into summaries by default
 - Blur focus ownership
 - Hide network or offline state when it affects interaction
-

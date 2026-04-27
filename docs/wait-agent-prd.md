@@ -168,19 +168,19 @@ This is not a protocol-level truth. It is a scheduling signal.
 
 ### 7.4 Waiting Queue
 
-Sessions that enter the waiting state are ordered by FIFO for scheduling.
+Sessions that enter the waiting state may be ordered for later user-facing attention policies.
 
-### 7.5 Switch Lock
+### 7.5 Session Automation Policy
 
-Once an automatic switch happens, the system locks further automatic switching until the next user action that unlocks it.
+The current local product does not perform automatic switching.
 
-### 7.6 Peek
+### 7.6 Runtime Role
 
-Read-only inspection of a background session without changing the current focus or taking over input.
+Every future `waitagent` runtime should remain a full local workspace host.
 
 ### 7.7 Node
 
-A machine running WaitAgent Client.
+A machine running WaitAgent.
 
 A node may be:
 
@@ -189,9 +189,9 @@ A node may be:
 - A container host
 - A CI or sandbox host
 
-### 7.8 Server
+### 7.8 Remote Control Plane
 
-WaitAgent Server is the aggregation and interaction surface that:
+Future remote support may introduce a remote control plane that:
 
 - Collects sessions from multiple nodes
 - Maintains a global session registry and aggregate view
@@ -199,9 +199,9 @@ WaitAgent Server is the aggregation and interaction surface that:
 - Receives events from attached consoles and routes them to the correct node
 - Broadcasts session output to all attached consoles
 
-### 7.9 Client
+### 7.9 Local PTY Host
 
-WaitAgent Client runs on the machine that owns the PTY and:
+The machine that owns the PTYs:
 
 - Starts or adopts local managed sessions
 - Maintains local PTYs and screen buffers
@@ -209,7 +209,7 @@ WaitAgent Client runs on the machine that owns the PTY and:
 - Writes input coming from the local CLI or the server-side console into the same PTY
 - Preserves full local interaction even after network mode is enabled
 
-`Client` is an implementation role, not a separate user-facing product entrypoint.
+This is an implementation role, not a separate user-facing product entrypoint.
 
 ### 7.10 Session Address
 
@@ -337,24 +337,23 @@ Useful additional operations:
 - Filter by node
 - Jump directly to `<node-id>/<session-id>`
 
-### 8.6 Peek
+### 8.6 Fullscreen
 
 Definition:
 
-> Temporarily inspect the latest screen state of a non-focused session in read-only mode, without taking over input, without changing focus, and without triggering automatic scheduling.
+> Temporarily zoom the active session to maximize readable terminal space without leaving the workspace.
 
 Constraints:
 
-- stdin still belongs to the current focus within that console
-- Peek must not write input to the target session
-- Peek does not change the scheduler lock state
-- Exiting Peek restores the original focused screen
+- stdin still belongs to the active focused session
+- Fullscreen must not alter session ownership
+- Exiting fullscreen restores the fixed workspace chrome cleanly
 
 Typical uses:
 
-- Check whether an agent is stuck
-- Check whether a session is already waiting for input
-- Inspect progress without interrupting the current flow
+- Read long shell or agent output
+- Give a Codex-like TUI the largest possible view
+- Inspect progress without leaving the current workspace session
 
 ### 8.7 Mirrored Multi-Console Interaction
 
@@ -435,7 +434,7 @@ Network mode:
 ```text
 Server Terminal
    ↓
-WaitAgent Server Workspace
+WaitAgent Remote Workspace
    ↓
 Global Session Registry + Aggregate Scheduler
    ↓
@@ -498,18 +497,17 @@ Responsibilities:
 - Avoid semantic re-rendering
 - Avoid summary-first views
 
-### 10.6 WaitAgent Server
+### 10.6 Future Remote Control Plane
 
 Responsibilities:
 
-- Accept long-lived connections from multiple clients
+- Accept long-lived connections from multiple runtimes
 - Maintain the global session registry
-- Maintain the server console’s own waiting queue and focus scheduler
-- Route user input to the correct client
+- Route user input to the correct PTY host
 - Broadcast PTY output to all attached consoles
 - Provide a cross-node aggregate interaction surface
 
-### 10.7 WaitAgent Client
+### 10.7 Local PTY Host
 
 Responsibilities:
 
@@ -635,20 +633,19 @@ Allowed minimal UI elements:
 - In-workspace session creation
 - Shell-backed session defaults
 - Single-focus switching
-- One automatic switch opportunity after input submission
 - Manual switching
 - Waiting heuristics
-- Peek
+- Fullscreen
 - Resize synchronization
 - Crash isolation
 
 ### 13.2 Phase 2: Network Version
 
-- WaitAgent Server
-- WaitAgent Client runtime
+- Remote control-plane runtime
+- Local-to-remote session publication runtime
 - Multi-node session aggregation
 - Global session namespace
-- Cross-machine aggregate waiting queue
+- Cross-machine aggregate session visibility
 - Mirrored workspace interaction
 - Multi-console attach and broadcast
 - Access point configuration
@@ -676,9 +673,6 @@ Functional acceptance:
 - On a single machine, those sessions must be reachable through one `waitagent` instance
 - Foreground input must never enter background sessions within a console
 - Waiting sessions must enter FIFO order correctly
-- One `Enter` must trigger at most one automatic switch
-- Continuous interaction must not cause false switching
-- Peek must not change input ownership
 - Resize must not break session behavior
 - One session crash must not affect others
 - Support at least `2` connected nodes
@@ -721,9 +715,8 @@ They do not solve:
 
 - Which session is waiting for the user
 - Waiting-aware FIFO scheduling
-- One automatic switch opportunity after `Enter`
-- Continuous interaction protection
-- Read-only Peek semantics
+- Explicit single-focus interaction management
+- Local workspace chrome that stays mounted while switching targets
 - Cross-machine session scheduling with mirrored interaction
 
 Conclusion:

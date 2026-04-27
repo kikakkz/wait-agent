@@ -33,7 +33,6 @@ In practical terms:
 - session lifecycle controls must be usable
 - shell behavior must remain natural
 - Codex-like full-screen TUIs must remain usable
-- auto-switch must behave predictably enough to trust in daily use
 
 ## 3. Recommended Environment
 
@@ -62,8 +61,6 @@ Recommended shell conditions:
 - a shell-backed session behaves like a real reusable shell context
 - Codex can start, render, navigate menus, and accept follow-up input inside WaitAgent
 - Chinese input and normal UTF-8 output remain readable in validated sessions
-- Peek works without stealing input ownership
-- no known blocker remains in auto-switch behavior for common local workflows
 - any remaining issues are minor enough that network work would not multiply debugging cost
 
 ## 5. Scenario Checklist
@@ -122,12 +119,12 @@ Recommended shell conditions:
 - Confirm picker-only keys do not leak into the shell when the picker is open.
 - Confirm shell keys continue to work normally when the picker is closed.
 
-### 5.7 Peek
+### 5.7 Fullscreen
 
-- Enter Peek on a non-focused session.
-- Confirm the viewed session changes while input ownership stays on the original focused session.
-- Exit Peek.
-- Confirm focus and input ownership return to the original session without corruption.
+- Enter fullscreen from the main shell pane.
+- Exit fullscreen back to the fixed workspace chrome.
+- Confirm the footer or status hints remain readable in both states.
+- Confirm fullscreen preserves usable shell and Codex interaction.
 
 ### 5.8 Resize
 
@@ -136,39 +133,7 @@ Recommended shell conditions:
 - Confirm content remains aligned and visible after resize.
 - Confirm status chrome still fits without hiding active session content unexpectedly.
 
-## 6. Auto-Switch Acceptance Rules
-
-This section is mandatory because auto-switch is currently the highest-risk local interaction behavior.
-
-### 6.1 Must Hold
-
-- auto-switch is considered only after `Enter`
-- at most one automatic switch may happen per submitted input round
-- no automatic switch may occur while partial input is still being typed
-- manual switching must clear the current auto-switch opportunity
-
-### 6.2 Same-Round Protection
-
-- if the focused session continues the same interaction round after `Enter`, WaitAgent must stay on it
-- if the focused session produces follow-up output and then returns to its own prompt, WaitAgent must still stay on it
-- a prompt-to-prompt follow-up inside the same session must not be treated as permission to switch away
-
-### 6.3 Waiting-Session Switching
-
-- if another session is already waiting and the current round truly stabilizes, one switch may occur
-- the switched-to target must be the earliest waiting session in FIFO order
-- after the switch, further auto-switching must remain blocked until the user submits new input or manually changes focus
-
-### 6.4 Failure Conditions
-
-Any of the following keeps `T4-10` open:
-
-- WaitAgent switches away from Codex or another session before the same interaction round is really done
-- WaitAgent fails to switch when a clearly waiting background session should receive the one allowed switch
-- WaitAgent switches more than once per submitted input round
-- the lock state becomes hard to predict from user-visible behavior
-
-## 7. How To Record A Failure
+## 6. How To Record A Failure
 
 For each failed scenario, record:
 
@@ -177,6 +142,6 @@ For each failed scenario, record:
 - triggering input
 - observed result
 - expected result
-- whether the failure involves auto-switch, picker, shell fidelity, resize, or UTF-8 behavior
+- whether the failure involves picker, fullscreen, shell fidelity, resize, or UTF-8 behavior
 
 The detailed machine-readable verification result should then be synced into `.agents/state/last-verified.yaml` and related task state.

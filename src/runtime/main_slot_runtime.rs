@@ -24,7 +24,6 @@ pub struct MainSlotRuntime {
     target_host_runtime: TargetHostRuntime,
     layout_runtime: WorkspaceLayoutRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
-    current_executable: PathBuf,
 }
 
 impl MainSlotRuntime {
@@ -33,14 +32,12 @@ impl MainSlotRuntime {
         target_host_runtime: TargetHostRuntime,
         layout_runtime: WorkspaceLayoutRuntime,
         session_service: SessionService<EmbeddedTmuxBackend>,
-        current_executable: PathBuf,
     ) -> Self {
         Self {
             backend,
             target_host_runtime,
             layout_runtime,
             session_service,
-            current_executable,
         }
     }
 
@@ -73,20 +70,10 @@ impl MainSlotRuntime {
             return self.activate_target_in_workspace(&current_workspace, &session);
         }
 
-        self.backend
-            .run_socket_command(
-                &TmuxSocketName::new(&command.current_socket_name),
-                &[
-                    "detach-client".to_string(),
-                    "-E".to_string(),
-                    format!(
-                        "{} attach {}",
-                        shell_escape(self.current_executable.to_string_lossy().as_ref()),
-                        shell_escape(&command.target)
-                    ),
-                ],
-            )
-            .map_err(main_slot_error)
+        Err(LifecycleError::Protocol(format!(
+            "target `{}` is outside the current workspace socket `{}`",
+            command.target, command.current_socket_name
+        )))
     }
 
     pub fn run_new_target(&self, command: NewTargetCommand) -> Result<(), LifecycleError> {
@@ -561,10 +548,6 @@ fn main_slot_error(error: TmuxError) -> LifecycleError {
         "tmux-native main-slot command failed".to_string(),
         io::Error::new(io::ErrorKind::Other, error.to_string()),
     )
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ impl WorkspaceInstanceId {
         Self(value.into())
     }
 
+    #[cfg(test)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -52,6 +53,7 @@ pub struct WorkspaceInstanceConfig {
 }
 
 impl WorkspaceInstanceConfig {
+    #[cfg(test)]
     pub fn for_new_session(workspace_dir: &Path) -> Self {
         Self::for_new_session_with_size(workspace_dir, None, None)
     }
@@ -89,15 +91,6 @@ impl WorkspaceInstanceConfig {
             initial_rows: rows,
             initial_cols: cols,
         }
-    }
-
-    pub fn for_new_session_on_socket_with_size(
-        workspace_dir: &Path,
-        socket_name: impl Into<String>,
-        rows: Option<u16>,
-        cols: Option<u16>,
-    ) -> Self {
-        Self::for_new_target_on_socket_with_size(workspace_dir, socket_name, rows, cols)
     }
 }
 

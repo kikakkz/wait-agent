@@ -197,8 +197,6 @@ pub trait TmuxSessionGateway: TmuxGateway {
 
     fn attach_session(&self, address: &ManagedSessionAddress) -> Result<(), Self::Error>;
 
-    fn detach_workspace_clients(&self, workspace: &TmuxWorkspaceHandle) -> Result<(), Self::Error>;
-
     fn detach_session_clients(&self, address: &ManagedSessionAddress) -> Result<(), Self::Error>;
 
     fn detach_current_client(&self) -> Result<(), Self::Error>;

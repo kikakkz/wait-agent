@@ -1,6 +1,6 @@
 use crate::domain::chrome::{ChromeSurfaceSize, FooterViewModel, SidebarViewModel};
 use crate::domain::local_runtime::{
-    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
+    ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 
@@ -10,10 +10,6 @@ pub struct ChromeProjectionService {
 }
 
 impl ChromeProjectionService {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn apply_event(&mut self, event: &LocalRuntimeEvent) -> ChromeProjectionUpdate {
         match event {
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
@@ -30,17 +26,6 @@ impl ChromeProjectionService {
                 self.ensure_selected_target();
                 self.emit_both()
             }
-            LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SelectionChanged {
-                selected_session_id,
-            }) => {
-                self.state.selected_target = self
-                    .state
-                    .sessions
-                    .iter()
-                    .find(|session| session.address.session_id() == selected_session_id)
-                    .map(|session| session.address.qualified_target());
-                self.emit_sidebar()
-            }
             LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged { session_id }) => {
                 self.state.selected_target = self
                     .state
@@ -49,18 +34,6 @@ impl ChromeProjectionService {
                     .find(|session| session.address.session_id() == session_id)
                     .map(|session| session.address.qualified_target());
                 self.emit_sidebar()
-            }
-            LocalRuntimeEvent::TargetActivation(TargetActivationEvent::Requested { target }) => {
-                self.state.selected_target = Some(target.clone());
-                self.emit_sidebar()
-            }
-            LocalRuntimeEvent::TargetActivation(
-                TargetActivationEvent::Rebound { target }
-                | TargetActivationEvent::Committed { target },
-            ) => {
-                self.state.active_target = Some(target.clone());
-                self.state.selected_target = Some(target.clone());
-                self.emit_both()
             }
             LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
                 surface,
@@ -84,15 +57,6 @@ impl ChromeProjectionService {
                 self.state.fullscreen = *is_fullscreen;
                 self.emit_footer()
             }
-            LocalRuntimeEvent::Chrome(ChromeEvent::RenderRequested { surface, .. }) => {
-                match surface {
-                    ChromeSurface::SidebarPane => self.emit_sidebar(),
-                    ChromeSurface::FooterPane | ChromeSurface::FullscreenStatusLine => {
-                        self.emit_footer()
-                    }
-                }
-            }
-            _ => ChromeProjectionUpdate::default(),
         }
     }
 
@@ -226,7 +190,7 @@ pub struct ChromeProjectionUpdate {
 mod tests {
     use super::ChromeProjectionService;
     use crate::domain::local_runtime::{
-        ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent, TargetActivationEvent,
+        ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -235,7 +199,7 @@ mod tests {
 
     #[test]
     fn snapshot_event_produces_sidebar_and_footer_models_once_surfaces_are_known() {
-        let mut service = ChromeProjectionService::new();
+        let mut service = ChromeProjectionService::default();
         service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
             surface: ChromeSurface::SidebarPane,
             width: 24,
@@ -281,7 +245,7 @@ mod tests {
 
     #[test]
     fn sidebar_selection_event_only_updates_sidebar_projection() {
-        let mut service = ChromeProjectionService::new();
+        let mut service = ChromeProjectionService::default();
         service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
             surface: ChromeSurface::SidebarPane,
             width: 24,
@@ -318,7 +282,7 @@ mod tests {
 
     #[test]
     fn fullscreen_flag_switches_footer_projection_mode() {
-        let mut service = ChromeProjectionService::new();
+        let mut service = ChromeProjectionService::default();
         service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
             surface: ChromeSurface::FooterPane,
             width: 80,
@@ -351,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn target_activation_commit_updates_active_and_selected_targets() {
-        let mut service = ChromeProjectionService::new();
+    fn later_snapshots_update_active_and_selected_targets() {
+        let mut service = ChromeProjectionService::default();
         service.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
             surface: ChromeSurface::SidebarPane,
             width: 24,
@@ -375,9 +339,15 @@ mod tests {
             },
         ));
 
-        let update = service.apply_event(&LocalRuntimeEvent::TargetActivation(
-            TargetActivationEvent::Committed {
-                target: "wa-1:sess-2".to_string(),
+        let update = service.apply_event(&LocalRuntimeEvent::SessionCatalog(
+            SessionCatalogEvent::SnapshotUpdated {
+                active_socket: "wa-1".to_string(),
+                active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-2".to_string()),
+                sessions: vec![
+                    session("wa-1", "sess-1", "bash"),
+                    session("wa-1", "sess-2", "codex"),
+                ],
             },
         ));
 

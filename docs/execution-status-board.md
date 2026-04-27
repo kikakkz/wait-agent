@@ -35,15 +35,13 @@ Current phase:
 
 Current gate:
 
-- `event-r2a` replace cross-session attach switching with fixed-chrome main-slot target activation
+- `local-cleanup` close local legacy cleanup and reset the remote design baseline
 
 Why this is the current gate:
 
-- the pane-side chrome path is already event-driven enough to expose the real remaining architecture problem
-- the same-socket switching path has now been rewritten around tmux-native main-slot rebinding, but the product contract still needs real-terminal acceptance on that new path
-- closing this gate is still required before the remaining attach or scheduler cleanup can be called done against the accepted architecture
-- attach or scheduler event cleanup is still needed, but it is not the current root blocker
-- this work is now the first slice in a locked batch: `event-r2a -> event-r3 -> event-r4`
+- the local tmux-native workspace path is now usable enough to end the current acceptance phase
+- the most important remaining risk is no longer local interaction breakage, but stale legacy assumptions in code and docs
+- remote session work should restart from the cleaned local architecture rather than from deleted network-era surfaces
 
 ## 3. Current Snapshot
 
@@ -54,8 +52,8 @@ Project status at a glance:
 - the tmux-first local path already owns the visible workspace chrome
 - the accepted new direction is now stricter than the earlier tmux-window switching model: sidebar and footer stay fixed while only the main view changes
 - `task.event-r2` is complete: chrome updates, session-catalog refresh, pane refresh, and shell-exit cleanup now use explicit events rather than pane-local polling loops on the accepted path
-- `task.event-r2a` is materially advanced: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection now comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks now refresh only the affected workspace chrome, and startup now materializes the initial target identity before attach
-- the remaining `task.event-r2a` work is umbrella acceptance rerun rather than architectural rework: the batch root causes have been addressed and the next step is to clear the remaining fixed-chrome switching evidence in a real terminal before moving to `event-r3`
+- `task.event-r2a` is complete enough for the current local product goal: same-socket switching now uses tmux-native pane rebinding, target hosts are modeled separately from the visible workspace chrome session, active-target projection now comes from workspace state instead of the visible chrome session id, workspace lifecycle hooks now refresh only the affected workspace chrome, and startup now materializes the initial target identity before attach
+- local acceptance is no longer blocked on deleted legacy interaction features, because they are not part of the accepted current product scope
 - future remote work remains deferred until the fixed local chrome and main-slot activation model is stable
 
 ## 4. Milestone Summary
@@ -63,7 +61,7 @@ Project status at a glance:
 | Milestone | Goal | Status |
 | --- | --- | --- |
 | `M0` | Product and design baseline completed | `done` |
-| `M1` | Local single-machine workspace UX usable end to end | `in_progress` |
+| `M1` | Local single-machine workspace UX usable end to end | `done` |
 | `M2` | Network aggregation MVP usable end to end | `not_started` |
 | `M3` | Hardening, observability, and developer usability | `not_started` |
 
@@ -73,9 +71,9 @@ Execution tracks at human-summary level:
 
 - `T0` Documentation and planning: active and aligned with the refined fixed-chrome architecture
 - `T1` Local runtime foundation: complete enough for the current architecture correction
-- `T2` Event-driven control path: in progress
+- `T2` Event-driven control path: complete enough for the accepted local scope
 - `T3` Terminal UI and rendering: the old custom fullscreen and shared-surface path remains retired
-- `T4` Local workspace UX and validation: in progress on fixed chrome and main-slot target activation
+- `T4` Local workspace UX and validation: complete enough for the current local scope
 - `T5` Network transport and registration: foundations exist, but resumed network work remains intentionally deferred
 - `T6` Mirrored multi-console interaction: not started
 - `T7` Reliability, security, and diagnostics: not started
@@ -84,7 +82,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- `event-r2a` Rerun umbrella acceptance on the fixed-chrome target-activation model now that ctrl-n hot paths, workspace-local hook refresh, and startup-time initial target materialization are all landed
+- remove local legacy leftovers and outdated documentation before remote session design resumes
 
 Accepted local architecture direction:
 
@@ -100,13 +98,13 @@ Accepted event-driven delivery queue:
 1. `event-r1` Establish the new event-driven local runtime architecture and event contract
 2. `event-r2` Implement event-driven tmux chrome, session catalog, and pane update flows
 3. `event-r2a` Replace cross-session attach switching with fixed-chrome main-slot target activation
-4. `event-r3` Move attach, resize, and scheduler control onto explicit runtime events
-5. `event-r4` Route the default local path through the new event-driven stack and isolate polling history
+4. `event-r3` Move remaining attach, resize, and lifecycle control onto explicit runtime events
+5. `event-r4` Route the default local path through the new event-driven stack and isolate polling history only if future remote design still needs that split
 
 Priority rule:
 
-- `event-r2a -> event-r3 -> event-r4` is the locked top-priority local batch
-- no network, remote, or optional local polish task should overtake this batch without an explicit replanning decision
+- no deleted legacy surface should be revived during remote planning
+- remote and local session management should be redesigned on top of the cleaned tmux-native workspace baseline
 
 Deferred queue after local stabilization:
 

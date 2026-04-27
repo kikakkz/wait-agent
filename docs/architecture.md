@@ -119,17 +119,18 @@ Anti-goal:
 Responsibilities:
 
 - Parse commands and flags
-- Bootstrap local workspace mode or server mode
+- Bootstrap local workspace mode
 - Attach the current terminal as a console
 - Apply terminal raw mode and resize wiring
 
 Preferred public model:
 
 - `waitagent`
-- `waitagent --connect <server-endpoint>`
-- `waitagent server`
+- `waitagent attach <session>`
+- `waitagent ls`
+- `waitagent detach [session]`
 
-The current `run` bridge may still exist temporarily during implementation, but it is not the target UX.
+Future remote connection and management entrypoints are deferred until the remote model is redesigned on top of the local workspace architecture.
 
 ### 5.2 Console Runtime
 
@@ -208,7 +209,7 @@ Responsibilities:
 - Render one focused session to one console
 - Restore a session’s visible screen state on switch
 - Render minimal metadata chrome
-- Support read-only Peek rendering
+- Support fullscreen and normal workspace rendering modes
 
 ### 5.7 Transport Hub
 
@@ -343,9 +344,7 @@ Suggested fields:
 - `location`
   Values: `local`, `server`, `remote-attach`
 - `focused_session`
-- `peek_session`
 - `input_buffer_state`
-- `switch_lock`
 - `scheduler_state`
 
 ### 7.4 Events
@@ -365,8 +364,6 @@ Minimum event types:
 - `console_attached`
 - `console_detached`
 - `focus_changed`
-- `peek_started`
-- `peek_ended`
 
 ## 8. Session Screen Model
 
@@ -425,32 +422,19 @@ The scheduler observes:
 
 The scheduler may emit:
 
-- `stay_on_current_session`
-- `switch_to_session`
-- `arm_switch_lock`
-- `clear_switch_lock`
 - `update_waiting_queue`
+- `mark_session_waiting`
+- `mark_session_active`
 
 ### 9.4 Scheduler State Machine
 
-Suggested states:
+The current local product does not perform automatic switching.
 
-- `idle`
-- `typing`
-- `armed_after_enter`
-- `observing_continuation`
-- `locked_after_auto_switch`
+Any future automation should be:
 
-Transition outline:
-
-1. `typing`
-   User is editing input. No switching allowed.
-2. `armed_after_enter`
-   One scheduling opportunity is available.
-3. `observing_continuation`
-   Current focused session may still be in the same interaction round.
-4. `locked_after_auto_switch`
-   One automatic switch already happened. No more auto-switches until unlock.
+- policy-driven rather than heuristic magic
+- explicit in user-visible state
+- designed after the unified local and remote session model is settled
 
 ## 10. Input Routing Architecture
 
@@ -504,21 +488,15 @@ Recommended runtime split:
 - `waitagent`
   Workspace-first CLI binary
 
-Alternative:
-
-- One binary with subcommands:
-  - `waitagent`
-  - `waitagent server`
-
-The single-binary model is preferable for consistency and distribution simplicity.
-
 Recommended command progression:
 
-- Phase 1:
+- Current:
   - `waitagent`
-- Phase 2:
-  - `waitagent server`
-  - `waitagent --connect ...`
+  - `waitagent attach`
+  - `waitagent ls`
+  - `waitagent detach`
+- Future remote connection and management commands:
+  - deferred until the remote model is redesigned on top of the accepted local architecture
 
 ## 13. Persistence Strategy
 
