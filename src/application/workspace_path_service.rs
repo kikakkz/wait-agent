@@ -1,7 +1,6 @@
-use crate::domain::workspace_paths::WorkspacePaths;
 use std::env;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkspacePathService;
@@ -11,23 +10,12 @@ impl WorkspacePathService {
         Self
     }
 
-    pub fn runtime_root_dir(&self) -> PathBuf {
-        env::var("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            .join("waitagent")
-    }
-
     pub fn resolve_workspace_dir(&self, value: Option<&str>) -> Result<PathBuf, io::Error> {
         let dir = match value {
             Some(path) => PathBuf::from(path),
             None => env::current_dir()?,
         };
         dir.canonicalize()
-    }
-
-    pub fn workspace_paths(&self, workspace_dir: &Path) -> WorkspacePaths {
-        WorkspacePaths::from_workspace_dir(workspace_dir, &self.runtime_root_dir())
     }
 }
 
@@ -59,10 +47,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_paths_use_waitagent_runtime_root() {
-        let service = WorkspacePathService::new();
-        let paths = service.workspace_paths(std::path::Path::new("/tmp/waitagent/ws"));
+    fn resolve_workspace_dir_defaults_to_current_directory() {
+        let expected = std::env::current_dir()
+            .expect("current dir should resolve")
+            .canonicalize()
+            .expect("current dir should canonicalize");
 
-        assert!(paths.socket_path.to_string_lossy().contains("waitagent"));
+        let resolved = WorkspacePathService::new()
+            .resolve_workspace_dir(None)
+            .expect("current workspace dir should resolve");
+
+        assert_eq!(resolved, expected);
     }
 }

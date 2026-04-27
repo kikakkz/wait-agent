@@ -1,26 +1,23 @@
 use crate::application::session_service::SessionService;
+use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
-    ActivateTargetCommand, AttachCommand, DaemonCommand, DetachCommand, ListCommand,
-    MainPaneDiedCommand, NewTargetCommand, ToggleFullscreenCommand, WorkspaceCommand,
+    ActivateTargetCommand, AttachCommand, DetachCommand, ListCommand, MainPaneDiedCommand,
+    NewTargetCommand, ToggleFullscreenCommand, WorkspaceCommand,
 };
-use crate::config::AppConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
-use crate::runtime::workspace_bootstrap_runtime::WorkspaceBootstrapRuntime;
-use crate::runtime::workspace_daemon_runtime::WorkspaceDaemonRuntime;
 use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
-use crate::terminal::TerminalSize;
 use std::io;
 
 pub struct WorkspaceCommandRuntime {
-    bootstrap: WorkspaceBootstrapRuntime,
+    path_service: WorkspacePathService,
     entry_runtime: WorkspaceEntryRuntime,
     main_slot_runtime: MainSlotRuntime,
     fullscreen_runtime: NativePaneFullscreenRuntime,
@@ -45,7 +42,7 @@ impl WorkspaceCommandRuntime {
         let target_host_runtime = TargetHostRuntime::from_backend(backend.clone());
 
         Ok(Self {
-            bootstrap: WorkspaceBootstrapRuntime::default(),
+            path_service: WorkspacePathService::new(),
             entry_runtime,
             main_slot_runtime: MainSlotRuntime::new(
                 main_slot_backend.clone(),
@@ -63,12 +60,8 @@ impl WorkspaceCommandRuntime {
         })
     }
 
-    pub fn run_workspace_entry(
-        &self,
-        _config: AppConfig,
-        _command: WorkspaceCommand,
-    ) -> Result<(), LifecycleError> {
-        let workspace_dir = self.bootstrap.resolve_workspace_dir(None)?;
+    pub fn run_workspace_entry(&self, _command: WorkspaceCommand) -> Result<(), LifecycleError> {
+        let workspace_dir = self.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
         self.main_slot_runtime.ensure_initial_target_materialized(
             &workspace.workspace_handle,
@@ -79,29 +72,8 @@ impl WorkspaceCommandRuntime {
             .map_err(tmux_runtime_error)
     }
 
-    pub fn run_daemon(
-        &self,
-        config: AppConfig,
-        command: DaemonCommand,
-    ) -> Result<(), LifecycleError> {
-        let runtime =
-            config.runtime_for_workspace(command.node_id.as_deref(), command.connect.as_deref());
-        let workspace_dir = self
-            .bootstrap
-            .resolve_workspace_dir(command.workspace_dir.as_deref())?;
-        let paths = self.bootstrap.workspace_paths(&workspace_dir);
-        let size = TerminalSize {
-            rows: command.rows.unwrap_or(24),
-            cols: command.cols.unwrap_or(80),
-            pixel_width: command.pixel_width.unwrap_or(0),
-            pixel_height: command.pixel_height.unwrap_or(0),
-        };
-
-        WorkspaceDaemonRuntime::start(&runtime, workspace_dir, paths, size)?.run()
-    }
-
     pub fn run_attach(&self, command: AttachCommand) -> Result<(), LifecycleError> {
-        match attach_target_path(&command)? {
+        match attach_target_path(&command) {
             Some(target) => {
                 let session = self.attachable_session(target)?;
                 self.session_service
@@ -160,9 +132,8 @@ impl WorkspaceCommandRuntime {
 
     pub fn run_detach(&self, command: DetachCommand) -> Result<(), LifecycleError> {
         if let Some(target) = attach_target_path(&AttachCommand {
-            workspace_dir: command.workspace_dir.clone(),
             target: command.target.clone(),
-        })? {
+        }) {
             let session = self.attachable_session(target)?;
             self.session_service
                 .detach_session_clients(&session)
@@ -195,6 +166,20 @@ impl WorkspaceCommandRuntime {
         Ok(())
     }
 
+    fn resolve_workspace_dir(
+        &self,
+        value: Option<&str>,
+    ) -> Result<std::path::PathBuf, LifecycleError> {
+        self.path_service
+            .resolve_workspace_dir(value)
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to canonicalize workspace directory".to_string(),
+                    error,
+                )
+            })
+    }
+
     fn attachable_session(&self, target: String) -> Result<ManagedSessionRecord, LifecycleError> {
         let session = self
             .session_service
@@ -205,12 +190,8 @@ impl WorkspaceCommandRuntime {
     }
 }
 
-fn attach_target_path(command: &AttachCommand) -> Result<Option<String>, LifecycleError> {
-    if let Some(target) = command.target.as_deref() {
-        return Ok(Some(target.to_string()));
-    }
-
-    Ok(None)
+fn attach_target_path(command: &AttachCommand) -> Option<String> {
+    command.target.as_ref().cloned()
 }
 
 fn tmux_runtime_error(error: TmuxError) -> LifecycleError {
