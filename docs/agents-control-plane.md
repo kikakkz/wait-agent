@@ -13,7 +13,7 @@ It exists to make coding assistants behave more like disciplined project operato
 - Read the current task before exploring widely
 - Route work through reusable primitives and runbooks
 - Keep machine state aligned with the human execution board
-- Avoid drifting into premature network work while the tmux-first local architecture migration is still active
+- Avoid drifting into stale local-only assumptions now that resumed network work is active again
 
 This file is human-facing.
 The machine-facing control plane lives under `.agents/`.
@@ -28,7 +28,8 @@ The WaitAgent control plane follows these rules:
 - `.agents/index.yaml` is the single assistant entrypoint
 - `docs/execution-status-board.md` remains the human-facing status summary
 - `docs/local-acceptance-checklist.md` remains the human-facing acceptance checklist
-- After the custom fullscreen baseline was retired, the tmux-first local architecture queue became the execution gate before resumed network execution
+- After the custom fullscreen baseline was retired, the tmux-first local architecture queue served as the execution gate before resumed network execution
+- Now that that gate is closed, resumed network work must stay aligned with the accepted local fixed-chrome baseline and shared transport-agnostic target catalog
 - Exact execution state, ordering, blockers, and verification now live in `.agents/`
 - Do not create orphan tasks that exist only in chat, scratch notes, or human docs without a matching `.agents/tasks/` entry
 - Implementation state and unified task-source state must move together; when code materially changes task completion, scope, or sequencing, the same work slice must update `.agents/tasks/` and any linked `.agents/state/` entries before the task can be considered synced

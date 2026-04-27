@@ -1,16 +1,16 @@
 id: runbook.close-local-acceptance
 kind: runbook
 version: 1
-objective: Close T4-10 only when local acceptance evidence is explicit, recent, and non-contradictory.
+objective: Close the active local acceptance slice only when local acceptance evidence is explicit, recent, and non-contradictory.
 trigger:
-  - task.t4-10 is near completion
+  - a local acceptance rerun task is near completion
   - final manual validation evidence was gathered
 sequence:
   - load primitive.acceptance-check-sync
   - confirm the checklist rerun covers sections 5 and 6 in docs/local-acceptance-checklist.md
   - refresh .agents/state/last-verified.yaml through primitive.verification-refresh
   - if any serious local UX issue remains, route it to primitive.blocker-record or a follow-up task template
-  - if no serious blocker remains, mark task.t4-10 done and sync docs through primitive.task-board-sync
+  - if no serious blocker remains, mark the active local acceptance task done and sync docs through primitive.task-board-sync
   - hand off to runbook.select-next-task
 stop_conditions:
   - final manual sign-off is still missing

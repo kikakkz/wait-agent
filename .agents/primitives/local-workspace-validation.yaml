@@ -1,9 +1,9 @@
 id: primitive.local-workspace-validation
 kind: primitive
 version: 1
-purpose: Run the smallest useful validation slice for the local workspace acceptance gate.
+purpose: Run the smallest useful validation slice for local workspace behavior when terminal fidelity still matters.
 use_when:
-  - task.t4-10 is active
+  - a local acceptance rerun or local UX regression task is active
   - terminal, scheduler, renderer, or session UX changes need acceptance evidence
 inputs:
   - docs/local-acceptance-checklist.md
@@ -23,5 +23,5 @@ steps:
 verification:
   - the validation slice names the exact scenario or command used
 failure_modes:
-  - T4-10 remains active with no clear evidence trail
+  - a local acceptance slice remains active with no clear evidence trail
   - acceptance is claimed based only on unit tests when terminal fidelity is the real risk

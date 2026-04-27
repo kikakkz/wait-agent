@@ -7,8 +7,6 @@ priority: highest
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
-depends_on:
-  - task.t4-10.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update

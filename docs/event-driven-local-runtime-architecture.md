@@ -83,28 +83,28 @@ The new event contract is represented in code by:
 - [event_driven_pane_runtime.rs](/opt/data/workspace/wait-agent/src/runtime/event_driven_pane_runtime.rs)
 - [workspace_command_runtime.rs](/opt/data/workspace/wait-agent/src/runtime/workspace_command_runtime.rs)
 
-The accepted top-level event classes are:
+The accepted top-level event classes and their current code owners are:
 
 1. `TmuxHook`
-   Source: `TmuxHookBridge`
+   Source: tmux hook wiring on the accepted local path
    Examples: `client-attached`, `client-detached`, `client-resized`, `client-session-changed`
-   Consumers: `WorkspaceController`, `SessionCatalogProjector`
+   Primary owners: `WorkspaceLayoutRuntime`, `SessionService`
 2. `SessionCatalog`
-   Source: session-service and pane-state projection on the accepted tmux path
+   Source: session-service lookup plus pane-side tmux snapshot projection on the accepted path
    Examples: snapshot published, selected target changed, active target changed
-   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`
+   Primary owners: `SessionService`, `EventDrivenTmuxPaneRuntime`, `EventDrivenUiPaneRuntime`
 3. `Chrome`
-   Source: pane runtimes
+   Source: pane-side event-driven chrome runtimes plus layout-side refresh signaling
    Examples: sidebar selection changed, footer render requested, status-line projection changed
-   Consumers: `WorkspaceController`, `MainSlotRuntime`, sibling chrome runtime when needed
+   Primary owners: `EventDrivenPaneRuntime`, `EventDrivenUiPaneRuntime`, `WorkspaceLayoutRuntime`
 4. `TargetActivation`
    Source: `WorkspaceCommandRuntime`, `MainSlotRuntime`
    Examples: target activation requested, target rebound into main slot, target activation committed
-   Consumers: `SidebarPaneRuntime`, `FooterPaneRuntime`
+   Primary owners: `WorkspaceCommandRuntime`, `MainSlotRuntime`, `EventDrivenTmuxPaneRuntime`
 5. `Attach`
    Source: `WorkspaceCommandRuntime`
    Examples: workspace attached, target attached, current client detached
-   Consumers: tmux backend and workspace layout runtime ownership
+   Primary owners: `WorkspaceCommandRuntime`, `SessionService`, `WorkspaceLayoutRuntime`
 
 ## 5. Explicit Producer And Consumer Contract
 
@@ -112,35 +112,41 @@ The accepted producer or consumer map is:
 
 ```text
 tmux hooks
-  -> WorkspaceController
-  -> SessionCatalogProjector
+  -> WorkspaceLayoutRuntime
+  -> SessionService
 
 session catalog updates
-  -> SidebarPaneRuntime
-  -> FooterPaneRuntime
+  -> EventDrivenTmuxPaneRuntime
+  -> EventDrivenUiPaneRuntime
 
 sidebar selection intent
+  -> EventDrivenUiPaneRuntime
+  -> EventDrivenPaneRuntime
   -> WorkspaceCommandRuntime
   -> MainSlotRuntime
-  -> FooterPaneRuntime
 
 target activation
   -> MainSlotRuntime
-  -> SidebarPaneRuntime
-  -> FooterPaneRuntime
+  -> WorkspaceLayoutRuntime
+  -> EventDrivenTmuxPaneRuntime
+  -> EventDrivenUiPaneRuntime
 
 attach command / attach target resolution
   -> WorkspaceCommandRuntime
   -> SessionService
+  -> WorkspaceLayoutRuntime
 
 main-pane output bridge signal
   -> WorkspaceLayoutRuntime
-  -> SidebarPaneRuntime
-  -> FooterPaneRuntime
+  -> EventDrivenPaneRuntime
+  -> EventDrivenTmuxPaneRuntime
+  -> EventDrivenUiPaneRuntime
 ```
 
-The critical constraint is that `SidebarPaneRuntime` and `FooterPaneRuntime` consume explicit state-change events.
-They must not be responsible for rediscovering state by periodic `list_sessions()` and redraw polling.
+The critical constraint is that the hidden pane path
+`EventDrivenPaneRuntime -> EventDrivenTmuxPaneRuntime -> EventDrivenUiPaneRuntime`
+consumes explicit state-change events.
+It must not rediscover state by periodic `list_sessions()` and redraw polling.
 The other critical constraint is that `MainSlotRuntime` keeps target activation inside the current client.
 It must not translate sidebar or footer selection into `detach-client -E "waitagent attach <target>"`.
 
@@ -150,10 +156,10 @@ The following paths are now historical and have explicit replacement owners in t
 
 1. `src/runtime/ui_pane_runtime.rs::run_sidebar`
    Current mechanism: fixed `200ms` session refresh plus `recv_timeout`
-   Replacement owner: `SessionCatalogProjector`
+   Replacement owners: `EventDrivenPaneRuntime`, `EventDrivenTmuxPaneRuntime`, `EventDrivenUiPaneRuntime`
 2. `src/runtime/ui_pane_runtime.rs::run_footer`
    Current mechanism: fixed `200ms` sleep and unconditional redraw
-   Replacement owner: `FooterPaneRuntime`
+   Replacement owners: `EventDrivenPaneRuntime`, `EventDrivenTmuxPaneRuntime`, `EventDrivenUiPaneRuntime`
 3. `src/runtime/workspace_attach_runtime.rs::run`
    Historical mechanism: fixed `50ms` client tick for resize and startup-refresh logic
    Replacement owner: `WorkspaceCommandRuntime` plus `WorkspaceLayoutRuntime`

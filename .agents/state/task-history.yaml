@@ -403,12 +403,6 @@ history:
     source_of_truth:
       file: docs/execution-status-board.md
       reference: Track Summary
-  - task_id: task.t4-10
-    status: done
-    summary: local acceptance sign-off was completed through user-confirmed manual validation in the preferred real terminal workflow
-    source_of_truth:
-      file: docs/execution-status-board.md
-      reference: Current Focus And Next Queue
   - task_id: task.sidebar-2
     status: done
     summary: unified sidebar focus navigation is implemented, including real-PTY verified `Right`, `Left`, `Up`, and `Down` behavior without widening shell passthrough ownership

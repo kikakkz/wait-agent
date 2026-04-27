@@ -9,7 +9,7 @@ sequence:
   - load primitive.read-current-task
   - load the active task from .agents/tasks/current.yaml
   - inspect blockers and current verification state
-  - if the task is task.t4-10, run primitive.acceptance-check-sync and primitive.local-workspace-validation
+  - if the active task is a local acceptance rerun or explicitly depends on terminal fidelity evidence, run primitive.acceptance-check-sync and primitive.local-workspace-validation
   - refresh verification state when meaningful validation changed
   - record blockers if a real stop condition was discovered
   - refresh task history when lifecycle state changed materially
