@@ -78,9 +78,9 @@ fn render_footer(
     let active = active_session_record(active_socket, active_session, active_target, sessions);
     let counts = task_counts(sessions);
     let left = match projection {
-        FooterProjection::Pane => "keys: ^N new  ^O zoom  C-b s menu".to_string(),
+        FooterProjection::Pane => "keys: ^N new  ^O fullscreen  C-b s menu".to_string(),
         FooterProjection::FullscreenStatus => format!(
-            "keys: [Ctrl-o] zoom off  [Ctrl-n] new  [Ctrl-b s] menu | total:{} R:{} I:{} C:{} U:{}",
+            "keys: [Ctrl-o] fullscreen off  [Ctrl-n] new  [Ctrl-b s] menu | total:{} R:{} I:{} C:{} U:{} | [PgUp/PgDn] page  [Up/Down] line",
             sessions.len(),
             counts.running,
             counts.input,
@@ -209,7 +209,7 @@ mod tests {
         );
 
         assert!(output.contains("keys: ^N new"));
-        assert!(output.contains("^O zoom"));
+        assert!(output.contains("^O fullscreen"));
         assert!(output.contains("C-b s menu"));
         assert!(output.contains("^N new"));
         assert!(!output.contains("^W cmd"));
@@ -236,13 +236,15 @@ mod tests {
                 current_path: Some(PathBuf::from("/tmp/demo")),
                 task_state: ManagedSessionTaskState::Input,
             }],
-            120,
+            180,
         );
 
-        assert!(output.contains("[Ctrl-o] zoom off"));
+        assert!(output.contains("[Ctrl-o] fullscreen off"));
         assert!(output.contains("[Ctrl-n] new"));
         assert!(output.contains("[Ctrl-b s] menu"));
         assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));
+        assert!(output.contains("[PgUp/PgDn] page"));
+        assert!(output.contains("[Up/Down] line"));
         assert!(output.contains("/tmp/demo"));
     }
 }

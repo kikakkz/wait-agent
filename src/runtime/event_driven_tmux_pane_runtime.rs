@@ -50,9 +50,17 @@ where
             .gateway
             .pane_dimensions_on_socket(&command.socket_name, pane_target)
             .map_err(tmux_pane_error)?;
+        let is_fullscreen = self
+            .gateway
+            .window_zoomed_on_socket(&command.socket_name, pane_target)
+            .map_err(tmux_pane_error)?;
         let mut update =
             self.pane_runtime
                 .publish_surface_resize(ChromeSurface::SidebarPane, width, height);
+        merge_render_update(
+            &mut update,
+            self.pane_runtime.publish_fullscreen_changed(is_fullscreen),
+        );
         merge_render_update(&mut update, self.publish_session_snapshot(command)?);
         Ok(update)
     }
@@ -139,6 +147,8 @@ fn merge_render_update(
     update: &mut EventDrivenChromeRenderUpdate,
     next: EventDrivenChromeRenderUpdate,
 ) {
+    update.invalidate_sidebar |= next.invalidate_sidebar;
+    update.invalidate_footer |= next.invalidate_footer;
     if next.sidebar.is_some() {
         update.sidebar = next.sidebar;
     }
@@ -229,14 +239,6 @@ mod tests {
         }
 
         fn select_pane(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            _pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            unreachable!("not used")
-        }
-
-        fn toggle_zoom(
             &self,
             _workspace: &TmuxWorkspaceHandle,
             _pane: &TmuxPaneId,
@@ -369,12 +371,12 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("keys: ^W cmd"))
+            .map(|buffer| buffer.contains("keys: ^N new"))
             .unwrap_or(false));
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-o] full off"))
+            .map(|buffer| buffer.contains("[Ctrl-o] fullscreen off"))
             .unwrap_or(false));
     }
 

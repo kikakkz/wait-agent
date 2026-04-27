@@ -9,6 +9,7 @@ pub struct EventDrivenChromeRuntime {
     last_sidebar_buffer: Option<String>,
     last_footer_buffer: Option<String>,
     last_fullscreen_footer_buffer: Option<String>,
+    last_fullscreen_state: Option<bool>,
 }
 
 impl EventDrivenChromeRuntime {
@@ -21,8 +22,27 @@ impl EventDrivenChromeRuntime {
         event: &LocalRuntimeEvent,
         now_millis: u128,
     ) -> EventDrivenChromeRenderUpdate {
+        let fullscreen_changed = match event {
+            LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged { is_fullscreen }) => {
+                let changed = self.last_fullscreen_state != Some(*is_fullscreen);
+                self.last_fullscreen_state = Some(*is_fullscreen);
+                changed
+            }
+            _ => false,
+        };
+
+        if fullscreen_changed {
+            self.last_sidebar_buffer = None;
+            self.last_footer_buffer = None;
+            self.last_fullscreen_footer_buffer = None;
+        }
+
         let projection = self.projection_service.apply_event(event);
-        let mut update = EventDrivenChromeRenderUpdate::default();
+        let mut update = EventDrivenChromeRenderUpdate {
+            invalidate_sidebar: fullscreen_changed,
+            invalidate_footer: fullscreen_changed,
+            ..Default::default()
+        };
 
         if let Some(model) = projection.sidebar {
             let buffer = SidebarUi::render_view_model(&model, now_millis);
@@ -79,6 +99,8 @@ pub struct EventDrivenChromeRenderUpdate {
     pub sidebar: Option<String>,
     pub footer: Option<String>,
     pub fullscreen_status: Option<String>,
+    pub invalidate_sidebar: bool,
+    pub invalidate_footer: bool,
 }
 
 #[cfg(test)]
@@ -131,7 +153,7 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("keys: ^W cmd"))
+            .map(|buffer| buffer.contains("keys: ^N new"))
             .unwrap_or(false));
         assert!(update
             .fullscreen_status
@@ -163,6 +185,45 @@ mod tests {
 
         assert!(first.footer.is_some());
         assert!(second.footer.is_none());
+    }
+
+    #[test]
+    fn fullscreen_invalidation_only_happens_on_state_transition() {
+        let mut runtime = EventDrivenChromeRuntime::new();
+        runtime.apply_event(
+            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+                surface: ChromeSurface::FooterPane,
+                width: 80,
+                height: 1,
+            }),
+            0,
+        );
+        runtime.apply_event(
+            &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
+                active_socket: "wa-1".to_string(),
+                active_session: "sess-1".to_string(),
+                active_target: Some("wa-1:sess-1".to_string()),
+                sessions: vec![session("wa-1", "sess-1", "bash")],
+            }),
+            0,
+        );
+
+        let first = runtime.apply_event(
+            &LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
+                is_fullscreen: true,
+            }),
+            0,
+        );
+        let second = runtime.apply_event(
+            &LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
+                is_fullscreen: true,
+            }),
+            0,
+        );
+
+        assert!(first.invalidate_footer);
+        assert!(first.footer.is_some());
+        assert!(!second.invalidate_footer);
     }
 
     #[test]

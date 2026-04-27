@@ -43,10 +43,11 @@ where
         &self,
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
+        fullscreen_toggle_command: &str,
         footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
         self.configure_session_chrome(workspace, layout)?;
-        self.bind_main_pane_fullscreen_toggle(workspace, layout)?;
+        self.bind_main_pane_fullscreen_toggle(workspace, fullscreen_toggle_command)?;
         self.bind_waitagent_sidebar_controls(workspace, layout)?;
         self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
     }
@@ -89,18 +90,15 @@ where
     fn bind_main_pane_fullscreen_toggle(
         &self,
         workspace: &TmuxWorkspaceHandle,
-        layout: &WorkspaceChromeLayout,
+        command: &str,
     ) -> Result<(), G::Error> {
-        self.tmux.bind_main_pane_zoom_toggle(
+        self.tmux.bind_key_without_prefix(
             workspace,
             FULLSCREEN_TOGGLE_KEY,
-            &layout.main_pane,
+            &[command.to_string()],
         )?;
-        self.tmux.bind_main_pane_zoom_toggle_with_prefix(
-            workspace,
-            FULLSCREEN_TOGGLE_PREFIX_KEY,
-            &layout.main_pane,
-        )
+        self.tmux
+            .bind_command_with_prefix(workspace, FULLSCREEN_TOGGLE_PREFIX_KEY, command)
     }
 
     fn bind_waitagent_sidebar_controls(
@@ -189,8 +187,6 @@ mod tests {
         SetSessionOption(String, String),
         SetWindowOption(String, String),
         BindWithoutPrefix(String, Vec<String>),
-        BindMainPaneZoomToggle(String, String),
-        BindMainPaneZoomToggleWithPrefix(String, String),
         BindCommandWithPrefix(String, String),
         BindWaitagentFocusSidebar(String, String, String, u16),
         BindWaitagentFocusMain(String, String),
@@ -255,14 +251,6 @@ mod tests {
         }
 
         fn select_pane(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            _pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            unreachable!("not used")
-        }
-
-        fn toggle_zoom(
             &self,
             _workspace: &TmuxWorkspaceHandle,
             _pane: &TmuxPaneId,
@@ -448,34 +436,6 @@ mod tests {
             Ok(())
         }
 
-        fn bind_main_pane_zoom_toggle(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            key: &str,
-            pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            self.calls.borrow_mut().push(Call::BindMainPaneZoomToggle(
-                key.to_string(),
-                pane.as_str().to_string(),
-            ));
-            Ok(())
-        }
-
-        fn bind_main_pane_zoom_toggle_with_prefix(
-            &self,
-            _workspace: &TmuxWorkspaceHandle,
-            key: &str,
-            pane: &TmuxPaneId,
-        ) -> Result<(), Self::Error> {
-            self.calls
-                .borrow_mut()
-                .push(Call::BindMainPaneZoomToggleWithPrefix(
-                    key.to_string(),
-                    pane.as_str().to_string(),
-                ));
-            Ok(())
-        }
-
         fn bind_command_with_prefix(
             &self,
             _workspace: &TmuxWorkspaceHandle,
@@ -572,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn control_service_binds_ctrl_o_to_main_pane_zoom() {
+    fn control_service_binds_ctrl_o_to_fullscreen_command() {
         let gateway = FakeGateway::default();
         let service = ControlService::new(gateway.clone());
         let workspace = TmuxWorkspaceHandle {
@@ -595,6 +555,7 @@ mod tests {
             .ensure_native_controls(
                 &workspace,
                 &layout,
+                "run-shell -b \"waitagent __toggle-fullscreen\"",
                 Some(&FooterMenuBindings {
                     create_session_command: "detach-client -E 'waitagent'".to_string(),
                     open_sessions_menu_command: "run-shell 'waitagent __footer-menu'".to_string(),
@@ -620,8 +581,14 @@ mod tests {
                     "menu-border-style".to_string(),
                     "fg=colour24,bg=colour235".to_string(),
                 ),
-                Call::BindMainPaneZoomToggle("C-o".to_string(), "%1".to_string()),
-                Call::BindMainPaneZoomToggleWithPrefix("z".to_string(), "%1".to_string()),
+                Call::BindWithoutPrefix(
+                    "C-o".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string(),],
+                ),
+                Call::BindCommandWithPrefix(
+                    "z".to_string(),
+                    "run-shell -b \"waitagent __toggle-fullscreen\"".to_string(),
+                ),
                 Call::BindWaitagentFocusSidebar(
                     "Right".to_string(),
                     "%1".to_string(),

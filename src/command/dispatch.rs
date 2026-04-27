@@ -43,10 +43,6 @@ impl CommandDispatcher {
                 .pane_runtime
                 .run_footer(command)
                 .map_err(AppError::from),
-            Command::ChromeRefreshStream(command) => self
-                .layout_runtime
-                .run_chrome_refresh_stream(command)
-                .map_err(AppError::from),
             Command::ActivateTarget(command) => self
                 .workspace_runtime
                 .run_activate_target(command)
@@ -62,6 +58,10 @@ impl CommandDispatcher {
             Command::FooterMenu(command) => self
                 .footer_menu_runtime
                 .run(command)
+                .map_err(AppError::from),
+            Command::ToggleFullscreen(command) => self
+                .workspace_runtime
+                .run_toggle_fullscreen(command)
                 .map_err(AppError::from),
             Command::CloseSession(command) => self
                 .layout_runtime

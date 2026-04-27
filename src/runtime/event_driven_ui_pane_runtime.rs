@@ -389,6 +389,8 @@ fn merge_render_update(
     update: &mut EventDrivenChromeRenderUpdate,
     next: EventDrivenChromeRenderUpdate,
 ) {
+    update.invalidate_sidebar |= next.invalidate_sidebar;
+    update.invalidate_footer |= next.invalidate_footer;
     if next.sidebar.is_some() {
         update.sidebar = next.sidebar;
     }
@@ -439,7 +441,7 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("keys: ^W cmd"))
+            .map(|buffer| buffer.contains("keys: ^N new"))
             .unwrap_or(false));
         assert!(update
             .fullscreen_status

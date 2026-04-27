@@ -176,12 +176,6 @@ pub trait TmuxGateway {
         pane: &TmuxPaneId,
     ) -> Result<(), Self::Error>;
 
-    fn toggle_zoom(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        pane: &TmuxPaneId,
-    ) -> Result<(), Self::Error>;
-
     fn enter_copy_mode(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -348,20 +342,6 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         workspace: &TmuxWorkspaceHandle,
         key: &str,
         command_and_args: &[String],
-    ) -> Result<(), Self::Error>;
-
-    fn bind_main_pane_zoom_toggle(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        key: &str,
-        pane: &TmuxPaneId,
-    ) -> Result<(), Self::Error>;
-
-    fn bind_main_pane_zoom_toggle_with_prefix(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        key: &str,
-        pane: &TmuxPaneId,
     ) -> Result<(), Self::Error>;
 
     fn bind_command_with_prefix(

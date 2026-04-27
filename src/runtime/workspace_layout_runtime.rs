@@ -3,7 +3,7 @@ use crate::application::layout_service::{
     LayoutFocusBehavior, LayoutService, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE,
 };
 use crate::application::session_service::SessionService;
-use crate::cli::{CloseSessionCommand, LayoutReconcileCommand, UiPaneCommand};
+use crate::cli::{CloseSessionCommand, LayoutReconcileCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
@@ -66,6 +66,9 @@ impl WorkspaceLayoutRuntime {
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
+        if self.native_fullscreen_active(workspace)? {
+            return Ok(());
+        }
         self.ensure_layout_topology(workspace, workspace_dir, LayoutFocusBehavior::ReturnToMain)
             .map(|_| ())
     }
@@ -75,6 +78,15 @@ impl WorkspaceLayoutRuntime {
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
+        if self.native_fullscreen_active(workspace)? {
+            return self
+                .backend
+                .signal_chrome_refresh_on_socket(
+                    workspace.socket_name.as_str(),
+                    workspace.session_name.as_str(),
+                )
+                .map_err(tmux_layout_error);
+        }
         if self.notify_existing_chrome_panes(workspace)? {
             Ok(())
         } else {
@@ -130,27 +142,6 @@ impl WorkspaceLayoutRuntime {
         Ok(())
     }
 
-    pub fn run_chrome_refresh_stream(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
-        use std::io::Read;
-
-        let mut stdin = std::io::stdin().lock();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = stdin.read(&mut buffer).map_err(|error| {
-                LifecycleError::Io(
-                    "failed to read main-pane output refresh stream".to_string(),
-                    error,
-                )
-            })?;
-            if read == 0 {
-                return Ok(());
-            }
-            self.backend
-                .signal_chrome_refresh_on_socket(&command.socket_name, &command.session_name)
-                .map_err(tmux_layout_error)?;
-        }
-    }
-
     pub fn run_close_session(&self, command: CloseSessionCommand) -> Result<(), LifecycleError> {
         self.backend
             .run_socket_command(
@@ -171,6 +162,15 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
         focus_behavior: LayoutFocusBehavior,
     ) -> Result<(), LifecycleError> {
+        if self.native_fullscreen_active(workspace)? {
+            return self
+                .backend
+                .signal_chrome_refresh_on_socket(
+                    workspace.socket_name.as_str(),
+                    workspace.session_name.as_str(),
+                )
+                .map_err(tmux_layout_error);
+        }
         self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)
             .map(|_| ())
     }
@@ -245,8 +245,14 @@ impl WorkspaceLayoutRuntime {
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
             .map_err(tmux_layout_error)?;
         let footer_bindings = self.footer_menu_bindings(workspace);
+        let fullscreen_toggle_command = self.fullscreen_toggle_command(workspace);
         self.control_service
-            .ensure_native_controls(workspace, &layout, Some(&footer_bindings))
+            .ensure_native_controls(
+                workspace,
+                &layout,
+                &fullscreen_toggle_command,
+                Some(&footer_bindings),
+            )
             .map_err(tmux_layout_error)?;
         self.backend
             .set_session_option(
@@ -255,7 +261,7 @@ impl WorkspaceLayoutRuntime {
                 layout.main_pane.as_str(),
             )
             .map_err(tmux_layout_error)?;
-        self.ensure_main_pane_output_bridge(workspace, &layout.main_pane)?;
+        self.clear_main_pane_output_bridge(workspace, &layout.main_pane)?;
         self.layout_service
             .ensure_layout_hooks(
                 workspace,
@@ -268,7 +274,7 @@ impl WorkspaceLayoutRuntime {
         Ok(layout)
     }
 
-    fn ensure_main_pane_output_bridge(
+    fn clear_main_pane_output_bridge(
         &self,
         workspace: &TmuxWorkspaceHandle,
         main_pane: &TmuxPaneId,
@@ -290,25 +296,23 @@ impl WorkspaceLayoutRuntime {
             }
         }
 
-        if previous_pipe.as_deref() != Some(main_pane.as_str()) {
-            self.backend
-                .pipe_pane_output(
-                    workspace,
-                    main_pane,
-                    &main_pane_output_refresh_shell_command(
-                        self.current_executable.to_string_lossy().as_ref(),
-                        workspace,
-                    ),
-                )
-                .map_err(tmux_layout_error)?;
-            self.backend
-                .set_session_option(
-                    workspace,
-                    WAITAGENT_MAIN_PANE_PIPE_OPTION,
-                    main_pane.as_str(),
-                )
-                .map_err(tmux_layout_error)?;
+        match self.backend.clear_pane_pipe(workspace, main_pane) {
+            Ok(()) => {}
+            Err(error) if error.is_command_failure() => {}
+            Err(error) => return Err(tmux_layout_error(error)),
         }
+        self.backend
+            .run_socket_command(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-u".to_string(),
+                    "-t".to_string(),
+                    workspace.session_name.as_str().to_string(),
+                    WAITAGENT_MAIN_PANE_PIPE_OPTION.to_string(),
+                ],
+            )
+            .map_err(tmux_layout_error)?;
 
         Ok(())
     }
@@ -398,6 +402,13 @@ impl WorkspaceLayoutRuntime {
         }
     }
 
+    fn fullscreen_toggle_command(&self, workspace: &TmuxWorkspaceHandle) -> String {
+        fullscreen_toggle_tmux_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+        )
+    }
+
     fn layout_reconcile_hook_command(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -441,6 +452,38 @@ impl WorkspaceLayoutRuntime {
             tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
         )
     }
+
+    fn native_fullscreen_active(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<bool, LifecycleError> {
+        let main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .map(TmuxPaneId::new)
+            .unwrap_or(
+                self.backend
+                    .current_pane(workspace)
+                    .map_err(tmux_layout_error)?,
+            );
+        self.backend
+            .window_zoomed_on_socket(workspace.socket_name.as_str(), main_pane.as_str())
+            .map_err(tmux_layout_error)
+    }
+}
+
+fn fullscreen_toggle_tmux_command(executable: &str, workspace: &TmuxWorkspaceHandle) -> String {
+    let shell_command = [
+        shell_escape(executable),
+        shell_escape("__toggle-fullscreen"),
+        shell_escape("--socket-name"),
+        shell_escape(workspace.socket_name.as_str()),
+        shell_escape("--session-name"),
+        shell_escape(workspace.session_name.as_str()),
+    ]
+    .join(" ");
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
 }
 
 fn footer_menu_shell_command(executable: &str, workspace: &TmuxWorkspaceHandle) -> String {
@@ -523,24 +566,6 @@ fn main_pane_died_hook_shell_command(
     .join(" ")
 }
 
-fn main_pane_output_refresh_shell_command(
-    executable: &str,
-    workspace: &TmuxWorkspaceHandle,
-) -> String {
-    format!(
-        "{} >/dev/null 2>&1",
-        [
-            shell_escape(executable),
-            shell_escape("__chrome-refresh-stream"),
-            shell_escape("--socket-name"),
-            shell_escape(workspace.socket_name.as_str()),
-            shell_escape("--session-name"),
-            shell_escape(workspace.session_name.as_str()),
-        ]
-        .join(" ")
-    )
-}
-
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -559,9 +584,9 @@ fn tmux_layout_error(error: TmuxError) -> LifecycleError {
 fn should_refresh_workspace_chrome(
     session: &crate::domain::session_catalog::ManagedSessionRecord,
 ) -> bool {
-    !matches!(
+    matches!(
         session.session_role,
-        Some(crate::domain::workspace::WorkspaceSessionRole::TargetHost)
+        Some(crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome)
     )
 }
 
@@ -569,9 +594,8 @@ fn should_refresh_workspace_chrome(
 mod tests {
     use super::{
         chrome_refresh_hook_shell_command, footer_menu_shell_command,
-        layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
-        main_pane_output_refresh_shell_command, should_refresh_workspace_chrome,
-        tmux_quote_argument,
+        fullscreen_toggle_tmux_command, layout_reconcile_hook_shell_command,
+        main_pane_died_hook_shell_command, should_refresh_workspace_chrome, tmux_quote_argument,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -601,6 +625,19 @@ mod tests {
         assert_eq!(
             quoted,
             "\"'waitagent' '__footer-menu' '--client-tty' '#{client_tty}'\""
+        );
+    }
+
+    #[test]
+    fn fullscreen_toggle_tmux_command_targets_current_workspace() {
+        let workspace = workspace();
+
+        let command = fullscreen_toggle_tmux_command("/tmp/wait agent", &workspace);
+        let expected_shell = "'/tmp/wait agent' '__toggle-fullscreen' '--socket-name' 'wa-1' '--session-name' 'session-1'";
+
+        assert_eq!(
+            command,
+            format!("run-shell -b {}", tmux_quote_argument(expected_shell))
         );
     }
 
@@ -641,18 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn main_pane_output_refresh_shell_command_targets_current_session() {
-        let workspace = workspace();
-        let command = main_pane_output_refresh_shell_command("/tmp/wait agent", &workspace);
-
-        assert_eq!(
-            command,
-            "'/tmp/wait agent' '__chrome-refresh-stream' '--socket-name' 'wa-1' '--session-name' 'session-1' >/dev/null 2>&1"
-        );
-    }
-
-    #[test]
-    fn chrome_refresh_all_skips_target_host_sessions() {
+    fn chrome_refresh_all_only_tracks_workspace_chrome_sessions() {
         let chrome = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1", "session-1"),
             workspace_dir: Some(PathBuf::from("/tmp/demo")),

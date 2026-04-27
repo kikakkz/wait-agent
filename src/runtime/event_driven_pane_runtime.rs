@@ -139,6 +139,9 @@ fn redraw_sidebar(
     update: EventDrivenChromeRenderUpdate,
     last_buffer: &mut String,
 ) -> Result<(), LifecycleError> {
+    if update.invalidate_sidebar {
+        last_buffer.clear();
+    }
     if let Some(buffer) = update.sidebar {
         redraw_if_changed(buffer, last_buffer)?;
     }
@@ -151,6 +154,9 @@ fn apply_footer_update(
     update: EventDrivenChromeRenderUpdate,
     last_buffer: &mut String,
 ) -> Result<(), LifecycleError> {
+    if update.invalidate_footer {
+        last_buffer.clear();
+    }
     if let Some(buffer) = update.footer {
         redraw_if_changed(buffer, last_buffer)?;
     }
@@ -240,7 +246,7 @@ fn spawn_pane_event_stream(
         backend,
         command.socket_name.clone(),
         command.session_name.clone(),
-        tx,
+        tx.clone(),
     );
     thread::spawn(move || {
         let _keep_resize_watcher_alive = _resize_watcher;

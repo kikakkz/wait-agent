@@ -2,12 +2,14 @@ use crate::application::session_service::SessionService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DaemonCommand, DetachCommand, ListCommand,
-    MainPaneDiedCommand, NewTargetCommand, WorkspaceCommand,
+    MainPaneDiedCommand, NewTargetCommand, ToggleFullscreenCommand, WorkspaceCommand,
 };
 use crate::config::AppConfig;
+use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
+use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_bootstrap_runtime::WorkspaceBootstrapRuntime;
 use crate::runtime::workspace_daemon_runtime::WorkspaceDaemonRuntime;
@@ -21,6 +23,7 @@ pub struct WorkspaceCommandRuntime {
     bootstrap: WorkspaceBootstrapRuntime,
     entry_runtime: WorkspaceEntryRuntime,
     main_slot_runtime: MainSlotRuntime,
+    fullscreen_runtime: NativePaneFullscreenRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
 }
 
@@ -49,7 +52,12 @@ impl WorkspaceCommandRuntime {
                 target_host_runtime,
                 WorkspaceLayoutRuntime::from_build_env()?,
                 SessionService::new(main_slot_backend),
-                current_executable,
+                current_executable.clone(),
+            ),
+            fullscreen_runtime: NativePaneFullscreenRuntime::new(
+                backend.clone(),
+                SessionService::new(backend.clone()),
+                WorkspaceLayoutRuntime::from_build_env()?,
             ),
             session_service,
         })
@@ -95,13 +103,7 @@ impl WorkspaceCommandRuntime {
     pub fn run_attach(&self, command: AttachCommand) -> Result<(), LifecycleError> {
         match attach_target_path(&command)? {
             Some(target) => {
-                let session = self
-                    .session_service
-                    .find_session(&target)
-                    .map_err(tmux_runtime_error)?
-                    .ok_or_else(|| {
-                        LifecycleError::Protocol(format!("unknown tmux target `{target}`"))
-                    })?;
+                let session = self.attachable_session(target)?;
                 self.session_service
                     .attach_session(&session)
                     .map_err(tmux_runtime_error)
@@ -133,6 +135,13 @@ impl WorkspaceCommandRuntime {
         self.main_slot_runtime.run_main_pane_died(command)
     }
 
+    pub fn run_toggle_fullscreen(
+        &self,
+        command: ToggleFullscreenCommand,
+    ) -> Result<(), LifecycleError> {
+        self.fullscreen_runtime.run_toggle(command)
+    }
+
     pub fn run_list(&self, _command: ListCommand) -> Result<(), LifecycleError> {
         let sessions = self
             .session_service
@@ -154,13 +163,7 @@ impl WorkspaceCommandRuntime {
             workspace_dir: command.workspace_dir.clone(),
             target: command.target.clone(),
         })? {
-            let session = self
-                .session_service
-                .find_session(&target)
-                .map_err(tmux_runtime_error)?
-                .ok_or_else(|| {
-                    LifecycleError::Protocol(format!("unknown tmux target `{target}`"))
-                })?;
+            let session = self.attachable_session(target)?;
             self.session_service
                 .detach_session_clients(&session)
                 .map_err(tmux_runtime_error)?;
@@ -190,6 +193,15 @@ impl WorkspaceCommandRuntime {
             session.address.qualified_target()
         );
         Ok(())
+    }
+
+    fn attachable_session(&self, target: String) -> Result<ManagedSessionRecord, LifecycleError> {
+        let session = self
+            .session_service
+            .find_session(&target)
+            .map_err(tmux_runtime_error)?
+            .ok_or_else(|| LifecycleError::Protocol(format!("unknown tmux target `{target}`")))?;
+        Ok(session)
     }
 }
 
