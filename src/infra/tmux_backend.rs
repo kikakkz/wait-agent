@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 mod control;
 mod layout;
+mod remote;
 
 const WAITAGENT_SOCKET_PREFIX: &str = "wa-";
 const WAITAGENT_WORKSPACE_DIR_ENV: &str = "WAITAGENT_WORKSPACE_DIR";
@@ -29,6 +30,11 @@ const WAITAGENT_WORKSPACE_KEY_ENV: &str = "WAITAGENT_WORKSPACE_KEY";
 const WAITAGENT_SESSION_ROLE_ENV: &str = "WAITAGENT_SESSION_ROLE";
 const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
+const WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV: &str =
+    "WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID";
+const WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV: &str =
+    "WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID";
+const WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV: &str = "WAITAGENT_REMOTE_PUBLICATION_SELECTOR";
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX: &str = "waitagent-chrome-refresh";
@@ -51,6 +57,9 @@ struct TmuxSessionMetadata {
     workspace_dir: Option<PathBuf>,
     workspace_key: Option<String>,
     session_role: Option<WorkspaceSessionRole>,
+    remote_publication_authority_id: Option<String>,
+    remote_publication_transport_session_id: Option<String>,
+    remote_publication_selector: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -429,9 +438,12 @@ impl EmbeddedTmuxBackend {
                     socket_name.as_str(),
                     session_name.to_string(),
                 ),
+                selector: Some(format!("{}:{}", socket_name.as_str(), session_name)),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: metadata.workspace_dir,
                 workspace_key: metadata.workspace_key,
                 session_role: metadata.session_role,
+                opened_by: Vec::new(),
                 attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
                 window_count: window_count.parse::<usize>().unwrap_or(1),
                 command_name: runtime.command_name,
@@ -467,6 +479,15 @@ impl EmbeddedTmuxBackend {
                     }
                     WAITAGENT_SESSION_ROLE_ENV => {
                         metadata.session_role = WorkspaceSessionRole::parse(value);
+                    }
+                    WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV => {
+                        metadata.remote_publication_authority_id = Some(value.to_string());
+                    }
+                    WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV => {
+                        metadata.remote_publication_transport_session_id = Some(value.to_string());
+                    }
+                    WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV => {
+                        metadata.remote_publication_selector = Some(value.to_string());
                     }
                     _ => {}
                 }
@@ -1181,6 +1202,43 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
         self.command_runner()
             .run_from_current_client(&["detach-client".to_string()])
     }
+
+    fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
+        let socket_name = current_client_socket_name()?;
+        let output = self.command_runner().capture_from_current_client(&[
+            "display-message".to_string(),
+            "-p".to_string(),
+            "#{session_name}".to_string(),
+        ])?;
+        let session_name = output.stdout.trim();
+        if session_name.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list_sessions_on_socket(&socket_name)?
+            .into_iter()
+            .find(|session| session.address.session_id() == session_name))
+    }
+}
+
+fn current_client_socket_name() -> Result<TmuxSocketName, TmuxError> {
+    let tmux = std::env::var("TMUX")
+        .map_err(|_| TmuxError::new("TMUX is not set for current client session lookup"))?;
+    let socket_path = tmux
+        .split(',')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TmuxError::new("TMUX does not contain a socket path"))?;
+    let socket_name = std::path::Path::new(socket_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TmuxError::new(format!(
+                "TMUX socket path `{socket_path}` does not have a valid socket name"
+            ))
+        })?;
+    Ok(TmuxSocketName::new(socket_name))
 }
 
 impl TmuxChromeGateway for EmbeddedTmuxBackend {

@@ -1,7 +1,124 @@
 kind: state
 version: 1
-last_updated_from: task.event-r4 closed and task.t5-06 opened on 2026-04-27
+last_updated_from: task.t5-07 metadata-driven publish bridge recovery validated on 2026-04-28
 checks:
+  - id: t5-07-cargo-test-quiet-publication-metadata-recovery
+    command: cargo test --quiet after binding remote publication metadata onto local target-host tmux sessions, auto-discovering those bindings on workspace startup, and ensuring one deduplicated publish bridge per configured target host through a lock-backed recovery path
+    status: pass
+  - id: t5-07-cargo-fmt-publication-metadata-recovery
+    command: cargo fmt after adding remote publication metadata binding, workspace-startup bridge ensure, and lock-backed publish-bridge deduplication
+    status: pass
+  - id: t5-07-cargo-test-quiet-remote-target-publish-bridge
+    command: cargo test --quiet after adding a hidden remote-target publish-bridge runtime that mirrors one real local target-host session into the published remote catalog, refreshes workspace chrome after metadata changes, and removes the published remote target when the source session disappears
+    status: pass
+  - id: t5-07-cargo-fmt-remote-target-publish-bridge
+    command: cargo fmt after adding the hidden remote-target publish-bridge runtime and wiring pane refresh plus merged target projection through the default catalog path
+    status: pass
+  - id: t5-07-cargo-test-quiet-published-remote-target-catalog
+    command: cargo test --quiet after adding a published remote-target store, hidden remote target upsert or exit commands, a merged default target-catalog gateway, remote-aware workspace target projection, and direct-attach rejection for published remote targets
+    status: pass
+  - id: t5-07-cargo-fmt-published-remote-target-catalog
+    command: cargo fmt after adding the published remote-target store, hidden publication commands, merged catalog gateway, and remote-aware workspace target projection
+    status: pass
+  - id: t5-07-cargo-test-quiet-selector-authority-auto-bridge
+    command: cargo test --quiet after adding optional target selectors, auto-resolving loopback-compatible local authority target hosts from the shared catalog, and auto-spawning the hidden authority-host bridge from the remote main-slot pane when that selector resolves locally
+    status: pass
+  - id: t5-07-cargo-fmt-selector-authority-auto-bridge
+    command: cargo fmt after adding optional target selectors and selector-driven authority-host auto-bridge wiring to the remote main-slot pane
+    status: pass
+  - id: t5-07-cargo-test-quiet-authority-target-host-runtime
+    command: cargo test --quiet after adding a real authority-side target-host runtime, no-dependency base64 helpers, tmux PTY bridge primitives for pane input and resize and pipe-pane output, and a hidden output-pump helper that streams pane bytes back into authority transport framing
+    status: pass
+  - id: t5-07-cargo-fmt-authority-target-host-runtime
+    command: cargo fmt after adding the authority-side target-host runtime, the hidden output-pump helper, and tmux remote PTY bridge primitives
+    status: pass
+  - id: t5-07-cargo-test-quiet-authority-transport-runtime
+    command: cargo test --quiet after adding a dedicated remote authority transport runtime, sharing the pane authority socket locator, and covering bidirectional resize or input or output delivery between the pane-side remote runtime and an authority-side transport client
+    status: pass
+  - id: t5-07-cargo-fmt-authority-transport-runtime
+    command: cargo fmt after adding the remote authority transport runtime and reusing its shared authority transport socket locator from the pane runtime
+    status: pass
+  - id: t5-07-cargo-test-quiet-authority-transport-registration
+    command: cargo test --quiet after adding a no-dependency remote transport codec, authority-side local socket registration for remote main-slot panes, and inbound target_output routing back through the existing remote control-plane plus observer render path
+    status: pass
+  - id: t5-07-cargo-fmt-authority-transport-registration
+    command: cargo fmt after adding the remote transport codec and first cross-process authority registration bridge for remote main-slot panes
+    status: pass
+  - id: t5-07-cargo-test-quiet-remote-main-slot-pane-runtime
+    command: cargo test --quiet after adding a dedicated remote main-slot pane command that respawns the workspace main pane, opens remote targets inside the pane process, consumes observer mailbox growth, and renders remote terminal state locally
+    status: pass
+  - id: t5-07-cargo-fmt-remote-main-slot-pane-runtime
+    command: cargo fmt after adding the remote main-slot pane runtime, mailbox growth notification support, and remote or local main-slot switch cleanup
+    status: pass
+  - id: t5-07-cargo-test-quiet-remote-observer-runtime
+    command: cargo test --quiet after adding a dedicated remote observer runtime that consumes loopback mailbox deliveries, decodes target_output bytes, and rebuilds local terminal state for remote targets
+    status: pass
+  - id: t5-07-cargo-fmt-remote-observer-runtime
+    command: cargo fmt after adding the remote observer runtime and mailbox incremental snapshot support
+    status: pass
+  - id: t5-07-cargo-test-quiet-target-output-fanout
+    command: cargo test --quiet after adding target_output protocol payloads, control-plane fanout, and remote main-slot runtime output delivery coverage through observer loopback mailboxes
+    status: pass
+  - id: t5-07-cargo-fmt-target-output-fanout
+    command: cargo fmt after adding target_output protocol payloads and remote output fanout through the remote main-slot runtime
+    status: pass
+  - id: t5-07-cargo-test-quiet-open-input-resize-send-paths
+    command: cargo test --quiet after exposing explicit remote main-slot send paths for open, console input, and PTY resize and covering authority-side loopback delivery in tests
+    status: pass
+  - id: t5-07-cargo-fmt-open-input-resize-send-paths
+    command: cargo fmt after exposing explicit remote main-slot send paths for open, console input, and PTY resize
+    status: pass
+  - id: t5-07-cargo-test-quiet-local-observer-loopback
+    command: cargo test --quiet after making the default remote runtime register a loopback observer connection for the local workspace console and adding mailbox-backed delivery coverage
+    status: pass
+  - id: t5-07-cargo-fmt-local-observer-loopback
+    command: cargo fmt after adding local observer loopback registration to the remote transport runtime and main-slot remote activation path
+    status: pass
+  - id: t5-07-cargo-test-quiet-connection-registry-sink
+    command: cargo test --quiet after adding a concrete remote connection registry plus registry-backed control-plane sink and wiring the default workspace runtime through that sink
+    status: pass
+  - id: t5-07-cargo-fmt-connection-registry-sink
+    command: cargo fmt after adding the remote connection registry and registry-backed control-plane sink
+    status: pass
+  - id: t5-07-cargo-test-quiet-node-deliveries
+    command: cargo test --quiet after expanding remote control-plane routing into concrete per-node deliveries before the sink boundary and updating the remote main-slot runtime to send node-bound deliveries instead of unresolved broadcast intents
+    status: pass
+  - id: t5-07-cargo-fmt-node-deliveries
+    command: cargo fmt after expanding remote control-plane routing into concrete per-node deliveries before the sink boundary
+    status: pass
+  - id: t5-07-cargo-test-quiet-remote-main-slot-runtime
+    command: cargo test --quiet after adding a dedicated remote main-slot runtime that turns remote activation into control-plane open messages plus an explicit transport sink, wiring the main-slot remote branch through that boundary, and keeping remote rendering intentionally unimplemented
+    status: pass
+  - id: t5-07-cargo-fmt-remote-main-slot-runtime
+    command: cargo fmt after adding the remote main-slot runtime boundary and wiring the main-slot remote branch through it
+    status: pass
+  - id: t5-07-cargo-test-quiet-resize-boundary-refine
+    command: cargo test --quiet after removing implicit PTY resize from remote open and authority handoff, making resize-authority announcements carry optional PTY size, and keeping explicit PTY resize as a separate authority-gated control path
+    status: pass
+  - id: t5-07-cargo-fmt-resize-boundary-refine
+    command: cargo fmt after refining remote control-plane resize semantics so attachment viewport changes stay local while explicit PTY resize remains separate
+    status: pass
+  - id: t5-07-cargo-test-quiet-first-slice
+    command: cargo test --quiet after adding remote protocol envelope types plus the server-side open, input, and resize authority state machine for remote target routing
+    status: pass
+  - id: t5-07-cargo-fmt-first-slice
+    command: cargo fmt after landing the first remote control-plane protocol and routing service slice
+    status: pass
+  - id: t5-06c-cargo-test-quiet
+    command: cargo test --quiet after extracting the target-registry service boundary, routing local chrome and main-slot consumers through unified target records, and making remote target activation an explicit future branch
+    status: pass
+  - id: t5-06c-cargo-fmt
+    command: cargo fmt after introducing the target-registry service and updating current runtime consumers to read unified target records through it
+    status: pass
+  - id: t5-06b-cargo-test-quiet
+    command: cargo test --quiet after generalizing session-catalog target identity, transport discrimination, authority identity, availability, and console-attachment metadata without changing transport behavior
+    status: pass
+  - id: t5-06b-cargo-fmt
+    command: cargo fmt after landing the transport-agnostic session-catalog model slice and updating local record construction sites
+    status: pass
+  - id: t5-06a-remote-foundation-review
+    command: targeted review confirming the remote-session foundation doc, terminology alignment, bounded task split, and task-board focus switch are all landed before model work begins
+    status: pass
   - id: event-r4-manual-shell-visible-behavior-acceptance
     command: user-reported manual shell validation confirming visible behavior on the accepted local path after the event-r4 cleanup
     status: pass

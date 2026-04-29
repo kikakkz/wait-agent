@@ -1,3 +1,6 @@
+use crate::application::target_registry_service::{
+    DefaultTargetCatalogGateway, TargetRegistryService,
+};
 use crate::cli::UiPaneCommand;
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
@@ -50,7 +53,12 @@ impl EventDrivenPaneRuntime {
             spawn_pane_event_stream(self.backend.clone(), &command, true).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
             })?;
-        let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
+        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry(
+            self.backend.clone(),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
+            ),
+        );
         let mut last_buffer = String::new();
 
         redraw_sidebar(
@@ -87,7 +95,12 @@ impl EventDrivenPaneRuntime {
             spawn_pane_event_stream(self.backend.clone(), &command, false).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
             })?;
-        let mut chrome = EventDrivenTmuxPaneRuntime::new(self.backend.clone());
+        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry(
+            self.backend.clone(),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
+            ),
+        );
         let mut last_buffer = String::new();
         let workspace = workspace_handle(&command);
         let update =

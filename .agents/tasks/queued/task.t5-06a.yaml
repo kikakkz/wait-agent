@@ -1,0 +1,44 @@
+id: task.t5-06a
+kind: task
+version: 1
+title: lock the remote-session foundation docs and split the registry implementation queue
+status: done
+priority: medium
+target_task_reference: task.t5-06a
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.event-r4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted remote-session foundation document records the product rule that local and remote targets share one target surface and differ only by interaction backend
+  - architecture and protocol docs point to that foundation and use the same terminology for target, console, PTY owner, shared input, broadcast output, and exclusive resize
+  - the original umbrella `task.t5-06` is split into bounded slices `task.t5-06a -> task.t5-06b -> task.t5-06c`
+  - current task state and status-board focus point at the first documentation or planning slice rather than the old umbrella task
+verification:
+  - targeted review of remote foundation architecture, protocol terminology, and task dependency consistency
+touched_paths:
+  - docs/remote-session-foundation.md
+  - docs/architecture.md
+  - docs/protocol.md
+  - docs/agents-control-plane.md
+  - .agents/index.yaml
+  - .agents/context/project.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.t5-06a.yaml
+  - .agents/tasks/queued/task.t5-06b.yaml
+  - .agents/tasks/queued/task.t5-06c.yaml
+  - .agents/tasks/current.yaml
+  - docs/execution-status-board.md
+  - .agents/state/task-history.yaml
+notes:
+  - This slice lands the remote foundation docs before changing model or transport code.
+  - 2026-04-27 refinement: the resumed remote registry umbrella is now split into documentation, model, and registry-boundary slices so each step can be reviewed and verified independently.
+  - Do not let this slice drift into implementation of transport routing, remote stream rendering, or server-console runtime behavior.
+  - 2026-04-27 close: the remote foundation doc, terminology alignment, task split, and task-board focus switch are all landed, so follow-on work moves to `task.t5-06b`.

@@ -1,5 +1,5 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::infra::tmux::{TmuxSessionGateway, TmuxSocketName, TmuxWorkspaceHandle};
+use crate::infra::tmux::{TmuxSessionGateway, TmuxWorkspaceHandle};
 
 pub struct SessionService<G> {
     gateway: G,
@@ -11,17 +11,6 @@ where
 {
     pub fn new(gateway: G) -> Self {
         Self { gateway }
-    }
-
-    pub fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        self.gateway.list_sessions()
-    }
-
-    pub fn list_sessions_on_socket(
-        &self,
-        socket_name: &TmuxSocketName,
-    ) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        self.gateway.list_sessions_on_socket(socket_name)
     }
 
     pub fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, G::Error> {
@@ -55,6 +44,10 @@ where
 
     pub fn detach_current_client(&self) -> Result<(), G::Error> {
         self.gateway.detach_current_client()
+    }
+
+    pub fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, G::Error> {
+        self.gateway.current_client_session()
     }
 }
 
@@ -109,9 +102,12 @@ mod tests {
                 calls: Rc::new(RefCell::new(Vec::new())),
                 sessions: Rc::new(RefCell::new(vec![ManagedSessionRecord {
                     address: ManagedSessionAddress::local_tmux("wa-1234", "1234"),
+                    selector: Some("wa-1234:1234".to_string()),
+                    availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("1234".to_string()),
                     session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                    opened_by: Vec::new(),
                     attached_clients: 1,
                     window_count: 1,
                     command_name: Some("bash".to_string()),
@@ -260,6 +256,10 @@ mod tests {
             self.calls.borrow_mut().push(Call::DetachCurrentClient);
             Ok(())
         }
+
+        fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
+            Ok(self.sessions.borrow().first().cloned())
+        }
     }
 
     fn workspace_handle() -> TmuxWorkspaceHandle {
@@ -322,9 +322,12 @@ mod tests {
         gateway.set_sessions(vec![
             ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "1111"),
+                selector: Some("wa-1:1111".to_string()),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: None,
                 workspace_key: None,
                 session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
                 attached_clients: 0,
                 window_count: 1,
                 command_name: Some("bash".to_string()),
@@ -333,9 +336,12 @@ mod tests {
             },
             ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-2", "2222"),
+                selector: Some("wa-2:2222".to_string()),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: None,
                 workspace_key: None,
                 session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
                 attached_clients: 0,
                 window_count: 1,
                 command_name: Some("codex".to_string()),
@@ -360,9 +366,12 @@ mod tests {
         gateway.set_sessions(vec![
             ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "workspace"),
+                selector: Some("wa-1:workspace".to_string()),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/ws")),
                 workspace_key: Some("wk-1".to_string()),
                 session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
                 attached_clients: 1,
                 window_count: 3,
                 command_name: Some("bash".to_string()),
@@ -371,9 +380,12 @@ mod tests {
             },
             ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "target-a"),
+                selector: Some("wa-1:target-a".to_string()),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/ws")),
                 workspace_key: Some("wk-1".to_string()),
                 session_role: Some(WorkspaceSessionRole::TargetHost),
+                opened_by: Vec::new(),
                 attached_clients: 0,
                 window_count: 1,
                 command_name: Some("codex".to_string()),

@@ -10,8 +10,19 @@ pub struct Cli {
 #[derive(Debug, Clone)]
 pub enum Command {
     Workspace,
+    ChromeRefreshSocket(SocketNameCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
+    RemoteMainSlot(RemoteMainSlotCommand),
+    RemoteAuthorityTargetHost(RemoteAuthorityTargetHostCommand),
+    RemoteAuthorityOutputPump(RemoteAuthorityOutputPumpCommand),
+    RemoteTargetPublicationServer(RemoteTargetPublicationServerCommand),
+    RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
+    RemoteTargetPublicationOwner(RemoteTargetPublicationOwnerCommand),
+    SocketLifecycleHook(SocketLifecycleHookCommand),
+    RemoteTargetBindPublication(RemoteTargetBindPublicationCommand),
+    RemoteTargetUnbindPublication(RemoteTargetUnbindPublicationCommand),
+    RemoteTargetReconcilePublications(RemoteTargetReconcilePublicationsCommand),
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
     MainPaneDied(MainPaneDiedCommand),
@@ -42,6 +53,75 @@ pub struct DetachCommand {
 pub struct UiPaneCommand {
     pub socket_name: String,
     pub session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SocketNameCommand {
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SocketLifecycleHookCommand {
+    pub socket_name: String,
+    pub hook_name: Option<String>,
+    pub session_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteMainSlotCommand {
+    pub socket_name: String,
+    pub session_name: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteAuthorityTargetHostCommand {
+    pub socket_name: String,
+    pub target_session_name: String,
+    pub authority_id: String,
+    pub target_id: String,
+    pub transport_socket_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteAuthorityOutputPumpCommand {
+    pub ingest_socket_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetPublicationServerCommand {
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetPublicationAgentCommand {
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetPublicationOwnerCommand {
+    pub socket_name: String,
+    pub target_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetBindPublicationCommand {
+    pub socket_name: String,
+    pub target_session_name: String,
+    pub authority_id: String,
+    pub transport_session_id: String,
+    pub selector: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetUnbindPublicationCommand {
+    pub socket_name: String,
+    pub target_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetReconcilePublicationsCommand {
+    pub socket_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -115,6 +195,10 @@ impl Cli {
         }
 
         let command = match args[0].as_str() {
+            "__chrome-refresh-socket" => {
+                args.remove(0);
+                Command::ChromeRefreshSocket(parse_socket_name_command(args)?)
+            }
             "__ui-sidebar" => {
                 args.remove(0);
                 Command::UiSidebar(parse_ui_pane(args)?)
@@ -122,6 +206,52 @@ impl Cli {
             "__ui-footer" => {
                 args.remove(0);
                 Command::UiFooter(parse_ui_pane(args)?)
+            }
+            "__remote-main-slot" => {
+                args.remove(0);
+                Command::RemoteMainSlot(parse_remote_main_slot(args)?)
+            }
+            "__remote-authority-target-host" => {
+                args.remove(0);
+                Command::RemoteAuthorityTargetHost(parse_remote_authority_target_host(args)?)
+            }
+            "__remote-authority-output-pump" => {
+                args.remove(0);
+                Command::RemoteAuthorityOutputPump(parse_remote_authority_output_pump(args)?)
+            }
+            "__remote-target-publication-server" => {
+                args.remove(0);
+                Command::RemoteTargetPublicationServer(parse_remote_target_publication_server(
+                    args,
+                )?)
+            }
+            "__remote-target-publication-agent" => {
+                args.remove(0);
+                Command::RemoteTargetPublicationAgent(parse_remote_target_publication_agent(args)?)
+            }
+            "__remote-target-publication-owner" => {
+                args.remove(0);
+                Command::RemoteTargetPublicationOwner(parse_remote_target_publication_owner(args)?)
+            }
+            "__socket-lifecycle-hook" => {
+                args.remove(0);
+                Command::SocketLifecycleHook(parse_socket_lifecycle_hook_command(args)?)
+            }
+            "__remote-target-bind-publication" => {
+                args.remove(0);
+                Command::RemoteTargetBindPublication(parse_remote_target_bind_publication(args)?)
+            }
+            "__remote-target-unbind-publication" => {
+                args.remove(0);
+                Command::RemoteTargetUnbindPublication(parse_remote_target_unbind_publication(
+                    args,
+                )?)
+            }
+            "__remote-target-reconcile-publications" => {
+                args.remove(0);
+                Command::RemoteTargetReconcilePublications(
+                    parse_remote_target_reconcile_publications(args)?,
+                )
             }
             "__activate-target" => {
                 args.remove(0);
@@ -244,6 +374,287 @@ fn parse_ui_pane(args: Vec<String>) -> Result<UiPaneCommand, CliError> {
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+    })
+}
+
+fn parse_socket_name_command(args: Vec<String>) -> Result<SocketNameCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(SocketNameCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_socket_lifecycle_hook_command(
+    args: Vec<String>,
+) -> Result<SocketLifecycleHookCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut hook_name = None;
+    let mut session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--hook-name" => hook_name = Some(expect_value("--hook-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(SocketLifecycleHookCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        hook_name,
+        session_name,
+    })
+}
+
+fn parse_remote_main_slot(args: Vec<String>) -> Result<RemoteMainSlotCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+    let mut target = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--target" => target = Some(expect_value("--target", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteMainSlotCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+        target: target.ok_or_else(|| CliError::MissingValue("--target".to_string()))?,
+    })
+}
+
+fn parse_remote_authority_target_host(
+    args: Vec<String>,
+) -> Result<RemoteAuthorityTargetHostCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut target_session_name = None;
+    let mut authority_id = None;
+    let mut target_id = None;
+    let mut transport_socket_path = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--target-session-name" => {
+                target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--authority-id" => authority_id = Some(expect_value("--authority-id", &mut iter)?),
+            "--target-id" => target_id = Some(expect_value("--target-id", &mut iter)?),
+            "--transport-socket-path" => {
+                transport_socket_path = Some(expect_value("--transport-socket-path", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteAuthorityTargetHostCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        target_session_name: target_session_name
+            .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
+        authority_id: authority_id
+            .ok_or_else(|| CliError::MissingValue("--authority-id".to_string()))?,
+        target_id: target_id.ok_or_else(|| CliError::MissingValue("--target-id".to_string()))?,
+        transport_socket_path: transport_socket_path
+            .ok_or_else(|| CliError::MissingValue("--transport-socket-path".to_string()))?,
+    })
+}
+
+fn parse_remote_authority_output_pump(
+    args: Vec<String>,
+) -> Result<RemoteAuthorityOutputPumpCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut ingest_socket_path = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--ingest-socket-path" => {
+                ingest_socket_path = Some(expect_value("--ingest-socket-path", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteAuthorityOutputPumpCommand {
+        ingest_socket_path: ingest_socket_path
+            .ok_or_else(|| CliError::MissingValue("--ingest-socket-path".to_string()))?,
+    })
+}
+
+fn parse_remote_target_publication_server(
+    args: Vec<String>,
+) -> Result<RemoteTargetPublicationServerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetPublicationServerCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_target_publication_agent(
+    args: Vec<String>,
+) -> Result<RemoteTargetPublicationAgentCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetPublicationAgentCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_target_publication_owner(
+    args: Vec<String>,
+) -> Result<RemoteTargetPublicationOwnerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut target_session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--target-session-name" => {
+                target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetPublicationOwnerCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        target_session_name: target_session_name
+            .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
+    })
+}
+
+fn parse_remote_target_bind_publication(
+    args: Vec<String>,
+) -> Result<RemoteTargetBindPublicationCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut target_session_name = None;
+    let mut authority_id = None;
+    let mut transport_session_id = None;
+    let mut selector = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--target-session-name" => {
+                target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--authority-id" => authority_id = Some(expect_value("--authority-id", &mut iter)?),
+            "--transport-session-id" => {
+                transport_session_id = Some(expect_value("--transport-session-id", &mut iter)?)
+            }
+            "--selector" => selector = Some(expect_value("--selector", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetBindPublicationCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        target_session_name: target_session_name
+            .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
+        authority_id: authority_id
+            .ok_or_else(|| CliError::MissingValue("--authority-id".to_string()))?,
+        transport_session_id: transport_session_id
+            .ok_or_else(|| CliError::MissingValue("--transport-session-id".to_string()))?,
+        selector,
+    })
+}
+
+fn parse_remote_target_reconcile_publications(
+    args: Vec<String>,
+) -> Result<RemoteTargetReconcilePublicationsCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetReconcilePublicationsCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_target_unbind_publication(
+    args: Vec<String>,
+) -> Result<RemoteTargetUnbindPublicationCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut target_session_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--target-session-name" => {
+                target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetUnbindPublicationCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        target_session_name: target_session_name
+            .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
     })
 }
 
@@ -549,6 +960,102 @@ mod tests {
             Command::UiSidebar(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_authority_target_host_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-authority-target-host",
+            "--socket-name",
+            "wa-1",
+            "--target-session-name",
+            "target-1",
+            "--authority-id",
+            "peer-a",
+            "--target-id",
+            "remote-peer:peer-a:target-1",
+            "--transport-socket-path",
+            "/tmp/transport.sock",
+        ]) {
+            Command::RemoteAuthorityTargetHost(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.target_session_name, "target-1");
+                assert_eq!(command.authority_id, "peer-a");
+                assert_eq!(command.target_id, "remote-peer:peer-a:target-1");
+                assert_eq!(command.transport_socket_path, "/tmp/transport.sock");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_authority_output_pump_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-authority-output-pump",
+            "--ingest-socket-path",
+            "/tmp/output.sock",
+        ]) {
+            Command::RemoteAuthorityOutputPump(command) => {
+                assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_target_unbind_publication_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-target-unbind-publication",
+            "--socket-name",
+            "wa-1",
+            "--target-session-name",
+            "target-1",
+        ]) {
+            Command::RemoteTargetUnbindPublication(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.target_session_name, "target-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_socket_lifecycle_hook_command() {
+        match parse(&[
+            "waitagent",
+            "__socket-lifecycle-hook",
+            "--socket-name",
+            "wa-1",
+            "--hook-name",
+            "client-attached",
+            "--session-name",
+            "target-1",
+        ]) {
+            Command::SocketLifecycleHook(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.hook_name.as_deref(), Some("client-attached"));
+                assert_eq!(command.session_name.as_deref(), Some("target-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_chrome_refresh_socket_command() {
+        match parse(&[
+            "waitagent",
+            "__chrome-refresh-socket",
+            "--socket-name",
+            "wa-1",
+        ]) {
+            Command::ChromeRefreshSocket(command) => {
+                assert_eq!(command.socket_name, "wa-1");
             }
             other => panic!("unexpected command: {other:?}"),
         }

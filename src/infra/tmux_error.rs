@@ -118,6 +118,34 @@ impl TmuxCommandRunner {
         )))
     }
 
+    pub(crate) fn capture_from_current_client(
+        &self,
+        args: &[String],
+    ) -> Result<TmuxCommandOutput, TmuxError> {
+        let command_summary = self.command_summary_without_socket(args);
+        let output = Command::new(&self.tmux_binary_path)
+            .args(args)
+            .output()
+            .map_err(|error| {
+                TmuxError::new(format!(
+                    "failed to spawn vendored tmux command `{command_summary}`: {error}"
+                ))
+            })?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if !output.status.success() {
+            return Err(TmuxError::command_failure(TmuxCommandFailure {
+                command_summary,
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+            }));
+        }
+
+        Ok(TmuxCommandOutput { stdout, stderr })
+    }
+
     fn base_socket_command(&self, socket_name: &TmuxSocketName) -> Command {
         let mut command = Command::new(&self.tmux_binary_path);
         command

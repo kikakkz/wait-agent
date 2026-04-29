@@ -10,6 +10,7 @@ Current note:
 
 - the accepted replacement for the old custom local fullscreen and live-surface path is documented in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
 - the accepted code-level runtime reorganization for that migration is documented in [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
+- the accepted resumed remote-session baseline is documented in [remote-session-foundation.md](remote-session-foundation.md)
 - until this architecture document is fully revised, treat the tmux-first plan as the authoritative local workspace display direction
 
 This document translates the product requirements in [wait-agent-prd.md](wait-agent-prd.md) into a build-oriented system architecture.
@@ -53,6 +54,12 @@ Network mode only adds:
 - Remote client nodes
 - Session registration and broadcast
 - A server-side interaction surface for remote sessions routed through the server control plane
+
+Remote-session refinement:
+
+- local and remote targets are one shared product surface
+- the distinction is backend transport, not a second workspace UX
+- remote targets open in the same fixed-chrome main slot model used by local targets
 
 ## 4. Runtime Topology
 
@@ -106,6 +113,8 @@ For future remote sessions, the accepted interaction path is:
 - the remote node remains the PTY owner for its sessions
 - the server maintains aggregate session state and routes control messages
 - server-side user interaction runs through a waitagent `interact` surface, not through a server-owned PTY pretending to be local
+- a local workspace console and a future server-side console may both open the same remote target at the same time
+- remote input is shared across opened consoles, remote output is broadcast to them, and resize authority stays exclusive
 
 Anti-goal:
 

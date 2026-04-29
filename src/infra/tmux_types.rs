@@ -100,6 +100,15 @@ pub struct TmuxProgram {
     pub start_directory: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTargetPublicationBinding {
+    pub socket_name: String,
+    pub target_session_name: String,
+    pub authority_id: String,
+    pub transport_session_id: String,
+    pub selector: Option<String>,
+}
+
 impl TmuxProgram {
     pub fn new(program: impl Into<String>) -> Self {
         Self {
@@ -200,6 +209,8 @@ pub trait TmuxSessionGateway: TmuxGateway {
     fn detach_session_clients(&self, address: &ManagedSessionAddress) -> Result<(), Self::Error>;
 
     fn detach_current_client(&self) -> Result<(), Self::Error>;
+
+    fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error>;
 }
 
 pub trait TmuxChromeGateway: TmuxSessionGateway {

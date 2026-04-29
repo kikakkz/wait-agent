@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-06
-focus_statement: task.event-r4 is now closed, so active work resumes the first deferred network slice: build the shared transport-agnostic target registry on top of the accepted local fixed-chrome baseline
+current_task: task.t5-07
+focus_statement: remote work now has both a production catalog path and a metadata-driven bounded authority-side publication lifecycle: hidden bind or publication commands and a publish-bridge runtime can project a real local target-host session into the shared published-target store, workspace startup can rediscover those session-bound publication descriptors and re-ensure one deduplicated bridge per target host, selector-based authority auto-bridge still works on top of that catalog, and the remaining gap is replacing this bounded local recovery loop with real long-lived node or server transport plus broader lifecycle ownership
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

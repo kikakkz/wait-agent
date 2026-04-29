@@ -1,6 +1,162 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-07
+    status: in_progress
+    summary: remote publication is now session-metadata driven rather than purely manual because a hidden bind command stores publication descriptors on local target-host tmux sessions, workspace startup re-discovers those bindings, and a lock-backed ensure path keeps one publish bridge per configured target host
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: published remote targets no longer depend only on one-shot hidden upsert or exit commands because a bounded authority-side publish-bridge runtime can now mirror a real local target-host session into the shared remote catalog, refresh chrome after metadata changes, and remove the published remote target when the source session disappears
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: remote targets can now enter the real production target registry through a published-target store and hidden upsert or exit commands, workspace sidebar or footer projection now includes those remote peers alongside local target hosts, and direct tmux attach is rejected for published remote targets while real node-driven publication remains the next gap
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: remote targets can now carry an optional authority-local selector, and the remote main-slot pane uses it to auto-spawn the hidden authority target-host bridge whenever that selector resolves to a real local tmux target-host session, leaving real remote target publication and broader lifecycle ownership as the next gap
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: authority-side transport is now bound to a real PTY-owner bridge because a dedicated target-host runtime can connect to the pane transport, apply input and PTY resize to a tmux target pane, and stream pane output back over the same control-plane path through a hidden output-pump helper
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the authority side no longer stops at socket registration because a dedicated remote authority transport runtime now handles connect or register, inbound target_input plus apply_resize delivery, and outbound target_output, with bidirectional pane-to-authority-to-observer coverage passing end to end in tests
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: a first cross-process authority transport slice now exists because remote main-slot panes can accept a registered authority node over a local socket transport, decode inbound control-plane envelopes, and route target_output back through the existing remote main-slot runtime instead of inventing a second render path
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: remote targets can now bind a real workspace main-pane process instead of stopping at an activation placeholder, because a dedicated remote main-slot pane runtime opens the target, consumes observer-side envelopes into terminal state, and renders that state locally while still leaving live authority transport as the next gap
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: observer-side remote output no longer stops at loopback mailboxes because a dedicated runtime now consumes delivered envelopes, decodes target_output bytes, and rebuilds terminal state locally, leaving live connection sources plus main-slot presentation wiring as the next clean gap
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: authority-side target output now fans back out through the same remote main-slot boundary and reaches observer loopback mailboxes in tests, so the remaining product gap narrows further to live connection sources and real render consumption
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the remote main-slot runtime now exposes explicit send paths for open_target, console_input, and PTY resize, and authority-side loopback connections can receive those node-bound deliveries end to end in tests
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the local workspace console now auto-registers a loopback observer connection for remote activation, so observer-side open_target delivery succeeds by default and the remaining runtime gap narrows to authority-side connections plus remote render-path work
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the default workspace runtime now wires remote activation through a concrete connection-registry sink, so remote opens fail specifically on missing node connections instead of stopping at an unconfigured sink placeholder
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: remote control-plane routing now resolves concrete per-node deliveries before the sink boundary, so transport-facing code no longer needs to interpret internal broadcast intents such as all-opened-observers
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: a dedicated remote main-slot runtime now sits between main-slot activation and the remote control plane, so remote target selection can compute console identity plus viewport size and emit routed open_target messages into an explicit transport sink without contaminating the local tmux path
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the first remote control-plane slice now matches the refined resize boundary in code: remote opens only establish attachments plus PTY-resize authority, opening viewport size no longer triggers implicit PTY resize, and authority changes no longer invent apply-resize traffic without an explicit PTY resize request
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the remote interaction contract is now being refined before deeper runtime glue: attachment viewport resize such as pane growth or fullscreen remains local to each console, while only PTY resize is authority-gated and routed through the server control plane
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: notes
+  - task_id: task.t5-07
+    status: in_progress
+    summary: the first t5-07 control-plane slice is now in code: protocol envelope types exist, remote open creates attachments and PTY-resize authority state, multi-console input is serialized by server-assigned target sequence, and explicit PTY-resize routing is enforced in a dedicated application service
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: in_progress
+    summary: active work now moves to the first real remote transport-routing slice, where remote target open, input, and resize must flow through the server control plane on top of the accepted shared target catalog and registry boundary
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-06c
+    status: done
+    summary: the target-registry service boundary is now explicit, local tmux is its first producer, current chrome and main-slot consumers read unified target records through it, and remote activation is reserved as an explicit future branch
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-06c.yaml
+      reference: status
+  - task_id: task.t5-06c
+    status: in_progress
+    summary: active work now moves to the registry-boundary slice, extracting a dedicated target-registry service so local tmux becomes the first producer of unified target records and remote activation is kept as an explicit future branch
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-06b
+    status: done
+    summary: the transport-agnostic target model is now explicit in code and docs, including stable target identity, authority identity, transport discrimination, console-attachment metadata, and a concrete protocol identity contract
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-06b.yaml
+      reference: status
+  - task_id: task.t5-06b
+    status: in_progress
+    summary: active work now moves to the model slice, generalizing target identity and catalog records so local tmux is only one producer of a unified target model and remote routing can land later without another schema rewrite
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-06a
+    status: done
+    summary: the remote-session foundation is now locked in docs, shared terminology is aligned across architecture and protocol docs, and the former t5-06 umbrella has been split into bounded follow-on slices
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-06a.yaml
+      reference: status
+  - task_id: task.t5-06a
+    status: in_progress
+    summary: resumed remote work now starts with a documentation-and-planning slice that locks the unified remote-target foundation, records shared-input and exclusive-resize rules, and splits the former t5-06 umbrella into bounded implementation tasks
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-06
+    status: superseded
+    summary: the original aggregate-registry umbrella was too broad for clean delivery, so it is now split into task.t5-06a, task.t5-06b, and task.t5-06c before transport routing continues
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-06.yaml
+      reference: status
   - task_id: task.t5-06
     status: in_progress
     summary: with task.event-r4 now closed after user-reported shell and Codex visible-behavior acceptance, active work resumes the first deferred network slice: establish one shared transport-agnostic target registry for local and remote targets

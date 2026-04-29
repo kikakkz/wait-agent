@@ -4,31 +4,83 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionTransport {
     LocalTmux,
+    RemotePeer,
+}
+
+impl SessionTransport {
+    fn stable_prefix(&self) -> &'static str {
+        match self {
+            Self::LocalTmux => "local-tmux",
+            Self::RemotePeer => "remote-peer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetId(String);
+
+impl TargetId {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    fn for_transport(transport: &SessionTransport, authority_id: &str, session_id: &str) -> Self {
+        Self(format!(
+            "{}:{}:{}",
+            transport.stable_prefix(),
+            authority_id,
+            session_id
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ManagedSessionAddress {
+    id: TargetId,
     transport: SessionTransport,
-    server_id: String,
+    authority_id: String,
     session_id: String,
 }
 
 impl ManagedSessionAddress {
     pub fn local_tmux(server_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+        let authority_id = server_id.into();
+        let session_id = session_id.into();
+        let transport = SessionTransport::LocalTmux;
         Self {
-            transport: SessionTransport::LocalTmux,
-            server_id: server_id.into(),
-            session_id: session_id.into(),
+            id: TargetId::for_transport(&transport, &authority_id, &session_id),
+            transport,
+            authority_id,
+            session_id,
         }
     }
 
-    #[cfg(test)]
+    pub fn remote_peer(authority_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+        let authority_id = authority_id.into();
+        let session_id = session_id.into();
+        let transport = SessionTransport::RemotePeer;
+        Self {
+            id: TargetId::for_transport(&transport, &authority_id, &session_id),
+            transport,
+            authority_id,
+            session_id,
+        }
+    }
+
     pub fn transport(&self) -> &SessionTransport {
         &self.transport
     }
 
+    pub fn id(&self) -> &TargetId {
+        &self.id
+    }
+
+    pub fn authority_id(&self) -> &str {
+        &self.authority_id
+    }
+
     pub fn server_id(&self) -> &str {
-        &self.server_id
+        self.authority_id()
     }
 
     pub fn session_id(&self) -> &str {
@@ -36,12 +88,13 @@ impl ManagedSessionAddress {
     }
 
     pub fn qualified_target(&self) -> String {
-        format!("{}:{}", self.server_id, self.session_id)
+        format!("{}:{}", self.authority_id, self.session_id)
     }
 
     pub fn display_location(&self) -> &str {
         match self.transport {
             SessionTransport::LocalTmux => "local",
+            SessionTransport::RemotePeer => "remote",
         }
     }
 
@@ -125,12 +178,60 @@ impl Default for ManagedSessionTaskState {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionAvailability {
+    Online,
+    Offline,
+    Exited,
+    #[default]
+    Unknown,
+}
+
+impl SessionAvailability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "online" => Some(Self::Online),
+            "offline" => Some(Self::Offline),
+            "exited" => Some(Self::Exited),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLocation {
+    LocalWorkspace,
+    ServerConsole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleAttachment {
+    pub console_id: String,
+    pub location: ConsoleLocation,
+    pub has_pty_resize_authority: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedSessionRecord {
     pub address: ManagedSessionAddress,
+    pub selector: Option<String>,
+    pub availability: SessionAvailability,
     pub workspace_dir: Option<PathBuf>,
     pub workspace_key: Option<String>,
     pub session_role: Option<WorkspaceSessionRole>,
+    pub opened_by: Vec<ConsoleAttachment>,
     pub attached_clients: usize,
     pub window_count: usize,
     pub command_name: Option<String>,
@@ -148,8 +249,11 @@ impl ManagedSessionRecord {
     }
 
     pub fn matches_target(&self, value: &str) -> bool {
-        value == self.address.display_session_id()
+        value == self.address.id().as_str()
+            || self.selector.as_deref() == Some(value)
+            || value == self.address.display_session_id()
             || value == self.address.session_id()
+            || value == self.address.authority_id()
             || value == self.address.server_id()
             || value == self.address.qualified_target()
             || value
@@ -198,7 +302,8 @@ fn looks_like_agent_input(command_name: &str, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
+        ConsoleAttachment, ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord,
+        ManagedSessionTaskState, SessionAvailability, SessionTransport,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use std::path::PathBuf;
@@ -207,9 +312,16 @@ mod tests {
     fn managed_session_matches_native_tmux_targets() {
         let record = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            selector: Some("wa-1234:waitagent-1234".to_string()),
+            availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some("1234".to_string()),
             session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            opened_by: vec![ConsoleAttachment {
+                console_id: "workspace-main".to_string(),
+                location: ConsoleLocation::LocalWorkspace,
+                has_pty_resize_authority: true,
+            }],
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),
@@ -218,6 +330,10 @@ mod tests {
         };
 
         assert_eq!(record.address.transport(), &SessionTransport::LocalTmux);
+        assert_eq!(
+            record.address.id().as_str(),
+            "local-tmux:wa-1234:waitagent-1234"
+        );
         assert!(record.matches_target("1234"));
         assert!(record.matches_target("waitagent-1234"));
         assert!(record.matches_target("wa-1234"));
@@ -230,9 +346,12 @@ mod tests {
     fn managed_session_summary_line_matches_tmux_like_shape() {
         let record = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            selector: Some("wa-1234:waitagent-1234".to_string()),
+            availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some("1234".to_string()),
             session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            opened_by: Vec::new(),
             attached_clients: 2,
             window_count: 3,
             command_name: Some("codex".to_string()),
@@ -248,9 +367,12 @@ mod tests {
     fn managed_session_display_label_uses_transport_aware_location() {
         let record = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            selector: Some("wa-1234:waitagent-1234".to_string()),
+            availability: SessionAvailability::Online,
             workspace_dir: None,
             workspace_key: None,
             session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
             attached_clients: 0,
             window_count: 1,
             command_name: Some("codex".to_string()),
@@ -265,9 +387,12 @@ mod tests {
     fn managed_session_exposes_workspace_role_helpers() {
         let chrome = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            selector: Some("wa-1234:waitagent-1234".to_string()),
+            availability: SessionAvailability::Online,
             workspace_dir: None,
             workspace_key: None,
             session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            opened_by: Vec::new(),
             attached_clients: 0,
             window_count: 1,
             command_name: None,
@@ -276,9 +401,12 @@ mod tests {
         };
         let target = ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-5678"),
+            selector: Some("wa-1234:waitagent-5678".to_string()),
+            availability: SessionAvailability::Online,
             workspace_dir: None,
             workspace_key: None,
             session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
             attached_clients: 0,
             window_count: 1,
             command_name: None,
@@ -290,6 +418,18 @@ mod tests {
         assert!(!chrome.is_target_host());
         assert!(target.is_target_host());
         assert!(!target.is_workspace_chrome());
+    }
+
+    #[test]
+    fn managed_session_remote_addresses_keep_transport_and_authority_explicit() {
+        let address = ManagedSessionAddress::remote_peer("peer-a", "shell-7");
+
+        assert_eq!(address.transport(), &SessionTransport::RemotePeer);
+        assert_eq!(address.id().as_str(), "remote-peer:peer-a:shell-7");
+        assert_eq!(address.authority_id(), "peer-a");
+        assert_eq!(address.server_id(), "peer-a");
+        assert_eq!(address.qualified_target(), "peer-a:shell-7");
+        assert_eq!(address.display_location(), "remote");
     }
 
     #[test]

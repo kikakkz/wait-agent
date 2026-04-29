@@ -1,4 +1,6 @@
-use crate::application::session_service::SessionService;
+use crate::application::target_registry_service::{
+    DefaultTargetCatalogGateway, TargetRegistryService,
+};
 use crate::cli::FooterMenuCommand;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -6,7 +8,6 @@ use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
-use crate::runtime::tmux_visible_sessions::visible_target_sessions;
 use std::io;
 use std::path::PathBuf;
 
@@ -16,7 +17,7 @@ const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub struct FooterMenuRuntime {
     backend: EmbeddedTmuxBackend,
-    session_service: SessionService<EmbeddedTmuxBackend>,
+    target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     current_executable: PathBuf,
 }
 
@@ -31,19 +32,15 @@ impl FooterMenuRuntime {
         })?;
 
         Ok(Self {
-            session_service: SessionService::new(backend.clone()),
+            target_registry: TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env().map_err(footer_menu_error)?,
+            ),
             backend,
             current_executable,
         })
     }
 
     pub fn run(&self, command: FooterMenuCommand) -> Result<(), LifecycleError> {
-        let sessions = self
-            .session_service
-            .list_sessions_on_socket(&TmuxSocketName::new(command.socket_name.clone()))
-            .map_err(footer_menu_error)?
-            .into_iter()
-            .collect::<Vec<_>>();
         let active_target = self
             .backend
             .show_session_option(
@@ -51,8 +48,14 @@ impl FooterMenuRuntime {
                 WAITAGENT_ACTIVE_TARGET_OPTION,
             )
             .map_err(footer_menu_error)?;
-        let visible_sessions =
-            visible_target_sessions(&sessions, &command.session_name, active_target.as_deref());
+        let visible_sessions = self
+            .target_registry
+            .visible_targets_in_workspace(
+                &command.socket_name,
+                &command.session_name,
+                active_target.as_deref(),
+            )
+            .map_err(footer_menu_error)?;
         let args = build_footer_menu_args(
             &command,
             &self.current_executable,
@@ -296,9 +299,12 @@ mod tests {
             Some("wa-1:1"),
             &[ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux("wa-1", "1"),
+                selector: Some("wa-1:1".to_string()),
+                availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 workspace_key: None,
                 session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
                 attached_clients: 1,
                 window_count: 1,
                 command_name: Some("codex".to_string()),

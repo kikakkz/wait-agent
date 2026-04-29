@@ -118,13 +118,22 @@ next:
     status: superseded
   - id: task.t5-06
     title: implement the aggregate transport-agnostic target registry
-    status: in_progress
+    status: superseded
+  - id: task.t5-06a
+    title: lock the remote-session foundation docs and split the registry implementation queue
+    status: done
+  - id: task.t5-06b
+    title: generalize target identity and catalog records into a transport-agnostic model
+    status: done
+  - id: task.t5-06c
+    title: extract the target-registry service boundary and route chrome consumers through unified target records
+    status: done
   - id: task.scroll-1
     title: implement tmux-style pane history with mouse-draggable gutter scrolling
     status: superseded
   - id: task.t5-07
-    title: implement remote target input and resize routing through the server control plane
-    status: deferred
+    title: implement remote target input routing and clean remote resize boundaries through the server control plane
+    status: in_progress
   - id: task.t6-01
     title: implement the server-side workspace console as a target-activation surface
     status: deferred
@@ -163,6 +172,10 @@ notes:
   - 2026-04-24 refinement: fixed-chrome main-slot target activation is now a prerequisite for further attach-side event cleanup, because the current sidebar or footer switch path still detaches the client and launches `waitagent attach <target>`.
   - 2026-04-24 execution lock: `task.event-r2a -> task.event-r3 -> task.event-r4` is the top-priority local batch and must complete before resuming remote, network, or optional polish work.
   - Remaining network and remote tasks must build on the shared transport-agnostic target catalog and fixed-chrome main-slot activation model; do not resume them on top of superseded daemon, attach, or local-only session assumptions.
+  - 2026-04-27 refinement: the original umbrella `task.t5-06` is now split into `task.t5-06a -> task.t5-06b -> task.t5-06c` so the resumed remote queue lands docs, model, and registry-boundary work in separate bounded slices before transport routing begins.
+  - 2026-04-27 update: `task.t5-06a` is complete enough to close; active work now moves to `task.t5-06b`, which generalizes target identity and catalog records without starting transport routing.
+  - 2026-04-27 update: `task.t5-06b` is complete enough to close after the shared target model, protocol identity contract, and compatibility accessors landed; active work now moves to `task.t5-06c`, where local tmux becomes the first producer behind an explicit target-registry boundary.
+  - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

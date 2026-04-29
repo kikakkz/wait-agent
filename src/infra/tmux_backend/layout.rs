@@ -5,6 +5,24 @@ use crate::infra::tmux_types::{
 };
 
 impl EmbeddedTmuxBackend {
+    pub(crate) fn set_global_hook_on_socket(
+        &self,
+        socket_name: &str,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &crate::infra::tmux::TmuxSocketName::new(socket_name),
+            &[
+                "set-hook".to_string(),
+                "-g".to_string(),
+                hook_name.to_string(),
+                command.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn break_pane_to_window(
         &self,
         workspace: &TmuxWorkspaceHandle,

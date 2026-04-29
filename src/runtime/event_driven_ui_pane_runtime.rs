@@ -497,9 +497,12 @@ mod tests {
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket, session),
+            selector: Some(format!("{socket}:{session}")),
+            availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: None,
             session_role: None,
+            opened_by: Vec::new(),
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

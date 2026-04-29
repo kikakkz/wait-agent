@@ -15,12 +15,12 @@ current_phase:
   stage_id: network-registry-reset
   stage_title: resume remote design from the accepted tmux-first local baseline
 current_focus:
-  default_task_id: task.t5-06
-  focus_statement: build the shared transport-agnostic target registry that remote interaction will consume, without regressing the accepted local fixed-chrome baseline
+  default_task_id: task.t5-07
+  focus_statement: implement remote target input and resize routing through the server control plane on top of the accepted shared target catalog and registry boundary
 upcoming_focus:
-  - route remote input and resize through the server control plane on top of the shared target catalog
-  - introduce the server-side workspace console as a target-activation surface
-  - keep local and remote target identity transport-agnostic instead of reviving local-only PTY assumptions
+  - implement the server-side workspace console as another target-opening surface after registry ownership and routing exist
+  - revisit remote target status projection after routing ownership and console attachments are real runtime state
+  - refine recovery, liveness, and remote authority handoff behavior after the first transport slice is real code
 source_of_truth:
   - docs/execution-status-board.md
   - docs/local-acceptance-checklist.md

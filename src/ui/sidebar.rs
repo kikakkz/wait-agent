@@ -213,9 +213,12 @@ mod tests {
             &[
                 ManagedSessionRecord {
                     address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
+                    selector: Some("wa-1:waitagent-1".to_string()),
+                    availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("1234".to_string()),
                     session_role: None,
+                    opened_by: Vec::new(),
                     attached_clients: 2,
                     window_count: 1,
                     command_name: Some("bash".to_string()),
@@ -224,9 +227,12 @@ mod tests {
                 },
                 ManagedSessionRecord {
                     address: ManagedSessionAddress::local_tmux("wa-2", "waitagent-2"),
+                    selector: Some("wa-2:waitagent-2".to_string()),
+                    availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
                     workspace_key: Some("5678".to_string()),
                     session_role: None,
+                    opened_by: Vec::new(),
                     attached_clients: 1,
                     window_count: 1,
                     command_name: Some("codex".to_string()),

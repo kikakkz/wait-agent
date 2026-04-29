@@ -1,4 +1,4 @@
-use crate::application::session_service::SessionService;
+use crate::application::target_registry_service::TargetRegistryService;
 use crate::cli::UiPaneCommand;
 use crate::domain::local_runtime::ChromeSurface;
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -8,26 +8,41 @@ use crate::runtime::event_driven_chrome_runtime::EventDrivenChromeRenderUpdate;
 use crate::runtime::event_driven_ui_pane_runtime::{
     EventDrivenSidebarInputOutcome, EventDrivenUiPaneRuntime,
 };
-use crate::runtime::tmux_visible_sessions::visible_target_sessions;
 use std::io;
 
 const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
-pub struct EventDrivenTmuxPaneRuntime<G> {
+pub struct EventDrivenTmuxPaneRuntime<G, R = G> {
     gateway: G,
-    session_service: SessionService<G>,
+    target_registry: TargetRegistryService<R>,
     pane_runtime: EventDrivenUiPaneRuntime,
 }
 
-impl<G> EventDrivenTmuxPaneRuntime<G>
+impl<G> EventDrivenTmuxPaneRuntime<G, G>
 where
     G: TmuxChromeGateway + Clone,
     G::Error: ToString,
 {
     pub fn new(gateway: G) -> Self {
         Self {
-            session_service: SessionService::new(gateway.clone()),
+            target_registry: TargetRegistryService::new(gateway.clone()),
             gateway,
+            pane_runtime: EventDrivenUiPaneRuntime::new(),
+        }
+    }
+}
+
+impl<G, R> EventDrivenTmuxPaneRuntime<G, R>
+where
+    G: TmuxChromeGateway + Clone,
+    R: crate::application::target_registry_service::TargetCatalogGateway,
+    G::Error: ToString,
+    R::Error: ToString,
+{
+    pub fn new_with_target_registry(gateway: G, target_registry: TargetRegistryService<R>) -> Self {
+        Self {
+            gateway,
+            target_registry,
             pane_runtime: EventDrivenUiPaneRuntime::new(),
         }
     }
@@ -99,18 +114,18 @@ where
         &mut self,
         command: &UiPaneCommand,
     ) -> Result<EventDrivenChromeRenderUpdate, LifecycleError> {
-        let sessions = self
-            .session_service
-            .list_sessions_on_socket(&TmuxSocketName::new(command.socket_name.clone()))
-            .map_err(tmux_pane_error)?
-            .into_iter()
-            .collect::<Vec<_>>();
         let active_target = self
             .gateway
             .show_session_option(&workspace_handle(command), WAITAGENT_ACTIVE_TARGET_OPTION)
             .map_err(tmux_pane_error)?;
-        let visible_sessions =
-            visible_target_sessions(&sessions, &command.session_name, active_target.as_deref());
+        let visible_sessions = self
+            .target_registry
+            .visible_targets_in_workspace(
+                &command.socket_name,
+                &command.session_name,
+                active_target.as_deref(),
+            )
+            .map_err(tmux_pane_error)?;
         Ok(self.pane_runtime.publish_session_snapshot(
             &command.socket_name,
             &command.session_name,
@@ -282,6 +297,10 @@ mod tests {
 
         fn detach_current_client(&self) -> Result<(), Self::Error> {
             unreachable!("not used")
+        }
+
+        fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
+            Ok(self.sessions.first().cloned())
         }
     }
 
@@ -480,9 +499,12 @@ mod tests {
     ) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket, session),
+            selector: Some(format!("{socket}:{session}")),
+            availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
             workspace_key: Some(WorkspaceInstanceId::new(session).as_str().to_string()),
             session_role: Some(session_role),
+            opened_by: Vec::new(),
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),

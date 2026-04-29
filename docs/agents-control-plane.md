@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.3`  
+Version: `v1.4`  
 Status: `Active`  
-Date: `2026-04-27`
+Date: `2026-04-28`
 
 ## 1. Purpose
 
@@ -71,24 +71,23 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.t5-06`:
+The current default task is `task.t5-07`:
 
-> Implement the aggregate transport-agnostic target registry.
+> Implement remote target input routing and clean remote resize boundaries through the server control plane.
 
 That task intentionally routes assistants through:
 
 - `primitive.verification-refresh`
-- `primitive.network-registry-scope`
 - `primitive.task-history-update`
 - `primitive.task-board-sync`
 - `primitive.agents-self-maintenance`
 
 This keeps assistants focused on:
 
-- one shared target catalog for local and remote targets
-- preserving the accepted local fixed-chrome activation model while network work resumes
+- making remote open and input flow through the server control plane on top of the accepted shared target catalog, while keeping attachment viewport resize local and PTY resize explicit
+- preserving the accepted local fixed-chrome activation model while remote design resumes
 - avoiding remote designs that assume local tmux inspection, daemon attach identity, or server-owned remote PTYs
-- sequencing remote registry work before remote input, resize, or server-console features
+- keeping server-console work and richer remote-state probing behind the first routing slice
 
 ## 5. Maintenance Rules
 

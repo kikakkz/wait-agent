@@ -9,8 +9,7 @@ source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.event-r4.done
-  - task.t5-06.done
+  - task.t5-06c.done
   - task.t5-07.done
 linked_primitives:
   - primitive.verification-refresh
@@ -33,5 +32,5 @@ touched_paths:
   - .agents/tasks/backlog.yaml
   - docs/execution-status-board.md
 notes:
-  - This task remains deferred until the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` closes.
+  - This task follows the split remote-foundation queue `task.t5-06a -> task.t5-06b -> task.t5-06c -> task.t5-07`.
   - The accepted console model is a server-side target-activation surface, not a parallel local-style tmux client running on top of remote PTYs.

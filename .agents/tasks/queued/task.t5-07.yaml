@@ -1,37 +1,78 @@
 id: task.t5-07
 kind: task
 version: 1
-title: implement remote target input and resize routing through the server control plane
-status: deferred
+title: implement remote target input routing and clean remote resize boundaries through the server control plane
+status: in_progress
 priority: medium
 target_task_reference: task.t5-07
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.event-r4.done
-  - task.t5-06.done
+  - task.t5-06c.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - remote input and resize routing flows through the server control plane to the PTY-owning node rather than by pretending the server owns a remote PTY locally
+  - remote input routing flows through the server control plane to the PTY-owning node rather than by pretending the server owns a remote PTY locally
+  - remote resize semantics are split explicitly: attachment viewport resize stays local to each console, while any PTY-resize routing to the PTY-owning node is a distinct control-plane path
   - remote target routing consumes the shared transport-agnostic target catalog introduced by `task.t5-06`
   - local fixed-chrome main-slot activation semantics remain the reference model for target selection, while remote targets bind through a transport runtime rather than through local tmux attach semantics
   - docs and task state record the accepted remote routing boundary explicitly
 verification:
   - cargo test
-  - targeted review of remote input, resize, and transport ownership boundaries
+  - targeted review of remote input, viewport-versus-PTY resize, and transport ownership boundaries
 touched_paths:
-  - src/server.rs
-  - src/transport.rs
-  - src/client.rs
+  - src/application
+  - src/domain
+  - src/runtime
+  - src/infra
+  - docs/protocol.md
   - .agents/tasks/queued/task.t5-07.yaml
   - .agents/tasks/backlog.yaml
   - docs/execution-status-board.md
 notes:
-  - This task remains deferred until the locked local batch `task.event-r2a -> task.event-r3 -> task.event-r4` closes.
+  - This task follows the split registry queue `task.t5-06a -> task.t5-06b -> task.t5-06c`.
   - Do not route remote interaction by creating a fake local PTY ownership layer on the server.
   - Do not bypass the shared target catalog with transport-specific side registries.
+  - The first acceptable transport slice is authority-routed open and input messaging plus a clean split between local attachment viewport changes and PTY-resize messaging built on top of the new target-registry boundary and accepted protocol contract.
+  - The next acceptable glue layer is a dedicated remote main-slot runtime that routes remote opens into control-plane messages and a transport sink without polluting the local tmux activation path.
+  - Transport-facing sinks should receive concrete per-node deliveries, not unresolved broadcast destinations such as `AllOpenedObservers`.
+  - The default runtime should now use a concrete connection-registry sink so the remaining gap is connection registration and remote output/render integration, not sink shape.
+  - The local workspace console should now register a loopback observer connection by default so remote open-target delivery can succeed on the observing node before authority-side networking lands.
+  - The remote main-slot runtime should now expose explicit open, input, and PTY-resize send paths so future UI or network work composes onto one control-plane boundary instead of re-routing around it.
+  - Remote output fanout should also flow through the same runtime boundary so authority-side output can be delivered to observer nodes before UI render integration lands.
+  - A dedicated remote observer runtime now consumes delivered loopback envelopes and rebuilds local terminal state from target_output bytes, so the next runtime gap is binding that observer state into main-slot presentation plus registering real live node connections.
+  - Remote targets can now respawn a dedicated main-slot pane command that opens the target inside the pane process and renders observer-side terminal state locally, so the remaining runtime gap narrows to real live transport registration plus authority-side delivery of input, PTY resize, and streamed output.
+  - A dedicated authority target-host runtime now exists on top of that local socket transport and control-plane codec, binding routed input and PTY resize to a real tmux target pane and feeding pane output back through the same control-plane path; the remaining runtime gap narrows further to wiring this hidden authority-host runtime into real node lifecycle and remote target publication rather than inventing more pane-side routing or render infrastructure.
+  - Remote targets may now carry an optional selector that resolves the concrete PTY host on the authority node, and the remote main-slot pane uses that selector only for loopback-compatible local authority-host auto-spawn; the remaining gap is publishing this metadata from real remote nodes and generalizing lifecycle ownership beyond pane-scoped loopback bridging.
+  - A published remote-target store now acts as a second shared-catalog producer beside local tmux, workspace-visible target projection includes remote peers alongside same-authority local target hosts, and the old one-shot hidden `upsert` or `exit` publication commands are retired in favor of a socket-backed publication listener plus long-lived publication transport.
+  - A socket-scoped remote-target publication agent now owns publication reconciliation for one tmux socket, keeps persistent per-authority publication transports alive across reconciles, and uses source-socket membership in the published-target store to remove stale entries without one process or lockfile per target.
+  - Remote publication metadata can now be bound onto a local target-host session through tmux session environment, workspace startup auto-discovers those bindings, ensures the socket-scoped publication server plus publication agent path only when the current socket actually needs publication recovery, and uses hook-driven socket reconciliation only to signal that agent; the remaining gap is replacing this still-local trigger path with actual node-owned publication lifecycle and richer live metadata pushes.
+  - Workspace startup publication recovery is now also socket-scoped: it reconciles only the current tmux socket, but still signals the publication agent when that socket has stale published-target records so cross-workspace startup no longer scans every waitagent socket or eagerly starts publication sidecars just to clear remote publication state.
+  - Publication listener writes are now change-sensitive: repeated reconcile publishes that do not actually change remote-target metadata no longer rewrite the published-target store or refresh all workspace chrome, which keeps the current hook-triggered publication path quieter while node-owned lifecycle work is still pending.
+  - Publication listener chrome refresh is now socket-scoped as well: when remote target metadata does change, only workspace chrome sessions on the same tmux socket are refreshed, so remote publication churn no longer fans out cross-socket UI refresh work.
+  - Remote publication control is now symmetric at the local socket boundary: a target-host session can explicitly unbind publication metadata while remaining alive, and the same socket-scoped publication agent reconcile path will emit `target_exited` for the withdrawn remote target instead of waiting for the tmux session itself to disappear.
+  - The published-target store now tracks source-socket membership per remote target instead of a single source socket, so the same remote target can be published into multiple local workspaces without one socket's unbind or exit incorrectly deleting the shared catalog record for the others.
+  - Socket-global lifecycle hook ownership is no longer anchored in the workspace layout runtime: publication runtime now registers and maintains the `session-created`, `session-closed`, `client-attached`, and `client-detached` hooks directly per tmux socket, and those hooks drive socket-scoped publication reconcile plus socket-scoped chrome refresh through dedicated hidden commands.
+  - Those socket-global lifecycle hooks now enter through one dedicated socket-lifecycle hidden command rather than a shell-composed pair of commands, and `CommandDispatcher` is the orchestration boundary that composes publication reconcile with socket-scoped chrome refresh instead of making publication runtime call back into layout runtime.
+  - Publication server no longer instantiates layout runtime directly when remote-target metadata changes: it now applies catalog mutations in-process and then triggers socket-scoped chrome refresh through the hidden command boundary, which keeps runtime composition aligned with `CommandDispatcher` instead of letting publication runtime reach into layout ownership internally.
+  - Publication agent now coalesces bursts of pending reconcile signals before scanning tmux state, so one socket-lifecycle event storm no longer forces one full reconcile pass per queued hook delivery.
+  - Explicit local publication lifecycle now bypasses steady-state socket scans: binding a published target resolves that concrete target-host session and pushes `target_published` immediately, while unbinding pushes `target_exited` immediately, so socket reconcile is narrowed further toward startup recovery and hook-driven metadata refresh instead of being the normal source of publication lifecycle truth.
+  - Socket-lifecycle publication updates are now hook-aware as well: the hidden lifecycle hook command carries tmux hook name plus hook session name, and publication runtime now prefers a direct republish of that one bound target-host session for `client-attached`, `client-detached`, and `session-created`, leaving full-socket reconcile primarily for `session-closed`, startup recovery, and the remaining stale-state cleanup path.
+  - Publication emission is now re-centered on the long-lived socket-scoped publication agent: bind, unbind, and hook-aware targeted publish paths no longer connect to the publication server directly, but instead enqueue explicit agent commands (`full_reconcile`, `publish_session`, `exit_target`) so one runtime owns the transport cache and concrete publish or exit delivery again.
+  - Published-target store membership is now source-binding scoped rather than only source-socket scoped: each published remote target tracks the concrete `(socket, target-session)` publishers that currently own it, which fixes same-socket multi-session correctness and gives `session-closed` enough identity to target just the exited publisher.
+  - `session-closed` hook handling is now narrowed from full-socket reconcile to targeted `exit_target` fanout when the store knows the closed source binding, with reconcile retained as the fallback only when no precise binding record exists yet.
+  - Explicit target-host close ownership now also emits publication exit before tmux session teardown: the main-slot runtime signals source-session closure on the publication runtime before `kill-session`, so locally-owned target shutdown no longer depends primarily on the later tmux hook to withdraw the published remote target.
+  - Explicit target-host detach now also emits a publication refresh after client detachment on the command path, so attached-client count changes for locally-owned published targets no longer rely only on the later `client-detached` hook to republish metadata.
+  - The current-client `waitagent detach` path inside tmux now opportunistically resolves the attached managed session before detaching and emits the same publication refresh when that session is a local target-host, so the common detach path no longer depends only on the later hook for attached-client metadata updates.
+  - Local target-host owner orchestration is now gathered behind `TargetHostRuntime`: main-slot close and workspace detach paths call that runtime instead of reaching into publication runtime directly for explicit local refresh or exit behavior.
+  - Bound local target-host sessions now also auto-spawn a dedicated publication owner runtime that watches the session's own metadata and triggers targeted republish on change, reducing steady-state dependence on tmux socket hooks for live publication updates.
+  - That publication owner runtime now emits steady-state `target_published` and `target_exited` envelopes directly over the publication transport instead of only signaling the socket-scoped agent, so unbind and session-disappearance exit are beginning to use a true owner-driven publication channel.
+  - Live binding bootstrap is now narrowing as well: bind and startup owner bring-up no longer trigger full-socket reconcile solely because healthy live bindings exist, pushing the socket-scoped publication agent further toward stale-record recovery and fallback cleanup rather than first-publish ownership.
+  - Targeted publish hooks and explicit local refresh now also prefer owner bring-up over agent publish: `client-attached`, `client-detached`, `session-created`, and detach-driven local refresh first ensure the bound publication owner is running, making hook-triggered publish increasingly a restart fallback instead of the steady-state sender.
+  - The publication owner socket now exposes a minimal control plane as well: explicit refresh and close paths can signal `refresh` or `stop` directly to the bound owner, and `session-closed` fallback exit stands down while that owner is still reachable, keeping more targeted publish/exit traffic on the owner-driven path before hook/agent fallback takes over.
+  - Explicit unbind now also uses that owner control plane first: it asks the bound publication owner to `stop` before withdrawing tmux metadata, and only falls back to legacy source-session exit signaling if no owner is reachable.
+  - The hidden authority target-host runtime now also participates in publication owner bring-up: when a loopback-resolved authority PTY host starts, it ensures the bound publication owner exists and immediately asks it to refresh, so owner lifecycle entry is no longer only coming from workspace startup or publication-side command paths.

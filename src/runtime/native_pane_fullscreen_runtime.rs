@@ -1,5 +1,7 @@
 use crate::application::layout_service::{FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE};
-use crate::application::session_service::SessionService;
+use crate::application::target_registry_service::{
+    DefaultTargetCatalogGateway, TargetRegistryService,
+};
 use crate::cli::ToggleFullscreenCommand;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -25,19 +27,19 @@ const TMUX_FULLSCREEN_STATUS_FORMAT: &str = "#{E:@waitagent_fullscreen_footer_li
 
 pub struct NativePaneFullscreenRuntime {
     backend: EmbeddedTmuxBackend,
-    session_service: SessionService<EmbeddedTmuxBackend>,
+    target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     layout_runtime: WorkspaceLayoutRuntime,
 }
 
 impl NativePaneFullscreenRuntime {
     pub fn new(
         backend: EmbeddedTmuxBackend,
-        session_service: SessionService<EmbeddedTmuxBackend>,
+        target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         layout_runtime: WorkspaceLayoutRuntime,
     ) -> Self {
         Self {
             backend,
-            session_service,
+            target_registry,
             layout_runtime,
         }
     }
@@ -305,11 +307,9 @@ impl NativePaneFullscreenRuntime {
         socket_name: &str,
         session_name: &str,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
-        self.session_service
-            .list_sessions_on_socket(&TmuxSocketName::new(socket_name))
+        self.target_registry
+            .resolve_target_on_authority_session(socket_name, session_name)
             .map_err(fullscreen_error)?
-            .into_iter()
-            .find(|session| session.address.session_id() == session_name)
             .ok_or_else(|| {
                 LifecycleError::Protocol(format!(
                     "tmux session `{socket_name}:{session_name}` could not be resolved"
