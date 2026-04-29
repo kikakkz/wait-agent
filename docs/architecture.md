@@ -11,6 +11,7 @@ Current note:
 - the accepted replacement for the old custom local fullscreen and live-surface path is documented in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
 - the accepted code-level runtime reorganization for that migration is documented in [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
 - the accepted resumed remote-session baseline is documented in [remote-session-foundation.md](remote-session-foundation.md)
+- the accepted active server-console scheduling design for `task.t6-01` is documented in [server-console-scheduling-design.md](server-console-scheduling-design.md)
 - until this architecture document is fully revised, treat the tmux-first plan as the authoritative local workspace display direction
 
 This document translates the product requirements in [wait-agent-prd.md](wait-agent-prd.md) into a build-oriented system architecture.

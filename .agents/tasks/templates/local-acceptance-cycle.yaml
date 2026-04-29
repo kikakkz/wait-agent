@@ -9,6 +9,7 @@ scaffold:
   status: ready
   priority: high
   required_fields:
+    - design_ref
     - scenario
     - observed_behavior
     - expected_behavior

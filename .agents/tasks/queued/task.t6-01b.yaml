@@ -9,9 +9,10 @@ design_ref:
   why:
     - section 5.5 requires real submit-driven scheduling opportunity arming
     - section 6.3 requires normalized console events rather than snapshot-only inference
+target_task_reference: task.t6-01
 source_of_truth:
-  file: .agents/tasks/queued/task.t6-01b.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t6-01a.done
 linked_primitives:
@@ -29,8 +30,8 @@ verification:
 touched_paths:
   - src/runtime
   - src/application
-  - .agents/tasks/current.yaml
   - .agents/tasks/queued/task.t6-01b.yaml
+  - .agents/tasks/backlog.yaml
   - docs/server-console-scheduling-design.md
   - docs/execution-status-board.md
 notes:

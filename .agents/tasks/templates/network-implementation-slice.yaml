@@ -9,6 +9,7 @@ scaffold:
   status: ready
   priority: medium
   required_fields:
+    - design_ref
     - target_task_reference
     - touched_paths
     - verification

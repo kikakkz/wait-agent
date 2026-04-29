@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.22`  
+Version: `v1.23`  
 Status: `Active`  
-Date: `2026-04-28`
+Date: `2026-04-29`
 
 ## 1. Purpose
 
@@ -35,14 +35,15 @@ Current phase:
 
 Current gate:
 
-- `task.t5-07` remote control-plane routing and publication ownership on the shared target catalog
+- `task.t6-01b` real submit and manual-switch signals through the unified server-console interaction seam
 
 Why this is the current gate:
 
-- the shared transport-agnostic target registry is already in place and is now the fixed boundary for remote work
-- remote open, input, output fanout, and viewport-versus-PTY resize semantics are already routed through that control-plane boundary
-- remote publication now reaches the shared catalog through a socket-scoped publication server plus long-lived publication agent rather than per-target helper mutations
-- the next blocking gap before server-console work is replacing the still-local hook-triggered publication lifecycle with actual node-owned publication ownership and richer live metadata pushes
+- the shared transport-agnostic target registry is already in place and remains the fixed target boundary for server-console work
+- remote open, input, output fanout, viewport-versus-PTY resize, publication ownership, and shared node-session framing are already routed through the accepted control-plane boundary
+- the first server-console slice already reuses that remote interact path instead of inventing a second remote interaction stack
+- the remaining server-console scheduling work now has an explicit top-down design source in `docs/server-console-scheduling-design.md`
+- the unified interaction seam is now landed, so the next blocking gap is capturing real submit and manual-switch signals before queue-order or auto-switch behavior lands
 
 ## 3. Current Snapshot
 
@@ -62,8 +63,11 @@ Project status at a glance:
 - `task.t5-06a` is now closed in substance: the remote foundation doc and bounded task split are landed
 - `task.t5-06b` is now closed in substance: the transport-agnostic target model and protocol identity contract are explicit in code and docs
 - `task.t5-06c` is now closed in substance: local tmux now sits behind an explicit target-registry boundary and current consumers read unified target records through it
-- `task.t5-07` is now the active gate: route remote target open and input through the server control plane, and refine remote resize semantics so attachment viewport changes stay local while PTY resize remains a distinct control-plane path
-- the first `task.t5-07` slice is now refined in code: protocol envelope types exist, remote opens create attachments plus PTY-resize authority state, multi-console input is serialized by the server control plane, and opening or fullscreen viewport changes no longer auto-propagate fake PTY resize traffic before deeper runtime integration
+- `task.t5-07` is now closed in substance: remote target open, input, output fanout, viewport-versus-PTY resize, publication ownership, shared node-session framing, and authority-host ownership convergence are all in code and validated
+- `task.t6-01` remains the umbrella gate for server-console activation on the shared catalog and accepted routing boundary
+- that umbrella is now execution-split as `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d` so the remaining work lands as bounded design-backed slices
+- `task.t6-01a` is now closed in substance: local attach and remote interact both report through one explicit server-console interaction seam plus shared trace model instead of forcing later runtime work to branch directly on transport
+- the public `waitagent server` runtime now also carries explicit server-console state: focused target, selected target, and a real waiting queue derived from shared-catalog `INPUT` or `CONFIRM` task signals, with that scheduling snapshot rendered directly in the picker instead of being implicit
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
 - the default workspace runtime now uses a concrete connection-registry sink for remote activation, so the remaining transport gap is registering live node connections and forwarding remote output rather than defining yet another sink abstraction
@@ -104,8 +108,29 @@ Project status at a glance:
 - targeted publish hooks and explicit local refresh now also prefer owner bring-up over agent publish: `client-attached`, `client-detached`, `session-created`, and local detach-driven refreshes first ensure the bound publication owner is running, making hook-triggered publish increasingly a restart fallback rather than the steady-state sender
 - the owner socket now exposes a minimal control plane too: explicit refresh and close paths can ask the bound publication owner to `refresh` or `stop`, and `session-closed` fallback exit now stands down when that owner is still reachable, so even more targeted publish or exit traffic stays on the owner-driven path before hook or agent fallback engages
 - explicit unbind now uses that owner control plane too: it first asks the bound publication owner to `stop` and only falls back to legacy source-session exit signaling when no owner is reachable, so withdraw is no longer mainly waiting on owner polling or hook cleanup
-- the hidden authority target-host runtime now also participates in publication owner bring-up: when a loopback-resolved authority PTY host starts, it ensures the bound publication owner exists and immediately asks it to refresh, so owner lifecycle entry is no longer only coming from workspace startup or publication-side command paths
-- the remaining gap is no longer “how does the pane find a PTY host?” or “can the UI see a remote target at all?” but “how do real remote nodes replace this still-local hook-triggered publication path with an actual node-owned publication lifecycle and richer live metadata pushes?”
+- the hidden authority target-host runtime now resolves its own bound publication mapping, opens a persistent publication transport for the lifetime of the hosted PTY, and emits `target_published` on startup plus `target_exited` on shutdown, so authority-side PTY hosting is now participating as a real publication owner rather than only waking a separate helper
+- authority-host publication fallback is narrower too: if no publication binding exists it does nothing, and if direct publication-session startup fails it only falls back to owner bring-up plus `refresh`, which keeps the old helper path as recovery rather than mixing it back into the normal steady-state sender
+- the remote main-slot pane now models authority transport state explicitly as waiting for remote authority, waiting for a local bridge, connected, or failed, and authority registration mismatches surface as visible transport failures instead of silent background no-ops
+- authority transport registration now also has its own runtime boundary: a dedicated authority-connection runtime owns the current local socket listener, registration validation, registry wiring, and disconnect or failure events, so future real remote connection sources can plug in without rewriting pane event flow again
+- that authority-connection runtime now also accepts an explicit connection-source boundary rather than hardwiring the local socket listener as its only construction path, and the remote pane consumes it through that abstraction, so the next cross-node step can inject a real remote authority source without another pane-runtime structure change
+- that connection-source boundary now has a second concrete implementation too: besides the local Unix-socket listener, authority-connection runtime can also consume externally injected authority streams through a queued source, which means a future real remote registration path can hand off accepted streams into the same runtime without masquerading as a pane-local listener
+- the default pane-side authority path now actually uses that bridge shape too: a dedicated local-socket bridge starter accepts authority streams and feeds them into the queued source before authority registration continues, so the production path is already aligned with the external-producer contract rather than leaving it only in test scaffolding
+- external producer wiring now also has a first-class starter API: `QueuedAuthorityStreamStarter::channel()` exposes a ready-to-inject authority starter plus stream sink pair, so the next real remote node registration slice has a concrete construction boundary instead of needing to assemble internal runtime pieces by hand
+- external authority-stream ownership is now explicit at real lifecycle boundaries: `RemoteMainSlotPaneRuntime` keeps the queued authority sink under its own ownership, and `CommandDispatcher` exposes a top-level `submit_external_authority_stream` path instead of leaking the sink as constructor output
+- the remote main-slot process now owns a real authority-ingress boundary too: `RemoteMainSlotIngressRuntime` binds the scoped authority transport socket at the process edge and hands each accepted stream into the in-process pane runtime through that top-level submit path, so authority registration is no longer only a constructor capability or a pane-internal listener shape
+- that public authority transport is now also explicit as a node-facing bridge boundary instead of only a raw registration socket: `RemoteAuthorityTransportRuntime` performs a minimal `client_hello` / `server_hello` handshake on the pane-scoped transport socket, and ingress bridges that outer transport stream into the existing pane authority-connection runtime by creating an internal registered stream pair
+- publication transport now uses the same outer node-facing handshake boundary too: a shared remote node-transport helper owns `client_hello` / `server_hello`, authority transport and publication transport both use it, and the publication server no longer begins on a raw registration frame before consuming `target_published` or `target_exited`
+- live remote attach now also has one real shared outer node-session boundary: the authority target-host runtime performs one hello-authenticated connect and multiplexes authority input or resize, PTY output, and live `target_published` or `target_exited` metadata over that single stream instead of opening a second publication transport beside the authority transport
+- remote main-slot ingress now demultiplexes that shared outer node session explicitly too: authority traffic still bridges into the existing authority-connection runtime, while live publication frames apply directly to the shared published-target store and trigger same-socket chrome refresh without routing through the separate publication server path
+- the fallback publication path now uses that same node-session protocol boundary too: socket-scoped publication owner or agent processes send `publication` channel envelopes through `RemoteNodeSessionRuntime`, and the publication server consumes them on a hello-authenticated node session instead of a separate publication-only wire shape
+- fallback publication transport ownership is now centralized as well: one socket-scoped publication sender runtime owns the cached outbound publication sessions, while publication owner and publication agent sidecars only submit local publish or exit commands into that sender instead of each keeping their own remote transport cache
+- live authority-host attach now also exposes a local publication relay boundary and becomes the preferred publication owner while it is alive: publication owner or agent refresh and withdraw for that target first reuse the already-open live authority-host node session, and only fall back to the socket-scoped sender when no live relay is reachable
+- that sender-side fallback owner is now explicit at the runtime boundary too: a dedicated `RemoteNodeSessionOwnerRuntime` owns the publication-sender listener and its outbound node-session cache, instead of leaving that cache nested inside publication runtime implementation details
+- publication owner routing policy now lives with that owner runtime boundary too: publish and exit dispatch now flows through `remote_node_session_owner_runtime`, which owns the decision `live authority-host relay first, dedicated node-session owner second`, leaving publication runtime focused on tmux-bound publication semantics and shared-catalog updates
+- authority-host publication orchestration is now explicit as well: the authority-host runtime no longer owns steady-state publication bootstrap or fallback logic directly, but instead consumes an injected publication gateway while the dedicated publication runtime remains the production implementation of that boundary
+- the first `task.t6-01` slice now exists too: a hidden `remote_server_console_runtime` reuses the same remote observer, authority-ingress, and live publication path as the local remote main-slot instead of inventing a second server-console remote stack
+- the current `task.t6-01` slice now exists as well: `waitagent server --socket-name <socket>` is now a public entrypoint for a long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker
+- the remaining `task.t6-01` gap is now narrower again: target discovery, activation routing, explicit focus, and a real waiting queue are already in code, so the next honest slice is live scheduling-opportunity and switch-lock transitions from real interaction signals
 
 ## 4. Milestone Summary
 
@@ -126,14 +151,14 @@ Execution tracks at human-summary level:
 - `T3` Terminal UI and rendering: the old custom fullscreen and shared-surface path remains retired
 - `T4` Local workspace UX and validation: complete enough for the current local scope
 - `T5` Network transport and registration: active again, with the remote foundation now split into documentation, model, registry-boundary, and later routing slices
-- `T6` Mirrored multi-console interaction: not started
+- `T6` Mirrored multi-console interaction: active, with the first server-console activation and scheduling-state slices now landed
 - `T7` Reliability, security, and diagnostics: not started
 
 ## 6. Current Focus And Next Queue
 
 Current focus:
 
-- execute `task.t5-07` now so resumed remote work gains real server-controlled open and input routing, plus a clean split between local attachment viewport changes and PTY-resize control, before server-console work begins
+- implement `task.t6-01b` under the accepted top-down design in `docs/server-console-scheduling-design.md`: capture real submit and manual-switch signals through the unified server-console interaction seam before queue-order or auto-switch behavior
 
 Accepted local architecture direction:
 
@@ -159,9 +184,11 @@ Priority rule:
 
 Refined remote queue after the current documentation slice:
 
-1. `T5-07` Implement remote target input routing and clean remote resize boundaries through the server control plane
-2. `T6-01` Implement the server-side workspace console as a target-activation surface
-3. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
+1. `task.t6-01a` Extract a unified server-console interaction seam for local and remote targets
+2. `task.t6-01b` Capture real submit and manual-switch signals through that seam
+3. `task.t6-01c` Replace catalog-order waiting snapshots with transition-driven FIFO waiting queue state
+4. `task.t6-01d` Add interaction-round stabilization, scheduling opportunity, switch lock, and server-side auto-switch
+5. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

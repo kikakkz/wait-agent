@@ -1,0 +1,38 @@
+id: task.t6-01c
+kind: task
+version: 1
+title: track waiting transitions and build an honest server-console FIFO waiting queue
+status: ready
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - section 5.4 distinguishes waiting-set membership from queue ordering
+    - section 7 forbids using catalog enumeration order as FIFO waiting order
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t6-01b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - waiting membership and waiting-queue order are tracked as separate runtime state
+  - queue insertion and removal follow observed waiting transitions rather than catalog order
+  - picker and server-console state can render waiting membership and FIFO-next state honestly without yet auto-switching
+verification:
+  - cargo test
+  - targeted review of waiting-transition state, queue ordering, and snapshot presentation boundaries
+touched_paths:
+  - src/runtime
+  - src/domain
+  - .agents/tasks/queued/task.t6-01c.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - This slice may refine the existing manual-only queue snapshot, but it must replace catalog-order behavior with transition-order behavior.

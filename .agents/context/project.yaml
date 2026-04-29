@@ -12,15 +12,15 @@ summary:
 current_phase:
   phase_id: phase-2
   phase_title: network aggregation MVP
-  stage_id: network-registry-reset
-  stage_title: resume remote design from the accepted tmux-first local baseline
+  stage_id: server-console-activation
+  stage_title: build the server-side console on top of the accepted shared catalog and routing boundary
 current_focus:
-  default_task_id: task.t5-07
-  focus_statement: implement remote target input and resize routing through the server control plane on top of the accepted shared target catalog and registry boundary
+  default_task_id: task.t6-01b
+  focus_statement: capture real submit and manual-switch signals through the unified server-console interaction seam before queue-order or auto-switch work
 upcoming_focus:
-  - implement the server-side workspace console as another target-opening surface after registry ownership and routing exist
-  - revisit remote target status projection after routing ownership and console attachments are real runtime state
-  - refine recovery, liveness, and remote authority handoff behavior after the first transport slice is real code
+  - replace catalog-order waiting snapshots with transition-driven FIFO waiting queue state
+  - add interaction-round stabilization, scheduling opportunity, and switch lock after the event seam is real
+  - enable server-side auto-switch only after submit, queue, and stabilization signals are explicit runtime state
 source_of_truth:
   - docs/execution-status-board.md
   - docs/local-acceptance-checklist.md

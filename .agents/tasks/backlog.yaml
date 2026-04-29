@@ -133,10 +133,22 @@ next:
     status: superseded
   - id: task.t5-07
     title: implement remote target input routing and clean remote resize boundaries through the server control plane
-    status: in_progress
+    status: done
   - id: task.t6-01
     title: implement the server-side workspace console as a target-activation surface
-    status: deferred
+    status: superseded
+  - id: task.t6-01a
+    title: extract a unified server-console interaction seam for local and remote targets
+    status: done
+  - id: task.t6-01b
+    title: capture real submit and manual-switch signals through the unified server-console interaction seam
+    status: in_progress
+  - id: task.t6-01c
+    title: track waiting transitions and build an honest server-console FIFO waiting queue
+    status: ready
+  - id: task.t6-01d
+    title: implement interaction-round stabilization plus scheduling opportunity and switch lock for server-side auto-switch
+    status: ready
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred
@@ -161,6 +173,8 @@ source_of_truth:
   file: .agents/tasks/backlog.yaml
 notes:
   - `.agents/tasks/*` is the unified task source; task status changes must update backlog, the current task pointer, queued task files, and task/state mirrors in the same change.
+  - Active implementation work must have an explicit top-down design source. Do not land patch-style behavior changes that only exist in chat or status notes without a governing design document.
+  - Every new in-progress or queued implementation task must declare a `design_ref` field that points to the governing top-down design document and explains why that document authorizes the slice. Tasks without `design_ref` are not ready for execution.
   - Replacement work must clean up superseded code paths as it lands; old custom fullscreen and live-surface logic should not be left in place behind the tmux-first architecture unless a named compatibility reason is documented in the active task.
   - T3-07 remains optional for the local MVP unless acceptance evidence proves it is blocking.
   - The lifecycle queue is complete enough to support the tmux-first migration; resumed network expansion is deferred until the local display baseline is rebuilt on tmux-native ownership boundaries.
@@ -176,6 +190,7 @@ notes:
   - 2026-04-27 update: `task.t5-06a` is complete enough to close; active work now moves to `task.t5-06b`, which generalizes target identity and catalog records without starting transport routing.
   - 2026-04-27 update: `task.t5-06b` is complete enough to close after the shared target model, protocol identity contract, and compatibility accessors landed; active work now moves to `task.t5-06c`, where local tmux becomes the first producer behind an explicit target-registry boundary.
   - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
+  - 2026-04-29 refinement: the original `task.t6-01` umbrella is now split into `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d` so the remaining server-console work lands as bounded design-backed slices rather than patch-style continuation.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

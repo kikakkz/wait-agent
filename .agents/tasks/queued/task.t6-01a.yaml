@@ -1,0 +1,43 @@
+id: task.t6-01a
+kind: task
+version: 1
+title: extract a unified server-console interaction seam for local and remote targets
+status: done
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - section 6 requires one server-console runtime ownership boundary
+    - section 6.3 requires a unified `ServerConsoleInteractionSurface` before more scheduling logic lands
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-07.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the server console owns one explicit interaction seam that normalizes local and remote target interaction into one event model
+  - transport-specific local attach and remote interact adapters no longer force later scheduling logic to branch directly on transport in the server-console runtime
+  - current server-console behavior remains manual-only and does not yet claim real auto-switch semantics
+  - docs and task state record this slice as the first post-design implementation step under `task.t6-01`
+verification:
+  - cargo test
+  - targeted review of server-console runtime ownership and transport-normalized interaction boundaries
+touched_paths:
+  - src/runtime
+  - src/application
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t6-01a.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - This slice is structure-first. It should not implement auto-switch policy yet.
+  - The goal is to prevent further patch-style scheduling changes from branching separately across local attach and remote interact paths.
+  - Accepted output is one server-console-owned event seam that later slices can consume for submit, output, stabilization, and manual-switch signals.
+  - 2026-04-29 close: the server console now routes local attach and remote interact through one explicit interaction seam plus shared trace model, so follow-on work can capture real submit and manual-switch signals without branching directly on transport again.

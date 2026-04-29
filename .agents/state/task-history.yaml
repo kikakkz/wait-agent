@@ -1,6 +1,42 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t6-01b
+    status: in_progress
+    summary: with the unified interaction seam now landed, active work moves to capturing real submit and manual-switch signals through that seam so later scheduling state no longer depends on passive snapshot inference
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01a
+    status: done
+    summary: local attach and remote interact now route through one explicit server-console interaction seam plus shared trace model, so follow-on scheduling slices no longer need to branch directly on transport at the runtime boundary
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01a.yaml
+      reference: status
+  - task_id: task.t6-01a
+    status: in_progress
+    summary: the original server-console umbrella is now split into `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d`, and active work moves first to extracting a unified local-plus-remote interaction seam so later scheduling slices land on one console-owned event model
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01
+    status: superseded
+    summary: the original server-console activation umbrella is now superseded by four bounded design-backed slices because the remaining work must no longer continue as patch-style scheduling additions inside one large task
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01.yaml
+      reference: status
+  - task_id: task.t6-01
+    status: in_progress
+    summary: `waitagent server --socket-name <socket>` now exposes a public long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker, so the remaining gap is explicit server-console focus and scheduling state rather than more target-opening or transport glue
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: done
+    summary: the remote routing and ownership batch is now closed: open, input, output fanout, viewport-versus-PTY resize, publication ownership, shared node-session framing, and authority-host ownership convergence are all in code and validated, so active work has moved to the server-console activation surface
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-07.yaml
+      reference: status
   - task_id: task.t5-07
     status: in_progress
     summary: remote publication is now session-metadata driven rather than purely manual because a hidden bind command stores publication descriptors on local target-host tmux sessions, workspace startup re-discovers those bindings, and a lock-backed ensure path keeps one publish bridge per configured target host

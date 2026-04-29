@@ -1,0 +1,40 @@
+id: task.t6-01d
+kind: task
+version: 1
+title: implement interaction-round stabilization plus scheduling opportunity and switch lock for server-side auto-switch
+status: ready
+priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - sections 5.5 through 5.7 define the required scheduling state machine
+    - section 8 defines the accepted auto-switch decision algorithm
+target_task_reference: task.t6-01
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t6-01c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the server-console runtime arms one scheduling opportunity per real submit
+  - current-session continuation is protected by an explicit interaction-round stabilization rule
+  - automatic switching is limited by an explicit per-console switch lock
+  - server-side auto-switch behavior matches the accepted decision order without affecting local client focus
+verification:
+  - cargo test
+  - targeted review of scheduling opportunity, interaction-round stabilization, and switch-lock semantics
+touched_paths:
+  - src/runtime
+  - src/application
+  - .agents/tasks/queued/task.t6-01d.yaml
+  - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
+  - docs/execution-status-board.md
+notes:
+  - This slice is the first one allowed to introduce real server-side auto-switch behavior.
+  - It must not land until `task.t6-01a -> task.t6-01b -> task.t6-01c` are all closed.

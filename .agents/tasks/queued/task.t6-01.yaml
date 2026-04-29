@@ -2,8 +2,13 @@ id: task.t6-01
 kind: task
 version: 1
 title: implement the server-side workspace console as a target-activation surface
-status: deferred
+status: superseded
 priority: medium
+design_ref:
+  doc: docs/server-console-scheduling-design.md
+  why:
+    - defines the active top-down product and runtime model for `task.t6-01`
+    - defines the required domain state and implementation order for remaining slices
 target_task_reference: task.t6-01
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -25,12 +30,20 @@ verification:
   - cargo test
   - targeted review of server-console ownership, target activation, and transport boundaries
 touched_paths:
-  - src/server.rs
+  - src/cli.rs
   - src/runtime
   - src/application
   - .agents/tasks/queued/task.t6-01.yaml
   - .agents/tasks/backlog.yaml
+  - docs/server-console-scheduling-design.md
   - docs/execution-status-board.md
 notes:
   - This task follows the split remote-foundation queue `task.t5-06a -> task.t5-06b -> task.t5-06c -> task.t5-07`.
+  - 2026-04-29 refinement: this umbrella is now split into `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d` so the remaining server-console scheduling work lands as bounded design-backed slices rather than patch-style continuation inside one large task.
   - The accepted console model is a server-side target-activation surface, not a parallel local-style tmux client running on top of remote PTYs.
+  - The authoritative top-down design for the remaining `task.t6-01` work now lives in `docs/server-console-scheduling-design.md`; if that document and older remote-deferred wording disagree, follow the active design doc for this task.
+  - The first `task.t6-01` slice is already in code: the server console has a hidden remote-interact runtime that reuses the same observer, authority-ingress, and publication path as the local remote main-slot rather than inventing a second remote interaction stack.
+  - The current `task.t6-01` slice is now in code as well: `waitagent server --socket-name <socket>` is now a public entrypoint for a long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker.
+  - The server console now also keeps explicit runtime-local focus and scheduling state: picker state tracks focused versus selected target separately, scheduling state exposes a real waiting queue derived from shared-catalog `INPUT` or `CONFIRM` task signals, and the picker renders that queue without inventing a second scheduler stack.
+  - The remaining gap is no longer “make scheduling state explicit”, but “implement the designed event seam, waiting-transition ordering, scheduling opportunity, and switch lock from real interaction signals” so future server-side auto-scheduling can sit on top of the current public runtime honestly.
+  - No further `task.t6-01` behavior change should land as a patch-style local fix. Each remaining slice must map back to the accepted design sections for runtime ownership, domain state, and implementation order.

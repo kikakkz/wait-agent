@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.t5-07
+  default_task: task.t6-01b
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -44,8 +44,8 @@ directories:
   generated: .agents/generated
 active_context:
   project_phase: phase-2
-  current_stage: network-registry-reset
-  current_focus: continue resumed remote work with task.t5-07 so remote target open, input, and resize flow through the server control plane on top of the accepted shared target catalog and registry boundary
+  current_stage: server-console-activation
+  current_focus: continue resumed remote work with task.t6-01b so the server-side console starts observing real submit and manual-switch signals through the new unified interaction seam
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh
