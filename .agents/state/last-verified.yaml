@@ -1,7 +1,40 @@
 kind: state
 version: 1
-last_updated_from: task.t5-07 metadata-driven publish bridge recovery validated on 2026-04-28
+last_updated_from: task.t6-01 public server-console entrypoint validated on 2026-04-29
 checks:
+  - id: t6-01-cargo-test-serial-public-server-console-entrypoint
+    command: cargo test -- --test-threads=1 after exposing `waitagent server --socket-name <socket>` as the public entrypoint for the long-lived server-console lifecycle on top of the existing shared-catalog activation and remote-interact boundary
+    status: pass
+  - id: t6-01-server-cli-parse-tests
+    command: cargo test parses_server_command_with_default_console_name -- --nocapture and cargo test parses_server_command_with_explicit_console_name_and_target -- --nocapture after adding the public `server` subcommand and default console-name behavior
+    status: pass
+  - id: t6-01-cargo-test-serial-hidden-server-console-lifecycle-loop
+    command: cargo test -- --test-threads=1 after turning the hidden server console into a long-lived `picker -> target -> picker` lifecycle and making the shared remote interact surface return to the picker on `Ctrl-]` for server-console attachments
+    status: pass
+  - id: t6-01-remote-surface-server-console-local-exit-test
+    command: cargo test only_server_console_surface_exits_on_ctrl_right_bracket -- --nocapture after adding server-console-only local surface exit handling for `Ctrl-]`
+    status: pass
+  - id: t6-01-cargo-test-serial-server-console-activation-surface
+    command: cargo test -- --test-threads=1 after making the hidden server console resolve activation targets from the shared catalog, pick a target when `--target` is omitted, and route local versus remote targets through the existing attach and remote-interact boundaries
+    status: pass
+  - id: t6-01-server-console-runtime-targeted-tests
+    command: cargo test parses_hidden_remote_server_console_command -- --nocapture and cargo test server_console_surface_spec_marks_server_console_location -- --nocapture and cargo test picker_actions_support_arrows_vim_keys_and_cancel -- --nocapture after adding the hidden activation picker and transport-aware server-console dispatch
+    status: pass
+  - id: t6-01-target-registry-activation-catalog-tests
+    command: cargo test registry_lists_only_activation_targets -- --nocapture after adding explicit shared-catalog activation-target projection for server-console use
+    status: pass
+  - id: t6-01-cargo-fmt-server-console-activation-surface
+    command: cargo fmt after adding shared activation-target catalog helpers and the hidden server-console activation picker
+    status: pass
+  - id: t5-07-cargo-test-serial-authority-host-publication-gateway-boundary
+    command: cargo test -- --test-threads=1 after moving authority-host publication orchestration behind an explicit injected publication gateway and making the authority-host node-session test robust against asynchronous publication or output ordering
+    status: pass
+  - id: t5-07-authority-host-runtime-targeted-test-publication-gateway-boundary
+    command: cargo test authority_host_runtime_routes_transport_commands_into_gateway_and_output_back_to_transport -- --nocapture after splitting authority-host publication ownership behind the new publication gateway boundary
+    status: pass
+  - id: t5-07-cargo-fmt-authority-host-publication-gateway-boundary
+    command: cargo fmt after introducing the authority-host publication gateway boundary and hardening the authority-host runtime test against asynchronous message ordering
+    status: pass
   - id: t5-07-cargo-test-quiet-publication-metadata-recovery
     command: cargo test --quiet after binding remote publication metadata onto local target-host tmux sessions, auto-discovering those bindings on workspace startup, and ensuring one deduplicated publish bridge per configured target host through a lock-backed recovery path
     status: pass

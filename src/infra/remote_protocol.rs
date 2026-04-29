@@ -3,6 +3,27 @@ use crate::domain::session_catalog::ConsoleLocation;
 pub const REMOTE_PROTOCOL_VERSION: &str = "1.1";
 pub const SERVER_SENDER_ID: &str = "server";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeSessionChannel {
+    Authority,
+    Publication,
+}
+
+impl NodeSessionChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Authority => "authority",
+            Self::Publication => "publication",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeSessionEnvelope {
+    pub channel: NodeSessionChannel,
+    pub envelope: ProtocolEnvelope<ControlPlanePayload>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolEnvelope<P> {
     pub protocol_version: String,
@@ -19,6 +40,8 @@ pub struct ProtocolEnvelope<P> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPlanePayload {
+    ClientHello(ClientHelloPayload),
+    ServerHello(ServerHelloPayload),
     OpenTargetOk(OpenTargetOkPayload),
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
@@ -33,6 +56,8 @@ pub enum ControlPlanePayload {
 impl ControlPlanePayload {
     pub fn message_type(&self) -> &'static str {
         match self {
+            Self::ClientHello(_) => "client_hello",
+            Self::ServerHello(_) => "server_hello",
             Self::OpenTargetOk(_) => "open_target_ok",
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
@@ -44,6 +69,21 @@ impl ControlPlanePayload {
             Self::Error(_) => "error",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientHelloPayload {
+    pub node_id: String,
+    pub client_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerHelloPayload {
+    pub server_id: String,
+    pub server_version: String,
+    pub accepted_protocol_version: String,
+    pub heartbeat_interval_ms: u64,
+    pub session_recovery_policy: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

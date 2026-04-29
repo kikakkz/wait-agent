@@ -7,31 +7,26 @@ use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RemoteConsoleDescriptor,
 };
-use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, read_registration_frame, write_control_plane_envelope,
-    RemoteTransportCodecError,
-};
+use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_authority_connection_runtime::{
+    AuthorityConnectionRequest, AuthorityConnectionStarter, AuthorityTransportEvent,
+    QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
+};
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
-use crate::runtime::remote_main_slot_runtime::{
-    RemoteAttachmentBinding, RemoteControlPlaneTransportError, RemoteMainSlotRuntime,
-};
+use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::{RemoteObserverRuntime, RemoteObserverSnapshot};
-use crate::runtime::remote_transport_runtime::{
-    LocalNodeMailbox, RemoteConnectionRegistry, RemoteControlPlaneConnection,
-};
+use crate::runtime::remote_transport_runtime::{LocalNodeMailbox, RemoteConnectionRegistry};
 use crate::terminal::{TerminalRuntime, TerminalSize};
 use std::fmt;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 const SIGWINCH: c_int = 28;
@@ -47,38 +42,132 @@ extern "C" {
 
 pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+    authority_connections: Box<dyn AuthorityConnectionStarter>,
+    external_authority_streams: Option<QueuedAuthorityStreamSink>,
     current_executable: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteInteractSurfaceSpec {
+    pub socket_name: String,
+    pub surface_scope: String,
+    pub target: String,
+    pub console_id: String,
+    pub console_host_id: String,
+    pub console_location: ConsoleLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthorityTransportStatus {
+    WaitingForRemoteAuthority,
+    WaitingForLocalBridge,
+    Connected,
+    Failed(String),
+}
+
 impl RemoteMainSlotPaneRuntime {
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
+    pub fn from_build_env_with_external_authority_streams() -> Result<Self, LifecycleError> {
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
                 "failed to locate current waitagent executable".to_string(),
                 error,
             )
         })?;
-        Ok(Self {
-            target_registry: TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
-            ),
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
+        );
+        Ok(Self::new_with_external_authority_streams(
+            target_registry,
             current_executable,
+        ))
+    }
+
+    pub fn new(
+        target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        authority_connections: Box<dyn AuthorityConnectionStarter>,
+        current_executable: PathBuf,
+    ) -> Self {
+        Self::new_with_optional_external_authority_streams(
+            target_registry,
+            authority_connections,
+            None,
+            current_executable,
+        )
+    }
+
+    fn new_with_optional_external_authority_streams(
+        target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        authority_connections: Box<dyn AuthorityConnectionStarter>,
+        external_authority_streams: Option<QueuedAuthorityStreamSink>,
+        current_executable: PathBuf,
+    ) -> Self {
+        Self {
+            target_registry,
+            authority_connections,
+            external_authority_streams,
+            current_executable,
+        }
+    }
+
+    pub fn new_with_external_authority_streams(
+        target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        current_executable: PathBuf,
+    ) -> Self {
+        let (starter, sink) = QueuedAuthorityStreamStarter::channel();
+        Self::new_with_optional_external_authority_streams(
+            target_registry,
+            Box::new(starter),
+            Some(sink),
+            current_executable,
+        )
+    }
+
+    pub fn submit_external_authority_stream(
+        &self,
+        stream: UnixStream,
+    ) -> Result<(), LifecycleError> {
+        let sink = self.external_authority_stream_submitter()?;
+        sink.submit(stream).map_err(|_| {
+            LifecycleError::Protocol(
+                "remote main-slot external authority stream consumer is unavailable".to_string(),
+            )
         })
     }
 
+    pub(crate) fn external_authority_stream_submitter(
+        &self,
+    ) -> Result<QueuedAuthorityStreamSink, LifecycleError> {
+        self.external_authority_streams
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                LifecycleError::Protocol(
+                "remote main-slot pane runtime is not configured for external authority streams"
+                    .to_string(),
+            )
+            })
+    }
+
     pub fn run(&self, command: RemoteMainSlotCommand) -> Result<(), LifecycleError> {
-        let target = self.resolve_remote_target(&command)?;
+        self.run_surface(main_slot_surface_spec(&command))
+    }
+
+    pub(crate) fn run_surface(
+        &self,
+        spec: RemoteInteractSurfaceSpec,
+    ) -> Result<(), LifecycleError> {
+        let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let terminal = TerminalRuntime::stdio();
         let initial_size = terminal.current_size_or_default();
         let _raw_mode = terminal.enter_raw_mode()?;
         let _cursor_guard = RemotePaneCursorGuard::hide().map_err(|error| {
-            LifecycleError::Io("failed to hide remote main-slot cursor".to_string(), error)
+            LifecycleError::Io("failed to hide remote interact cursor".to_string(), error)
         })?;
 
         let registry = RemoteConnectionRegistry::new();
         let remote_runtime = RemoteMainSlotRuntime::with_registry(registry.clone());
         let mailbox = remote_runtime
-            .ensure_local_observer_connection(command.socket_name.clone())
+            .ensure_local_observer_connection(spec.console_host_id.clone())
             .ok_or_else(|| {
                 LifecycleError::Protocol(
                     "remote observer connection registry is not available".to_string(),
@@ -87,9 +176,9 @@ impl RemoteMainSlotPaneRuntime {
         let binding = remote_runtime.activate_target(
             &target,
             RemoteConsoleDescriptor {
-                console_id: remote_console_id(&command),
-                console_host_id: command.socket_name.clone(),
-                location: ConsoleLocation::LocalWorkspace,
+                console_id: spec.console_id.clone(),
+                console_host_id: spec.console_host_id.clone(),
+                location: spec.console_location,
             },
             usize::from(initial_size.cols),
             usize::from(initial_size.rows),
@@ -105,34 +194,38 @@ impl RemoteMainSlotPaneRuntime {
         spawn_input_thread(event_tx.clone());
         let resize_watcher = spawn_resize_watcher(event_tx.clone()).map_err(remote_pane_error)?;
         spawn_mailbox_watcher(mailbox, event_tx.clone());
-        let authority_transport_socket_path = authority_transport_socket_path(
-            &command.socket_name,
-            &command.session_name,
-            &command.target,
-        );
-        let _authority_listener = spawn_authority_listener(
-            authority_transport_socket_path.clone(),
-            registry.clone(),
-            &target,
-            event_tx,
-        )
-        .map_err(remote_pane_error)?;
-        self.spawn_local_authority_target_host_if_resolvable(
-            &target,
-            &authority_transport_socket_path,
-        )
-        .map_err(remote_pane_error)?;
+        let authority_transport_socket_path =
+            authority_transport_socket_path(&spec.socket_name, &spec.surface_scope, &spec.target);
+        let authority_tx = authority_transport_event_sender(event_tx.clone());
+        let _authority_listener = self
+            .authority_connections
+            .start_connection(
+                AuthorityConnectionRequest {
+                    socket_path: authority_transport_socket_path.clone(),
+                    authority_id: target.address.authority_id().to_string(),
+                },
+                registry.clone(),
+                authority_tx,
+            )
+            .map_err(remote_pane_error)?;
+        let waiting_authority_status =
+            self.start_authority_transport_source(&target, &authority_transport_socket_path);
         thread::spawn(move || {
             let _keep_resize_watcher_alive = resize_watcher;
             thread::park();
         });
         let mut console_seq = 0u64;
+        let mut authority_status = if remote_runtime.has_connection(target.address.authority_id()) {
+            AuthorityTransportStatus::Connected
+        } else {
+            waiting_authority_status.clone()
+        };
         draw_remote_snapshot(
             &terminal,
             &target,
             &binding,
             &observer.snapshot(),
-            remote_runtime.has_connection(target.address.authority_id()),
+            &authority_status,
         )?;
 
         loop {
@@ -144,7 +237,7 @@ impl RemoteMainSlotPaneRuntime {
                         &target,
                         &binding,
                         &observer.snapshot(),
-                        remote_runtime.has_connection(target.address.authority_id()),
+                        &authority_status,
                     )?;
                 }
                 Ok(RemotePaneEvent::Resize) => {
@@ -153,23 +246,43 @@ impl RemoteMainSlotPaneRuntime {
                         &target,
                         &binding,
                         &observer.snapshot(),
-                        remote_runtime.has_connection(target.address.authority_id()),
+                        &authority_status,
                     )?;
                 }
-                Ok(RemotePaneEvent::AuthorityTransportChanged) => {
-                    draw_remote_snapshot(
-                        &terminal,
-                        &target,
-                        &binding,
-                        &observer.snapshot(),
-                        remote_runtime.has_connection(target.address.authority_id()),
-                    )?;
-                }
-                Ok(RemotePaneEvent::AuthorityEnvelope(envelope)) => {
-                    apply_authority_envelope(&remote_runtime, &target, &envelope)
-                        .map_err(remote_protocol_error)?;
-                }
+                Ok(RemotePaneEvent::AuthorityTransport(event)) => match event {
+                    AuthorityTransportEvent::Connected | AuthorityTransportEvent::Disconnected => {
+                        authority_status = authority_status_from_runtime(
+                            &remote_runtime,
+                            &target,
+                            &waiting_authority_status,
+                        );
+                        draw_remote_snapshot(
+                            &terminal,
+                            &target,
+                            &binding,
+                            &observer.snapshot(),
+                            &authority_status,
+                        )?;
+                    }
+                    AuthorityTransportEvent::Failed(message) => {
+                        authority_status = AuthorityTransportStatus::Failed(message);
+                        draw_remote_snapshot(
+                            &terminal,
+                            &target,
+                            &binding,
+                            &observer.snapshot(),
+                            &authority_status,
+                        )?;
+                    }
+                    AuthorityTransportEvent::Envelope(envelope) => {
+                        apply_authority_envelope(&remote_runtime, &target, &envelope)
+                            .map_err(remote_protocol_error)?;
+                    }
+                },
                 Ok(RemotePaneEvent::Input(bytes)) => {
+                    if should_exit_surface_locally(&spec, &bytes) {
+                        return Ok(());
+                    }
                     if remote_runtime.has_connection(target.address.authority_id()) {
                         console_seq += 1;
                         remote_runtime.send_console_input(
@@ -187,38 +300,44 @@ impl RemoteMainSlotPaneRuntime {
 
     fn resolve_remote_target(
         &self,
-        command: &RemoteMainSlotCommand,
+        target_id: &str,
+        surface_label: &str,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
         let session = self
             .target_registry
-            .find_target(&command.target)
+            .find_target(target_id)
             .map_err(remote_pane_error)?
             .ok_or_else(|| {
                 LifecycleError::Protocol(format!(
-                    "unknown remote target `{}` for remote main-slot pane",
-                    command.target
+                    "unknown remote target `{}` for {surface_label}",
+                    target_id
                 ))
             })?;
         if session.address.transport() != &SessionTransport::RemotePeer {
             return Err(LifecycleError::Protocol(format!(
                 "target `{}` is not a remote target",
-                command.target
+                target_id
             )));
         }
         Ok(session)
     }
 
-    fn spawn_local_authority_target_host_if_resolvable(
+    fn start_authority_transport_source(
         &self,
         target: &ManagedSessionRecord,
         transport_socket_path: &Path,
-    ) -> Result<(), RemoteSocketTransportError> {
+    ) -> AuthorityTransportStatus {
         let available_targets = self
             .target_registry
             .list_targets()
-            .map_err(|error| RemoteSocketTransportError::new(error.to_string()))?;
+            .map_err(|error| RemoteSocketTransportError::new(error.to_string()));
+        let Ok(available_targets) = available_targets else {
+            return AuthorityTransportStatus::Failed(
+                "failed to inspect local authority bridge candidates".to_string(),
+            );
+        };
         let Some(resolved) = resolve_local_authority_target_host(target, &available_targets) else {
-            return Ok(());
+            return AuthorityTransportStatus::WaitingForRemoteAuthority;
         };
         let mut command = Command::new(&self.current_executable);
         command
@@ -230,9 +349,17 @@ impl RemoteMainSlotPaneRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        command.spawn()?;
-        Ok(())
+        match command.spawn() {
+            Ok(_) => AuthorityTransportStatus::WaitingForLocalBridge,
+            Err(error) => AuthorityTransportStatus::Failed(format!(
+                "failed to start local authority bridge: {error}"
+            )),
+        }
     }
+}
+
+fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, bytes: &[u8]) -> bool {
+    spec.console_location == ConsoleLocation::ServerConsole && bytes.contains(&0x1d)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,13 +368,12 @@ struct ResolvedLocalAuthorityTargetHost {
     target_session_name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RemotePaneEvent {
     Input(Vec<u8>),
     Resize,
     MailboxUpdated,
-    AuthorityTransportChanged,
-    AuthorityEnvelope(ProtocolEnvelope<ControlPlanePayload>),
+    AuthorityTransport(AuthorityTransportEvent),
 }
 
 struct RemotePaneResizeWatcher {
@@ -256,15 +382,6 @@ struct RemotePaneResizeWatcher {
 
 struct RemotePaneCursorGuard {
     visible_on_drop: bool,
-}
-
-struct AuthorityListenerGuard {
-    socket_path: PathBuf,
-}
-
-struct SocketRemoteControlPlaneConnection {
-    writer: Arc<Mutex<UnixStream>>,
-    connected: Arc<AtomicBool>,
 }
 
 impl RemotePaneCursorGuard {
@@ -287,31 +404,6 @@ impl Drop for RemotePaneCursorGuard {
 impl Drop for RemotePaneResizeWatcher {
     fn drop(&mut self) {
         REMOTE_PANE_SIGWINCH_WRITE_FD.store(-1, Ordering::Relaxed);
-    }
-}
-
-impl Drop for AuthorityListenerGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket_path);
-    }
-}
-
-impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
-    fn send(
-        &self,
-        envelope: &ProtocolEnvelope<ControlPlanePayload>,
-    ) -> Result<(), RemoteControlPlaneTransportError> {
-        if !self.connected.load(Ordering::Relaxed) {
-            return Err(RemoteControlPlaneTransportError::new(
-                "authority transport connection is closed",
-            ));
-        }
-        let mut writer = self
-            .writer
-            .lock()
-            .expect("authority transport writer mutex should not be poisoned");
-        write_control_plane_envelope(&mut *writer, envelope)
-            .map_err(|error| RemoteControlPlaneTransportError::new(error.to_string()))
     }
 }
 
@@ -378,82 +470,6 @@ fn spawn_mailbox_watcher(mailbox: LocalNodeMailbox, tx: mpsc::Sender<RemotePaneE
     });
 }
 
-fn spawn_authority_listener(
-    socket_path: PathBuf,
-    registry: RemoteConnectionRegistry,
-    target: &ManagedSessionRecord,
-    tx: mpsc::Sender<RemotePaneEvent>,
-) -> io::Result<AuthorityListenerGuard> {
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-    let listener = UnixListener::bind(&socket_path)?;
-    let authority_id = target.address.authority_id().to_string();
-
-    thread::spawn(move || {
-        for accepted in listener.incoming() {
-            let Ok(stream) = accepted else {
-                break;
-            };
-            let _ = register_authority_stream(
-                stream,
-                registry.clone(),
-                authority_id.clone(),
-                tx.clone(),
-            );
-        }
-    });
-
-    Ok(AuthorityListenerGuard { socket_path })
-}
-
-fn register_authority_stream(
-    mut stream: UnixStream,
-    registry: RemoteConnectionRegistry,
-    authority_id: String,
-    tx: mpsc::Sender<RemotePaneEvent>,
-) -> Result<(), RemoteSocketTransportError> {
-    let node_id = read_registration_frame(&mut stream)?;
-    if node_id != authority_id {
-        return Err(RemoteSocketTransportError::new(format!(
-            "unexpected authority node `{node_id}`; expected `{authority_id}`"
-        )));
-    }
-
-    let writer = stream.try_clone()?;
-    let connected = Arc::new(AtomicBool::new(true));
-    let reader_tx = tx.clone();
-    registry.register_connection(
-        node_id.clone(),
-        Arc::new(SocketRemoteControlPlaneConnection {
-            writer: Arc::new(Mutex::new(writer)),
-            connected: connected.clone(),
-        }),
-    );
-
-    thread::spawn(move || {
-        while connected.load(Ordering::Relaxed) {
-            match read_control_plane_envelope(&mut stream) {
-                Ok(envelope) => {
-                    if reader_tx
-                        .send(RemotePaneEvent::AuthorityEnvelope(envelope))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        connected.store(false, Ordering::Relaxed);
-        registry.unregister_connection(&node_id);
-        let _ = reader_tx.send(RemotePaneEvent::AuthorityTransportChanged);
-    });
-
-    let _ = tx.send(RemotePaneEvent::AuthorityTransportChanged);
-    Ok(())
-}
-
 fn apply_authority_envelope(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
@@ -489,13 +505,13 @@ fn draw_remote_snapshot(
     target: &ManagedSessionRecord,
     binding: &RemoteAttachmentBinding,
     snapshot: &RemoteObserverSnapshot,
-    authority_connected: bool,
+    authority_status: &AuthorityTransportStatus,
 ) -> Result<(), LifecycleError> {
     let viewport = terminal.current_size_or_default();
     let screen_lines = if snapshot.last_output_seq.is_some() {
         snapshot.active_screen().styled_lines.clone()
     } else {
-        placeholder_lines(target, binding, authority_connected, viewport)
+        placeholder_lines(target, binding, authority_status, viewport)
     };
     let active_screen = snapshot.active_screen();
 
@@ -533,9 +549,27 @@ fn draw_remote_snapshot(
 fn placeholder_lines(
     target: &ManagedSessionRecord,
     binding: &RemoteAttachmentBinding,
-    authority_connected: bool,
+    authority_status: &AuthorityTransportStatus,
     viewport: TerminalSize,
 ) -> Vec<String> {
+    let (status_label, detail_line) = match authority_status {
+        AuthorityTransportStatus::WaitingForRemoteAuthority => (
+            "waiting for remote authority",
+            "waiting for a live authority node to register this target transport".to_string(),
+        ),
+        AuthorityTransportStatus::WaitingForLocalBridge => (
+            "waiting for local bridge",
+            "selector resolved locally; waiting for the authority target-host bridge to connect"
+                .to_string(),
+        ),
+        AuthorityTransportStatus::Connected => (
+            "connected",
+            "authority transport is live; waiting for remote target output".to_string(),
+        ),
+        AuthorityTransportStatus::Failed(message) => {
+            ("failed", format!("authority transport error: {message}"))
+        }
+    };
     let mut lines = vec![
         format!(
             "remote target {}",
@@ -546,26 +580,40 @@ fn placeholder_lines(
         ),
         format!("target-id: {}", target.address.id().as_str()),
         format!("attachment: {}", binding.attachment_id),
-        format!(
-            "authority transport: {}",
-            if authority_connected {
-                "connected"
-            } else {
-                "waiting"
-            }
-        ),
+        format!("authority transport: {status_label}"),
     ];
-    if !authority_connected {
-        lines.push(
-            "input and PTY resize stay local until a live authority connection is registered"
-                .to_string(),
-        );
-    }
+    lines.push(detail_line);
 
     while lines.len() < usize::from(viewport.rows.max(1)) {
         lines.push(String::new());
     }
     lines
+}
+
+fn authority_status_from_runtime(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    waiting_status: &AuthorityTransportStatus,
+) -> AuthorityTransportStatus {
+    if remote_runtime.has_connection(target.address.authority_id()) {
+        AuthorityTransportStatus::Connected
+    } else {
+        waiting_status.clone()
+    }
+}
+
+fn authority_transport_event_sender(
+    tx: mpsc::Sender<RemotePaneEvent>,
+) -> mpsc::Sender<AuthorityTransportEvent> {
+    let (authority_tx, authority_rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(event) = authority_rx.recv() {
+            if tx.send(RemotePaneEvent::AuthorityTransport(event)).is_err() {
+                break;
+            }
+        }
+    });
+    authority_tx
 }
 
 fn resolve_local_authority_target_host(
@@ -604,7 +652,18 @@ fn remote_authority_target_host_args(
     ]
 }
 
-fn remote_console_id(command: &RemoteMainSlotCommand) -> String {
+pub(crate) fn main_slot_surface_spec(command: &RemoteMainSlotCommand) -> RemoteInteractSurfaceSpec {
+    RemoteInteractSurfaceSpec {
+        socket_name: command.socket_name.clone(),
+        surface_scope: command.session_name.clone(),
+        target: command.target.clone(),
+        console_id: main_slot_console_id(command),
+        console_host_id: command.socket_name.clone(),
+        console_location: ConsoleLocation::LocalWorkspace,
+    }
+}
+
+fn main_slot_console_id(command: &RemoteMainSlotCommand) -> String {
     format!(
         "workspace-main-slot:{}:{}",
         command.socket_name, command.session_name
@@ -679,9 +738,14 @@ extern "C" fn remote_pane_sigwinch_handler(_signal: c_int) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_authority_envelope, encode_base64, placeholder_lines, register_authority_stream,
-        remote_authority_target_host_args, remote_console_id, resolve_local_authority_target_host,
-        RemotePaneEvent, ResolvedLocalAuthorityTargetHost,
+        apply_authority_envelope, authority_transport_event_sender, encode_base64,
+        main_slot_console_id, main_slot_surface_spec, placeholder_lines,
+        remote_authority_target_host_args, resolve_local_authority_target_host,
+        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractSurfaceSpec,
+        RemoteMainSlotPaneRuntime, RemotePaneEvent, ResolvedLocalAuthorityTargetHost,
+    };
+    use crate::application::target_registry_service::{
+        DefaultTargetCatalogGateway, TargetRegistryService,
     };
     use crate::cli::RemoteMainSlotCommand;
     use crate::domain::session_catalog::{
@@ -692,11 +756,12 @@ mod tests {
     use crate::infra::remote_protocol::{
         ControlPlanePayload, ProtocolEnvelope, RemoteConsoleDescriptor, TargetOutputPayload,
     };
-    use crate::infra::remote_transport_codec::{
-        write_control_plane_envelope, write_registration_frame,
+    use crate::infra::remote_transport_codec::write_registration_frame;
+    use crate::runtime::remote_authority_connection_runtime::{
+        spawn_authority_listener, AuthorityConnectionRequest, AuthorityTransportEvent,
     };
     use crate::runtime::remote_authority_transport_runtime::{
-        authority_transport_socket_path, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
+        authority_transport_socket_path, RemoteAuthorityCommand,
     };
     use crate::runtime::remote_main_slot_runtime::RemoteAttachmentBinding;
     use crate::runtime::remote_main_slot_runtime::RemoteMainSlotRuntime;
@@ -704,14 +769,14 @@ mod tests {
     use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
     use crate::terminal::TerminalSize;
     use std::fs;
-    use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::Path;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process;
     use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn remote_console_id_matches_workspace_main_slot_shape() {
+    fn main_slot_console_id_matches_workspace_main_slot_shape() {
         let command = RemoteMainSlotCommand {
             socket_name: "wa-1".to_string(),
             session_name: "workspace-1".to_string(),
@@ -719,8 +784,122 @@ mod tests {
         };
 
         assert_eq!(
-            remote_console_id(&command),
+            main_slot_console_id(&command),
             "workspace-main-slot:wa-1:workspace-1"
+        );
+    }
+
+    #[test]
+    fn main_slot_surface_spec_marks_local_workspace_console() {
+        let command = RemoteMainSlotCommand {
+            socket_name: "wa-1".to_string(),
+            session_name: "workspace-1".to_string(),
+            target: "peer-a:shell-1".to_string(),
+        };
+
+        let spec = main_slot_surface_spec(&command);
+
+        assert_eq!(spec.console_id, "workspace-main-slot:wa-1:workspace-1");
+        assert_eq!(spec.console_host_id, "wa-1");
+        assert_eq!(spec.surface_scope, "workspace-1");
+        assert_eq!(spec.console_location, ConsoleLocation::LocalWorkspace);
+    }
+
+    #[test]
+    fn only_server_console_surface_exits_on_ctrl_right_bracket() {
+        let main_slot = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: "peer-a:shell-1".to_string(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "wa-1".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+        let server_console = RemoteInteractSurfaceSpec {
+            console_location: ConsoleLocation::ServerConsole,
+            ..main_slot.clone()
+        };
+
+        assert!(!should_exit_surface_locally(&main_slot, &[0x1d]));
+        assert!(should_exit_surface_locally(&server_console, &[0x1d]));
+        assert!(!should_exit_surface_locally(&server_console, b"hello"));
+    }
+
+    #[test]
+    fn new_with_external_authority_streams_keeps_external_sink_under_runtime_ownership() {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env()
+                .expect("build env target catalog should exist"),
+        );
+        let runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
+            target_registry,
+            PathBuf::from("/tmp/waitagent"),
+        );
+
+        let (_client, server) = UnixStream::pair().expect("stream pair should open");
+        runtime
+            .submit_external_authority_stream(server)
+            .expect("runtime should accept submitted authority stream");
+    }
+
+    #[test]
+    fn submitted_external_authority_stream_reaches_authority_connection_runtime() {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env()
+                .expect("build env target catalog should exist"),
+        );
+        let runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
+            target_registry,
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let _guard = runtime
+            .authority_connections
+            .start_connection(
+                AuthorityConnectionRequest {
+                    socket_path: test_socket_path("pane-external-authority"),
+                    authority_id: "peer-a".to_string(),
+                },
+                registry.clone(),
+                tx,
+            )
+            .expect("authority connection runtime should start");
+
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+        runtime
+            .submit_external_authority_stream(server)
+            .expect("runtime should accept external authority stream");
+        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("connected event should arrive"),
+            AuthorityTransportEvent::Connected
+        );
+        assert!(registry.has_connection("peer-a"));
+    }
+
+    #[test]
+    fn runtime_without_external_authority_streams_rejects_submissions() {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env()
+                .expect("build env target catalog should exist"),
+        );
+        let runtime = RemoteMainSlotPaneRuntime::new(
+            target_registry,
+            Box::new(crate::runtime::remote_authority_connection_runtime::LocalAuthoritySocketBridgeStarter),
+            PathBuf::from("/tmp/waitagent"),
+        );
+
+        let (_client, server) = UnixStream::pair().expect("stream pair should open");
+        let error = runtime
+            .submit_external_authority_stream(server)
+            .expect_err("default runtime should reject external authority stream submissions");
+
+        assert_eq!(
+            error.to_string(),
+            "remote main-slot pane runtime is not configured for external authority streams"
         );
     }
 
@@ -740,7 +919,7 @@ mod tests {
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
             },
-            false,
+            &AuthorityTransportStatus::WaitingForRemoteAuthority,
             TerminalSize {
                 rows: 5,
                 cols: 80,
@@ -751,8 +930,30 @@ mod tests {
 
         assert_eq!(lines.len(), 5);
         assert!(lines[0].contains("remote target bash"));
-        assert!(lines[3].contains("waiting"));
-        assert!(lines[4].contains("input and PTY resize stay local"));
+        assert!(lines[3].contains("waiting for remote authority"));
+        assert!(lines[4].contains("live authority node"));
+    }
+
+    #[test]
+    fn placeholder_lines_surface_authority_transport_failures() {
+        let lines = placeholder_lines(
+            &remote_target(),
+            &RemoteAttachmentBinding {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                attachment_id: "attach-1".to_string(),
+                console_id: "console-a".to_string(),
+            },
+            &AuthorityTransportStatus::Failed("unexpected authority node".to_string()),
+            TerminalSize {
+                rows: 5,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        );
+
+        assert!(lines[3].contains("failed"));
+        assert!(lines[4].contains("unexpected authority node"));
     }
 
     #[test]
@@ -771,39 +972,6 @@ mod tests {
         let rendered = path.to_string_lossy();
 
         assert!(rendered.contains("waitagent-remote-wa-1-workspace-1-peer-a_shell-1.sock"));
-    }
-
-    #[test]
-    fn register_authority_stream_tracks_connection_and_forwards_inbound_envelopes() {
-        let registry = RemoteConnectionRegistry::new();
-        let (tx, rx) = mpsc::channel();
-        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
-
-        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
-        register_authority_stream(server, registry.clone(), "peer-a".to_string(), tx)
-            .expect("authority stream should register");
-
-        assert!(registry.has_connection("peer-a"));
-        assert!(matches!(
-            rx.recv().expect("transport change should be emitted"),
-            RemotePaneEvent::AuthorityTransportChanged
-        ));
-
-        write_control_plane_envelope(&mut client, &authority_target_output_envelope(1))
-            .expect("target output should encode");
-        match rx.recv().expect("authority envelope should arrive") {
-            RemotePaneEvent::AuthorityEnvelope(envelope) => {
-                assert_eq!(envelope.sender_id, "peer-a");
-                match envelope.payload {
-                    ControlPlanePayload::TargetOutput(payload) => {
-                        assert_eq!(payload.output_seq, 1);
-                        assert_eq!(payload.bytes_base64, "YQ==");
-                    }
-                    other => panic!("unexpected payload: {other:?}"),
-                }
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
     }
 
     #[test]
@@ -863,31 +1031,42 @@ mod tests {
             .expect("remote activation should succeed");
         let socket_path = authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1");
         let _ = fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
-        let (tx, rx) = mpsc::channel();
-        let accept_registry = registry.clone();
+        let (pane_tx, pane_rx) = mpsc::channel();
+        let authority_tx = authority_transport_event_sender(pane_tx);
+        let _listener = spawn_authority_listener(
+            AuthorityConnectionRequest {
+                socket_path: socket_path.clone(),
+                authority_id: "peer-a".to_string(),
+            },
+            registry.clone(),
+            authority_tx,
+        )
+        .expect("authority listener should bind");
 
-        let accept_thread = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("listener should accept");
-            register_authority_stream(stream, accept_registry, "peer-a".to_string(), tx)
-                .expect("authority stream should register");
-        });
-
-        let authority = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
-            .expect("authority runtime should connect");
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1))
-                .expect("transport change should arrive"),
-            RemotePaneEvent::AuthorityTransportChanged
-        ));
+        let mut authority =
+            UnixStream::connect(&socket_path).expect("authority transport should connect");
+        write_registration_frame(&mut authority, "peer-a")
+            .expect("registration frame should encode");
+        assert_eq!(
+            pane_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("transport event should arrive"),
+            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::Connected)
+        );
 
         runtime
             .send_pty_resize(&target, &binding, 160, 50)
             .expect("resize should route");
         assert_eq!(
-            authority
-                .recv_command()
-                .expect("resize command should arrive"),
+            match crate::infra::remote_transport_codec::read_control_plane_envelope(&mut authority,)
+                .expect("resize command should arrive")
+                .payload
+            {
+                ControlPlanePayload::ApplyResize(payload) => {
+                    RemoteAuthorityCommand::ApplyResize(payload)
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            },
             RemoteAuthorityCommand::ApplyResize(
                 crate::infra::remote_protocol::ApplyResizePayload {
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
@@ -903,9 +1082,15 @@ mod tests {
             .send_console_input(&target, &binding, 1, "YQ==")
             .expect("input should route");
         assert_eq!(
-            authority
-                .recv_command()
-                .expect("input command should arrive"),
+            match crate::infra::remote_transport_codec::read_control_plane_envelope(&mut authority,)
+                .expect("input command should arrive")
+                .payload
+            {
+                ControlPlanePayload::TargetInput(payload) => {
+                    RemoteAuthorityCommand::TargetInput(payload)
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            },
             RemoteAuthorityCommand::TargetInput(
                 crate::infra::remote_protocol::TargetInputPayload {
                     attachment_id: "attach-1".to_string(),
@@ -918,14 +1103,32 @@ mod tests {
             )
         );
 
-        authority
-            .send_target_output("remote-peer:peer-a:shell-1", 1, "pty", "Yg==")
-            .expect("target output should send");
-        match rx
+        crate::infra::remote_transport_codec::write_control_plane_envelope(
+            &mut authority,
+            &ProtocolEnvelope {
+                protocol_version: "1.1".to_string(),
+                message_id: "msg-1".to_string(),
+                message_type: "target_output",
+                timestamp: "2026-04-28T00:00:00Z".to_string(),
+                sender_id: "peer-a".to_string(),
+                correlation_id: None,
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    output_seq: 1,
+                    stream: "pty",
+                    bytes_base64: "Yg==".to_string(),
+                }),
+            },
+        )
+        .expect("target output should send");
+        match pane_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("authority envelope should arrive")
         {
-            RemotePaneEvent::AuthorityEnvelope(envelope) => {
+            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::Envelope(envelope)) => {
                 apply_authority_envelope(&runtime, &target, &envelope)
                     .expect("authority output should apply");
             }
@@ -940,10 +1143,6 @@ mod tests {
             snapshot.active_screen().lines[0],
             "b           ".to_string()
         );
-
-        accept_thread
-            .join()
-            .expect("accept thread should join cleanly");
         let _ = fs::remove_file(&socket_path);
     }
 
@@ -1087,5 +1286,16 @@ mod tests {
             current_path: None,
             task_state: ManagedSessionTaskState::Input,
         }
+    }
+
+    fn test_socket_path(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "waitagent-test-remote-main-slot-pane-{name}-{}-{millis}.sock",
+            process::id()
+        ))
     }
 }

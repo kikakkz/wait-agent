@@ -5,8 +5,10 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
+use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_target_publication_runtime::{
-    ensure_publication_owner_process_running, signal_publication_owner_refresh,
+    signal_publication_sender_live_session_registered,
+    signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
 use std::fmt;
 use std::fs;
@@ -96,8 +98,87 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
     }
 }
 
-pub struct RemoteAuthorityTargetHostRuntime<G = EmbeddedTmuxBackend> {
+pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
+    fn ensure_live_session_registered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+        authority_id: &str,
+        transport_socket_path: &str,
+    ) -> Result<PathBuf, LifecycleError>;
+
+    fn ensure_live_session_unregistered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError>;
+
+    fn start_source_publication(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError>;
+
+    fn stop_source_publication(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError>;
+}
+
+impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
+    fn ensure_live_session_registered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+        authority_id: &str,
+        transport_socket_path: &str,
+    ) -> Result<PathBuf, LifecycleError> {
+        self.ensure_publication_sender_running(socket_name)?;
+        signal_publication_sender_live_session_registered(
+            socket_name,
+            target_session_name,
+            authority_id,
+            transport_socket_path,
+        )?;
+        let authority_socket_path =
+            live_authority_session_socket_path(socket_name, target_session_name);
+        wait_for_ready_socket(&authority_socket_path)?;
+        Ok(authority_socket_path)
+    }
+
+    fn ensure_live_session_unregistered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        signal_publication_sender_live_session_unregistered(socket_name, target_session_name)
+    }
+
+    fn start_source_publication(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        self.signal_source_session_refresh(socket_name, target_session_name)
+    }
+
+    fn stop_source_publication(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        self.signal_source_session_closed(socket_name, target_session_name)?;
+        Ok(())
+    }
+}
+
+pub struct RemoteAuthorityTargetHostRuntime<
+    G = EmbeddedTmuxBackend,
+    P = RemoteTargetPublicationRuntime,
+> {
     gateway: G,
+    publication_gateway: P,
     current_executable: PathBuf,
 }
 
@@ -119,26 +200,29 @@ where
 
 pub struct RemoteAuthorityOutputPumpRuntime;
 
-impl RemoteAuthorityTargetHostRuntime<EmbeddedTmuxBackend> {
+impl RemoteAuthorityTargetHostRuntime<EmbeddedTmuxBackend, RemoteTargetPublicationRuntime> {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_authority_error)?;
+        let publication_gateway = RemoteTargetPublicationRuntime::from_build_env()?;
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
                 "failed to locate current waitagent executable".to_string(),
                 error,
             )
         })?;
-        Ok(Self::new(gateway, current_executable))
+        Ok(Self::new(gateway, publication_gateway, current_executable))
     }
 }
 
-impl<G> RemoteAuthorityTargetHostRuntime<G>
+impl<G, P> RemoteAuthorityTargetHostRuntime<G, P>
 where
     G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
 {
-    pub fn new(gateway: G, current_executable: PathBuf) -> Self {
+    pub fn new(gateway: G, publication_gateway: P, current_executable: PathBuf) -> Self {
         Self {
             gateway,
+            publication_gateway,
             current_executable,
         }
     }
@@ -151,12 +235,18 @@ where
             .gateway
             .target_main_pane(&command.socket_name, &command.target_session_name)
             .map_err(remote_authority_error)?;
-        let transport = Arc::new(
-            RemoteAuthorityTransportRuntime::connect(
-                &command.transport_socket_path,
+        let authority_socket_path = self
+            .publication_gateway
+            .ensure_live_session_registered(
+                &command.socket_name,
+                &command.target_session_name,
                 &command.authority_id,
+                &command.transport_socket_path,
             )
-            .map_err(remote_authority_error)?,
+            .map_err(remote_authority_error)?;
+        let transport = Arc::new(
+            RemoteAuthorityTransportRuntime::connect(&authority_socket_path, &command.authority_id)
+                .map_err(remote_authority_error)?,
         );
         let ingest_socket_path =
             authority_output_ingest_socket_path(&command.transport_socket_path, &command.target_id);
@@ -172,14 +262,6 @@ where
         self.gateway
             .set_output_pipe(&command.socket_name, &pane, &pipe_command)
             .map_err(remote_authority_error)?;
-        let _ = ensure_publication_owner_process_running(
-            &self.current_executable,
-            &command.socket_name,
-            &command.target_session_name,
-        )
-        .and_then(|()| {
-            signal_publication_owner_refresh(&command.socket_name, &command.target_session_name)
-        });
         let _output_guard = OutputPipeGuard {
             gateway: self.gateway.clone(),
             socket_name: command.socket_name.clone(),
@@ -188,6 +270,9 @@ where
         };
 
         let (event_tx, event_rx) = mpsc::channel();
+        let _ = self
+            .publication_gateway
+            .start_source_publication(&command.socket_name, &command.target_session_name);
         let reader_transport = transport.clone();
         let reader_tx = event_tx.clone();
         let command_thread = thread::spawn(move || {
@@ -206,44 +291,72 @@ where
         let output_thread = spawn_output_ingest_thread(listener, running.clone(), event_tx);
         let mut output_seq = 0_u64;
 
-        loop {
+        let loop_result = loop {
             match event_rx.recv() {
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::TargetInput(
                     payload,
                 ))) => {
-                    let bytes =
-                        decode_base64(&payload.bytes_base64).map_err(remote_authority_error)?;
-                    self.gateway
+                    let bytes = match decode_base64(&payload.bytes_base64)
+                        .map_err(remote_authority_error)
+                    {
+                        Ok(bytes) => bytes,
+                        Err(error) => break Err(error),
+                    };
+                    if let Err(error) = self
+                        .gateway
                         .send_input(&command.socket_name, &pane, &bytes)
-                        .map_err(remote_authority_error)?;
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
+                    }
                 }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
                 ))) => {
-                    self.gateway
+                    if let Err(error) = self
+                        .gateway
                         .resize_pty(&command.socket_name, &pane, payload.cols, payload.rows)
-                        .map_err(remote_authority_error)?;
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
+                    }
                 }
                 Ok(AuthorityHostEvent::OutputChunk(bytes)) => {
                     output_seq += 1;
-                    transport
+                    if let Err(error) = transport
                         .send_target_output(
                             &command.target_id,
                             output_seq,
                             "pty",
                             encode_base64(&bytes),
                         )
-                        .map_err(remote_authority_error)?;
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
+                    }
                 }
-                Ok(AuthorityHostEvent::TransportClosed) | Err(_) => break,
+                Ok(AuthorityHostEvent::TransportClosed) => {
+                    if let Err(error) = self
+                        .publication_gateway
+                        .stop_source_publication(&command.socket_name, &command.target_session_name)
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
+                    }
+                    break Ok(());
+                }
+                Err(_) => break Ok(()),
             }
-        }
+        };
 
         running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&ingest_socket_path);
+        let _ = self
+            .publication_gateway
+            .ensure_live_session_unregistered(&command.socket_name, &command.target_session_name);
         let _ = command_thread.join();
         let _ = output_thread.join();
-        Ok(())
+        loop_result
     }
 
     pub fn run_output_pump(
@@ -429,26 +542,50 @@ fn remote_authority_error(error: impl ToString) -> LifecycleError {
     )
 }
 
+fn wait_for_ready_socket(socket_path: &Path) -> Result<(), LifecycleError> {
+    for _ in 0..100 {
+        if socket_path.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err(LifecycleError::Protocol(format!(
+        "authority live-session socket did not become ready at {}",
+        socket_path.display()
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
-        remote_authority_output_pump_shell_command, write_output_chunk_frame,
+        remote_authority_error, remote_authority_output_pump_shell_command,
+        write_output_chunk_frame, LifecycleError, RemoteAuthorityPublicationGateway,
         RemoteAuthorityTargetHostRuntime, RemoteTargetPtyGateway,
     };
     use crate::cli::RemoteAuthorityTargetHostCommand;
     use crate::infra::remote_protocol::{
-        ApplyResizePayload, ControlPlanePayload, ProtocolEnvelope, TargetInputPayload,
+        ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
+        NodeSessionEnvelope, ProtocolEnvelope, TargetExitedPayload, TargetInputPayload,
+        TargetOutputPayload, TargetPublishedPayload,
     };
     use crate::infra::remote_transport_codec::{
-        read_control_plane_envelope, read_registration_frame, write_control_plane_envelope,
+        read_control_plane_envelope, read_node_session_envelope, write_node_session_envelope,
     };
     use crate::infra::tmux::TmuxPaneId;
+    use crate::runtime::remote_node_session_owner_runtime::{
+        live_authority_session_socket_path, spawn_live_authority_session_bridge,
+    };
+    use crate::runtime::remote_node_session_runtime::RemoteNodeSessionRuntime;
+    use crate::runtime::remote_node_transport_runtime::write_server_hello;
+    use crate::runtime::remote_target_publication_runtime::PublicationSenderCommand;
     use std::fs;
     use std::io::Cursor;
+    use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::process;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -526,6 +663,117 @@ mod tests {
         }
     }
 
+    struct FakeLiveSession {
+        session: Arc<RemoteNodeSessionRuntime>,
+        socket_path: PathBuf,
+        running: Arc<AtomicBool>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakePublicationGateway {
+        live_session: Arc<Mutex<Option<FakeLiveSession>>>,
+    }
+
+    impl RemoteAuthorityPublicationGateway for FakePublicationGateway {
+        fn ensure_live_session_registered(
+            &self,
+            socket_name: &str,
+            target_session_name: &str,
+            authority_id: &str,
+            transport_socket_path: &str,
+        ) -> Result<PathBuf, LifecycleError> {
+            let session = Arc::new(
+                RemoteNodeSessionRuntime::connect(transport_socket_path, authority_id)
+                    .map_err(remote_authority_error)?,
+            );
+            let running = Arc::new(AtomicBool::new(true));
+            let socket_path = live_authority_session_socket_path(socket_name, target_session_name);
+            spawn_live_authority_session_bridge(
+                socket_path.clone(),
+                session.clone(),
+                running.clone(),
+            );
+            super::wait_for_ready_socket(&socket_path)?;
+            *self
+                .live_session
+                .lock()
+                .expect("live session mutex should not be poisoned") = Some(FakeLiveSession {
+                session,
+                socket_path: socket_path.clone(),
+                running,
+            });
+            Ok(socket_path)
+        }
+
+        fn ensure_live_session_unregistered(
+            &self,
+            _socket_name: &str,
+            target_session_name: &str,
+        ) -> Result<(), LifecycleError> {
+            assert_eq!(target_session_name, "target-1");
+            if let Some(live_session) = self
+                .live_session
+                .lock()
+                .expect("live session mutex should not be poisoned")
+                .take()
+            {
+                live_session.running.store(false, Ordering::Relaxed);
+                live_session.session.shutdown();
+                let _ = UnixStream::connect(&live_session.socket_path);
+                let _ = fs::remove_file(live_session.socket_path);
+            }
+            Ok(())
+        }
+
+        fn start_source_publication(
+            &self,
+            socket_name: &str,
+            target_session_name: &str,
+        ) -> Result<(), LifecycleError> {
+            self.live_session
+                .lock()
+                .expect("live session mutex should not be poisoned")
+                .as_ref()
+                .expect("live session should be registered")
+                .session
+                .send_publication_sender_command(&PublicationSenderCommand::PublishTarget {
+                    authority_id: "peer-a".to_string(),
+                    transport_session_id: "target-1".to_string(),
+                    source_session_name: Some(target_session_name.to_string()),
+                    selector: Some(format!("{socket_name}:{target_session_name}")),
+                    availability: "online",
+                    session_role: Some("target-host"),
+                    workspace_key: Some("wk-1".to_string()),
+                    command_name: Some("codex".to_string()),
+                    current_path: Some("/tmp/demo".to_string()),
+                    attached_clients: 1,
+                    window_count: 1,
+                })
+                .map_err(remote_authority_error)?;
+            Ok(())
+        }
+
+        fn stop_source_publication(
+            &self,
+            _socket_name: &str,
+            target_session_name: &str,
+        ) -> Result<(), LifecycleError> {
+            self.live_session
+                .lock()
+                .expect("live session mutex should not be poisoned")
+                .as_ref()
+                .expect("live session should be registered")
+                .session
+                .send_publication_sender_command(&PublicationSenderCommand::ExitTarget {
+                    authority_id: "peer-a".to_string(),
+                    transport_session_id: "target-1".to_string(),
+                    source_session_name: Some(target_session_name.to_string()),
+                })
+                .map_err(remote_authority_error)?;
+            Ok(())
+        }
+    }
+
     #[test]
     fn authority_output_pump_shell_command_quotes_ingest_socket_path() {
         let command = remote_authority_output_pump_shell_command(
@@ -562,16 +810,19 @@ mod tests {
     #[test]
     fn authority_host_runtime_routes_transport_commands_into_gateway_and_output_back_to_transport()
     {
+        let socket_name = unique_test_socket_name("wa-1");
         let transport_socket_path = transport_socket_path("host");
         let transport_listener =
             UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
         let fake_gateway = FakeGateway::default();
+        let fake_publication_gateway = FakePublicationGateway::default();
         let runtime = RemoteAuthorityTargetHostRuntime::new(
             fake_gateway.clone(),
+            fake_publication_gateway,
             PathBuf::from("/tmp/waitagent"),
         );
         let command = RemoteAuthorityTargetHostCommand {
-            socket_name: "wa-1".to_string(),
+            socket_name: socket_name.clone(),
             target_session_name: "target-1".to_string(),
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
@@ -581,24 +832,72 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
-
         let server = thread::spawn(move || {
             let (mut stream, _) = transport_listener
                 .accept()
                 .expect("transport should accept");
-            let registered =
-                read_registration_frame(&mut stream).expect("registration should decode");
+            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
+            let registered = match hello.payload {
+                ControlPlanePayload::ClientHello(ClientHelloPayload { node_id, .. }) => node_id,
+                other => panic!("unexpected hello payload: {other:?}"),
+            };
             assert_eq!(registered, "peer-a");
-            write_control_plane_envelope(&mut stream, &target_input_envelope())
-                .expect("target input should encode");
-            write_control_plane_envelope(&mut stream, &apply_resize_envelope())
-                .expect("apply resize should encode");
-            let envelope =
-                read_control_plane_envelope(&mut stream).expect("target output should decode");
-            match envelope.payload {
-                ControlPlanePayload::TargetOutput(payload) => payload,
-                other => panic!("unexpected payload: {other:?}"),
+            write_server_hello(&mut stream, "waitagent-remote-node-session")
+                .expect("server hello should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: target_input_envelope(),
+                },
+            )
+            .expect("target input should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: apply_resize_envelope(),
+                },
+            )
+            .expect("apply resize should encode");
+            let mut published_payload = None;
+            let mut output_payload = None;
+            let mut exited_payload = None;
+            let mut write_shutdown = false;
+            while published_payload.is_none()
+                || output_payload.is_none()
+                || exited_payload.is_none()
+            {
+                let envelope =
+                    read_node_session_envelope(&mut stream).expect("node session should decode");
+                match envelope.envelope.payload {
+                    payload @ ControlPlanePayload::TargetPublished(_) => {
+                        if published_payload.is_none() {
+                            published_payload = Some(payload);
+                        }
+                    }
+                    payload @ ControlPlanePayload::TargetOutput(_) => {
+                        if output_payload.is_none() {
+                            output_payload = Some(payload);
+                        }
+                    }
+                    payload @ ControlPlanePayload::TargetExited(_) => {
+                        exited_payload = Some(payload);
+                    }
+                    other => panic!("unexpected node-session payload: {other:?}"),
+                }
+                if !write_shutdown && published_payload.is_some() && output_payload.is_some() {
+                    stream
+                        .shutdown(Shutdown::Write)
+                        .expect("server write shutdown should succeed");
+                    write_shutdown = true;
+                }
             }
+            (
+                published_payload.expect("published payload should be collected"),
+                output_payload.expect("output payload should be collected"),
+                exited_payload.expect("exit payload should be collected"),
+            )
         });
 
         let runtime_thread = thread::spawn(move || runtime.run_target_host(command));
@@ -609,7 +908,7 @@ mod tests {
         write_output_chunk_frame(&mut output_stream, b"hello").expect("output chunk should encode");
         drop(output_stream);
 
-        let payload = server.join().expect("server should join cleanly");
+        let (published, output, exited) = server.join().expect("server should join cleanly");
         runtime_thread
             .join()
             .expect("runtime thread should join cleanly")
@@ -631,8 +930,53 @@ mod tests {
                 .clone(),
             vec![(160, 50)]
         );
-        assert_eq!(payload.output_seq, 1);
-        assert_eq!(payload.bytes_base64, "aGVsbG8=");
+        match published {
+            ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                transport_session_id,
+                source_session_name,
+                selector,
+                availability,
+                session_role,
+                workspace_key,
+                command_name,
+                current_path,
+                attached_clients,
+                window_count,
+            }) => {
+                assert_eq!(transport_session_id, "target-1");
+                assert_eq!(source_session_name.as_deref(), Some("target-1"));
+                assert_eq!(selector, Some(format!("{socket_name}:target-1")));
+                assert_eq!(availability, "online");
+                assert_eq!(session_role, Some("target-host"));
+                assert_eq!(workspace_key.as_deref(), Some("wk-1"));
+                assert_eq!(command_name.as_deref(), Some("codex"));
+                assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
+                assert_eq!(attached_clients, 1);
+                assert_eq!(window_count, 1);
+            }
+            other => panic!("unexpected publication payload: {other:?}"),
+        }
+        match output {
+            ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                output_seq,
+                bytes_base64,
+                ..
+            }) => {
+                assert_eq!(output_seq, 1);
+                assert_eq!(bytes_base64, "aGVsbG8=");
+            }
+            other => panic!("unexpected authority output payload: {other:?}"),
+        }
+        match exited {
+            ControlPlanePayload::TargetExited(TargetExitedPayload {
+                transport_session_id,
+                source_session_name,
+            }) => {
+                assert_eq!(transport_session_id, "target-1");
+                assert_eq!(source_session_name.as_deref(), Some("target-1"));
+            }
+            other => panic!("unexpected exit payload: {other:?}"),
+        }
         assert!(fake_gateway
             .pipe_calls
             .lock()
@@ -683,6 +1027,14 @@ mod tests {
             "waitagent-test-authority-ingest-{name}-{}-{millis}.sock",
             process::id()
         ))
+    }
+
+    fn unique_test_socket_name(prefix: &str) -> String {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        format!("{prefix}-{}-{millis}", process::id())
     }
 
     fn target_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {

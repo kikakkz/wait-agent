@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.4`  
+Version: `v1.5`  
 Status: `Active`  
-Date: `2026-04-28`
+Date: `2026-04-29`
 
 ## 1. Purpose
 
@@ -71,9 +71,9 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.t5-07`:
+The current default task is `task.t6-01`:
 
-> Implement remote target input routing and clean remote resize boundaries through the server control plane.
+> Implement the server-side workspace console as a target-activation surface.
 
 That task intentionally routes assistants through:
 
@@ -84,10 +84,10 @@ That task intentionally routes assistants through:
 
 This keeps assistants focused on:
 
-- making remote open and input flow through the server control plane on top of the accepted shared target catalog, while keeping attachment viewport resize local and PTY resize explicit
-- preserving the accepted local fixed-chrome activation model while remote design resumes
+- building explicit focus and scheduling state on top of the public `waitagent server` runtime and shared-catalog activation boundary
+- preserving the accepted local fixed-chrome activation model while server-console work reuses the same transport-agnostic catalog
 - avoiding remote designs that assume local tmux inspection, daemon attach identity, or server-owned remote PTYs
-- keeping server-console work and richer remote-state probing behind the first routing slice
+- keeping richer status probing and later scheduling behavior behind the current activation-surface slice
 
 ## 5. Maintenance Rules
 

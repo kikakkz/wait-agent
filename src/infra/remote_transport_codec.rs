@@ -1,7 +1,8 @@
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ControlPlanePayload, ErrorPayload, OpenTargetOkPayload,
-    OpenTargetRejectedPayload, ProtocolEnvelope, ResizeAuthorityChangedPayload,
-    TargetExitedPayload, TargetInputPayload, TargetOutputPayload, TargetPublishedPayload,
+    ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, ErrorPayload, NodeSessionChannel,
+    NodeSessionEnvelope, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
+    ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload, TargetInputPayload,
+    TargetOutputPayload, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -48,6 +49,14 @@ pub fn write_control_plane_envelope(
     Ok(())
 }
 
+pub fn write_node_session_envelope(
+    writer: &mut impl Write,
+    envelope: &NodeSessionEnvelope,
+) -> Result<(), RemoteTransportCodecError> {
+    write_node_session_channel(writer, envelope.channel)?;
+    write_control_plane_envelope(writer, &envelope.envelope)
+}
+
 pub fn read_control_plane_envelope(
     reader: &mut impl Read,
 ) -> Result<ProtocolEnvelope<ControlPlanePayload>, RemoteTransportCodecError> {
@@ -74,6 +83,14 @@ pub fn read_control_plane_envelope(
         console_id,
         payload,
     })
+}
+
+pub fn read_node_session_envelope(
+    reader: &mut impl Read,
+) -> Result<NodeSessionEnvelope, RemoteTransportCodecError> {
+    let channel = read_node_session_channel(reader)?;
+    let envelope = read_control_plane_envelope(reader)?;
+    Ok(NodeSessionEnvelope { channel, envelope })
 }
 
 #[derive(Debug)]
@@ -108,8 +125,21 @@ fn write_payload(
     payload: &ControlPlanePayload,
 ) -> Result<(), RemoteTransportCodecError> {
     match payload {
-        ControlPlanePayload::OpenTargetOk(payload) => {
+        ControlPlanePayload::ClientHello(payload) => {
             write_u8(writer, 1)?;
+            write_string(writer, &payload.node_id)?;
+            write_string(writer, &payload.client_version)?;
+        }
+        ControlPlanePayload::ServerHello(payload) => {
+            write_u8(writer, 2)?;
+            write_string(writer, &payload.server_id)?;
+            write_string(writer, &payload.server_version)?;
+            write_string(writer, &payload.accepted_protocol_version)?;
+            write_u64(writer, payload.heartbeat_interval_ms)?;
+            write_static_string(writer, payload.session_recovery_policy)?;
+        }
+        ControlPlanePayload::OpenTargetOk(payload) => {
+            write_u8(writer, 3)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.attachment_id)?;
             write_string(writer, &payload.console_id)?;
@@ -120,14 +150,14 @@ fn write_payload(
             write_optional_string(writer, payload.initial_snapshot.as_deref())?;
         }
         ControlPlanePayload::OpenTargetRejected(payload) => {
-            write_u8(writer, 2)?;
+            write_u8(writer, 4)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.console_id)?;
             write_static_string(writer, payload.code)?;
             write_string(writer, &payload.message)?;
         }
         ControlPlanePayload::ResizeAuthorityChanged(payload) => {
-            write_u8(writer, 3)?;
+            write_u8(writer, 5)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.resize_epoch)?;
             write_string(writer, &payload.resize_authority_console_id)?;
@@ -136,7 +166,7 @@ fn write_payload(
             write_optional_usize(writer, payload.rows)?;
         }
         ControlPlanePayload::TargetInput(payload) => {
-            write_u8(writer, 4)?;
+            write_u8(writer, 6)?;
             write_string(writer, &payload.attachment_id)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.console_id)?;
@@ -145,14 +175,14 @@ fn write_payload(
             write_string(writer, &payload.bytes_base64)?;
         }
         ControlPlanePayload::TargetOutput(payload) => {
-            write_u8(writer, 5)?;
+            write_u8(writer, 7)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.output_seq)?;
             write_static_string(writer, payload.stream)?;
             write_string(writer, &payload.bytes_base64)?;
         }
         ControlPlanePayload::ApplyResize(payload) => {
-            write_u8(writer, 6)?;
+            write_u8(writer, 8)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.resize_epoch)?;
             write_string(writer, &payload.resize_authority_console_id)?;
@@ -160,7 +190,7 @@ fn write_payload(
             write_usize(writer, payload.rows)?;
         }
         ControlPlanePayload::TargetPublished(payload) => {
-            write_u8(writer, 7)?;
+            write_u8(writer, 9)?;
             write_string(writer, &payload.transport_session_id)?;
             write_optional_string(writer, payload.source_session_name.as_deref())?;
             write_optional_string(writer, payload.selector.as_deref())?;
@@ -173,12 +203,12 @@ fn write_payload(
             write_usize(writer, payload.window_count)?;
         }
         ControlPlanePayload::TargetExited(payload) => {
-            write_u8(writer, 8)?;
+            write_u8(writer, 10)?;
             write_string(writer, &payload.transport_session_id)?;
             write_optional_string(writer, payload.source_session_name.as_deref())?;
         }
         ControlPlanePayload::Error(payload) => {
-            write_u8(writer, 9)?;
+            write_u8(writer, 11)?;
             write_static_string(writer, payload.code)?;
             write_string(writer, &payload.message)?;
             write_optional_string(writer, payload.details.as_deref())?;
@@ -189,7 +219,18 @@ fn write_payload(
 
 fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTransportCodecError> {
     Ok(match read_u8(reader)? {
-        1 => ControlPlanePayload::OpenTargetOk(OpenTargetOkPayload {
+        1 => ControlPlanePayload::ClientHello(ClientHelloPayload {
+            node_id: read_string(reader)?,
+            client_version: read_string(reader)?,
+        }),
+        2 => ControlPlanePayload::ServerHello(ServerHelloPayload {
+            server_id: read_string(reader)?,
+            server_version: read_string(reader)?,
+            accepted_protocol_version: read_string(reader)?,
+            heartbeat_interval_ms: read_u64(reader)?,
+            session_recovery_policy: read_known_static_string(reader)?,
+        }),
+        3 => ControlPlanePayload::OpenTargetOk(OpenTargetOkPayload {
             target_id: read_string(reader)?,
             attachment_id: read_string(reader)?,
             console_id: read_string(reader)?,
@@ -199,13 +240,13 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             availability: read_known_static_string(reader)?,
             initial_snapshot: read_optional_string(reader)?,
         }),
-        2 => ControlPlanePayload::OpenTargetRejected(OpenTargetRejectedPayload {
+        4 => ControlPlanePayload::OpenTargetRejected(OpenTargetRejectedPayload {
             target_id: read_string(reader)?,
             console_id: read_string(reader)?,
             code: read_known_static_string(reader)?,
             message: read_string(reader)?,
         }),
-        3 => ControlPlanePayload::ResizeAuthorityChanged(ResizeAuthorityChangedPayload {
+        5 => ControlPlanePayload::ResizeAuthorityChanged(ResizeAuthorityChangedPayload {
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,
             resize_authority_console_id: read_string(reader)?,
@@ -213,7 +254,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             cols: read_optional_usize(reader)?,
             rows: read_optional_usize(reader)?,
         }),
-        4 => ControlPlanePayload::TargetInput(TargetInputPayload {
+        6 => ControlPlanePayload::TargetInput(TargetInputPayload {
             attachment_id: read_string(reader)?,
             target_id: read_string(reader)?,
             console_id: read_string(reader)?,
@@ -221,20 +262,20 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             input_seq: read_u64(reader)?,
             bytes_base64: read_string(reader)?,
         }),
-        5 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
+        7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
             target_id: read_string(reader)?,
             output_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
             bytes_base64: read_string(reader)?,
         }),
-        6 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
+        8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,
             resize_authority_console_id: read_string(reader)?,
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
         }),
-        7 => ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+        9 => ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: read_string(reader)?,
             source_session_name: read_optional_string(reader)?,
             selector: read_optional_string(reader)?,
@@ -246,11 +287,11 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             attached_clients: read_usize(reader)?,
             window_count: read_usize(reader)?,
         }),
-        8 => ControlPlanePayload::TargetExited(TargetExitedPayload {
+        10 => ControlPlanePayload::TargetExited(TargetExitedPayload {
             transport_session_id: read_string(reader)?,
             source_session_name: read_optional_string(reader)?,
         }),
-        9 => ControlPlanePayload::Error(ErrorPayload {
+        11 => ControlPlanePayload::Error(ErrorPayload {
             code: read_known_static_string(reader)?,
             message: read_string(reader)?,
             details: read_optional_string(reader)?,
@@ -261,6 +302,31 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             )));
         }
     })
+}
+
+fn write_node_session_channel(
+    writer: &mut impl Write,
+    channel: NodeSessionChannel,
+) -> Result<(), RemoteTransportCodecError> {
+    write_u8(
+        writer,
+        match channel {
+            NodeSessionChannel::Authority => 1,
+            NodeSessionChannel::Publication => 2,
+        },
+    )
+}
+
+fn read_node_session_channel(
+    reader: &mut impl Read,
+) -> Result<NodeSessionChannel, RemoteTransportCodecError> {
+    match read_u8(reader)? {
+        1 => Ok(NodeSessionChannel::Authority),
+        2 => Ok(NodeSessionChannel::Publication),
+        other => Err(RemoteTransportCodecError::new(format!(
+            "unknown node session channel tag `{other}`"
+        ))),
+    }
 }
 
 fn write_string(writer: &mut impl Write, value: &str) -> Result<(), RemoteTransportCodecError> {
@@ -300,6 +366,7 @@ fn read_known_static_string(
         "unauthorized" => Ok("unauthorized"),
         "pty" => Ok("pty"),
         "test" => Ok("test"),
+        "republish_live_targets" => Ok("republish_live_targets"),
         "resize_denied" => Ok("resize_denied"),
         "target_not_opened" => Ok("target_not_opened"),
         "attachment_not_open" => Ok("attachment_not_open"),
@@ -435,11 +502,12 @@ fn read_u8(reader: &mut impl Read) -> Result<u8, RemoteTransportCodecError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_control_plane_envelope, read_registration_frame, write_control_plane_envelope,
-        write_registration_frame,
+        read_control_plane_envelope, read_node_session_envelope, read_registration_frame,
+        write_control_plane_envelope, write_node_session_envelope, write_registration_frame,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, TargetOutputPayload, TargetPublishedPayload,
+        ControlPlanePayload, NodeSessionChannel, NodeSessionEnvelope, ProtocolEnvelope,
+        TargetOutputPayload, TargetPublishedPayload,
     };
 
     #[test]
@@ -511,6 +579,44 @@ mod tests {
         write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
         let decoded =
             read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn node_session_envelope_round_trips_channel_and_payload() {
+        let envelope = NodeSessionEnvelope {
+            channel: NodeSessionChannel::Publication,
+            envelope: ProtocolEnvelope {
+                protocol_version: "1.1".to_string(),
+                message_id: "msg-3".to_string(),
+                message_type: "target_published",
+                timestamp: "2026-04-28T00:00:00Z".to_string(),
+                sender_id: "peer-a".to_string(),
+                correlation_id: None,
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                    transport_session_id: "shell-1".to_string(),
+                    source_session_name: Some("target-host-1".to_string()),
+                    selector: Some("wk:shell".to_string()),
+                    availability: "online",
+                    session_role: Some("target-host"),
+                    workspace_key: Some("wk-1".to_string()),
+                    command_name: Some("codex".to_string()),
+                    current_path: Some("/tmp/demo".to_string()),
+                    attached_clients: 2,
+                    window_count: 1,
+                }),
+            },
+        };
+        let mut bytes = Vec::new();
+
+        write_node_session_envelope(&mut bytes, &envelope)
+            .expect("node session envelope should encode");
+        let decoded =
+            read_node_session_envelope(&mut bytes.as_slice()).expect("node session should decode");
 
         assert_eq!(decoded, envelope);
     }

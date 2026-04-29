@@ -92,9 +92,27 @@ where
             .collect())
     }
 
+    pub fn list_activation_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
+        Ok(self
+            .list_targets()?
+            .into_iter()
+            .filter(is_activation_target)
+            .collect())
+    }
+
     pub fn find_target(&self, value: &str) -> Result<Option<ManagedSessionRecord>, G::Error> {
         Ok(self
             .list_targets()?
+            .into_iter()
+            .find(|target| target.matches_target(value)))
+    }
+
+    pub fn find_activation_target(
+        &self,
+        value: &str,
+    ) -> Result<Option<ManagedSessionRecord>, G::Error> {
+        Ok(self
+            .list_activation_targets()?
             .into_iter()
             .find(|target| target.matches_target(value)))
     }
@@ -183,9 +201,16 @@ pub fn project_visible_targets(
     visible_targets
 }
 
+pub fn is_activation_target(target: &ManagedSessionRecord) -> bool {
+    (target.address.transport() == &SessionTransport::LocalTmux && target.is_target_host())
+        || target.address.transport() == &SessionTransport::RemotePeer
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{project_visible_targets, TargetCatalogGateway, TargetRegistryService};
+    use super::{
+        is_activation_target, project_visible_targets, TargetCatalogGateway, TargetRegistryService,
+    };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
@@ -278,6 +303,63 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].address.authority_id(), "wa-1");
         assert_eq!(targets[0].address.session_id(), "workspace-1");
+    }
+
+    #[test]
+    fn registry_lists_only_activation_targets() {
+        let registry = TargetRegistryService::new(FakeGateway {
+            targets: vec![
+                session(
+                    "wa-1",
+                    "workspace",
+                    "bash",
+                    WorkspaceSessionRole::WorkspaceChrome,
+                ),
+                session(
+                    "wa-1",
+                    "target-1",
+                    "codex",
+                    WorkspaceSessionRole::TargetHost,
+                ),
+                remote_session("peer-a", "shell-1", "bash"),
+            ],
+        });
+
+        let targets = registry
+            .list_activation_targets()
+            .expect("activation targets should list successfully");
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(is_activation_target));
+        assert_eq!(targets[0].address.qualified_target(), "wa-1:target-1");
+        assert_eq!(targets[1].address.qualified_target(), "peer-a:shell-1");
+    }
+
+    #[test]
+    fn registry_finds_only_activation_targets() {
+        let registry = TargetRegistryService::new(FakeGateway {
+            targets: vec![
+                session(
+                    "wa-1",
+                    "workspace",
+                    "bash",
+                    WorkspaceSessionRole::WorkspaceChrome,
+                ),
+                remote_session("peer-a", "shell-1", "codex"),
+            ],
+        });
+
+        assert!(registry
+            .find_activation_target("wa-1:workspace")
+            .expect("activation lookup should succeed")
+            .is_none());
+
+        let target = registry
+            .find_activation_target("peer-a:shell-1")
+            .expect("activation lookup should succeed")
+            .expect("remote activation target should exist");
+
+        assert_eq!(target.address.qualified_target(), "peer-a:shell-1");
     }
 
     #[test]

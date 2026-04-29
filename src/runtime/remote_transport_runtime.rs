@@ -61,7 +61,10 @@ impl RemoteConnectionRegistry {
         mailbox
     }
 
-    fn connection_for(&self, node_id: &str) -> Option<Arc<dyn RemoteControlPlaneConnection>> {
+    pub(crate) fn connection_for(
+        &self,
+        node_id: &str,
+    ) -> Option<Arc<dyn RemoteControlPlaneConnection>> {
         self.connections
             .lock()
             .expect("remote connection registry mutex should not be poisoned")

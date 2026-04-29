@@ -10,14 +10,17 @@ pub struct Cli {
 #[derive(Debug, Clone)]
 pub enum Command {
     Workspace,
+    Server(ServerConsoleCommand),
     ChromeRefreshSocket(SocketNameCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
     RemoteMainSlot(RemoteMainSlotCommand),
+    RemoteServerConsole(RemoteServerConsoleCommand),
     RemoteAuthorityTargetHost(RemoteAuthorityTargetHostCommand),
     RemoteAuthorityOutputPump(RemoteAuthorityOutputPumpCommand),
     RemoteTargetPublicationServer(RemoteTargetPublicationServerCommand),
     RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
+    RemoteTargetPublicationSender(RemoteTargetPublicationSenderCommand),
     RemoteTargetPublicationOwner(RemoteTargetPublicationOwnerCommand),
     SocketLifecycleHook(SocketLifecycleHookCommand),
     RemoteTargetBindPublication(RemoteTargetBindPublicationCommand),
@@ -37,6 +40,13 @@ pub enum Command {
     List,
     Detach(DetachCommand),
     Help(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerConsoleCommand {
+    pub socket_name: String,
+    pub console_name: String,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +85,13 @@ pub struct RemoteMainSlotCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct RemoteServerConsoleCommand {
+    pub socket_name: String,
+    pub console_name: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct RemoteAuthorityTargetHostCommand {
     pub socket_name: String,
     pub target_session_name: String,
@@ -95,6 +112,11 @@ pub struct RemoteTargetPublicationServerCommand {
 
 #[derive(Debug, Clone, Default)]
 pub struct RemoteTargetPublicationAgentCommand {
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteTargetPublicationSenderCommand {
     pub socket_name: String,
 }
 
@@ -195,6 +217,10 @@ impl Cli {
         }
 
         let command = match args[0].as_str() {
+            "server" => {
+                args.remove(0);
+                Command::Server(parse_server_console(args)?)
+            }
             "__chrome-refresh-socket" => {
                 args.remove(0);
                 Command::ChromeRefreshSocket(parse_socket_name_command(args)?)
@@ -210,6 +236,10 @@ impl Cli {
             "__remote-main-slot" => {
                 args.remove(0);
                 Command::RemoteMainSlot(parse_remote_main_slot(args)?)
+            }
+            "__remote-server-console" => {
+                args.remove(0);
+                Command::RemoteServerConsole(parse_remote_server_console(args)?)
             }
             "__remote-authority-target-host" => {
                 args.remove(0);
@@ -228,6 +258,12 @@ impl Cli {
             "__remote-target-publication-agent" => {
                 args.remove(0);
                 Command::RemoteTargetPublicationAgent(parse_remote_target_publication_agent(args)?)
+            }
+            "__remote-target-publication-sender" => {
+                args.remove(0);
+                Command::RemoteTargetPublicationSender(parse_remote_target_publication_sender(
+                    args,
+                )?)
             }
             "__remote-target-publication-owner" => {
                 args.remove(0);
@@ -355,6 +391,30 @@ fn parse_detach(args: Vec<String>) -> Result<DetachCommand, CliError> {
     Ok(command)
 }
 
+fn parse_server_console(args: Vec<String>) -> Result<ServerConsoleCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut console_name = None;
+    let mut target = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--console-name" => console_name = Some(expect_value("--console-name", &mut iter)?),
+            "--target" => target = Some(expect_value("--target", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ServerConsoleCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        console_name: console_name.unwrap_or_else(|| "server".to_string()),
+        target,
+    })
+}
+
 fn parse_ui_pane(args: Vec<String>) -> Result<UiPaneCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
@@ -443,6 +503,31 @@ fn parse_remote_main_slot(args: Vec<String>) -> Result<RemoteMainSlotCommand, Cl
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         target: target.ok_or_else(|| CliError::MissingValue("--target".to_string()))?,
+    })
+}
+
+fn parse_remote_server_console(args: Vec<String>) -> Result<RemoteServerConsoleCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut console_name = None;
+    let mut target = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--console-name" => console_name = Some(expect_value("--console-name", &mut iter)?),
+            "--target" => target = Some(expect_value("--target", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteServerConsoleCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        console_name: console_name
+            .ok_or_else(|| CliError::MissingValue("--console-name".to_string()))?,
+        target,
     })
 }
 
@@ -570,6 +655,26 @@ fn parse_remote_target_publication_owner(
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
         target_session_name: target_session_name
             .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
+    })
+}
+
+fn parse_remote_target_publication_sender(
+    args: Vec<String>,
+) -> Result<RemoteTargetPublicationSenderCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteTargetPublicationSenderCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
     })
 }
 
@@ -860,6 +965,7 @@ fn help_text() -> String {
         "",
         "Usage:",
         "  waitagent",
+        "  waitagent server --socket-name <socket> [--console-name <name>] [--target <target>]",
         "  waitagent attach [<target>]",
         "  waitagent ls",
         "  waitagent detach [<target>]",
@@ -922,6 +1028,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_server_command_with_default_console_name() {
+        match parse(&["waitagent", "server", "--socket-name", "wa-1"]) {
+            Command::Server(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.console_name, "server");
+                assert!(command.target.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_server_command_with_explicit_console_name_and_target() {
+        match parse(&[
+            "waitagent",
+            "server",
+            "--socket-name",
+            "wa-1",
+            "--console-name",
+            "ops",
+            "--target",
+            "peer-a:shell-1",
+        ]) {
+            Command::Server(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.console_name, "ops");
+                assert_eq!(command.target.as_deref(), Some("peer-a:shell-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_attach_command_with_tmux_target() {
         match parse(&["waitagent", "attach", "wa-1:waitagent-1"]) {
             Command::Attach(command) => {
@@ -960,6 +1099,46 @@ mod tests {
             Command::UiSidebar(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_server_console_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-server-console",
+            "--socket-name",
+            "wa-1",
+            "--console-name",
+            "console-a",
+            "--target",
+            "peer-a:shell-1",
+        ]) {
+            Command::RemoteServerConsole(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.console_name, "console-a");
+                assert_eq!(command.target.as_deref(), Some("peer-a:shell-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_server_console_command_without_target() {
+        match parse(&[
+            "waitagent",
+            "__remote-server-console",
+            "--socket-name",
+            "wa-1",
+            "--console-name",
+            "console-a",
+        ]) {
+            Command::RemoteServerConsole(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.console_name, "console-a");
+                assert!(command.target.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }

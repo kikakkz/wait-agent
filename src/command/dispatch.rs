@@ -3,7 +3,9 @@ use crate::error::AppError;
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
-use crate::runtime::remote_main_slot_pane_runtime::RemoteMainSlotPaneRuntime;
+use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
+use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
+use crate::runtime::remote_server_console_runtime::RemoteServerConsoleRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
@@ -18,7 +20,9 @@ pub struct CommandDispatcher {
     pane_runtime: EventDrivenPaneRuntime,
     footer_menu_runtime: FooterMenuRuntime,
     remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime,
-    remote_main_slot_pane_runtime: RemoteMainSlotPaneRuntime,
+    remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime,
+    remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
+    remote_server_console_runtime: RemoteServerConsoleRuntime,
     remote_target_publication_runtime: RemoteTargetPublicationRuntime,
     layout_runtime: WorkspaceLayoutRuntime,
 }
@@ -31,7 +35,9 @@ impl CommandDispatcher {
             footer_menu_runtime: FooterMenuRuntime::from_build_env()?,
             remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime::from_build_env(
             )?,
-            remote_main_slot_pane_runtime: RemoteMainSlotPaneRuntime::from_build_env()?,
+            remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime::from_build_env()?,
+            remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime::from_build_env()?,
+            remote_server_console_runtime: RemoteServerConsoleRuntime::from_build_env()?,
             remote_target_publication_runtime: RemoteTargetPublicationRuntime::from_build_env()?,
             layout_runtime: WorkspaceLayoutRuntime::from_build_env()?,
         })
@@ -42,6 +48,10 @@ impl CommandDispatcher {
             Command::Workspace => self
                 .workspace_runtime
                 .run_workspace_entry()
+                .map_err(AppError::from),
+            Command::Server(command) => self
+                .remote_server_console_runtime
+                .run_public(command)
                 .map_err(AppError::from),
             Command::ChromeRefreshSocket(command) => self
                 .layout_runtime
@@ -56,7 +66,11 @@ impl CommandDispatcher {
                 .run_footer(command)
                 .map_err(AppError::from),
             Command::RemoteMainSlot(command) => self
-                .remote_main_slot_pane_runtime
+                .remote_main_slot_ingress_runtime
+                .run(command)
+                .map_err(AppError::from),
+            Command::RemoteServerConsole(command) => self
+                .remote_server_console_runtime
                 .run(command)
                 .map_err(AppError::from),
             Command::RemoteAuthorityTargetHost(command) => self
@@ -74,6 +88,10 @@ impl CommandDispatcher {
             Command::RemoteTargetPublicationAgent(command) => self
                 .remote_target_publication_runtime
                 .run_publication_agent(command)
+                .map_err(AppError::from),
+            Command::RemoteTargetPublicationSender(command) => self
+                .remote_node_session_owner_runtime
+                .run_publication_sender(command)
                 .map_err(AppError::from),
             Command::RemoteTargetPublicationOwner(command) => self
                 .remote_target_publication_runtime

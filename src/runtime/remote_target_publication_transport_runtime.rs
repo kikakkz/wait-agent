@@ -1,24 +1,13 @@
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
-use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
-    REMOTE_PROTOCOL_VERSION,
-};
-use crate::infra::remote_transport_codec::{
-    write_control_plane_envelope, write_registration_frame, RemoteTransportCodecError,
+use crate::runtime::remote_node_session_runtime::{
+    RemoteNodeSessionError, RemoteNodeSessionRuntime,
 };
 use std::fmt;
-use std::io;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct RemoteTargetPublicationTransportRuntime {
     node_id: String,
-    writer: Mutex<UnixStream>,
-    next_message_id: AtomicU64,
+    session: RemoteNodeSessionRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,13 +21,8 @@ impl RemoteTargetPublicationTransportRuntime {
         node_id: impl Into<String>,
     ) -> Result<Self, RemoteTargetPublicationTransportError> {
         let node_id = node_id.into();
-        let mut stream = UnixStream::connect(socket_path)?;
-        write_registration_frame(&mut stream, &node_id)?;
-        Ok(Self {
-            node_id,
-            writer: Mutex::new(stream),
-            next_message_id: AtomicU64::new(0),
-        })
+        let session = RemoteNodeSessionRuntime::connect(socket_path, node_id.clone())?;
+        Ok(Self { node_id, session })
     }
 
     pub fn send_target_published(
@@ -47,26 +31,9 @@ impl RemoteTargetPublicationTransportRuntime {
         source_session_name: Option<&str>,
     ) -> Result<(), RemoteTargetPublicationTransportError> {
         validate_publication_target(target, &self.node_id)?;
-        let current_path = target
-            .current_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        let payload = ControlPlanePayload::TargetPublished(TargetPublishedPayload {
-            transport_session_id: target.address.session_id().to_string(),
-            source_session_name: source_session_name.map(str::to_string),
-            selector: target.selector.clone(),
-            availability: target.availability.as_str(),
-            session_role: target
-                .session_role
-                .as_ref()
-                .map(WorkspaceSessionRole::as_str),
-            workspace_key: target.workspace_key.clone(),
-            command_name: target.command_name.clone(),
-            current_path,
-            attached_clients: target.attached_clients,
-            window_count: target.window_count,
-        });
-        self.send_envelope(target.address.id().as_str(), payload)
+        self.session
+            .send_target_published(target, source_session_name)
+            .map_err(RemoteTargetPublicationTransportError::from)
     }
 
     pub fn send_target_exited(
@@ -74,43 +41,9 @@ impl RemoteTargetPublicationTransportRuntime {
         transport_session_id: &str,
         source_session_name: Option<&str>,
     ) -> Result<(), RemoteTargetPublicationTransportError> {
-        let target_id = format!("remote-peer:{}:{transport_session_id}", self.node_id);
-        self.send_envelope(
-            &target_id,
-            ControlPlanePayload::TargetExited(TargetExitedPayload {
-                transport_session_id: transport_session_id.to_string(),
-                source_session_name: source_session_name.map(str::to_string),
-            }),
-        )
-    }
-
-    fn send_envelope(
-        &self,
-        target_id: &str,
-        payload: ControlPlanePayload,
-    ) -> Result<(), RemoteTargetPublicationTransportError> {
-        let envelope = ProtocolEnvelope {
-            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!(
-                "{}-publication-msg-{}",
-                self.node_id,
-                self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1
-            ),
-            message_type: payload.message_type(),
-            timestamp: now_rfc3339_like(),
-            sender_id: self.node_id.clone(),
-            correlation_id: None,
-            target_id: Some(target_id.to_string()),
-            attachment_id: None,
-            console_id: None,
-            payload,
-        };
-        let mut writer = self
-            .writer
-            .lock()
-            .expect("publication transport writer mutex should not be poisoned");
-        write_control_plane_envelope(&mut *writer, &envelope)?;
-        Ok(())
+        self.session
+            .send_target_exited(transport_session_id, source_session_name)
+            .map_err(RemoteTargetPublicationTransportError::from)
     }
 }
 
@@ -153,14 +86,6 @@ fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
-fn now_rfc3339_like() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{millis}Z")
-}
-
 impl RemoteTargetPublicationTransportError {
     fn new(message: impl Into<String>) -> Self {
         Self {
@@ -177,14 +102,8 @@ impl fmt::Display for RemoteTargetPublicationTransportError {
 
 impl std::error::Error for RemoteTargetPublicationTransportError {}
 
-impl From<io::Error> for RemoteTargetPublicationTransportError {
-    fn from(value: io::Error) -> Self {
-        Self::new(value.to_string())
-    }
-}
-
-impl From<RemoteTransportCodecError> for RemoteTargetPublicationTransportError {
-    fn from(value: RemoteTransportCodecError) -> Self {
+impl From<RemoteNodeSessionError> for RemoteTargetPublicationTransportError {
+    fn from(value: RemoteNodeSessionError) -> Self {
         Self::new(value.to_string())
     }
 }
@@ -197,10 +116,14 @@ mod tests {
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, TargetExitedPayload, TargetPublishedPayload,
+        ClientHelloPayload, ControlPlanePayload, NodeSessionChannel, TargetExitedPayload,
+        TargetPublishedPayload,
     };
     use crate::infra::remote_transport_codec::{
-        read_control_plane_envelope, read_registration_frame,
+        read_control_plane_envelope, read_node_session_envelope,
+    };
+    use crate::runtime::remote_node_transport_runtime::{
+        write_server_hello, NODE_TRANSPORT_CLIENT_VERSION,
     };
     use std::fs;
     use std::os::unix::net::UnixListener;
@@ -222,9 +145,23 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("listener should bind");
         let accept_thread = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
-            let node_id = read_registration_frame(&mut stream).expect("registration should decode");
+            let node_id = match read_control_plane_envelope(&mut stream)
+                .expect("client hello should decode")
+                .payload
+            {
+                ControlPlanePayload::ClientHello(ClientHelloPayload {
+                    node_id,
+                    client_version,
+                }) => {
+                    assert_eq!(client_version, NODE_TRANSPORT_CLIENT_VERSION);
+                    node_id
+                }
+                other => panic!("unexpected hello payload: {other:?}"),
+            };
+            write_server_hello(&mut stream, "waitagent-publication")
+                .expect("server hello should encode");
             let envelope =
-                read_control_plane_envelope(&mut stream).expect("publication should decode");
+                read_node_session_envelope(&mut stream).expect("publication should decode");
             (node_id, envelope)
         });
 
@@ -238,7 +175,8 @@ mod tests {
             .join()
             .expect("accept thread should join cleanly");
         assert_eq!(node_id, "peer-a");
-        match envelope.payload {
+        assert_eq!(envelope.channel, NodeSessionChannel::Publication);
+        match envelope.envelope.payload {
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
                 transport_session_id,
                 source_session_name,
@@ -274,8 +212,22 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("listener should bind");
         let accept_thread = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
-            let _ = read_registration_frame(&mut stream).expect("registration should decode");
-            read_control_plane_envelope(&mut stream).expect("exit should decode")
+            match read_control_plane_envelope(&mut stream)
+                .expect("client hello should decode")
+                .payload
+            {
+                ControlPlanePayload::ClientHello(ClientHelloPayload {
+                    node_id,
+                    client_version,
+                }) => {
+                    assert_eq!(node_id, "peer-a");
+                    assert_eq!(client_version, NODE_TRANSPORT_CLIENT_VERSION);
+                }
+                other => panic!("unexpected hello payload: {other:?}"),
+            }
+            write_server_hello(&mut stream, "waitagent-publication")
+                .expect("server hello should encode");
+            read_node_session_envelope(&mut stream).expect("exit should decode")
         });
 
         let transport = RemoteTargetPublicationTransportRuntime::connect(&socket_path, "peer-a")
@@ -287,12 +239,13 @@ mod tests {
         let envelope = accept_thread
             .join()
             .expect("accept thread should join cleanly");
+        assert_eq!(envelope.channel, NodeSessionChannel::Publication);
         assert_eq!(
-            envelope.target_id.as_deref(),
+            envelope.envelope.target_id.as_deref(),
             Some("remote-peer:peer-a:shell-1")
         );
         assert_eq!(
-            envelope.payload,
+            envelope.envelope.payload,
             ControlPlanePayload::TargetExited(TargetExitedPayload {
                 transport_session_id: "shell-1".to_string(),
                 source_session_name: Some("target-host-1".to_string()),
