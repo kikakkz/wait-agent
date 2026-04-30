@@ -48,6 +48,13 @@ pub struct RemoteMainSlotPaneRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteInteractSignal {
+    ConsoleInputStarted,
+    ConsoleSubmit,
+    ManualReturnToPicker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteInteractSurfaceSpec {
     pub socket_name: String,
     pub surface_scope: String,
@@ -156,6 +163,17 @@ impl RemoteMainSlotPaneRuntime {
         &self,
         spec: RemoteInteractSurfaceSpec,
     ) -> Result<(), LifecycleError> {
+        self.run_surface_with_signal_sink(spec, |_| {})
+    }
+
+    pub(crate) fn run_surface_with_signal_sink<F>(
+        &self,
+        spec: RemoteInteractSurfaceSpec,
+        mut on_signal: F,
+    ) -> Result<(), LifecycleError>
+    where
+        F: FnMut(RemoteInteractSignal),
+    {
         let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let terminal = TerminalRuntime::stdio();
         let initial_size = terminal.current_size_or_default();
@@ -215,6 +233,7 @@ impl RemoteMainSlotPaneRuntime {
             thread::park();
         });
         let mut console_seq = 0u64;
+        let mut input_signal_decoder = RemoteInteractInputSignalDecoder::default();
         let mut authority_status = if remote_runtime.has_connection(target.address.authority_id()) {
             AuthorityTransportStatus::Connected
         } else {
@@ -280,6 +299,9 @@ impl RemoteMainSlotPaneRuntime {
                     }
                 },
                 Ok(RemotePaneEvent::Input(bytes)) => {
+                    for signal in input_signal_decoder.feed(&spec, &bytes) {
+                        on_signal(signal);
+                    }
                     if should_exit_surface_locally(&spec, &bytes) {
                         return Ok(());
                     }
@@ -360,6 +382,94 @@ impl RemoteMainSlotPaneRuntime {
 
 fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, bytes: &[u8]) -> bool {
     spec.console_location == ConsoleLocation::ServerConsole && bytes.contains(&0x1d)
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RemoteInteractInputSignalDecoder {
+    pending: Vec<u8>,
+    input_in_progress: bool,
+}
+
+impl RemoteInteractInputSignalDecoder {
+    fn feed(
+        &mut self,
+        spec: &RemoteInteractSurfaceSpec,
+        bytes: &[u8],
+    ) -> Vec<RemoteInteractSignal> {
+        self.pending.extend_from_slice(bytes);
+        let mut signals = Vec::new();
+
+        loop {
+            if self.pending.is_empty() {
+                break;
+            }
+
+            if spec.console_location == ConsoleLocation::ServerConsole
+                && self.pending.first() == Some(&0x1d)
+            {
+                self.pending.drain(..1);
+                self.input_in_progress = false;
+                signals.push(RemoteInteractSignal::ManualReturnToPicker);
+                continue;
+            }
+
+            if self.pending.starts_with(b"\x1bOM") {
+                self.pending.drain(..3);
+                self.push_submit_signals(&mut signals);
+                continue;
+            }
+
+            if self.pending.starts_with(b"\x1b[13u") {
+                self.pending.drain(..5);
+                self.push_submit_signals(&mut signals);
+                continue;
+            }
+
+            if self.pending.starts_with(b"\r\n") {
+                self.pending.drain(..2);
+                self.push_submit_signals(&mut signals);
+                continue;
+            }
+
+            if self.pending.first() == Some(&b'\r') || self.pending.first() == Some(&b'\n') {
+                self.pending.drain(..1);
+                self.push_submit_signals(&mut signals);
+                continue;
+            }
+
+            if is_partial_remote_submit_sequence(&self.pending) {
+                break;
+            }
+
+            self.pending.drain(..1);
+            if !self.input_in_progress {
+                self.input_in_progress = true;
+                signals.push(RemoteInteractSignal::ConsoleInputStarted);
+            }
+        }
+
+        signals
+    }
+
+    fn push_submit_signals(&mut self, signals: &mut Vec<RemoteInteractSignal>) {
+        if !self.input_in_progress {
+            signals.push(RemoteInteractSignal::ConsoleInputStarted);
+        }
+        self.input_in_progress = false;
+        signals.push(RemoteInteractSignal::ConsoleSubmit);
+    }
+}
+
+fn is_partial_remote_submit_sequence(pending: &[u8]) -> bool {
+    [
+        b"\x1b".as_slice(),
+        b"\x1b[".as_slice(),
+        b"\x1bO".as_slice(),
+        b"\x1b[1".as_slice(),
+        b"\x1b[13".as_slice(),
+    ]
+    .iter()
+    .any(|pattern| pattern.starts_with(pending))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,8 +851,9 @@ mod tests {
         apply_authority_envelope, authority_transport_event_sender, encode_base64,
         main_slot_console_id, main_slot_surface_spec, placeholder_lines,
         remote_authority_target_host_args, resolve_local_authority_target_host,
-        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractSurfaceSpec,
-        RemoteMainSlotPaneRuntime, RemotePaneEvent, ResolvedLocalAuthorityTargetHost,
+        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractInputSignalDecoder,
+        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
+        RemotePaneEvent, ResolvedLocalAuthorityTargetHost,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -823,6 +934,46 @@ mod tests {
         assert!(!should_exit_surface_locally(&main_slot, &[0x1d]));
         assert!(should_exit_surface_locally(&server_console, &[0x1d]));
         assert!(!should_exit_surface_locally(&server_console, b"hello"));
+    }
+
+    #[test]
+    fn server_console_input_decoder_emits_input_started_and_submit() {
+        let spec = server_console_surface_spec();
+        let mut decoder = RemoteInteractInputSignalDecoder::default();
+
+        assert_eq!(
+            decoder.feed(&spec, b"abc\r"),
+            vec![
+                RemoteInteractSignal::ConsoleInputStarted,
+                RemoteInteractSignal::ConsoleSubmit,
+            ]
+        );
+    }
+
+    #[test]
+    fn server_console_input_decoder_keeps_partial_submit_sequence_until_complete() {
+        let spec = server_console_surface_spec();
+        let mut decoder = RemoteInteractInputSignalDecoder::default();
+
+        assert!(decoder.feed(&spec, b"\x1b[13").is_empty());
+        assert_eq!(
+            decoder.feed(&spec, b"u"),
+            vec![
+                RemoteInteractSignal::ConsoleInputStarted,
+                RemoteInteractSignal::ConsoleSubmit,
+            ]
+        );
+    }
+
+    #[test]
+    fn server_console_input_decoder_emits_manual_return_for_ctrl_right_bracket() {
+        let spec = server_console_surface_spec();
+        let mut decoder = RemoteInteractInputSignalDecoder::default();
+
+        assert_eq!(
+            decoder.feed(&spec, &[0x1d]),
+            vec![RemoteInteractSignal::ManualReturnToPicker]
+        );
     }
 
     #[test]
@@ -1285,6 +1436,17 @@ mod tests {
             command_name: Some("bash".to_string()),
             current_path: None,
             task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    fn server_console_surface_spec() -> RemoteInteractSurfaceSpec {
+        RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "server-console:console-a".to_string(),
+            target: "peer-a:shell-1".to_string(),
+            console_id: "server-console:wa-1:console-a".to_string(),
+            console_host_id: "server-console:wa-1:console-a".to_string(),
+            console_location: ConsoleLocation::ServerConsole,
         }
     }
 

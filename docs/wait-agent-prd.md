@@ -75,7 +75,7 @@ WaitAgent does not try to make agents smarter. It tries to:
 - Make one `waitagent` instance the default entrypoint per machine
 - Expose only one session for active interaction at a time within a given console
 - Detect sessions that are likely waiting for user input
-- Allow at most one automatic switch after the user submits input
+- Surface waiting sessions clearly enough that the user notices them without any automatic focus jump
 - Preserve raw TTY semantics and avoid changing agent behavior or in-session command habits
 
 ### 3.2 Success Criteria
@@ -84,7 +84,7 @@ WaitAgent does not try to make agents smarter. It tries to:
 - On a single machine, the user only needs to start one `waitagent`
 - The user can always tell where input is going within the active console
 - Waiting sessions are surfaced quickly enough to matter
-- Automatic switching does not interrupt continuous interaction in the current session
+- Waiting-state visibility does not interrupt continuous interaction in the current session
 - The system remains transparent to the agents themselves
 
 ## 4. Non-goals
@@ -172,7 +172,7 @@ Sessions that enter the waiting state may be ordered for later user-facing atten
 
 ### 7.5 Session Automation Policy
 
-The current local product does not perform automatic switching.
+The accepted product direction does not perform automatic switching.
 
 ### 7.6 Runtime Role
 
@@ -195,7 +195,7 @@ Future remote support may introduce a remote control plane that:
 
 - Collects sessions from multiple nodes
 - Maintains a global session registry and aggregate view
-- Maintains its own focus and waiting queue for the server console
+- Maintains its own focus and waiting visibility for the server console
 - Receives events from attached consoles and routes them to the correct node
 - Broadcasts session output to all attached consoles
 
@@ -268,60 +268,39 @@ In network mode:
 - The server console and local client console use the same focus model
 - Network mode must not remove local CLI interactivity
 
-### 8.2 Automatic Scheduling Rule
+### 8.2 Waiting Visibility Rule
 
-Automatic scheduling may only happen after:
+Waiting state exists to attract attention, not to seize focus.
 
-> The user submits input with `Enter`
+The system may:
 
-Each `Enter` creates one scheduling opportunity:
+- Surface waiting state in sidebar, picker, badges, counts, or similar chrome
 
-- It may be consumed at most once
-- If there is a waiting session, switch to the earliest one in the FIFO queue
-- If there is no waiting session, keep the current focus
+The system must not:
+
+- Change focus automatically after `Enter`
+- Change focus automatically after any timeout or stabilization window
+- Use waiting state as an implicit focus jump trigger
 
 In network mode:
 
-- The server console maintains an aggregate waiting queue across nodes
-- Sessions from different nodes enter the same FIFO order
-- Scheduling rules do not change just because the target session lives on another machine
+- The server console maintains aggregate waiting visibility across nodes
+- Waiting visibility rules do not change just because the target session lives on another machine
 
-At the same time, a local client console may keep its own local waiting queue so that local interaction still feels like single-machine mode.
+At the same time, a local client console may keep its own local waiting visibility so that local interaction still feels like single-machine mode.
 
 ### 8.3 Continuous Interaction Protection
 
-This pattern should be treated as one continuous interaction and should not trigger a switch away:
+This pattern should be treated as one continuous interaction and must never trigger an automatic switch away:
 
 `prompt1 -> user input -> current session continues output -> prompt2`
 
-Therefore, the system should not switch immediately on `Enter`. It should:
-
-- Arm one scheduling opportunity
-- Observe the current session during the current interaction round
-- Prefer staying on the same session if it keeps producing output
-- Only consider spending the scheduling opportunity after the current output round has stabilized
-
-This rule is required to satisfy both:
-
-- Automatic scheduling only happens after user submission
-- Continuous interaction in the current session must not be interrupted
-
-### 8.4 Switch Lock
-
-After one automatic switch:
-
-- Lock further automatic switching
-- Keep the lock until one of the following happens
-
-Unlock conditions:
-
-- The user submits input again
-- The user manually switches sessions
+Therefore, pressing `Enter` keeps focus on the current session. Waiting sessions may update chrome and counts, but they must not steal focus.
 
 Goal:
 
-- Guarantee at most one automatic switch per submitted input
-- Prevent multiple waiting sessions from repeatedly stealing attention
+- Preserve continuous interaction in the current session
+- Let the user decide when to leave it
 
 ### 8.5 Manual Operations
 
@@ -475,10 +454,8 @@ Responsibilities:
 Responsibilities:
 
 - Track current focus
-- Track waiting queues
-- Implement FIFO scheduling
-- Implement enter-triggered scheduling
-- Implement switch lock
+- Track waiting visibility
+- Surface waiting-state attention cues without changing focus automatically
 
 ### 10.4 Input Controller
 
@@ -620,7 +597,7 @@ Allowed minimal UI elements:
 ### 12.9 Continuous Prompt Flow
 
 - `prompt1 -> input -> prompt2` is treated as one continuous interaction flow
-- The waiting queue must not steal focus in the middle of that flow
+- Waiting state must not steal focus in the middle of that flow
 
 ## 13. MVP Scope
 
@@ -672,7 +649,7 @@ Functional acceptance:
 - Support at least `3` simultaneous sessions
 - On a single machine, those sessions must be reachable through one `waitagent` instance
 - Foreground input must never enter background sessions within a console
-- Waiting sessions must enter FIFO order correctly
+- Waiting sessions must surface their state correctly
 - Resize must not break session behavior
 - One session crash must not affect others
 - Support at least `2` connected nodes
@@ -714,10 +691,9 @@ These tools solve:
 They do not solve:
 
 - Which session is waiting for the user
-- Waiting-aware FIFO scheduling
 - Explicit single-focus interaction management
 - Local workspace chrome that stays mounted while switching targets
-- Cross-machine session scheduling with mirrored interaction
+- Cross-machine session attention with mirrored interaction
 
 Conclusion:
 

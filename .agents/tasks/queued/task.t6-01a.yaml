@@ -23,7 +23,7 @@ linked_primitives:
 done_criteria:
   - the server console owns one explicit interaction seam that normalizes local and remote target interaction into one event model
   - transport-specific local attach and remote interact adapters no longer force later scheduling logic to branch directly on transport in the server-console runtime
-  - current server-console behavior remains manual-only and does not yet claim real auto-switch semantics
+  - current server-console behavior remains manual-only and does not claim any automatic focus movement
   - docs and task state record this slice as the first post-design implementation step under `task.t6-01`
 verification:
   - cargo test
@@ -37,7 +37,7 @@ touched_paths:
   - docs/server-console-scheduling-design.md
   - docs/execution-status-board.md
 notes:
-  - This slice is structure-first. It should not implement auto-switch policy yet.
+  - This slice is structure-first. It establishes the shared event seam under the accepted manual-only policy.
   - The goal is to prevent further patch-style scheduling changes from branching separately across local attach and remote interact paths.
   - Accepted output is one server-console-owned event seam that later slices can consume for submit, output, stabilization, and manual-switch signals.
   - 2026-04-29 close: the server console now routes local attach and remote interact through one explicit interaction seam plus shared trace model, so follow-on work can capture real submit and manual-switch signals without branching directly on transport again.

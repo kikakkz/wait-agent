@@ -2,7 +2,7 @@ id: task.t6-01c
 kind: task
 version: 1
 title: track waiting transitions and build an honest server-console FIFO waiting queue
-status: ready
+status: done
 priority: medium
 design_ref:
   doc: docs/server-console-scheduling-design.md
@@ -23,7 +23,7 @@ linked_primitives:
 done_criteria:
   - waiting membership and waiting-queue order are tracked as separate runtime state
   - queue insertion and removal follow observed waiting transitions rather than catalog order
-  - picker and server-console state can render waiting membership and FIFO-next state honestly without yet auto-switching
+  - picker and server-console state can render waiting membership and FIFO-next state honestly without moving focus automatically
 verification:
   - cargo test
   - targeted review of waiting-transition state, queue ordering, and snapshot presentation boundaries
@@ -36,3 +36,4 @@ touched_paths:
   - docs/execution-status-board.md
 notes:
   - This slice may refine the existing manual-only queue snapshot, but it must replace catalog-order behavior with transition-order behavior.
+  - 2026-04-29 close: server-console scheduling now tracks waiting membership separately from a transition-driven FIFO waiting queue, preserves first observed wait-entry order across catalog reordering, removes exited waiters on transition, and re-adds re-entered waiters at the tail instead of rebuilding queue order from catalog enumeration.

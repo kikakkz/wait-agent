@@ -216,7 +216,12 @@ mod tests {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
-                sessions: vec![session("wa-1", "sess-1", "bash")],
+                sessions: vec![session(
+                    "wa-1",
+                    "sess-1",
+                    "bash",
+                    ManagedSessionTaskState::Input,
+                )],
             },
         ));
 
@@ -257,8 +262,8 @@ mod tests {
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![
-                    session("wa-1", "sess-1", "bash"),
-                    session("wa-2", "sess-2", "codex"),
+                    session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
+                    session("wa-2", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
             },
         ));
@@ -298,7 +303,12 @@ mod tests {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
-                sessions: vec![session("wa-1", "sess-1", "bash")],
+                sessions: vec![session(
+                    "wa-1",
+                    "sess-1",
+                    "bash",
+                    ManagedSessionTaskState::Input,
+                )],
             },
         ));
 
@@ -333,8 +343,8 @@ mod tests {
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![
-                    session("wa-1", "sess-1", "bash"),
-                    session("wa-1", "sess-2", "codex"),
+                    session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
+                    session("wa-1", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
             },
         ));
@@ -345,8 +355,8 @@ mod tests {
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-2".to_string()),
                 sessions: vec![
-                    session("wa-1", "sess-1", "bash"),
-                    session("wa-1", "sess-2", "codex"),
+                    session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
+                    session("wa-1", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
             },
         ));
@@ -369,7 +379,12 @@ mod tests {
         );
     }
 
-    fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {
+    fn session(
+        socket: &str,
+        session: &str,
+        command: &str,
+        task_state: ManagedSessionTaskState,
+    ) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket, session),
             selector: Some(format!("{socket}:{session}")),
@@ -382,7 +397,7 @@ mod tests {
             window_count: 1,
             command_name: Some(command.to_string()),
             current_path: Some(PathBuf::from("/tmp/demo")),
-            task_state: ManagedSessionTaskState::Input,
+            task_state,
         }
     }
 }

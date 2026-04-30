@@ -323,11 +323,11 @@ Edge notes:
 
 - WaitAgent does not merge or reinterpret concurrent user intent.
 
-### 4.5 Server-Side Auto-Scheduling Flow
+### 4.5 Server-Side Attention Visibility Flow
 
 Trigger:
 
-- The server console has one scheduling opportunity after input submission
+- The server console observes that one or more targets are waiting
 
 Preconditions:
 
@@ -336,10 +336,9 @@ Preconditions:
 Main path:
 
 1. Server-side scheduler observes the aggregate waiting queue.
-2. Scheduler prefers current-session continuation first.
-3. Once stable, scheduler selects the earliest waiting session.
-4. Focus changes only in the server console.
-5. Local client consoles keep their own focus unchanged.
+2. Chrome updates waiting counts, badges, or “next” labels.
+3. Focus remains on the current target until the user chooses to switch.
+4. Local client consoles keep their own focus unchanged.
 
 Result:
 
@@ -439,7 +438,7 @@ Every interaction flow must preserve:
 
 - One focused session per console
 - No switching during partial input
-- At most one automatic switch opportunity per `Enter`
+- Waiting state may raise attention cues but must not move focus automatically
 - Raw terminal output as the primary viewport
 - Local CLI usability even when network mode is enabled
 

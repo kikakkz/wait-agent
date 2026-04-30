@@ -1,20 +1,21 @@
-# WaitAgent Server Console Scheduling Design
+# WaitAgent Server Console Attention Design
 
-Version: `v1.0`
+Version: `v1.1`
 Status: `Accepted for task.t6-01`
 Date: `2026-04-29`
 
 ## 1. Purpose
 
-This document is the authoritative top-down design for the active
+This document is the authoritative top-down design for active
 `task.t6-01` server-console work.
 
 It exists to remove ambiguity in four places:
 
 - what the server console is in the product model
-- which runtime owns server-console focus and scheduling state
-- which data model is required for honest waiting-queue and auto-switch work
-- which implementation slices are allowed next without falling into patch-on-patch changes
+- which runtime owns server-console focus and waiting state
+- which data model is required for honest waiting-queue visibility
+- which implementation slices are allowed next without reintroducing
+  automatic focus changes
 
 It complements:
 
@@ -29,19 +30,15 @@ For active server-console work, this document is the source of truth for:
 
 - server-console runtime ownership
 - server-console focus state
-- server-console scheduling state
+- server-console waiting-state visibility
 - the implementation order for remaining `task.t6-01` slices
-
-If older product or flow documents still describe remote work as fully deferred,
-that wording must not be used to justify ad hoc implementation decisions inside
-`task.t6-01`.
 
 All further `task.t6-01` implementation must satisfy this rule:
 
 > no server-console behavior change lands without an explicit top-down design
 > home in this document or in a design document that supersedes it
 
-Patch-style behavior additions without a declared model, state machine, and
+Patch-style behavior additions without a declared model, state shape, and
 runtime ownership boundary are not acceptable.
 
 ## 3. Product Model
@@ -51,19 +48,23 @@ The server console is not:
 - a second workspace product
 - a local tmux client masquerading as remote interaction
 - a server-owned PTY for remote sessions
+- an automation surface that moves focus on the user’s behalf
 
 The server console is:
 
 - one attached console
 - backed by the shared transport-agnostic target catalog
-- scoped to its own focus and scheduling state
+- scoped to its own focus and waiting-state visibility
 - able to open either local or remote targets through one activation model
 
 User-visible rule:
 
 - local target and remote target both appear as activation targets
-- choosing either target opens that target in the same server-console product surface
+- choosing either target opens that target in the same server-console product
+  surface
 - transport differences are backend differences, not a second UX contract
+- waiting state may raise attention through chrome, but focus changes remain
+  manual
 
 ## 4. Non-Negotiable Rules
 
@@ -71,21 +72,19 @@ User-visible rule:
    The server console must not grow a transport-specific interaction model.
    Local and remote targets may use different adapters, but they must report
    into one console-runtime state machine.
-2. One scheduler per console
-   Focus, waiting queue, scheduling opportunity, and switch lock are all
-   console-scoped, never global.
-3. No fake FIFO
-   Waiting-queue order must come from explicit observed wait-entry events, not
-   from incidental catalog enumeration order.
-4. No fake auto-switch
-   Automatic switching must not be claimed until the runtime has real submit,
-   output-round, stabilization, and lock signals.
+2. One attention model per console
+   Focus and waiting visibility are console-scoped, never global.
+3. No fabricated ordering
+   Waiting state is advisory only; the accepted product direction does not need
+   queue ordering semantics in chrome.
+4. Manual-only focus
+   Waiting state may inform the user, but it must not automatically move focus.
 5. No server PTY ownership
    The server console may route input and render output for remote targets, but
    remote PTYs remain owned by remote nodes.
 6. Mirrored interaction remains intact
-   Local client consoles keep their own focus and scheduling state even when the
-   same target is also open in the server console.
+   Local client consoles keep their own focus and waiting visibility even when
+   the same target is also open in the server console.
 
 ## 5. Domain Model
 
@@ -119,85 +118,35 @@ Current accepted signal source:
 Important limitation:
 
 - this is only membership evidence for “likely waiting”
-- it is not sufficient by itself to define FIFO ordering or auto-switch timing
+- it must not be used to justify automatic focus movement
 
-### 5.4 Waiting Set And Waiting Queue
-
-These are not the same thing.
+### 5.4 Waiting Visibility
 
 - `waiting_set`
   The current set of targets with active waiting signals.
-- `waiting_queue`
-  An ordered queue of waiting targets based on first observed wait-entry order.
-
-Required queue entry shape:
-
-```text
-WaitingQueueEntry {
-  target_id
-  first_wait_seq
-  latest_wait_state
-}
-```
 
 Rules:
 
-- queue membership is added on a transition `not waiting -> waiting`
-- queue membership is removed on a transition `waiting -> not waiting`
-- queue order is by `first_wait_seq`, not by catalog order
+- waiting membership is added on a transition `not waiting -> waiting`
+- waiting membership is removed on a transition `waiting -> not waiting`
 - the focused target may still be present in the waiting set
-- decision logic derives a switch-candidate queue that excludes the current
-  focused target when evaluating whether to leave the current interaction round
 
-### 5.5 Scheduling Opportunity
+### 5.5 Attention Cue Policy
 
-- `SchedulingOpportunity`
-  One chance to auto-switch after a user submit.
+Waiting state exists to attract user attention, not to seize focus.
 
-State model:
+Accepted attention cues:
 
-- `disarmed`
-- `armed { submit_seq }`
-- `spent { submit_seq }`
+- focused target label
+- selected target label
+- waiting count
+- explicit policy label such as `manual-only`
 
-Rules:
+Not accepted:
 
-- only a real submit event may arm it
-- it may be spent at most once
-- a later submit creates a new opportunity
-
-### 5.6 Interaction Round
-
-- `InteractionRound`
-  The period after a submit during which the currently focused target may keep
-  producing output and therefore retain focus.
-
-Required state:
-
-- `round_submit_seq`
-- `current_target_output_seen`
-- `stabilized`
-
-This is the mechanism that enforces:
-
-`prompt1 -> submit -> current target continues output -> prompt2`
-
-without premature switching.
-
-### 5.7 Switch Lock
-
-- `SwitchLock`
-  A per-console lock that prevents repeated automatic switches from one submit.
-
-State model:
-
-- `unlocked`
-- `locked { cause_submit_seq }`
-
-Unlock conditions:
-
-- the user submits input again
-- the user manually switches target
+- automatic target activation
+- delayed automatic jumps after submit
+- hidden scheduler state that implies future focus movement
 
 ## 6. Runtime Ownership
 
@@ -215,8 +164,8 @@ This remains correct.
 
 - picker lifecycle
 - focused and selected target state
-- server-console scheduling state
-- the policy decision of whether to keep focus, return to picker, or switch
+- waiting-set and waiting-queue state
+- the policy decision to remain manual-only
 
 What it must not own directly:
 
@@ -226,12 +175,9 @@ What it must not own directly:
 
 ### 6.3 Required Interaction Boundary
 
-The next runtime seam must be:
+The runtime seam remains:
 
 `ServerConsoleInteractionSurface`
-
-This is a logical boundary, whether implemented as a trait, enum-backed adapter,
-or runtime object.
 
 It must normalize both:
 
@@ -251,8 +197,9 @@ Required emitted events:
 - `FocusedTargetExited`
 - `FocusedTargetUnavailable`
 
-Without this seam, scheduling logic will continue to split by transport and
-degrade into patch-style branching.
+These events exist so focus ownership, waiting visibility, and future chrome
+behavior stay transport-agnostic. They must not be used to reintroduce
+automatic focus changes.
 
 ## 7. Data And Ordering Requirements
 
@@ -265,84 +212,47 @@ The current catalog record is sufficient for:
 
 It is not sufficient for:
 
-- FIFO waiting order
-- submit-scoped scheduling opportunity
-- stabilization-based auto-switch
-
-Therefore the next implementation must introduce explicit event ordering data.
-
-Accepted first approach:
-
-- a console-local monotonic sequence owned by `RemoteServerConsoleRuntime`
-- queue insertion based on observed waiting transitions in that runtime
-- submit sequencing based on observed console submit events in that runtime
+- deciding focus automatically
 
 Not acceptable:
 
-- deriving queue order from `list_activation_targets()` enumeration order
-- deriving submit opportunities from passive snapshot refresh alone
+- inferring focus movement from passive waiting snapshots
 
-## 8. Decision Algorithm
+## 8. Presentation Rules
 
-The accepted future auto-switch decision flow is:
+The picker or sidebar may render a waiting snapshot.
 
-1. User submits input in the focused target.
-2. Runtime arms one scheduling opportunity.
-3. Runtime starts or continues the current interaction round.
-4. If the focused target continues producing output, stay on it.
-5. Once that round stabilizes, inspect the waiting queue excluding the focused target.
-6. If no eligible waiting target exists, keep focus and leave the opportunity effectively unused.
-7. If an eligible waiting target exists and switch lock is not active, auto-switch once.
-8. Spend the scheduling opportunity and activate switch lock.
-9. Keep lock until a later submit or a manual switch.
+Accepted UI:
 
-This means:
+- waiting-state badges
+- optional simple waiting counts
+- manual-only policy labeling
 
-- waiting signals alone do not trigger switching
-- submit alone does not trigger immediate switching
-- queue order matters only after current-session continuation has had a chance
-
-## 9. Presentation Rules
-
-The picker may render a scheduling snapshot before full auto-switch exists.
-
-Accepted pre-auto-switch UI:
-
-- focused target label
-- selected target label
-- waiting count
-- next queued waiting target
-- queue position badges in the picker list
-- explicit policy label such as `manual-only`
-
-UI snapshot must not imply behavior that does not exist yet.
+UI must not imply behavior that does not exist.
 
 Therefore:
 
-- `manual-only` is acceptable now
-- labels implying active automatic scheduling are not acceptable until the
-  state machine in this document is implemented
+- `manual-only` is required
+- wording that suggests the system will switch automatically is not acceptable
 
-## 10. Implementation Plan
+## 9. Implementation Plan
 
-The remaining `task.t6-01` work should land in this order:
+The accepted `task.t6-01` order is now:
 
 1. Design lock
    Land this document and point status/task state at it.
 2. Extract interaction surface seam
-   Normalize local and remote target interaction into one server-console event model.
+   Normalize local and remote target interaction into one server-console event
+   model.
 3. Add real submit and manual-switch events
-   The runtime must observe console-local interaction, not infer it from snapshots.
+   The runtime must observe console-local interaction, not infer it from
+   snapshots.
 4. Add waiting transition tracking
-   Build `waiting_set` and `waiting_queue` from transitions, not catalog order.
-5. Add interaction-round stabilization
-   Give the focused target a chance to continue before switching.
-6. Add scheduling opportunity and switch lock
-   Enforce one auto-switch per submit.
-7. Only then enable server-side auto-switch policy
-   Until then, keep explicit `manual-only` policy labeling.
+   Build `waiting_set` from transitions, not catalog order.
+5. Lock policy on manual-only attention cues
+   Retire auto-switch planning and keep future work limited to visibility polish.
 
-## 11. Current Status Mapping
+## 10. Current Status Mapping
 
 Already landed:
 
@@ -353,24 +263,31 @@ Already landed:
 - remote target route through shared remote interact surface
 - long-lived `picker -> target -> picker` lifecycle
 - explicit focused versus selected target state
-- manual-only scheduling snapshot based on current waiting membership
+- real submit and manual-switch signal capture through the shared interaction
+  seam
+- waiting-state visibility rendered through per-session task state
+- manual-only waiting snapshot rendered without queue ordering
 
-Not yet landed:
+Not planned:
 
-- unified interaction seam across local and remote targets
-- FIFO waiting queue based on wait-entry transitions
-- submit-scoped scheduling opportunity
-- interaction-round stabilization
-- switch lock
+- scheduling opportunity
+- interaction-round-based auto-switch
+- switch lock for automatic focus movement
 - real server-side auto-switch
 
-## 12. Rejection Rule
+Possible future work:
+
+- stronger manual-only attention cues in sidebar, picker, badge, or count
+  presentation if acceptance evidence shows the current cues are too weak
+
+## 11. Rejection Rule
 
 Reject any future change that does one of the following:
 
 - adds another server-console-only scheduler object outside
   `RemoteServerConsoleRuntime`
-- adds transport-conditional scheduling behavior without a shared event seam
-- treats catalog order as FIFO wait order
-- introduces automatic switching without submit and stabilization signals
-- documents behavior in status notes only without updating this design
+- adds transport-conditional waiting behavior without a shared event seam
+- treats waiting state as an ordering contract rather than simple visibility
+- introduces any automatic focus jump without an explicit product reversal
+- documents focus-changing behavior in status notes only without updating this
+  design

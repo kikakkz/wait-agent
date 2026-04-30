@@ -142,13 +142,16 @@ next:
     status: done
   - id: task.t6-01b
     title: capture real submit and manual-switch signals through the unified server-console interaction seam
-    status: in_progress
+    status: done
   - id: task.t6-01c
     title: track waiting transitions and build an honest server-console FIFO waiting queue
-    status: ready
+    status: done
   - id: task.t6-01d
-    title: implement interaction-round stabilization plus scheduling opportunity and switch lock for server-side auto-switch
-    status: ready
+    title: cancelled auto-switch slice superseded by manual-only attention policy
+    status: superseded
+  - id: task.t6-01e
+    title: retire server-side auto-switch planning and lock server-console on manual-only attention cues
+    status: done
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred
@@ -190,7 +193,7 @@ notes:
   - 2026-04-27 update: `task.t5-06a` is complete enough to close; active work now moves to `task.t5-06b`, which generalizes target identity and catalog records without starting transport routing.
   - 2026-04-27 update: `task.t5-06b` is complete enough to close after the shared target model, protocol identity contract, and compatibility accessors landed; active work now moves to `task.t5-06c`, where local tmux becomes the first producer behind an explicit target-registry boundary.
   - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
-  - 2026-04-29 refinement: the original `task.t6-01` umbrella is now split into `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d` so the remaining server-console work lands as bounded design-backed slices rather than patch-style continuation.
+  - 2026-04-29 refinement: the original `task.t6-01` umbrella was first split into bounded slices and later corrected again when the planned auto-switch slice was cancelled in favor of a manual-only attention policy lock.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

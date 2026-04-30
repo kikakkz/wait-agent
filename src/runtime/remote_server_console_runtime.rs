@@ -3,15 +3,14 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{AttachCommand, RemoteServerConsoleCommand, ServerConsoleCommand};
 use crate::domain::session_catalog::{
-    ConsoleLocation, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
-    SessionTransport,
+    ConsoleLocation, ManagedSessionRecord, SessionTransport,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_pane_runtime::{
-    RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
+    RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
 };
 use crate::runtime::remote_node_session_runtime::{
     spawn_remote_node_session_listener, RemoteNodePublicationSink, RemoteNodeSessionError,
@@ -150,7 +149,9 @@ impl RemoteServerConsoleRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ServerConsoleInteractionEvent {
     TargetOpened(String),
-    ReturnedToPicker,
+    ConsoleInputStarted,
+    ConsoleSubmit,
+    ManualReturnToPicker,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -167,6 +168,12 @@ impl ServerConsoleInteractionTrace {
 
     fn push(&mut self, event: ServerConsoleInteractionEvent) {
         self.events.push(event);
+    }
+
+    fn has_manual_return_to_picker(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| *event == ServerConsoleInteractionEvent::ManualReturnToPicker)
     }
 }
 
@@ -234,7 +241,7 @@ impl<'a> LocalServerConsoleInteractionSurface<'a> {
         self.workspace_runtime.run_attach(AttachCommand {
             target: Some(qualified_target),
         })?;
-        trace.push(ServerConsoleInteractionEvent::ReturnedToPicker);
+        trace.push(ServerConsoleInteractionEvent::ManualReturnToPicker);
         Ok(trace)
     }
 }
@@ -268,8 +275,21 @@ impl<'a> RemoteServerConsoleInteractionSurface<'a> {
                     )
                 },
             )?;
-        self.surface_runtime.run_surface(spec)?;
-        trace.push(ServerConsoleInteractionEvent::ReturnedToPicker);
+        self.surface_runtime
+            .run_surface_with_signal_sink(spec, |signal| match signal {
+                RemoteInteractSignal::ConsoleInputStarted => {
+                    trace.push(ServerConsoleInteractionEvent::ConsoleInputStarted)
+                }
+                RemoteInteractSignal::ConsoleSubmit => {
+                    trace.push(ServerConsoleInteractionEvent::ConsoleSubmit)
+                }
+                RemoteInteractSignal::ManualReturnToPicker => {
+                    trace.push(ServerConsoleInteractionEvent::ManualReturnToPicker)
+                }
+            })?;
+        if !trace.has_manual_return_to_picker() {
+            trace.push(ServerConsoleInteractionEvent::ManualReturnToPicker);
+        }
         Ok(trace)
     }
 }
@@ -324,27 +344,15 @@ enum PickerAction {
 struct ServerConsoleState {
     focused_target: Option<String>,
     selected_target: Option<String>,
-    scheduling: ServerConsoleSchedulingState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ServerConsoleSchedulingPolicy {
-    #[default]
-    ManualOnly,
-}
-
-impl ServerConsoleSchedulingPolicy {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ManualOnly => "manual-only",
-        }
-    }
+    interaction: ServerConsoleInteractionState,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct ServerConsoleSchedulingState {
-    policy: ServerConsoleSchedulingPolicy,
-    waiting_queue: Vec<String>,
+struct ServerConsoleInteractionState {
+    next_signal_seq: u64,
+    input_in_progress: bool,
+    last_submit_seq: Option<u64>,
+    last_manual_switch_seq: Option<u64>,
 }
 
 impl ServerConsoleState {
@@ -354,7 +362,15 @@ impl ServerConsoleState {
                 ServerConsoleInteractionEvent::TargetOpened(target) => {
                     self.focus_target(target.clone());
                 }
-                ServerConsoleInteractionEvent::ReturnedToPicker => {}
+                ServerConsoleInteractionEvent::ConsoleInputStarted => {
+                    self.interaction.observe_input_started();
+                }
+                ServerConsoleInteractionEvent::ConsoleSubmit => {
+                    self.interaction.observe_submit();
+                }
+                ServerConsoleInteractionEvent::ManualReturnToPicker => {
+                    self.interaction.observe_manual_switch();
+                }
             }
         }
     }
@@ -394,9 +410,6 @@ impl ServerConsoleState {
                     .map(|target| target.address.qualified_target())
             });
         }
-
-        self.scheduling
-            .reconcile(self.focused_target.as_deref(), targets);
     }
 
     fn selected_index(&self, targets: &[ManagedSessionRecord]) -> Option<usize> {
@@ -422,46 +435,23 @@ impl ServerConsoleState {
             .unwrap_or_else(|| "(none)".to_string())
     }
 
-    fn scheduling_line(&self, targets: &[ManagedSessionRecord]) -> String {
-        self.scheduling.summary_line(targets)
-    }
-
-    fn queue_position_for(&self, target: &ManagedSessionRecord) -> Option<usize> {
-        self.scheduling
-            .waiting_queue
-            .iter()
-            .position(|queued| *queued == target.address.qualified_target())
-            .map(|index| index + 1)
-    }
 }
 
-impl ServerConsoleSchedulingState {
-    fn reconcile(&mut self, focused_target: Option<&str>, targets: &[ManagedSessionRecord]) {
-        self.waiting_queue = targets
-            .iter()
-            .filter(|target| is_waiting_activation_target(target))
-            .filter(|target| Some(target.address.qualified_target().as_str()) != focused_target)
-            .map(|target| target.address.qualified_target())
-            .collect();
+impl ServerConsoleInteractionState {
+    fn observe_input_started(&mut self) {
+        self.input_in_progress = true;
     }
 
-    fn summary_line(&self, targets: &[ManagedSessionRecord]) -> String {
-        let next = self
-            .waiting_queue
-            .first()
-            .and_then(|target| {
-                targets
-                    .iter()
-                    .find(|candidate| candidate.address.qualified_target() == *target)
-            })
-            .map(server_console_target_label)
-            .unwrap_or_else(|| "(none)".to_string());
-        format!(
-            "scheduling: {} | waiting: {} queued | next: {}",
-            self.policy.label(),
-            self.waiting_queue.len(),
-            next
-        )
+    fn observe_submit(&mut self) {
+        self.next_signal_seq += 1;
+        self.input_in_progress = false;
+        self.last_submit_seq = Some(self.next_signal_seq);
+    }
+
+    fn observe_manual_switch(&mut self) {
+        self.next_signal_seq += 1;
+        self.input_in_progress = false;
+        self.last_manual_switch_seq = Some(self.next_signal_seq);
     }
 }
 
@@ -501,7 +491,6 @@ fn draw_activation_picker(
             format!("focus: {}", state.focused_target_label(targets)),
             width,
         ),
-        fit_line(state.scheduling_line(targets), width),
         fit_line(
             "up/down or j/k to move, enter to open, q to cancel".to_string(),
             width,
@@ -528,7 +517,6 @@ fn draw_activation_picker(
                 activation_target_line(
                     target,
                     start + row == selected_index,
-                    state.queue_position_for(target),
                     width,
                 )
             })
@@ -561,13 +549,9 @@ fn draw_activation_picker(
 fn activation_target_line(
     target: &ManagedSessionRecord,
     is_selected: bool,
-    queue_position: Option<usize>,
     width: usize,
 ) -> String {
     let marker = if is_selected { ">" } else { " " };
-    let queue_marker = queue_position
-        .map(|position| format!(" q{position}"))
-        .unwrap_or_default();
     let current_path = target
         .current_path
         .as_ref()
@@ -576,10 +560,9 @@ fn activation_target_line(
         .unwrap_or_else(|| "-".to_string());
     fit_line(
         format!(
-            "{marker} {} [{}{}] {} cwd:{}",
+            "{marker} {} [{}] {} cwd:{}",
             server_console_target_label(target),
             target.task_state.short_label(),
-            queue_marker,
             target.address.qualified_target(),
             current_path
         ),
@@ -598,14 +581,6 @@ fn server_console_target_label(target: &ManagedSessionRecord) -> String {
 
 fn fit_line(line: String, width: usize) -> String {
     line.chars().take(width).collect()
-}
-
-fn is_waiting_activation_target(target: &ManagedSessionRecord) -> bool {
-    target.availability != SessionAvailability::Exited
-        && matches!(
-            target.task_state,
-            ManagedSessionTaskState::Input | ManagedSessionTaskState::Confirm
-        )
 }
 
 fn contains_target(targets: &[ManagedSessionRecord], target: &str) -> bool {
@@ -684,9 +659,10 @@ fn target_catalog_error(error: crate::infra::tmux::TmuxError) -> LifecycleError 
 #[cfg(test)]
 mod tests {
     use super::{
-        interaction_surface_kind_for_target, picker_actions, selection_window_start,
-        server_console_surface_spec, PickerAction, ServerConsoleInteractionEvent,
-        ServerConsoleInteractionSurfaceKind, ServerConsoleInteractionTrace, ServerConsoleState,
+        activation_target_line, interaction_surface_kind_for_target, picker_actions,
+        selection_window_start, server_console_surface_spec, PickerAction,
+        ServerConsoleInteractionEvent, ServerConsoleInteractionSurfaceKind,
+        ServerConsoleInteractionTrace, ServerConsoleState,
     };
     use crate::cli::RemoteServerConsoleCommand;
     use crate::domain::session_catalog::{
@@ -772,27 +748,12 @@ mod tests {
     }
 
     #[test]
-    fn server_console_scheduling_queue_tracks_waiting_targets_in_catalog_order() {
-        let targets = vec![
-            running_local_target("wa-1", "target-1"),
-            input_target("peer-a", "shell-1"),
-            confirm_target("peer-b", "shell-2"),
-        ];
-        let mut state = ServerConsoleState::default();
-        state.focus_target("wa-1:target-1".to_string());
-        state.reconcile_targets(&targets);
+    fn activation_target_line_shows_task_state_without_queue_metadata() {
+        let line = activation_target_line(&confirm_target("peer-b", "shell-2"), false, 120);
 
-        assert_eq!(
-            state.scheduling.waiting_queue,
-            vec!["peer-a:shell-1".to_string(), "peer-b:shell-2".to_string()]
-        );
-        assert_eq!(
-            state.scheduling_line(&targets),
-            "scheduling: manual-only | waiting: 2 queued | next: bash@remote:target"
-        );
-        assert_eq!(state.queue_position_for(&targets[0]), None);
-        assert_eq!(state.queue_position_for(&targets[1]), Some(1));
-        assert_eq!(state.queue_position_for(&targets[2]), Some(2));
+        assert!(line.contains("bash@remote:target"));
+        assert!(!line.contains("q1"));
+        assert!(!line.contains("next"));
     }
 
     #[test]
@@ -801,7 +762,7 @@ mod tests {
         let trace = ServerConsoleInteractionTrace {
             events: vec![
                 ServerConsoleInteractionEvent::TargetOpened("peer-a:shell-1".to_string()),
-                ServerConsoleInteractionEvent::ReturnedToPicker,
+                ServerConsoleInteractionEvent::ManualReturnToPicker,
             ],
         };
 
@@ -809,6 +770,25 @@ mod tests {
 
         assert_eq!(state.focused_target.as_deref(), Some("peer-a:shell-1"));
         assert_eq!(state.selected_target.as_deref(), Some("peer-a:shell-1"));
+    }
+
+    #[test]
+    fn interaction_trace_records_submit_and_manual_switch_as_console_local_signals() {
+        let mut state = ServerConsoleState::default();
+        let trace = ServerConsoleInteractionTrace {
+            events: vec![
+                ServerConsoleInteractionEvent::ConsoleInputStarted,
+                ServerConsoleInteractionEvent::ConsoleSubmit,
+                ServerConsoleInteractionEvent::ConsoleInputStarted,
+                ServerConsoleInteractionEvent::ManualReturnToPicker,
+            ],
+        };
+
+        state.apply_interaction_trace(&trace);
+
+        assert_eq!(state.interaction.last_submit_seq, Some(1));
+        assert_eq!(state.interaction.last_manual_switch_seq, Some(2));
+        assert!(!state.interaction.input_in_progress);
     }
 
     #[test]
@@ -862,20 +842,6 @@ mod tests {
             command_name: Some("bash".to_string()),
             current_path: Some(PathBuf::from("/tmp/remote")),
             task_state: ManagedSessionTaskState::Running,
-        }
-    }
-
-    fn running_local_target(socket_name: &str, session_name: &str) -> ManagedSessionRecord {
-        ManagedSessionRecord {
-            task_state: ManagedSessionTaskState::Running,
-            ..local_target(socket_name, session_name)
-        }
-    }
-
-    fn input_target(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
-        ManagedSessionRecord {
-            task_state: ManagedSessionTaskState::Input,
-            ..remote_target(authority_id, session_id)
         }
     }
 

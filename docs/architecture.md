@@ -206,9 +206,8 @@ This is the only place that directly owns PTY file descriptors.
 Responsibilities:
 
 - Maintain waiting queue per console
-- Enforce switch lock per console
-- Observe interaction rounds
-- Decide when to stay, switch, or keep waiting
+- Surface manual-only attention cues from that queue
+- Decide which session is eligible when the user explicitly switches or when the focused session disappears
 
 The scheduler must be console-scoped, not global.
 
@@ -438,12 +437,10 @@ The scheduler may emit:
 
 ### 9.4 Scheduler State Machine
 
-The current local product does not perform automatic switching.
+The accepted product direction does not perform automatic switching.
 
-Any future automation should be:
-
-- policy-driven rather than heuristic magic
-- explicit in user-visible state
+Waiting state may inform the user through chrome, but it must not move focus
+without an explicit user action.
 - designed after the unified local and remote session model is settled
 
 ## 10. Input Routing Architecture

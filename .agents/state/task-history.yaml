@@ -1,6 +1,36 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t6-01e
+    status: done
+    summary: active planning is now aligned on a manual-only attention model: server-console waiting state is surfaced through sidebar, picker, badges, counts, and FIFO queue state, while auto-switch work is explicitly retired
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01d
+    status: superseded
+    summary: the planned auto-switch slice was explicitly cancelled because automatic focus jumps are considered a poor user experience for this product, so later work must stay manual-only
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01d.yaml
+      reference: status
+  - task_id: task.t6-01c
+    status: done
+    summary: server-console scheduling now separates waiting membership from transition-driven FIFO queue state, preserving first observed wait-entry order across catalog reordering and re-adding returned waiters at the tail instead of rebuilding order from catalog snapshots
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01c.yaml
+      reference: status
+  - task_id: task.t6-01c
+    status: in_progress
+    summary: real submit and manual-switch signals now enter the server-console runtime through the unified interaction seam, so active work moves to replacing the current catalog-order waiting snapshot with honest transition-driven waiting membership and FIFO queue state
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01b
+    status: done
+    summary: remote server-console interaction now emits real `ConsoleInputStarted`, `ConsoleSubmit`, and `ManualReturnToPicker` signals through the shared seam, and console-local runtime state records submit plus manual-switch ownership without depending only on passive catalog refresh
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01b.yaml
+      reference: status
   - task_id: task.t6-01b
     status: in_progress
     summary: with the unified interaction seam now landed, active work moves to capturing real submit and manual-switch signals through that seam so later scheduling state no longer depends on passive snapshot inference
@@ -15,7 +45,7 @@ history:
       reference: status
   - task_id: task.t6-01a
     status: in_progress
-    summary: the original server-console umbrella is now split into `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d`, and active work moves first to extracting a unified local-plus-remote interaction seam so later scheduling slices land on one console-owned event model
+    summary: the original server-console umbrella was split into bounded manual-only slices so later work could land on one console-owned event model without reviving automatic focus movement
     source_of_truth:
       file: .agents/tasks/current.yaml
       reference: status

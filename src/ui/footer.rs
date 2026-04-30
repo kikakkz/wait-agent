@@ -77,17 +77,7 @@ fn render_footer(
     let width = width.max(1);
     let active = active_session_record(active_socket, active_session, active_target, sessions);
     let counts = task_counts(sessions);
-    let left = match projection {
-        FooterProjection::Pane => "keys: ^N new  ^O fullscreen  C-b s menu".to_string(),
-        FooterProjection::FullscreenStatus => format!(
-            "keys: [Ctrl-o] fullscreen off  [Ctrl-n] new  [Ctrl-b s] menu | total:{} R:{} I:{} C:{} U:{} | [PgUp/PgDn] page  [Up/Down] line",
-            sessions.len(),
-            counts.running,
-            counts.input,
-            counts.confirm,
-            counts.unknown
-        ),
-    };
+    let left = left_status_text(projection, sessions.len(), &counts);
     let right = active
         .and_then(|session| {
             session
@@ -143,6 +133,24 @@ fn task_counts(sessions: &[ManagedSessionRecord]) -> TaskCounts {
         }
     }
     counts
+}
+
+fn left_status_text(
+    projection: FooterProjection,
+    total_sessions: usize,
+    counts: &TaskCounts,
+) -> String {
+    match projection {
+        FooterProjection::Pane => "keys: ^N new  ^O fullscreen  C-b s menu".to_string(),
+        FooterProjection::FullscreenStatus => format!(
+            "keys: [Ctrl-o] fullscreen off  [Ctrl-n] new  [Ctrl-b s] menu | total:{} R:{} I:{} C:{} U:{} | [PgUp/PgDn] page  [Up/Down] line",
+            total_sessions,
+            counts.running,
+            counts.input,
+            counts.confirm,
+            counts.unknown
+        ),
+    }
 }
 
 fn join_left_right(left: &str, right: &str, width: usize) -> String {
@@ -228,27 +236,43 @@ mod tests {
             "wa-1",
             "waitagent-1",
             Some("wa-1:waitagent-1"),
-            &[ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
-                selector: Some("wa-1:waitagent-1".to_string()),
-                availability: crate::domain::session_catalog::SessionAvailability::Online,
-                workspace_dir: Some(PathBuf::from("/tmp/demo")),
-                workspace_key: None,
-                session_role: None,
-                opened_by: Vec::new(),
-                attached_clients: 1,
-                window_count: 1,
-                command_name: Some("bash".to_string()),
-                current_path: Some(PathBuf::from("/tmp/demo")),
-                task_state: ManagedSessionTaskState::Input,
-            }],
+            &[
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
+                    selector: Some("wa-1:waitagent-1".to_string()),
+                    availability: crate::domain::session_catalog::SessionAvailability::Online,
+                    workspace_dir: Some(PathBuf::from("/tmp/demo")),
+                    workspace_key: None,
+                    session_role: None,
+                    opened_by: Vec::new(),
+                    attached_clients: 1,
+                    window_count: 1,
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/demo")),
+                    task_state: ManagedSessionTaskState::Input,
+                },
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::local_tmux("wa-2", "waitagent-2"),
+                    selector: Some("wa-2:waitagent-2".to_string()),
+                    availability: crate::domain::session_catalog::SessionAvailability::Online,
+                    workspace_dir: Some(PathBuf::from("/tmp/other")),
+                    workspace_key: None,
+                    session_role: None,
+                    opened_by: Vec::new(),
+                    attached_clients: 1,
+                    window_count: 1,
+                    command_name: Some("codex".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/other")),
+                    task_state: ManagedSessionTaskState::Confirm,
+                },
+            ],
             180,
         );
 
         assert!(output.contains("[Ctrl-o] fullscreen off"));
         assert!(output.contains("[Ctrl-n] new"));
         assert!(output.contains("[Ctrl-b s] menu"));
-        assert!(output.contains("total:1 R:0 I:1 C:0 U:0"));
+        assert!(output.contains("total:2 R:0 I:1 C:1 U:0"));
         assert!(output.contains("[PgUp/PgDn] page"));
         assert!(output.contains("[Up/Down] line"));
         assert!(output.contains("/tmp/demo"));

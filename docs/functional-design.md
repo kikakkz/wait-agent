@@ -155,8 +155,8 @@ This rule prevents misrouting partially typed commands.
 When the user presses `Enter`:
 
 - Send the input to the focused session
-- Arm one automatic scheduling opportunity
-- Start the continuation observation window
+- Keep focus on the current session
+- Allow waiting-state visibility to refresh without changing focus
 
 #### 3.5.3 Mirrored Input
 
@@ -166,31 +166,21 @@ In network mode:
 - Input from the server-side attached view appears in the local CLI
 - Resulting PTY output is synchronized to both
 
-### 3.6 Automatic Scheduling
+### 3.6 Attention Visibility
 
-#### 3.6.1 Entry Condition
+#### 3.6.1 Manual-Only Rule
 
-Automatic scheduling may only be considered after input submission.
+The accepted product direction does not perform automatic switching.
 
-#### 3.6.2 Continuation Observation
+#### 3.6.2 Waiting Visibility Use
 
-After input submission:
+Waiting state exists to support:
 
-- If the current session continues producing output as part of the same interaction round, stay on it
-- Only when that round stabilizes may the scheduler consume the switch opportunity
+- sidebar and picker state badges
+- simple waiting counts when helpful
+- manual target choice
 
-#### 3.6.3 Waiting Queue Selection
-
-If a switch opportunity is available and the current interaction has stabilized:
-
-- Choose the earliest waiting session in FIFO order
-
-#### 3.6.4 Locking
-
-After an automatic switch:
-
-- Lock further automatic switching
-- Unlock on next input submission or manual switch
+It must not trigger focus changes by itself.
 
 ### 3.7 Waiting Detection
 
@@ -205,16 +195,15 @@ MVP signals:
 - No input was sent recently
 - Process is still alive
 
-#### 3.7.2 Waiting Queue Update
+#### 3.7.2 Waiting State Update
 
 When a session transitions into waiting:
 
-- Add it to the queue if not already present
-- Preserve FIFO order by first waiting timestamp
+- Mark its visible state as waiting
 
 When a session becomes active again:
 
-- Remove it from the waiting queue
+- Remove the waiting state marker
 
 ### 3.8 Fullscreen
 

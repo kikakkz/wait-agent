@@ -1,7 +1,16 @@
 kind: state
 version: 1
-last_updated_from: task.t6-01 public server-console entrypoint validated on 2026-04-29
+last_updated_from: task.t6-01e manual-only attention-policy lock reviewed on 2026-04-29
 checks:
+  - id: t6-01e-planning-alignment-review
+    command: targeted review of `.agents/` and active docs after cancelling auto-switch and locking server-console on manual-only attention cues
+    status: pass
+  - id: t6-01c-cargo-test-transition-driven-fifo-waiting-queue
+    command: cargo test after replacing the catalog-order waiting snapshot with transition-driven waiting membership plus FIFO queue state, preserving first observed wait-entry order across catalog reordering and re-adding returned waiters at the tail
+    status: pass
+  - id: t6-01b-cargo-test-submit-and-manual-switch-signals
+    command: cargo test after adding real `ConsoleInputStarted`, `ConsoleSubmit`, and `ManualReturnToPicker` signal delivery through the unified server-console interaction seam and recording submit plus manual-switch ownership as console-local runtime state
+    status: pass
   - id: t6-01-cargo-test-serial-public-server-console-entrypoint
     command: cargo test -- --test-threads=1 after exposing `waitagent server --socket-name <socket>` as the public entrypoint for the long-lived server-console lifecycle on top of the existing shared-catalog activation and remote-interact boundary
     status: pass
@@ -482,8 +491,8 @@ checks:
   - id: local-three-session-validation
     command: manual local workflow validation for three shell-backed sessions
     status: pass
-  - id: local-auto-switch-shell-check
-    command: manual validation of same-session prompt rounds and FIFO switch behavior
+  - id: local-manual-queue-shell-check
+    command: manual validation of same-session prompt rounds and FIFO waiting-order behavior under manual focus control
     status: pass
   - id: local-acceptance-final-signoff
     command: manual rerun of docs/local-acceptance-checklist.md sections 5 and 6 in the user's daily-use terminal environment

@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.23`  
+Version: `v1.26`  
 Status: `Active`  
 Date: `2026-04-29`
 
@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t6-01b` real submit and manual-switch signals through the unified server-console interaction seam
+- `task.t6-01e` retire auto-switch planning and lock server-console on manual-only attention cues
 
 Why this is the current gate:
 
@@ -43,7 +43,9 @@ Why this is the current gate:
 - remote open, input, output fanout, viewport-versus-PTY resize, publication ownership, and shared node-session framing are already routed through the accepted control-plane boundary
 - the first server-console slice already reuses that remote interact path instead of inventing a second remote interaction stack
 - the remaining server-console scheduling work now has an explicit top-down design source in `docs/server-console-scheduling-design.md`
-- the unified interaction seam is now landed, so the next blocking gap is capturing real submit and manual-switch signals before queue-order or auto-switch behavior lands
+- real submit and manual-switch signals now enter the server-console runtime through the unified interaction seam instead of depending only on passive catalog refresh
+- waiting state is now treated as visibility-only chrome and no longer carries a FIFO queue contract
+- the accepted product decision is now explicit as well: waiting state may raise attention in chrome, but focus stays manual-only and does not jump automatically
 
 ## 3. Current Snapshot
 
@@ -65,9 +67,13 @@ Project status at a glance:
 - `task.t5-06c` is now closed in substance: local tmux now sits behind an explicit target-registry boundary and current consumers read unified target records through it
 - `task.t5-07` is now closed in substance: remote target open, input, output fanout, viewport-versus-PTY resize, publication ownership, shared node-session framing, and authority-host ownership convergence are all in code and validated
 - `task.t6-01` remains the umbrella gate for server-console activation on the shared catalog and accepted routing boundary
-- that umbrella is now execution-split as `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01d` so the remaining work lands as bounded design-backed slices
+- that umbrella is now execution-split as `task.t6-01a -> task.t6-01b -> task.t6-01c -> task.t6-01e` because the former auto-switch slice was cancelled and replaced by a manual-only policy-lock cleanup
 - `task.t6-01a` is now closed in substance: local attach and remote interact both report through one explicit server-console interaction seam plus shared trace model instead of forcing later runtime work to branch directly on transport
-- the public `waitagent server` runtime now also carries explicit server-console state: focused target, selected target, and a real waiting queue derived from shared-catalog `INPUT` or `CONFIRM` task signals, with that scheduling snapshot rendered directly in the picker instead of being implicit
+- `task.t6-01b` is now closed in substance: remote server-console interaction now emits real submit and manual-switch signals through that unified seam, and server-console runtime state records those signals with console-local ownership instead of depending only on passive catalog refresh
+- `task.t6-01c` is now historical context only: the later product decision removed the need to surface or preserve FIFO waiting order in the active UX
+- `task.t6-01d` is now superseded: auto-switch was explicitly cancelled because automatic focus jumps are considered a poor user experience for this product
+- `task.t6-01e` is now closed in substance: active docs and task state are aligned on a manual-only attention model where waiting state is surfaced in sidebar, picker, badges, counts, and related chrome without changing focus automatically
+- the public `waitagent server` runtime now carries explicit server-console focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
 - the default workspace runtime now uses a concrete connection-registry sink for remote activation, so the remaining transport gap is registering live node connections and forwarding remote output rather than defining yet another sink abstraction
@@ -130,7 +136,7 @@ Project status at a glance:
 - authority-host publication orchestration is now explicit as well: the authority-host runtime no longer owns steady-state publication bootstrap or fallback logic directly, but instead consumes an injected publication gateway while the dedicated publication runtime remains the production implementation of that boundary
 - the first `task.t6-01` slice now exists too: a hidden `remote_server_console_runtime` reuses the same remote observer, authority-ingress, and live publication path as the local remote main-slot instead of inventing a second server-console remote stack
 - the current `task.t6-01` slice now exists as well: `waitagent server --socket-name <socket>` is now a public entrypoint for a long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker
-- the remaining `task.t6-01` gap is now narrower again: target discovery, activation routing, explicit focus, and a real waiting queue are already in code, so the next honest slice is live scheduling-opportunity and switch-lock transitions from real interaction signals
+- the remaining `task.t6-01` gap is now narrower again: target discovery, activation routing, explicit focus, and real submit or manual-switch signal ownership are already in code, so any future T6 work should stay limited to manual-only attention-cue polish rather than focus automation
 
 ## 4. Milestone Summary
 
@@ -158,7 +164,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- implement `task.t6-01b` under the accepted top-down design in `docs/server-console-scheduling-design.md`: capture real submit and manual-switch signals through the unified server-console interaction seam before queue-order or auto-switch behavior
+- keep server-console and local workspace scheduling manual-only: waiting state may raise attention through sidebar, picker, badges, counts, and related chrome, but must not trigger automatic focus jumps
 
 Accepted local architecture direction:
 
@@ -186,8 +192,8 @@ Refined remote queue after the current documentation slice:
 
 1. `task.t6-01a` Extract a unified server-console interaction seam for local and remote targets
 2. `task.t6-01b` Capture real submit and manual-switch signals through that seam
-3. `task.t6-01c` Replace catalog-order waiting snapshots with transition-driven FIFO waiting queue state
-4. `task.t6-01d` Add interaction-round stabilization, scheduling opportunity, switch lock, and server-side auto-switch
+3. `task.t6-01c` Historical waiting-state slice later superseded by simpler per-session status visibility
+4. `task.t6-01e` Lock manual-only attention policy and retire auto-switch planning
 5. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.

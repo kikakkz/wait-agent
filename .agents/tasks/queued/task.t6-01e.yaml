@@ -9,9 +9,10 @@ design_ref:
   why:
     - the accepted server-console design must match the explicit product decision that focus stays manual-only
     - the active scheduling model should surface waiting state in chrome without automatic focus jumps
+target_task_reference: task.t6-01
 source_of_truth:
-  file: .agents/tasks/queued/task.t6-01e.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t6-01c.done
 linked_primitives:

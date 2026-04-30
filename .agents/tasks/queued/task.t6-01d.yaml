@@ -1,14 +1,14 @@
 id: task.t6-01d
 kind: task
 version: 1
-title: implement interaction-round stabilization plus scheduling opportunity and switch lock for server-side auto-switch
-status: ready
+title: cancelled auto-switch slice superseded by manual-only attention policy
+status: superseded
 priority: medium
 design_ref:
   doc: docs/server-console-scheduling-design.md
   why:
-    - sections 5.5 through 5.7 define the required scheduling state machine
-    - section 8 defines the accepted auto-switch decision algorithm
+    - this historical slice is retained only so task history records why auto-switch work was cancelled
+    - the accepted server-console design is now manual-only and rejects automatic focus jumps
 target_task_reference: task.t6-01
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -21,13 +21,9 @@ linked_primitives:
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - the server-console runtime arms one scheduling opportunity per real submit
-  - current-session continuation is protected by an explicit interaction-round stabilization rule
-  - automatic switching is limited by an explicit per-console switch lock
-  - server-side auto-switch behavior matches the accepted decision order without affecting local client focus
+  - historical record only
 verification:
-  - cargo test
-  - targeted review of scheduling opportunity, interaction-round stabilization, and switch-lock semantics
+  - targeted review confirming this slice is no longer planned work
 touched_paths:
   - src/runtime
   - src/application
@@ -36,5 +32,4 @@ touched_paths:
   - docs/server-console-scheduling-design.md
   - docs/execution-status-board.md
 notes:
-  - This slice is the first one allowed to introduce real server-side auto-switch behavior.
-  - It must not land until `task.t6-01a -> task.t6-01b -> task.t6-01c` are all closed.
+  - 2026-04-29 superseded: auto-switch was explicitly cancelled because automatic focus jumps degrade user experience; future server-console work must stay manual-only and use attention cues instead.
