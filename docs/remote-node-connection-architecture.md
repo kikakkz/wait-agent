@@ -531,8 +531,8 @@ ownership, but listener lifecycle is now universal:
 - the default listener bind address is `0.0.0.0`
 - the listener port is configured by CLI flag `--port <port>`
 - if `--port` is omitted, WaitAgent uses default port `7474`
-- `waitagent server` remains the accepted rendezvous point for phase-2 remote
-  sessions
+- the designated listener node remains the accepted rendezvous point for
+  phase-2 remote sessions
 - non-server WaitAgent nodes may still dial the server outbound
 - the same long-lived outbound node session carries authority publication,
   authority input or resize delivery, observer open, observer input, and
@@ -570,7 +570,7 @@ environment-variable-first.
 Rules:
 
 - listener configuration must come from `--port`
-- outbound remote dialing configuration must come from `--server <host:port>`
+- outbound remote dialing configuration must come from `--connect <host:port>`
 - WaitAgent must not require environment variables as the primary product
   interface for production remote networking
 - existing environment variables may survive only as temporary internal
@@ -585,9 +585,8 @@ Accepted defaults:
 Accepted examples:
 
 - `waitagent --port 7474`
-- `waitagent server --socket-name <socket> --port 7474`
-- `waitagent --server server.example.com:7474`
-- `waitagent server --socket-name <socket> --port 7474 --server hub.example.com:7474`
+- `waitagent --connect server.example.com:7474`
+- `waitagent --port 7474 --connect hub.example.com:7474`
 
 ### 10.2 Transport Trust Model
 

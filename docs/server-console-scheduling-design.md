@@ -256,7 +256,7 @@ The accepted `task.t6-01` order is now:
 
 Already landed:
 
-- public `waitagent server` entrypoint
+- dedicated hidden server-console entrypoint
 - shared-catalog activation picker
 - transport-agnostic target resolution
 - local target route through existing local attach path

@@ -14,14 +14,14 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteNetworkConfig {
     pub port: u16,
-    pub server: Option<String>,
+    pub connect: Option<String>,
 }
 
 impl Default for RemoteNetworkConfig {
     fn default() -> Self {
         Self {
             port: DEFAULT_REMOTE_NODE_PORT,
-            server: None,
+            connect: None,
         }
     }
 }
@@ -42,21 +42,21 @@ impl RemoteNetworkConfig {
         self.advertised_listener_addr().to_string()
     }
 
-    pub fn server_endpoint_uri(&self) -> Option<String> {
-        self.server.as_ref().map(|server| {
-            if server.contains("://") {
-                server.clone()
+    pub fn connect_endpoint_uri(&self) -> Option<String> {
+        self.connect.as_ref().map(|connect| {
+            if connect.contains("://") {
+                connect.clone()
             } else {
-                format!("http://{server}")
+                format!("http://{connect}")
             }
         })
     }
 
     pub fn to_cli_args(&self) -> Vec<String> {
         let mut args = vec!["--port".to_string(), self.port.to_string()];
-        if let Some(server) = &self.server {
-            args.push("--server".to_string());
-            args.push(server.clone());
+        if let Some(connect) = &self.connect {
+            args.push("--connect".to_string());
+            args.push(connect.clone());
         }
         args
     }
@@ -99,7 +99,6 @@ pub fn prepend_global_network_args(
 #[derive(Debug, Clone)]
 pub enum Command {
     Workspace,
-    Server(ServerConsoleCommand),
     ChromeRefreshSocket(SocketNameCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
@@ -129,13 +128,6 @@ pub enum Command {
     List,
     Detach(DetachCommand),
     Help(String),
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ServerConsoleCommand {
-    pub socket_name: String,
-    pub console_name: String,
-    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,10 +301,6 @@ impl Cli {
         }
 
         let command = match args[0].as_str() {
-            "server" => {
-                args.remove(0);
-                Command::Server(parse_server_console(args)?)
-            }
             "__chrome-refresh-socket" => {
                 args.remove(0);
                 Command::ChromeRefreshSocket(parse_socket_name_command(args)?)
@@ -470,17 +458,17 @@ fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkCo
                     .parse::<u16>()
                     .map_err(|_| CliError::InvalidValue("--port".to_string(), value.clone()))?;
             }
-            "--server" => {
+            "--connect" => {
                 args.remove(0);
                 let value = args
                     .first()
                     .cloned()
-                    .ok_or_else(|| CliError::MissingValue("--server".to_string()))?;
+                    .ok_or_else(|| CliError::MissingValue("--connect".to_string()))?;
                 args.remove(0);
                 if value.trim().is_empty() {
-                    return Err(CliError::InvalidValue("--server".to_string(), value));
+                    return Err(CliError::InvalidValue("--connect".to_string(), value));
                 }
-                network.server = Some(value);
+                network.connect = Some(value);
             }
             _ => break,
         }
@@ -519,30 +507,6 @@ fn parse_detach(args: Vec<String>) -> Result<DetachCommand, CliError> {
     }
 
     Ok(command)
-}
-
-fn parse_server_console(args: Vec<String>) -> Result<ServerConsoleCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut socket_name = None;
-    let mut console_name = None;
-    let mut target = None;
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
-            "--console-name" => console_name = Some(expect_value("--console-name", &mut iter)?),
-            "--target" => target = Some(expect_value("--target", &mut iter)?),
-            "--help" | "-h" => {}
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(ServerConsoleCommand {
-        socket_name: socket_name
-            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
-        console_name: console_name.unwrap_or_else(|| "server".to_string()),
-        target,
-    })
 }
 
 fn parse_ui_pane(args: Vec<String>) -> Result<UiPaneCommand, CliError> {
@@ -1094,11 +1058,10 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
-        "  waitagent [--port <port>] [--server <host:port>]",
-        "  waitagent [--port <port>] [--server <host:port>] server --socket-name <socket> [--console-name <name>] [--target <target>]",
-        "  waitagent [--port <port>] [--server <host:port>] attach [<target>]",
-        "  waitagent [--port <port>] [--server <host:port>] ls",
-        "  waitagent [--port <port>] [--server <host:port>] detach [<target>]",
+        "  waitagent [--port <port>] [--connect <host:port>]",
+        "  waitagent [--port <port>] [--connect <host:port>] attach [<target>]",
+        "  waitagent [--port <port>] [--connect <host:port>] ls",
+        "  waitagent [--port <port>] [--connect <host:port>] detach [<target>]",
     ]
     .join("\n")
 }
@@ -1140,18 +1103,18 @@ mod tests {
         let cli = parse(&["waitagent"]);
         assert!(matches!(cli.command, Command::Workspace));
         assert_eq!(cli.network.port, DEFAULT_REMOTE_NODE_PORT);
-        assert!(cli.network.server.is_none());
+        assert!(cli.network.connect.is_none());
     }
 
     #[test]
     fn rejects_removed_top_level_remote_flags() {
-        let argv = ["waitagent", "--connect", "127.0.0.1:7474"]
+        let argv = ["waitagent", "--server", "127.0.0.1:7474"]
             .iter()
             .map(|arg| (*arg).into())
             .collect::<Vec<_>>();
         let error = Cli::parse(argv).expect_err("legacy remote flags should no longer parse");
 
-        assert_eq!(error.to_string(), "unexpected argument: --connect");
+        assert_eq!(error.to_string(), "unexpected argument: --server");
     }
 
     #[test]
@@ -1170,16 +1133,16 @@ mod tests {
             "waitagent",
             "--port",
             "8484",
-            "--server",
+            "--connect",
             "remote.example:7474",
             "attach",
             "wa-1:waitagent-1",
         ]);
 
         assert_eq!(cli.network.port, 8484);
-        assert_eq!(cli.network.server.as_deref(), Some("remote.example:7474"));
+        assert_eq!(cli.network.connect.as_deref(), Some("remote.example:7474"));
         assert_eq!(
-            cli.network.server_endpoint_uri().as_deref(),
+            cli.network.connect_endpoint_uri().as_deref(),
             Some("http://remote.example:7474")
         );
         match cli.command {
@@ -1199,41 +1162,6 @@ mod tests {
         let error = Cli::parse(argv).expect_err("invalid port should fail");
 
         assert_eq!(error.to_string(), "invalid value for --port: abc");
-    }
-
-    #[test]
-    fn parses_server_command_with_default_console_name() {
-        match parse(&["waitagent", "server", "--socket-name", "wa-1"]).command {
-            Command::Server(command) => {
-                assert_eq!(command.socket_name, "wa-1");
-                assert_eq!(command.console_name, "server");
-                assert!(command.target.is_none());
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_server_command_with_explicit_console_name_and_target() {
-        match parse(&[
-            "waitagent",
-            "server",
-            "--socket-name",
-            "wa-1",
-            "--console-name",
-            "ops",
-            "--target",
-            "peer-a:shell-1",
-        ])
-        .command
-        {
-            Command::Server(command) => {
-                assert_eq!(command.socket_name, "wa-1");
-                assert_eq!(command.console_name, "ops");
-                assert_eq!(command.target.as_deref(), Some("peer-a:shell-1"));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
     }
 
     #[test]
@@ -1260,6 +1188,17 @@ mod tests {
         let error = Cli::parse(argv).expect_err("status should no longer parse");
 
         assert_eq!(error.to_string(), "unknown subcommand: status");
+    }
+
+    #[test]
+    fn rejects_removed_server_subcommand() {
+        let argv = ["waitagent", "server"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        let error = Cli::parse(argv).expect_err("server subcommand should no longer parse");
+
+        assert_eq!(error.to_string(), "unknown subcommand: server");
     }
 
     #[test]

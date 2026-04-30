@@ -1,9 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::{
-    AttachCommand, RemoteNetworkConfig, RemoteServerConsoleCommand, ServerConsoleCommand,
-};
+use crate::cli::{AttachCommand, RemoteNetworkConfig, RemoteServerConsoleCommand};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
@@ -74,16 +72,6 @@ impl RemoteServerConsoleRuntime {
                 ServerConsoleInteractionSurface::for_target(self, &command, &target).run()?;
             state.apply_interaction_trace(&trace);
         }
-    }
-
-    pub fn run_public(&self, command: ServerConsoleCommand) -> Result<(), LifecycleError> {
-        self.publication_runtime
-            .ensure_configured_publications_on_socket(&command.socket_name)?;
-        self.run(RemoteServerConsoleCommand {
-            socket_name: command.socket_name,
-            console_name: command.console_name,
-            target: command.target,
-        })
     }
 
     fn resolve_activation_target(

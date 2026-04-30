@@ -13,7 +13,7 @@ It exists because the current codebase already has:
 
 - a shared transport-agnostic target catalog
 - remote target activation through the server control plane
-- a public `waitagent server` console surface
+- a dedicated server-console surface
 - loopback and local-socket transport coverage for authority and publication
 
 but it does not yet close the real cross-host product loop.
@@ -40,8 +40,8 @@ The accepted outcome is:
 
 - a PTY-owning authority node can connect through a real cross-host ingress
   boundary
-- a local workspace console or `waitagent server` can open that target through
-  the shared catalog
+- a local workspace console or dedicated server-console surface can open that
+  target through the shared catalog
 - input reaches the authority-owned PTY through the accepted control-plane path
 - output returns over the same accepted node-session model and becomes visible
   in the opened console surface
@@ -88,7 +88,7 @@ Not yet complete for the phase outcome:
   source
 - the product still lacks one public always-on listener lifecycle and public
   outbound dial contract, so real cross-host validation cannot yet run through
-  a normal user-facing `--port` / `--server` workflow
+  a normal user-facing `--port` / `--connect` workflow
 - steady-state live node ownership is still split across several runtimes and
   helper boundaries
 - remote output delivery is routed, but the final visible render path and

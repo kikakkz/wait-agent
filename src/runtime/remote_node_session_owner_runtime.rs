@@ -682,7 +682,7 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
             let session = match RemoteNodeSessionRuntime::connect(
                 &shared_session.transport_socket_path,
                 &shared_session.authority_id,
-                shared_session.network.server_endpoint_uri().as_deref(),
+                shared_session.network.connect_endpoint_uri().as_deref(),
             ) {
                 Ok(session) => {
                     reconnect_attempt = 0;

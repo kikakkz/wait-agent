@@ -73,10 +73,6 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_workspace_entry()
                 .map_err(AppError::from),
-            Command::Server(command) => self
-                .remote_server_console_runtime
-                .run_public(command)
-                .map_err(AppError::from),
             Command::ChromeRefreshSocket(command) => self
                 .layout_runtime
                 .run_chrome_refresh_on_socket(&command.socket_name)
