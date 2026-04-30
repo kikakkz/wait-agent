@@ -1,8 +1,8 @@
 # WaitAgent Remote Session Foundation
 
-Version: `v1.1`
+Version: `v1.2`
 Status: `Accepted`
-Date: `2026-04-28`
+Date: `2026-04-30`
 
 ## 1. Purpose
 
@@ -21,6 +21,8 @@ It complements:
 - [architecture.md](architecture.md)
 - [protocol.md](protocol.md)
 - [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
+- [remote-network-completion-plan.md](remote-network-completion-plan.md)
+- [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
 
 ## 2. Product Rule
 
@@ -167,6 +169,11 @@ The accepted resumed remote queue is:
 5. `task.t6-01`
    Implement the server-side workspace console as another target-opening
    surface that consumes the same shared catalog.
+6. `task.t5-08 -> task.t5-08c`
+   Close the remaining cross-host network gap by replacing local-only
+   authority ingress assumptions, centralizing live node ownership, binding
+   delivered remote output into visible console rendering, and now front-loading
+   a dedicated node-connection architecture design.
 
 ## 8. Anti-Goals
 

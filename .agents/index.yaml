@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.t6-01b
+  default_task: task.t5-08a2
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -22,6 +22,8 @@ authoritative_sources:
   execution_board: docs/execution-status-board.md
   acceptance_checklist: docs/local-acceptance-checklist.md
   architecture: docs/architecture.md
+  remote_network_completion: docs/remote-network-completion-plan.md
+  remote_node_connection_architecture: docs/remote-node-connection-architecture.md
   tmux_first_plan: docs/tmux-first-workspace-plan.md
   tmux_first_runtime_architecture: docs/tmux-first-runtime-architecture.md
   functional_design: docs/functional-design.md
@@ -44,8 +46,8 @@ directories:
   generated: .agents/generated
 active_context:
   project_phase: phase-2
-  current_stage: server-console-activation
-  current_focus: continue resumed remote work with task.t6-01b so the server-side console starts observing real submit and manual-switch signals through the new unified interaction seam
+  current_stage: remote-network-completion
+  current_focus: continue phase-2 remote work with task.t5-08a2 so trust bootstrap, dialing policy, and canonical connection ownership are fixed before the cross-host ingress implementation starts
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

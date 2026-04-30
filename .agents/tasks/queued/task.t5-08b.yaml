@@ -1,0 +1,43 @@
+id: task.t5-08b
+kind: task
+version: 1
+title: centralize live node-session ownership and remote registration lifecycle
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - the architecture task must first define the accepted node-scoped ownership and reconnect model
+    - this slice then converges authority and publication lifecycle ownership under that runtime boundary
+target_task_reference: task.t5-08b
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted owner runtime coordinates live node-session registration, reconnect or disconnect behavior, and registry cleanup for remote authority and publication flows
+  - authority-host and publication paths reuse that owner boundary instead of keeping split steady-state session caches
+  - node disconnects and failures update remote availability and console-visible state without reviving local-only assumptions
+verification:
+  - cargo test
+  - targeted review of live node ownership, reconnect behavior, and owner-runtime boundaries
+touched_paths:
+  - Cargo.toml
+  - src/runtime
+  - src/application
+  - src/infra
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08b.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice should consume the ingress boundary from `task.t5-08a` rather than inventing a new parallel owner path.
+  - Manual-only attention policy and server-console UX rules remain unchanged.

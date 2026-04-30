@@ -9,9 +9,10 @@ design_ref:
   why:
     - section 8.3 only states that mTLS is preferred, but the actual trust bootstrap and ownership policy are still undefined
     - the node-scoped connection manager cannot be implemented cleanly until dial, accept, duplicate-session, and reconnect authority rules are fixed
+target_task_reference: task.t5-08a2
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08a2.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t5-08a1.done
 linked_primitives:

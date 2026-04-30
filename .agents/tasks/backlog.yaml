@@ -152,6 +152,27 @@ next:
   - id: task.t6-01e
     title: retire server-side auto-switch planning and lock server-console on manual-only attention cues
     status: done
+  - id: task.t5-08
+    title: design the remote node connection architecture for efficient multi-connection ingress and ownership
+    status: done
+  - id: task.t5-08a1
+    title: design the gRPC proto and RPC contract for remote node sessions
+    status: done
+  - id: task.t5-08a2
+    title: design node trust, dialing policy, and canonical connection ownership
+    status: in_progress
+  - id: task.t5-08a3
+    title: design remote render bootstrap, replay, and late-subscriber recovery
+    status: ready
+  - id: task.t5-08a
+    title: introduce a real cross-host authority ingress source on the accepted connection boundary
+    status: ready
+  - id: task.t5-08b
+    title: centralize live node-session ownership and remote registration lifecycle
+    status: ready
+  - id: task.t5-08c
+    title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
+    status: ready
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred
@@ -194,6 +215,7 @@ notes:
   - 2026-04-27 update: `task.t5-06b` is complete enough to close after the shared target model, protocol identity contract, and compatibility accessors landed; active work now moves to `task.t5-06c`, where local tmux becomes the first producer behind an explicit target-registry boundary.
   - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
   - 2026-04-29 refinement: the original `task.t6-01` umbrella was first split into bounded slices and later corrected again when the planned auto-switch slice was cancelled in favor of a manual-only attention policy lock.
+  - 2026-04-30 refinement: `task.t5-07`, `task.t6-01e`, and `task.t5-08a1` closed the current control-plane, server-console-planning, and protocol-contract gaps; implementation remains deliberately paused behind the remaining design slices `task.t5-08a2 -> task.t5-08a3` before `task.t5-08a -> task.t5-08c` resumes.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

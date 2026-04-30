@@ -1,605 +1,382 @@
 # WaitAgent Protocol
 
-Version: `v1.1`  
-Status: `Accepted`  
-Date: `2026-04-28`
+Version: `v2.0`
+Status: `Accepted for task.t5-08a1`
+Date: `2026-04-30`
 
 ## 1. Purpose
 
-This document defines the accepted client and server signaling contract for
+This document defines the accepted node-to-node application protocol for
 WaitAgent network mode.
 
-It exists to make `task.t5-07` and later remote-console work implementable
-without another protocol redesign.
+It exists to freeze the production transport contract before real cross-host
+ingress implementation starts.
 
 It complements:
 
 - [architecture.md](architecture.md)
 - [remote-session-foundation.md](remote-session-foundation.md)
+- [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
 - [functional-design.md](functional-design.md)
 
 ## 2. Scope
 
-This protocol covers only `server <-> client node` communication.
+This protocol covers only `server <-> client node` communication for remote
+target publication, open, input, output, and PTY-control traffic.
 
-It does not change the local-only product path:
+It does not change the accepted local product path:
 
 - local mode must still work without a live server
-- local tmux remains a valid target producer without any network transport
-- server-hosted consoles use the same control-plane state machine, but their
-  events are in-process server events rather than wire messages
+- local tmux remains a valid target producer without network transport
+- server-hosted consoles keep using the same control-plane model, but their
+  events are in-process rather than wire messages
 
 This document intentionally defines:
 
-- the canonical wire envelope
-- canonical target and console identity fields
-- the message set required for target catalog sync, remote open, input, output,
-  and PTY resize
-- ordering and authority rules
-- reconnect and failure behavior
+- the accepted protobuf package and file ownership
+- the accepted gRPC service and RPC shape
+- the node-session envelope and message families
+- the distinction between terminal interaction traffic and transport control
+- error, ordering, versioning, and reconnect rules
 
 This document intentionally does not define:
 
-- transport-specific authentication mechanisms
-- a binary snapshot format
-- rich remote task-state probing heuristics
+- certificate issuance and trust bootstrap policy
+- canonical dialer and duplicate-session ownership policy
+- remote render bootstrap, replay, or late-subscriber snapshot policy
 
-## 3. Non-Negotiable Rules
+Those remaining design gaps belong to:
 
-The remote-session foundation remains authoritative:
+- `task.t5-08a2` for trust and connection ownership
+- `task.t5-08a3` for render bootstrap and replay
+
+## 3. Accepted Transport Model
+
+The accepted production transport stack is:
+
+- `tonic` for gRPC over HTTP/2
+- `prost` for protobuf schema generation
+- `tokio` for async runtime and bounded queues
+- `rustls` for authenticated TLS transport
+
+The accepted production contract is:
+
+- one repo-owned proto file at `proto/waitagent/remote/v1/node_session.proto`
+- one protobuf package `waitagent.remote.v1`
+- one primary bidirectional streaming RPC `OpenNodeSession`
+- one typed protobuf envelope carrying logical message variants over that stream
+
+WaitAgent must not keep the old production assumption of JSON envelopes,
+base64 PTY payloads, or ad hoc framed sockets as the primary cross-host path.
+
+## 4. Non-Negotiable Rules
 
 1. The PTY owner stays remote.
    The server never pretends to own a remote PTY locally.
-2. Local and remote targets share one target model.
-   The protocol must not fork a remote-only identity shape.
-3. Input is shared.
-   Multiple consoles may send input to one target.
-4. Output is broadcast.
-   PTY output fans out to every opened console.
-5. Resize scope is explicit.
-   Attachment viewport resize is local to each console. PTY resize, when
-   routed through the control plane, is exclusive.
-6. The server control plane serializes cross-console input order.
-7. The PTY owner serializes PTY output order.
+2. The protocol is app-agnostic.
+   It carries terminal bytes, resize intent, publication state, and attachment
+   control. It must not depend on recognizing Codex, shell, editor, or other
+   TUI-specific semantic events.
+3. Remote and local parity is terminal parity.
+   The user should observe the same visible command, output, resize, and prompt
+   behavior. The transport boundary may add latency, but it must not create a
+   second interaction model.
+4. One node session multiplexes many logical targets.
+   WaitAgent must not open one production transport connection per target or
+   per observer pane.
+5. Input is shared and ordered by the server.
+   Multiple consoles may send input to one target, but the server serializes
+   target input order.
+6. Output is authoritative at the PTY host.
+   Ordered PTY bytes emitted by the authority node are the source of truth for
+   what observers should display.
+7. Viewport resize remains local.
+   PTY resize is a target-scoped control-plane action; viewer-local geometry is
+   not a transport-level PTY mutation by itself.
 
-## 4. Wire Format
+## 5. Proto Ownership
 
-Each protocol message is one UTF-8 JSON object.
+The accepted schema ownership is:
 
-Framing rule:
+- file: `proto/waitagent/remote/v1/node_session.proto`
+- protobuf package: `waitagent.remote.v1`
+- generated code ownership: infra or transport-facing modules only
 
-- on WebSocket, one WebSocket message carries exactly one protocol envelope
-- on framed TCP, one length-prefixed frame carries exactly one protocol envelope
+Higher-level runtime code must depend on a repo-owned transport facade rather
+than calling generated `tonic` client or server stubs directly.
 
-Binary PTY data is base64-encoded inside JSON payloads.
+## 6. RPC Surface
 
-This keeps the logical protocol transport-agnostic while still defining one
-concrete message representation.
+The accepted service surface is:
 
-## 5. Actors
+```proto
+syntax = "proto3";
 
-- `client node`
-  A WaitAgent node that owns local PTYs and may also host a local workspace
-  console.
-- `server`
-  The aggregate control plane that maintains replicated target state, tracks
-  console attachments, serializes multi-console input, and arbitrates PTY
-  resize when that control path is active for a target.
-- `console host`
-  A runtime that hosts one or more consoles.
-  This can be a client node or the server process itself.
+package waitagent.remote.v1;
 
-Important boundary:
-
-- only client nodes speak this wire protocol
-- server-hosted consoles participate in the same attachment and authority
-  model, but not over the wire
-
-## 6. Canonical Identities
-
-### 6.1 Node Identity
-
-Every connected client node has a stable `node_id`.
-
-Rules:
-
-- `node_id` is stable across reconnect when the local installation persists
-- `node_id` is unique within one server deployment
-- the server keys connection recovery on `node_id`
-
-### 6.2 Target Identity
-
-Every target published to the server carries:
-
-- `target_id`
-  Stable WaitAgent target identity.
-  This is the primary protocol identifier for one target.
-- `authority_id`
-  The current PTY-owning node id.
-- `transport`
-  One of `local-tmux` or `remote-peer`.
-- `transport_session_id`
-  Transport-local session identity on the PTY owner.
-- `selector`
-  Optional compatibility or authority-local selector that can resolve the
-  concrete transport target on the PTY-owning node without replacing
-  `target_id`.
-
-Rules:
-
-- `target_id` is stable across reconnect if the target still exists
-- `target_id` is not derived by the server
-- `selector` is compatibility metadata, not the canonical identity key
-- when present, `selector` may also be used by authority-local runtimes to
-  resolve a concrete PTY host such as a tmux `socket:session` target for
-  loopback or same-node bridging
-
-### 6.3 Console Identity
-
-Every console attachment is described by:
-
-- `console_id`
-  Stable identity for one console surface on one console host
-- `console_location`
-  `local-workspace` or `server-console`
-- `console_host_id`
-  The node id of the client host, or the literal `server` for server-hosted
-  consoles
-
-The server creates:
-
-- `attachment_id`
-  Stable identity for one `open target in console` relationship
-
-## 7. Envelope Contract
-
-Every message must use this envelope:
-
-```json
-{
-  "protocol_version": "1.1",
-  "message_id": "msg-uuid",
-  "message_type": "client_hello",
-  "timestamp": "2026-04-27T12:00:00Z",
-  "sender_id": "node-a",
-  "payload": {}
+service NodeSessionService {
+  rpc OpenNodeSession(stream NodeSessionEnvelope)
+      returns (stream NodeSessionEnvelope);
 }
 ```
 
-Required top-level fields:
+Rules:
 
-- `protocol_version`
-- `message_id`
-- `message_type`
-- `timestamp`
-- `sender_id`
-- `payload`
+- `OpenNodeSession` is the only required steady-state RPC in protocol `v1`
+- the stream is long-lived and node-scoped
+- both directions carry discrete typed envelopes, not raw transport blobs
+- uplink and downlink both use the same RPC, but their message semantics remain
+  explicit by message type
 
-Optional top-level fields:
+Future unary or auxiliary RPCs may be added later for diagnostics or bulk
+recovery, but the accepted phase-2 contract must not depend on them.
 
-- `correlation_id`
+## 7. Envelope Contract
+
+The accepted stream item is one typed envelope:
+
+```proto
+message NodeSessionEnvelope {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  string session_instance_id = 3;
+  optional string correlation_id = 4;
+  optional RouteContext route = 5;
+
+  oneof body {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    Heartbeat heartbeat = 12;
+    SessionNotice session_notice = 13;
+    CommandRejected command_rejected = 14;
+
+    TargetPublished target_published = 20;
+    TargetExited target_exited = 21;
+
+    OpenTargetRequest open_target_request = 30;
+    OpenTargetAccepted open_target_accepted = 31;
+    OpenTargetRejected open_target_rejected = 32;
+    CloseTargetRequest close_target_request = 33;
+
+    ConsoleInput console_input = 40;
+    TargetInputDelivery target_input_delivery = 41;
+
+    PtyResizeRequest pty_resize_request = 50;
+    ApplyPtyResize apply_pty_resize = 51;
+    PtyResizeApplied pty_resize_applied = 52;
+
+    TargetOutput target_output = 60;
+  }
+}
+```
+
+`RouteContext` exists to carry the stable routing identifiers that matter for
+diagnostics, fanout, and correlation:
+
+```proto
+message RouteContext {
+  optional string authority_node_id = 1;
+  optional string target_id = 2;
+  optional string attachment_id = 3;
+  optional string console_id = 4;
+  optional string console_host_id = 5;
+}
+```
+
+Rules:
+
+- `message_id` is unique within one `session_instance_id`
+- `correlation_id` points back to the initiating message when the current
+  envelope is a reply or rejection
+- `route` must carry only stable protocol identifiers, not transport-local
+  socket names or pane ids
+- message payloads use protobuf `bytes` for terminal data; no base64 wrapper is
+  used in gRPC mode
+
+## 8. Handshake And Session Control
+
+### 8.1 Hello Exchange
+
+The first envelope sent by the client node on a new stream must be
+`ClientHello`.
+
+The first successful reply from the server must be `ServerHello`.
+
+Accepted handshake shape:
+
+```proto
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message ClientHello {
+  string node_id = 1;
+  string node_instance_id = 2;
+  ProtocolVersion min_supported_version = 3;
+  ProtocolVersion max_supported_version = 4;
+  NodeCapabilities capabilities = 5;
+  optional ResumeHint resume = 6;
+}
+
+message ServerHello {
+  string server_id = 1;
+  string session_instance_id = 2;
+  ProtocolVersion negotiated_version = 3;
+  google.protobuf.Duration heartbeat_interval = 4;
+  RecoveryPolicy recovery_policy = 5;
+}
+```
+
+Rules:
+
+- the stream is not considered established until `ServerHello` is accepted
+- the authoritative `session_instance_id` is assigned by the server
+- transport authentication must already have happened underneath the RPC; the
+  claimed `node_id` is still validated against that authenticated transport
+  identity by later trust-policy design
+- `ResumeHint` may reference the previously observed stream, but it does not
+  guarantee replay or attachment restoration in protocol `v1`
+- `NodeCapabilities` must at least advertise whether the node can publish
+  targets, host observing consoles, send observing-console input, and consume
+  authority-directed terminal control
+- `RecoveryPolicy` must at least state whether authority republish is required,
+  whether observer-side attachment reopen is required, and whether any replay
+  facility exists at all
+
+### 8.2 Heartbeat And Session Notices
+
+The accepted control-plane keepalive messages are:
+
+- `Heartbeat`
+- `SessionNotice`
+
+`Heartbeat` is symmetric and exists for application-level liveness and coarse
+diagnostics in addition to HTTP/2 keepalive.
+
+`SessionNotice` is server or client initiated and covers graceful session-level
+state such as:
+
+- `draining`
+- `going_offline`
+- `resync_required`
+
+If the stream is rejected before `ServerHello`, the RPC must fail with a gRPC
+status rather than an in-band envelope.
+
+## 9. Message Families
+
+### 9.1 Publication Messages
+
+Authority nodes publish and withdraw targets through:
+
+- `TargetPublished`
+- `TargetExited`
+
+Accepted `TargetPublished` fields:
+
 - `target_id`
-- `attachment_id`
-- `console_id`
-
-Rules:
-
-- `message_id` is unique per sender
-- `correlation_id` links replies or errors to the initiating message
-- `target_id`, `attachment_id`, and `console_id` are duplicated at envelope
-  level only when they improve routing or diagnostics
-
-## 8. Capability Contract
-
-The first accepted protocol version is `1.1`.
-
-Capability negotiation is explicit but minimal.
-
-Each side may advertise:
-
-- `max_frame_bytes`
-- `supports_screen_snapshot`
-- `supports_server_console_observation`
-- `supports_server_console_input`
-
-The first accepted baseline assumes:
-
-- snapshot delivery is optional
-- server-console observation is supported later, but its state model is already
-  reserved
-- client nodes must tolerate receiving catalog messages for targets they do not
-  currently open
-
-## 9. Message Set
-
-## 9.1 Connection Messages
-
-### `client_hello`
-
-Direction:
-
-- client node -> server
-
-Payload:
-
-- `node_id`
-- `client_version`
-- `capabilities`
-- `auth_material`
-
-Meaning:
-
-- begin session negotiation
-- resume node identity if reconnecting
-
-### `server_hello`
-
-Direction:
-
-- server -> client node
-
-Payload:
-
-- `server_id`
-- `server_version`
-- `accepted_protocol_version`
-- `capabilities`
-- `heartbeat_interval_ms`
-- `session_recovery_policy`
-
-Meaning:
-
-- accept or reject the node connection
-- establish protocol version and heartbeat cadence
-
-### `heartbeat`
-
-Direction:
-
-- client node -> server
-- server -> client node
-
-Payload:
-
-- `sender_runtime`
-- `active_target_count`
-- `open_attachment_count`
-- `last_catalog_version`
-
-Meaning:
-
-- liveness
-- coarse recovery diagnostics
-
-## 9.2 Target Catalog Messages
-
-### `target_published`
-
-Direction:
-
-- authority client node -> server
-
-Payload:
-
+- `authority_node_id`
+- `transport`
 - `transport_session_id`
-- `selector`
+- optional `selector`
 - `availability`
-  One of `online`, `offline`, `exited`
-- `session_role`
-- `workspace_key`
-- `command_name`
-- `current_path`
-- `attached_clients`
-- `window_count`
-
-Envelope rules:
-
-- `sender_id` is the publishing `authority_id`
-- `target_id` is the canonical remote target id such as
-  `remote-peer:<authority_id>:<transport_session_id>`
+- optional presentation metadata such as command name, path, and attached count
 
 Rules:
 
-- the authority client is the only writer of authoritative target metadata
-- the server derives `opened_by` and resize ownership from attachment messages,
-  not from `target_published`
-- repeated `target_published` messages replace the replicated target metadata for
-  that `target_id`
-- the current local development path may deliver these messages through a
-  socket-backed publication listener that is fed by a socket-scoped publication
-  agent; current tmux hooks only signal agent reconciliation before real node
-  or server transport lands
+- the authority node is the only writer of authoritative target-host metadata
+- repeated `TargetPublished` messages replace the current replicated metadata
+  for that `target_id`
+- `selector` is compatibility metadata, not the primary identity key
 
-### `target_exited`
+### 9.2 Observer Attachment Messages
 
-Direction:
+Client-hosted observing consoles use:
 
-- authority client node -> server
+- `OpenTargetRequest`
+- `OpenTargetAccepted`
+- `OpenTargetRejected`
+- `CloseTargetRequest`
 
-Payload:
+`OpenTargetRequest` carries:
 
-- `transport_session_id`
-
-Envelope rules:
-
-- `sender_id` is the publishing `authority_id`
-- `target_id` remains the canonical remote target id
-
-Rules:
-
-- after `target_exited`, the server removes or marks the replicated target as
-  exited according to the server lifecycle policy
-- existing attachments may remain briefly for UI cleanup, but no new input or
-  resize is valid for that target
-- the current local development path may emit `target_exited` from the same
-  publication-agent reconcile pass when a previously published target drops out
-  of the authority socket view
-
-### `node_offline`
-
-Direction:
-
-- server -> interested client nodes
-
-Payload:
-
-- `node_id`
-- `offline_at`
-
-Meaning:
-
-- the PTY owner or observing node is currently disconnected
-- affected remote targets should project `offline` until reconciled
-
-## 9.3 Console Attachment Messages
-
-### `open_target`
-
-Direction:
-
-- observing client node -> server
-
-Payload:
-
+- `target_id`
 - `console_id`
 - `console_location`
-- `target_id`
-- `cols`
-- `rows`
+- opening viewport `cols` and `rows`
 
-Rules:
-
-- `open_target` means “open this target in this console”
-- `cols` and `rows` describe the opening console's local viewport size, not an
-  immediate PTY resize
-- a repeated `open_target` for the same console refreshes the attachment and
-  updates the console's last-known viewport size
-- the newest successful `open_target` becomes PTY resize authority by default
-  only for the PTY-resize control path
-
-### `open_target_ok`
-
-Direction:
-
-- server -> observing client node
-
-Payload:
+`OpenTargetAccepted` carries at least:
 
 - `target_id`
 - `attachment_id`
 - `console_id`
-- `resize_epoch`
-- `resize_authority_console_id`
-- `resize_authority_host_id`
 - `availability`
-- `initial_snapshot`
-  Optional inline snapshot or reference
+- `resize_epoch`
+- `resize_authority_console_id`
 
-Rules:
-
-- the server creates `attachment_id`
-- the `resize_*` fields describe PTY-resize authority state, not ownership of
-  the attachment's local viewport
-- if `open_target` changed PTY resize authority, the server increments
-  `resize_epoch`
-
-### `open_target_rejected`
-
-Direction:
-
-- server -> observing client node
-
-Payload:
+`OpenTargetRejected` carries at least:
 
 - `target_id`
 - `console_id`
-- `code`
-- `message`
-
-Typical reasons:
-
-- `unknown_target`
-- `target_offline`
-- `unauthorized`
-
-### `close_target`
-
-Direction:
-
-- observing client node -> server
-
-Payload:
-
-- `attachment_id`
-- `target_id`
+- rejection `reason`
+- structured `status`
 
 Rules:
 
-- `close_target` removes one console attachment
-- if the removed attachment held PTY resize authority, the server reassigns
-  authority to the most recently opened remaining attachment
-- when authority changes, the server increments `resize_epoch`
+- opening viewport size describes the viewer surface, not an automatic PTY
+  resize
+- the server creates `attachment_id`
+- attachment state is server-owned even though the request originates on a
+  client-hosted console
 
-### `resize_authority_changed`
+### 9.3 Client-Originated Terminal Interaction Messages
 
-Direction:
+Client-hosted console interaction sent toward the server uses:
 
-- server -> affected client nodes
+- `ConsoleInput`
+- `PtyResizeRequest`
 
-Payload:
-
-- `target_id`
-- `resize_epoch`
-- `resize_authority_console_id`
-- `resize_authority_host_id`
-- `cols`
-  Optional last-known PTY column count
-- `rows`
-  Optional last-known PTY row count
-
-Rules:
-
-- this message announces PTY-resize authority, not attachment viewport
-  ownership
-- `cols` and `rows` are the server's last-known PTY size for the new authority
-  when one is known, and may be absent before any explicit PTY resize has been
-  accepted
-- after authority changes, the server may send `apply_resize` to the PTY owner
-  using the same `resize_epoch` when the runtime is propagating PTY resize
-
-Local viewport rule:
-
-- pane resize, fullscreen, and other viewer-local geometry changes are not
-  `resize_request` messages in protocol v1.1
-- local viewport changes must be handled by the console runtime and must not be
-  rejected by PTY-resize authority rules
-- if wider history or richer redraw is needed after viewport growth, the
-  runtime should rely on local terminal buffering or later `screen_snapshot`
-  support rather than forcing a PTY resize
-
-## 9.4 Input Messages
-
-### `console_input`
-
-Direction:
-
-- observing client node -> server
-
-Payload:
+`ConsoleInput` carries:
 
 - `attachment_id`
 - `target_id`
 - `console_id`
 - `console_seq`
-- `bytes_base64`
+- `input_bytes`
+
+`PtyResizeRequest` carries:
+
+- `attachment_id`
+- `target_id`
+- `console_id`
+- `cols`
+- `rows`
+- `resize_epoch`
 
 Rules:
 
 - `console_seq` is monotonic per console
-- `console_input` is valid only for an open attachment
-- the server does not forward raw local console order directly to the PTY owner
+- `PtyResizeRequest` is only for PTY resize, not local viewer resizing
+- a pure viewer resize stays local and must not be rejected by transport rules
 
-### `target_input`
+### 9.4 Server-Originated Terminal Control Messages
 
-Direction:
+The server sends authority-directed terminal control over the same stream using:
 
-- server -> authority client node
+- `TargetInputDelivery`
+- `ApplyPtyResize`
 
-Payload:
+`TargetInputDelivery` carries:
 
 - `attachment_id`
 - `target_id`
 - `console_id`
 - `console_host_id`
 - `input_seq`
-- `bytes_base64`
+- `input_bytes`
 
-Rules:
-
-- `input_seq` is assigned by the server and is monotonic per target
-- the authority client applies input strictly in `input_seq` order
-- multi-console input ordering is therefore serialized by the server control
-  plane rather than inferred at the PTY host
-
-## 9.5 Output Messages
-
-### `target_output`
-
-Direction:
-
-- authority client node -> server
-- server -> observing client nodes
-
-Payload:
-
-- `target_id`
-- `output_seq`
-- `stream`
-  The first accepted value is `pty`
-- `bytes_base64`
-
-Rules:
-
-- `output_seq` is assigned by the PTY owner and is monotonic per target
-- the server forwards output in the same order and must not renumber it
-- observers render output in `output_seq` order
-- different observers may render the same ordered output into different local
-  viewport sizes
-
-### `screen_snapshot`
-
-Direction:
-
-- authority client node -> server
-- server -> observing client nodes
-
-Payload:
-
-- `target_id`
-- `screen_version`
-- `snapshot_encoding`
-- `snapshot_data`
-
-Rules:
-
-- `screen_snapshot` is optional in protocol v1.1
-- it exists to support later focus restore, late join, replay, and fuller
-  redraw after local viewport expansion
-
-## 9.6 PTY Resize Messages
-
-### `resize_request`
-
-Direction:
-
-- observing client node -> server
-
-Payload:
-
-- `attachment_id`
-- `target_id`
-- `console_id`
-- `cols`
-- `rows`
-
-Rules:
-
-- `resize_request` is only for PTY resize, not attachment viewport resize
-- only the current PTY-resize authority may send an accepted `resize_request`
-- non-authority PTY-resize requests are rejected with
-  `error.code = resize_denied`
-- the server stores the authority console's latest size on every accepted
-  PTY-resize request
-- a local pane resize or fullscreen transition must not generate
-  `resize_request` by itself
-
-### `apply_resize`
-
-Direction:
-
-- server -> authority client node
-
-Payload:
+`ApplyPtyResize` carries:
 
 - `target_id`
 - `resize_epoch`
@@ -609,247 +386,201 @@ Payload:
 
 Rules:
 
-- the PTY owner must ignore stale `apply_resize` messages whose `resize_epoch`
-  is older than the latest one it has applied for that target
-- authority changes and accepted PTY-resize requests both fan out through
-  `apply_resize`
+- `input_seq` is assigned by the server and is monotonic per target
+- the authority node applies input strictly in `input_seq` order
+- the server never sends application-specific semantic commands such as
+  "show this Codex prompt"
+- the only accepted server-originated interaction contract is generic terminal
+  input or PTY-control delivery
 
-### `resize_applied`
+### 9.5 Authority-Originated Output Messages
 
-Direction:
+PTY-owning nodes send terminal output through:
 
-- authority client node -> server
+- `TargetOutput`
+- `PtyResizeApplied`
 
-Payload:
+`TargetOutput` carries:
 
 - `target_id`
-- `resize_epoch`
-- `cols`
-- `rows`
-- `applied_at`
+- `output_seq`
+- `stream`
+- `output_bytes`
 
 Rules:
 
-- the server accepts `resize_applied` only for the current `resize_epoch`
-- the server may reflect the result to observing clients by updating target
-  state or by resending `resize_authority_changed`
+- `output_seq` is assigned by the PTY owner and is monotonic per target
+- the server forwards `TargetOutput` in order and must not renumber it
+- observers render the same ordered bytes according to their local terminal
+  surface
+- protocol `v1` does not define separate application-level prompt or command
+  event types beyond these terminal bytes
 
-## 9.7 Error Message
+`PtyResizeApplied` confirms accepted PTY resize state for the current
+`resize_epoch`.
 
-### `error`
+## 10. Direction And Ownership Matrix
 
-Direction:
+The accepted direction model is:
 
-- either direction
+| Message family | Client node -> server | Server -> client node |
+| --- | --- | --- |
+| session control | `ClientHello`, `Heartbeat`, `SessionNotice` | `ServerHello`, `Heartbeat`, `SessionNotice` |
+| target publication | `TargetPublished`, `TargetExited` | none in `v1` |
+| observer attachment | `OpenTargetRequest`, `CloseTargetRequest` | `OpenTargetAccepted`, `OpenTargetRejected` |
+| terminal interaction from observing console | `ConsoleInput`, `PtyResizeRequest` | none directly |
+| authority-directed terminal control | none directly | `TargetInputDelivery`, `ApplyPtyResize` |
+| authority terminal output | `TargetOutput`, `PtyResizeApplied` | `TargetOutput` fanout to observing nodes when applicable |
+| recoverable command rejection | `CommandRejected` when server-issued command cannot be applied | `CommandRejected` when client-issued command is rejected |
 
-Payload:
+Important ownership rule:
 
-- `code`
-- `message`
-- `details`
+- server-hosted console interaction uses the same domain semantics, but it is
+  routed in-process rather than emitted as wire messages
 
-The first required error codes are:
+## 11. Error And Status Model
 
-- `unauthorized`
-- `unsupported_protocol_version`
-- `unknown_target`
-- `node_offline`
-- `attachment_not_open`
-- `write_failed`
-- `resize_denied`
-- `stale_resize_epoch`
+The accepted error model has two layers.
 
-`resize_denied` applies only to PTY-resize requests. It must not be used for
-purely local viewport changes.
+### 11.1 Transport Or Session Establishment Failures
 
-## 10. Ordering Rules
+Use standard gRPC status for:
+
+- authentication failure
+- authorization failure
+- unsupported protocol version
+- resource exhaustion
+- unavailable server
+- internal transport failure
+
+Recommended gRPC mappings:
+
+- `UNAUTHENTICATED`
+- `PERMISSION_DENIED`
+- `UNIMPLEMENTED`
+- `RESOURCE_EXHAUSTED`
+- `UNAVAILABLE`
+- `FAILED_PRECONDITION`
+- `INTERNAL`
+
+These failures terminate or reject the RPC itself.
+
+### 11.2 In-Stream Command Rejections
+
+Recoverable application-level rejections use an in-band message:
+
+```proto
+message CommandRejected {
+  CommandRejectedReason reason = 1;
+  google.rpc.Status status = 2;
+}
+```
+
+The first required rejection reasons are:
+
+- `UNKNOWN_TARGET`
+- `TARGET_OFFLINE`
+- `ATTACHMENT_NOT_OPEN`
+- `RESIZE_DENIED`
+- `STALE_RESIZE_EPOCH`
+- `WRITE_FAILED`
+- `UNSUPPORTED_CAPABILITY`
+
+Rules:
+
+- `CommandRejected` must include `correlation_id`
+- recoverable rejection must not tear down the whole node session by default
+- transport failure must not be hidden inside `CommandRejected`
+
+## 12. Ordering And Flow Control
 
 The protocol must preserve:
 
 - target metadata replacement order per `target_id`
-- input order per `target_id` as assigned by `input_seq`
-- output order per `target_id` as assigned by `output_seq`
-- PTY resize authority changes per `resize_epoch`
+- target input order per server-assigned `input_seq`
+- PTY output order per authority-assigned `output_seq`
+- PTY resize authority and application order per `resize_epoch`
 
-The protocol does not require one global total order across all targets.
+The protocol does not require one total order across all targets.
 
-## 11. Open, Input, Output, and Resize Flow
+Flow-control rules:
 
-The accepted remote open flow is:
+- each node connection actor owns one bounded outbound queue
+- backpressure is applied at the node-session boundary, not by opening extra
+  sockets
+- slow consumers may delay delivery, but they must not change per-target order
 
-1. The observing client sends `open_target`.
-2. The server creates or refreshes the attachment.
-3. The server records the attachment viewport and assigns PTY resize authority
-   to the newest opener for the PTY-resize control path.
-4. The server replies `open_target_ok`.
-5. If PTY resize authority changed, the server emits
-   `resize_authority_changed`.
-6. If the runtime is propagating PTY size, the server emits `apply_resize`.
-7. If `apply_resize` was sent, the authority client replies `resize_applied`.
+Protocol `v1` deliberately defines discrete envelopes, not token-stream
+semantics. Frequent PTY output chunks are expected; downlink command traffic is
+typically much sparser.
 
-The accepted remote input flow is:
+## 13. Reconnect And Recovery
 
-1. The console host sends `console_input`.
-2. The server assigns `input_seq`.
-3. The server forwards `target_input` to the PTY owner.
-4. The PTY owner writes bytes to the PTY in `input_seq` order.
+The accepted reconnect rule is session-scoped, not target-scoped.
 
-The accepted remote output flow is:
+When a node session drops:
 
-1. The PTY owner reads PTY bytes.
-2. The PTY owner emits `target_output` with `output_seq`.
-3. The server forwards the same ordered stream to every observing client node.
+- the server marks the node offline
+- published targets from that authority remain in the catalog but become
+  unavailable
+- existing attachments remain logical server state
+- new target input or PTY resize toward that offline authority fails fast
 
-The accepted remote PTY-resize flow is:
+When the node reconnects:
 
-1. The current PTY-resize authority console sends `resize_request`.
-2. The server validates authority and records the latest PTY size.
-3. The server emits `apply_resize` with the current `resize_epoch`.
-4. The PTY owner applies the resize and replies `resize_applied`.
+- it opens a fresh `OpenNodeSession` stream
+- it sends the same stable `node_id`
+- it may send `ResumeHint` referencing the previous session
+- after `ServerHello`, authority nodes must republish every live target
+- observer-side client nodes must explicitly reopen any client-hosted
+  attachments they want restored unless a later replay or recovery design says
+  otherwise
+- future PTY output resumes on the new stream with normal per-target ordering
 
-## 12. Reconnect and Recovery
+Protocol `v1` does not guarantee:
 
-Reconnect rules:
+- retroactive PTY output replay across disconnect
+- late-subscriber screen snapshots
+- attachment transcript recovery
+- attachment-id reuse across observer reconnect
 
-- a reconnecting client node must send the same `node_id`
-- after `server_hello`, the client republishes every live target with
-  `target_upsert`
-- the server reconciles by `target_id`
+Those recovery semantics belong to `task.t5-08a3`.
 
-Recovery rules:
+## 14. Versioning Rules
 
-- if a previously published target still exists on the PTY owner, it keeps the
-  same `target_id`
-- existing open attachments remain server-owned state
-- if the authority node disconnects, the server marks affected targets
-  `offline` and rejects new `console_input` or PTY `resize_request` traffic
-  until the authority node reconnects or the target exits
+The accepted version baseline is:
 
-Duplicate-prevention rule:
+- protobuf package: `waitagent.remote.v1`
+- negotiated protocol version: `1.0`
 
-- the server must treat `target_id` as the canonical deduplication key
-- `selector` may collide or change and must not be used as the primary key
+Compatibility rules:
 
-## 13. Implementation Notes
+- additive fields and additive `oneof` variants within `v1` are allowed when
+  older peers can safely ignore them
+- existing field numbers and existing `oneof` tags must not be renumbered
+  within `v1`
+- field meanings must not be reinterpreted incompatibly inside `v1`
+- removing fields, changing semantics incompatibly, or changing ordering rules
+  requires a new package version such as `waitagent.remote.v2`
+- unsupported negotiated versions must be rejected during hello or RPC
+  establishment, before steady-state payload handling begins
 
-Protocol v1.1 intentionally maps cleanly onto the current target catalog work:
+The proto package version and the negotiated protocol version should move
+together unless a later migration explicitly justifies a different scheme.
 
-- `target_id` aligns with the stable WaitAgent target identity
-- `authority_id` aligns with PTY ownership
-- `transport` and `transport_session_id` align with transport-aware target
-  addressing
-- `availability`, `opened_by`, attachment viewport state, and PTY resize
-  authority can map into one shared transport-agnostic target record
+## 15. Implementation Rules
 
-The first implementation slices should follow this order:
+Implementation must follow these constraints:
 
-1. use the accepted shared target model and registry boundary
-2. add the wire message types above
-3. route remote open, input, and resize through the server control plane
-4. add server-hosted consoles on top of the same attachment and authority state
+1. Generated gRPC or protobuf code stays behind one repo-owned transport
+   boundary.
+2. Business and UI-facing runtime code must not open raw production sockets or
+   direct `tonic` channels on their own.
+3. Network events must translate into application-owned events before any
+   workspace or server-console UI runtime consumes them.
+4. The protocol must remain terminal-oriented and app-agnostic.
+5. No code may revive the old JSON or frame-level wire contract as the primary
+   cross-host production path.
 
-Anti-goals:
-
-- do not reintroduce attach-based switching semantics for remote targets
-- do not bypass the server for remote input ordering
-- do not make `selector` the canonical remote identity
-- do not invent a fake local PTY on the server for remote rendering
-
-This lets network mode grow later without forcing the local MVP to simulate a full distributed system.
-
-## 19. MVP Protocol Subset
-
-The first network-capable subset should support only:
-
-- Client hello / server hello
-- Heartbeat
-- Session started
-- Session updated
-- Session exited
-- Stdout chunk
-- Stdin chunk
-- Resize applied
-
-Everything else can layer on later.
-
-## 20. Executable Schema Baseline
-
-The repository now includes an executable baseline for protocol schema and versioning in:
-
-- `src/transport.rs`
-
-This baseline currently defines:
-
-- `ProtocolVersion`
-- `ConnectionId`
-- `MessageId`
-- `TransportEnvelope`
-- `TransportPayload`
-- Explicit payload structs for the MVP protocol subset
-- Validation rules for protocol version, session identity, and console identity
-
-Current implementation rule:
-
-- The code-level schema is the source of truth for transport-facing types during implementation
-- This document remains the source of truth for behavior and message semantics
-
-## 20.1 Client Runtime Skeleton Baseline
-
-The earlier experimental client runtime skeleton was removed during the local-architecture reset.
-
-The repository does not currently ship a live network client runtime.
-
-Current implementation rule:
-
-- Future remote-connect behavior must be reintroduced only on top of the cleaned tmux-native local architecture
-- No deleted `client/server/transport` surface should be treated as the source of truth for resumed remote work
-
-## 20.2 Registration And Liveness Baseline
-
-The earlier executable registration and liveness baseline was also removed with the legacy network runtime.
-
-Current implementation rule:
-
-- When remote work resumes, registration and liveness must flow through one explicit transport model
-- The next design must start from the current local session catalog and chrome/runtime ownership model rather than from deleted bridge code
-
-## 20.3 Remote Session Publication Baseline
-
-There is currently no live remote session publication implementation in the repository.
-
-Current implementation rule:
-
-- Future session publication must reuse the same transport envelope model as registration and liveness
-- Remote session publication should be designed only after the unified local/remote target model is agreed
-
-## 21. Versioning Rules
-
-The current versioning baseline is:
-
-- `CURRENT_PROTOCOL_VERSION = 1`
-- `MIN_SUPPORTED_PROTOCOL_VERSION = 1`
-
-Rules:
-
-- Every transport envelope must carry an explicit protocol version
-- Unsupported versions must be rejected before payload handling
-- Version negotiation may widen later, but the first implementation uses one accepted version only
-- Backward-compatible additions should prefer extending payload structs over reinterpreting existing fields
-
-## 22. Internal Event Bus Baseline
-
-The repository now includes an internal event bus baseline in:
-
-- `src/event.rs`
-
-This baseline defines:
-
-- `EventGroup`
-- `EventBusMessage`
-- `EventEnvelope`
-- `EventBus`
-
-Current implementation rule:
-
-- Local and network runtimes should share the same event-envelope model
-- Transport integration should publish into the internal event bus rather than bypassing runtime boundaries with ad hoc direct calls
+This is the frozen application protocol for the next implementation slice
+`task.t5-08a`.

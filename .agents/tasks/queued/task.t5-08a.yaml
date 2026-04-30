@@ -1,0 +1,56 @@
+id: task.t5-08a
+kind: task
+version: 1
+title: introduce a real cross-host authority ingress source on the accepted connection boundary
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - the architecture task must first define the accepted node-scoped ingress and connection-reuse model
+    - this slice then lands the first production connection source within that accepted architecture
+target_task_reference: task.t5-08a
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08a1.done
+  - task.t5-08a2.done
+  - task.t5-08a3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted protobuf node-session contract fixes the application protocol, service shape, and transport message variants for production cross-host ingress
+  - one repo-owned transport facade wraps generated gRPC client/server code so production node traffic does not reintroduce direct socket access throughout runtime code
+  - the remote ingress design explicitly defines the transport-event to application-event boundary so network loops, transaction/state loops, and UI loops remain separated on the accepted path
+  - the accepted production authority-registration path can ingest real external node streams rather than depending only on local Unix-socket bridges or injected test sources
+  - the accepted node-scoped connection architecture remains the orchestration seam, but the default production path is no longer local-only
+  - registration success and failure remain explicit runtime events and do not regress loopback behavior
+  - docs and task state record the accepted cross-host ingress boundary
+verification:
+  - cargo test
+  - targeted review of proto contract ownership, transport-facade boundaries, event-loop coordination, and authority-ingress ownership
+touched_paths:
+  - Cargo.toml
+  - build.rs
+  - proto
+  - src/runtime
+  - src/application
+  - src/infra
+  - docs/event-driven-local-runtime-architecture.md
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - docs/agents-control-plane.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08a.yaml
+notes:
+  - This slice is about production ingress ownership, not a new console model.
+  - Generated gRPC code and production transport setup must stay behind one repo-owned facade; do not let direct socket or direct tonic channel setup spread through runtime code.
+  - Transport events must enter application-owned event boundaries before any UI-facing runtime consumes them.
+  - Do not reintroduce server-owned PTY assumptions or auto-switch behavior while landing the new source.
+  - This implementation slice starts only after the proto/RPC, trust/ownership, and render-bootstrap design gaps are all closed.

@@ -12,17 +12,18 @@ summary:
 current_phase:
   phase_id: phase-2
   phase_title: network aggregation MVP
-  stage_id: server-console-activation
-  stage_title: build the server-side console on top of the accepted shared catalog and routing boundary
+  stage_id: remote-network-completion
+  stage_title: close the remaining cross-host interaction gaps on top of the accepted shared catalog and routing boundary
 current_focus:
-  default_task_id: task.t6-01e
-  focus_statement: auto-switch is cancelled; server-console and local workspace attention should stay manual-only and rely on clear waiting-state cues instead of automatic focus jumps
+  default_task_id: task.t5-08a2
+  focus_statement: the remote node-session proto and RPC contract are now fixed; active work now defines trust bootstrap, dialing policy, and canonical connection ownership before cross-host ingress implementation starts
 upcoming_focus:
-  - keep waiting-state visibility scoped to per-session state, badges, and simple counts rather than queue ordering
-  - polish sidebar, picker, badge, and count presentation only if acceptance evidence shows the current cues are too weak
-  - do not reintroduce server-side auto-switch without an explicit product reversal
+  - fix remote render bootstrap and replay semantics after trust and ownership rules are frozen
+  - start `task.t5-08a` only after those design gaps are closed
 source_of_truth:
   - docs/execution-status-board.md
+  - docs/remote-network-completion-plan.md
+  - docs/remote-node-connection-architecture.md
   - docs/local-acceptance-checklist.md
   - docs/architecture.md
   - docs/tmux-first-workspace-plan.md

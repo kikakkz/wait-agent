@@ -1,0 +1,39 @@
+id: task.t5-08a3
+kind: task
+version: 1
+title: design remote render bootstrap, replay, and late-subscriber recovery
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - the remote queue still lacks a design for initial visible state, replay, and observer catch-up
+    - end-to-end render correctness depends on freezing bootstrap and replay semantics before transport implementation drifts
+target_task_reference: task.t5-08a3
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08a1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted design defines how a newly opened or reconnected observer obtains an initial visible screen state
+  - replay, transcript, or snapshot ownership is explicit, including ordering and catch-up semantics for late subscribers
+  - render-bootstrap design is aligned with the accepted local event-driven path and remote event-boundary model
+verification:
+  - targeted review of render bootstrap, replay ordering, observer catch-up, and event-boundary integration
+touched_paths:
+  - docs/remote-node-connection-architecture.md
+  - docs/remote-network-completion-plan.md
+  - docs/execution-status-board.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08a3.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+notes:
+  - This is design-only. It should freeze the bootstrap/replay model before the visible render path is implemented.

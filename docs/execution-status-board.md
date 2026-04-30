@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.26`  
+Version: `v1.27`  
 Status: `Active`  
-Date: `2026-04-29`
+Date: `2026-04-30`
 
 ## 1. Purpose
 
@@ -35,17 +35,15 @@ Current phase:
 
 Current gate:
 
-- `task.t6-01e` retire auto-switch planning and lock server-console on manual-only attention cues
+- `task.t5-08a2` design node trust, dialing policy, and canonical connection ownership
 
 Why this is the current gate:
 
-- the shared transport-agnostic target registry is already in place and remains the fixed target boundary for server-console work
-- remote open, input, output fanout, viewport-versus-PTY resize, publication ownership, and shared node-session framing are already routed through the accepted control-plane boundary
-- the first server-console slice already reuses that remote interact path instead of inventing a second remote interaction stack
-- the remaining server-console scheduling work now has an explicit top-down design source in `docs/server-console-scheduling-design.md`
-- real submit and manual-switch signals now enter the server-console runtime through the unified interaction seam instead of depending only on passive catalog refresh
-- waiting state is now treated as visibility-only chrome and no longer carries a FIFO queue contract
-- the accepted product decision is now explicit as well: waiting state may raise attention in chrome, but focus stays manual-only and does not jump automatically
+- the shared transport-agnostic target registry, control-plane routing, and manual-only server-console model are already in place
+- the dedicated remote node connection architecture is now explicit, including the accepted node-scoped long-connection, bounded backpressure, and reconnect ownership model
+- the node-session proto and RPC contract are now explicit in the protocol doc, including the accepted gRPC service shape, envelope, versioning, status mapping, and reconnect baseline
+- two design gaps still materially affect code shape: node trust plus canonical connection ownership, and remote render bootstrap or replay
+- the remaining phase-2 product gap is still the first production cross-host ingress implementation, but it should not start before those two design slices close
 
 ## 3. Current Snapshot
 
@@ -73,6 +71,8 @@ Project status at a glance:
 - `task.t6-01c` is now historical context only: the later product decision removed the need to surface or preserve FIFO waiting order in the active UX
 - `task.t6-01d` is now superseded: auto-switch was explicitly cancelled because automatic focus jumps are considered a poor user experience for this product
 - `task.t6-01e` is now closed in substance: active docs and task state are aligned on a manual-only attention model where waiting state is surfaced in sidebar, picker, badges, counts, and related chrome without changing focus automatically
+- `task.t5-08a1` is now closed in substance: the accepted protocol doc freezes `waitagent.remote.v1`, `NodeSessionService.OpenNodeSession`, typed protobuf envelopes, gRPC error mapping, versioning rules, reconnect baseline, and app-agnostic terminal semantics in place of the old JSON frame contract
+- the next remote queue is now explicit as `task.t5-08a2 -> task.t5-08a3 -> task.t5-08a -> task.t5-08c`, because the product still lacks a completed cross-host path and the remaining design gaps would otherwise force implementation churn
 - the public `waitagent server` runtime now carries explicit server-console focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -164,7 +164,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- keep server-console and local workspace scheduling manual-only: waiting state may raise attention through sidebar, picker, badges, counts, and related chrome, but must not trigger automatic focus jumps
+- freeze trust bootstrap, dialing policy, and canonical node-session ownership next so the connection manager can be implemented without transport-side split-brain or duplicate-session ambiguity
 
 Accepted local architecture direction:
 
@@ -188,13 +188,14 @@ Priority rule:
 - no deleted legacy surface should be revived during remote planning
 - remote and local session management should be redesigned on top of the cleaned tmux-native workspace baseline
 
-Refined remote queue after the current documentation slice:
+Remaining remote queue for phase completion:
 
-1. `task.t6-01a` Extract a unified server-console interaction seam for local and remote targets
-2. `task.t6-01b` Capture real submit and manual-switch signals through that seam
-3. `task.t6-01c` Historical waiting-state slice later superseded by simpler per-session status visibility
-4. `task.t6-01e` Lock manual-only attention policy and retire auto-switch planning
-5. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout if acceptance evidence makes it necessary
+1. `task.t5-08a2` Design node trust, dialing policy, and canonical connection ownership
+2. `task.t5-08a3` Design remote render bootstrap, replay, and late-subscriber recovery
+3. `task.t5-08a` Introduce a real cross-host authority ingress source on the accepted connection boundary
+4. `task.t5-08b` Centralize live node-session ownership and remote registration lifecycle
+5. `task.t5-08c` Bind remote output into visible console rendering and validate end-to-end cross-host interaction
+6. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

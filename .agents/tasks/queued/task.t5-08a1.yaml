@@ -1,0 +1,43 @@
+id: task.t5-08a1
+kind: task
+version: 1
+title: design the gRPC proto and RPC contract for remote node sessions
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - section 5.4 requires one explicit protobuf node-session contract before cross-host ingress implementation lands
+    - the current protocol doc still needs to be reconciled from the old frame-level model to the accepted gRPC session model
+target_task_reference: task.t5-08a1
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one accepted proto package and gRPC service contract define the production node-session RPC surface
+  - message variants, status or error mapping, versioning rules, and reconnect semantics are explicit and replace the stale frame-level protocol wording
+  - the proto contract explicitly models server-originated commands versus client-originated terminal interaction traffic so remote terminal-app behavior can mirror the local interaction contract without application-specific event assumptions
+  - protocol and architecture docs no longer disagree about the transport contract
+verification:
+  - targeted review of proto schema ownership, app-agnostic mirrored terminal semantics, RPC surface, status semantics, and version compatibility rules
+touched_paths:
+  - docs/protocol.md
+  - docs/remote-node-connection-architecture.md
+  - docs/remote-network-completion-plan.md
+  - docs/execution-status-board.md
+  - .agents/state/task-history.yaml
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08a1.yaml
+  - .agents/tasks/queued/task.t5-08a.yaml
+notes:
+  - This is design-only. Do not generate code yet.
+  - The output should freeze the application-level transport contract before implementation starts.
+  - The contract must preserve remote-versus-local interaction parity rather than introducing a second user-visible command model.

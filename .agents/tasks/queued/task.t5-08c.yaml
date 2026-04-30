@@ -1,0 +1,45 @@
+id: task.t5-08c
+kind: task
+version: 1
+title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - the architecture task must first define the accepted attachment fanout and output-delivery model
+    - this slice then closes visible rendering and end-to-end validation on that accepted path
+target_task_reference: task.t5-08c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - delivered remote output reaches the visible local workspace and server-console target presentations through the accepted observer or render runtime boundaries
+  - real cross-host open, input, output, and resize behavior is validated end to end on the accepted phase-2 path
+  - loopback-only transport assumptions are either removed from the production path or explicitly retired as historical fallback
+verification:
+  - cargo test
+  - manual: real cross-host remote interaction validation
+  - targeted review of remote render-path ownership and end-to-end transport boundaries
+touched_paths:
+  - Cargo.toml
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice closes the product path. It should not reopen planning for queue-order UX, auto-switch, or compact-layout polish.

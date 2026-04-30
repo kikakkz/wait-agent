@@ -1,8 +1,8 @@
 # WaitAgent Assistant Control Plane
 
-Version: `v1.5`  
+Version: `v1.7`  
 Status: `Active`  
-Date: `2026-04-29`
+Date: `2026-04-30`
 
 ## 1. Purpose
 
@@ -71,9 +71,9 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.t6-01`:
+The current default task is `task.t5-08a2`:
 
-> Implement the server-side workspace console as a target-activation surface.
+> Design node trust, dialing policy, and canonical connection ownership.
 
 That task intentionally routes assistants through:
 
@@ -84,10 +84,11 @@ That task intentionally routes assistants through:
 
 This keeps assistants focused on:
 
-- building explicit focus and scheduling state on top of the public `waitagent server` runtime and shared-catalog activation boundary
-- preserving the accepted local fixed-chrome activation model while server-console work reuses the same transport-agnostic catalog
-- avoiding remote designs that assume local tmux inspection, daemon attach identity, or server-owned remote PTYs
-- keeping richer status probing and later scheduling behavior behind the current activation-surface slice
+- freezing trust bootstrap and canonical node-session ownership before the
+  first cross-host ingress implementation slice starts
+- preserving the accepted local fixed-chrome activation model while real cross-host remote paths are introduced
+- avoiding remote designs that assume server-owned remote PTYs, a second console UX contract, or resurrected auto-switch behavior
+- keeping phase-2 work anchored on one explicit completion queue `task.t5-08a2 -> task.t5-08a3 -> task.t5-08a -> task.t5-08c`
 
 ## 5. Maintenance Rules
 

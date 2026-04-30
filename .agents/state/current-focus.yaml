@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t6-01e
-focus_statement: auto-switch is cancelled; the accepted direction is manual-only focus with waiting-state attention cues in sidebar, picker, badges, and related chrome
+current_task: task.t5-08a2
+focus_statement: the gRPC proto and RPC contract are now fixed on an app-agnostic terminal model; active work now moves to trust bootstrap, dialing policy, and canonical node-session ownership before cross-host ingress implementation starts
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

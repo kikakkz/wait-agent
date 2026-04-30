@@ -1,11 +1,41 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08a2
+    status: in_progress
+    summary: the node-session proto and gRPC contract are now explicit in the protocol doc, so active work moves to trust bootstrap, dial ownership, duplicate-session collapse, and reconnect authority before cross-host ingress implementation starts
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a1
+    status: done
+    summary: the accepted remote protocol is now frozen on `waitagent.remote.v1` plus `NodeSessionService.OpenNodeSession`, typed protobuf envelopes, gRPC status mapping, versioning rules, reconnect semantics, and app-agnostic terminal I/O parity instead of the old JSON frame contract
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a1.yaml
+      reference: status
+  - task_id: task.t5-08a1
+    status: in_progress
+    summary: before cross-host ingress implementation starts, active work now moves to freezing the gRPC proto and RPC contract so the remote transport surface, status semantics, and versioning rules stop drifting between the old protocol doc and the new architecture
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a
+    status: ready
+    summary: once the remaining trust or ownership and render-bootstrap design gaps are closed, the first implementation slice will replace local-only authority ingress assumptions with a real production cross-host source
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a.yaml
+      reference: status
+  - task_id: task.t5-08
+    status: done
+    summary: the remote node connection architecture is now explicit: WaitAgent will use a tonic-based node-scoped long-connection model with protobuf messages, rustls-backed transport, bounded backpressure, and centralized reconnect ownership for the remaining cross-host queue
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08.yaml
+      reference: status
   - task_id: task.t6-01e
     status: done
     summary: active planning is now aligned on a manual-only attention model: server-console waiting state is surfaced through sidebar, picker, badges, counts, and related chrome cues while auto-switch work is explicitly retired
     source_of_truth:
-      file: .agents/tasks/current.yaml
+      file: .agents/tasks/queued/task.t6-01e.yaml
       reference: status
   - task_id: task.t6-01d
     status: superseded
