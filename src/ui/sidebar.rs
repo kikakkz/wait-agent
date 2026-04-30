@@ -260,16 +260,7 @@ mod tests {
 
     #[test]
     fn sidebar_ui_renders_collapsed_marker_for_hidden_width() {
-        let output = SidebarUi::render(
-            "wa-1",
-            "waitagent-1",
-            None,
-            None,
-            &[],
-            1,
-            3,
-            0,
-        );
+        let output = SidebarUi::render("wa-1", "waitagent-1", None, None, &[], 1, 3, 0);
 
         assert!(output.contains("<"));
     }

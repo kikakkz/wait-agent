@@ -176,7 +176,8 @@ impl EmbeddedTmuxBackend {
             let Some(authority_id) = metadata.remote_publication_authority_id else {
                 continue;
             };
-            let Some(transport_session_id) = metadata.remote_publication_transport_session_id else {
+            let Some(transport_session_id) = metadata.remote_publication_transport_session_id
+            else {
                 continue;
             };
             bindings.push(RemoteTargetPublicationBinding {

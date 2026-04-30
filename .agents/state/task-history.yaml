@@ -1,6 +1,48 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08c
+    status: in_progress
+    summary: cross-host ingress and shared node-session ownership are now in place, and visible remote-output proof is tighter too: besides the existing workspace and server-console observer-path checks, there is now a higher-level grpc-ingress-to-observer-render combination test across `RemoteMainSlotIngressRuntime`, authority bridging, and observer terminal state, while the local acceptance checklist keeps the explicit phase-2 cross-host validation appendix for real open, input, output, resize, disconnect, and reconnect checks
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08b
+    status: done
+    summary: live remote node-session ownership is now centralized behind `RemoteNodeSessionOwnerRuntime`: one shared authority session is reused per authority node, publication steady-state transport ownership moved under that runtime, disconnect projects remote targets offline instead of erasing them, and reconnect ownership now preserves the local authority bridge while replaying live publication state after recovery
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08b.yaml
+      reference: status
+  - task_id: task.t5-08a
+    status: done
+    summary: the accepted production ingress path now supports real cross-host node sessions through repo-owned grpc transport and ingress runtimes, so live authority publication and control traffic no longer depend only on local Unix-socket bridges or injected test streams
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a.yaml
+      reference: status
+  - task_id: task.t5-08a
+    status: in_progress
+    summary: the protocol, trust, and replay design gaps are now explicit and closed; the first ingress implementation slice has started by landing proto generation, tonic or prost transport scaffolding, and a repo-owned remote-node ingress facade so upper runtimes no longer bind local socket listeners directly
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a3
+    status: done
+    summary: the remote render path now has an accepted baseline: the server owns a bounded per-target replay window of ordered target output, new observers bootstrap by replaying that stream in-order before joining the live tail, reconnect recovery is reopen-based, and truncation is explicit rather than hidden behind fake snapshots
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a3.yaml
+      reference: status
+  - task_id: task.t5-08a3
+    status: in_progress
+    summary: the production dial direction, mTLS trust model, node identity binding, duplicate-session collapse, and canonical ownership rules are now explicit, so active work moves to render bootstrap, replay, and late-subscriber recovery before cross-host ingress implementation starts
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a2
+    status: done
+    summary: the remote node architecture now fixes hub-and-spoke dialing, rustls mTLS admission, SPIFFE-style node identity binding, server-side canonical session arbitration, duplicate-session containment, and reconnect ownership between node dialers and the server manager
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a2.yaml
+      reference: status
   - task_id: task.t5-08a2
     status: in_progress
     summary: the node-session proto and gRPC contract are now explicit in the protocol doc, so active work moves to trust bootstrap, dial ownership, duplicate-session collapse, and reconnect authority before cross-host ingress implementation starts

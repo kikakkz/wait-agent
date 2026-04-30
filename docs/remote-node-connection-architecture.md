@@ -520,7 +520,420 @@ Reconnect must not be spread across:
 Those pieces may observe connection state, but they must not each invent their
 own reconnect policy.
 
-## 10. Backpressure And Fairness
+## 10. Node Trust, Dialing, And Canonical Ownership Policy
+
+### 10.1 Accepted Production Topology
+
+The accepted phase-2 production topology is hub-and-spoke:
+
+- `waitagent server` binds the production gRPC listener
+- every non-server WaitAgent node dials the server outbound
+- the same long-lived outbound node session carries authority publication,
+  authority input or resize delivery, observer open, observer input, and
+  observer output fanout traffic
+
+The accepted default is therefore:
+
+- server accepts inbound node sessions
+- client nodes initiate outbound node sessions
+- server does not dial back out to nodes in phase 2
+
+Reasons:
+
+- one outbound dial from the node side works better with NAT and firewall
+  realities than requiring inbound reachability to every node
+- one bidirectional stream already gives the server a native downlink channel
+  without inventing a second transport
+- canonical connection ownership is much simpler when there is one dial
+  direction in production
+
+Future peer-to-peer or server-initiated dialing would require a separate design
+task. They are not part of the accepted phase-2 production contract.
+
+### 10.2 Transport Trust Model
+
+The accepted production trust model is authenticated `rustls` mTLS.
+
+Rules:
+
+- the server presents a server certificate signed by a deployment-trusted CA
+- every production client node presents a client certificate signed by a
+  deployment-trusted CA
+- the server listener requires client-certificate authentication on the gRPC
+  path
+- the client validates the server certificate before sending `ClientHello`
+- local Unix-socket adapters and injected-stream test seams may remain
+  unauthenticated local helpers, but they must not weaken the production gRPC
+  admission rule
+
+This means the production cross-host path does not rely on bearer tokens or ad
+hoc shared secrets inside `ClientHello`.
+Transport authentication must complete before application session negotiation is
+considered valid.
+
+### 10.3 Identity Binding Rule
+
+The accepted identity binding is:
+
+- one stable logical `node_id` per persisted WaitAgent installation
+- one authenticated certificate identity per admitted node
+- one allowlisted mapping from certificate identity to stable `node_id`
+
+The certificate identity should use a mature URI SAN pattern rather than a
+custom opaque string convention.
+The accepted form is a SPIFFE-style URI SAN such as:
+
+- `spiffe://waitagent/<deployment-id>/nodes/<node_id>`
+
+The server identity should use the same family, for example:
+
+- `spiffe://waitagent/<deployment-id>/server/control-plane`
+
+Admission rules:
+
+- the presented client certificate chain must validate to one trusted root
+- the URI SAN must map to exactly one admitted `node_id`
+- the `node_id` claimed in `ClientHello` must match the admitted `node_id`
+- node capabilities claimed in `ClientHello` must not exceed the role or
+  capability class configured for that admitted node
+
+If certificate identity and claimed `node_id` disagree, the server must reject
+the session before it becomes canonical.
+
+### 10.4 Certificate Lifecycle Expectations
+
+The accepted operational model is short-lived leaf certificates with overlap
+rotation.
+
+Rules:
+
+- deployments own one CA bundle or small active root set for WaitAgent nodes
+- node and server leaf certificates should be rotated with overlap rather than
+  treated as effectively permanent
+- root rotation may use overlapping trust bundles during migration windows
+- production trust should prefer short certificate TTL plus explicit admission
+  control over bespoke in-band revocation logic in phase 2
+- self-signed leaf certificates are acceptable only for local development or
+  explicit non-production bootstrap modes
+
+Phase 2 does not require designing CRL or OCSP handling.
+The accepted baseline is:
+
+- authenticated trust chain
+- bounded certificate lifetime
+- explicit admission allowlist or registry
+
+### 10.5 Admission Policy
+
+The server-side connection manager is the admission authority for node sessions.
+
+For every new inbound gRPC stream, the server must evaluate:
+
+1. did the TLS layer authenticate the peer certificate successfully
+2. does the certificate identity map to one admitted `node_id`
+3. does `ClientHello.node_id` match that admitted identity
+4. is the node currently allowed to connect in this deployment
+5. do claimed protocol version and capabilities fit the accepted contract
+
+Accepted outcomes:
+
+- reject at RPC establishment with gRPC auth or precondition status if trust or
+  identity checks fail
+- accept the stream into handshake only after trust and identity checks pass
+- allow the session to become canonical only after `ClientHello` and
+  `ServerHello` complete successfully
+
+### 10.6 Canonical Session Ownership
+
+The server is the sole canonical-session arbiter for each `node_id`.
+
+Rules:
+
+- there may be many transient connect attempts, but at most one canonical live
+  node session per `node_id`
+- handshakes for the same `node_id` must be serialized under the node-scoped
+  connection manager
+- the stream that completes authenticated handshake last becomes canonical for
+  that `node_id`
+- any previously canonical stream for that `node_id` moves to `draining`
+  immediately
+- once a stream is marked `draining`, its future envelopes must not mutate
+  authority, publication, attachment, or output state
+
+When a canonical replacement happens, the server should:
+
+- emit a session notice equivalent to `superseded`
+- stop routing new outbound messages to the older stream
+- require the new canonical session to republish live target state
+
+This keeps ownership simple:
+
+- nodes own outbound dialing and reconnect attempts
+- the server owns final truth about which live stream is canonical
+
+### 10.7 Duplicate Session And Split-Brain Resolution
+
+Duplicate-session handling must distinguish trust failure from overlap recovery.
+
+Case 1:
+same claimed `node_id`, different authenticated certificate identity
+
+- reject the new stream
+- keep the existing canonical stream unchanged
+- record a security-significant warning or metric
+
+Case 2:
+same claimed `node_id`, same authenticated identity, overlapping live streams
+
+- accept handshake serialization
+- newest successfully handshaken stream becomes canonical
+- older canonical stream is drained and then closed
+
+Case 3:
+same logical node credential used concurrently by multiple real processes or
+hosts
+
+- WaitAgent cannot reliably infer operator intent from transport alone
+- the same containment rule still applies: newest successful handshake wins
+- the server should emit an operator-visible split-brain warning because this
+  indicates credential reuse or deployment drift
+
+This is intentionally a containment policy, not magical conflict resolution.
+The product rule is:
+
+- preserve one canonical session
+- fail closed on identity mismatch
+- fail over deterministically on same-identity overlap
+
+### 10.8 Dialing Ownership And Reconnect Authority
+
+Reconnect ownership is deliberately split in one precise way:
+
+- the client node owns dialing, retry timing, and exponential backoff for its
+  outbound session
+- the server owns offline projection, canonical-session replacement, and drain
+  or cleanup after stream loss
+
+Client-side rules:
+
+- keep at most one active production dial attempt in flight per node process
+- do not keep multiple speculative outbound sessions alive hoping the server
+  will choose one
+- after disconnect, reconnect through one owner loop with bounded backoff and
+  jitter
+
+Server-side rules:
+
+- mark the node offline only when no canonical live stream remains
+- keep attachments as logical state while the node is offline
+- reject or fail fast target commands that require the offline authority node
+- accept a later successful reconnect as the new canonical session
+
+This prevents reconnect policy from being split across panes, target helpers,
+publication sidecars, or ad hoc transport wrappers.
+
+### 10.9 Why Not Bidirectional Dialing In Phase 2
+
+WaitAgent should not allow both sides to initiate competing production sessions
+for the same node in phase 2.
+
+That would immediately force extra policy around:
+
+- simultaneous cross-dials
+- double registration races
+- more complex split-brain resolution
+- firewall and reachability asymmetry
+- duplicated reconnect owners
+
+Because the accepted bidirectional gRPC stream already gives the server a
+native downlink, the extra complexity does not buy the product anything in the
+current phase.
+
+## 11. Remote Render Bootstrap, Replay, And Late-Subscriber Recovery
+
+### 11.1 Accepted Baseline
+
+The accepted phase-2 render bootstrap model is ordered output replay, not a
+separate remote-only screen-snapshot protocol.
+
+That means:
+
+- `TargetOutput` remains the primary remote render source of truth
+- the server keeps a bounded per-target replay window of ordered output chunks
+- a newly opened observer attachment replays that ordered window before
+  consuming the live tail
+- the observer continues to use the same local terminal engine and UI-safe
+  projection path after bootstrap
+
+This is accepted because it:
+
+- preserves the app-agnostic terminal protocol
+- reuses the same byte-stream semantics already used during live remote output
+- aligns with the existing observer runtime that rebuilds terminal state from
+  ordered `target_output`
+- avoids inventing a second rendering protocol before the production ingress
+  path even lands
+
+### 11.2 Replay Ownership
+
+Replay ownership belongs to the server-side application layer, adjacent to
+target and attachment state, not to the UI layer and not to the authority node
+transport facade alone.
+
+The accepted runtime shape is one per-target replay store such as:
+
+- `RemoteRenderReplayStore`
+
+The store owns:
+
+- ordered `TargetOutput` chunks by `target_id`
+- the earliest retained output sequence
+- the latest retained output sequence
+- a bounded byte or chunk window
+- target lifecycle markers such as `published`, `offline`, and `exited`
+
+Rules:
+
+- the replay store is fed only by authority-ordered `TargetOutput`
+- the replay store is keyed by canonical `target_id`
+- replay retention is bounded; phase 2 must not keep an unbounded transcript in
+  memory for every remote target
+- replay ownership is server-side because many observers may need the same
+  bootstrap source
+
+### 11.3 Observer Bootstrap Flow
+
+The accepted open-target bootstrap flow is:
+
+1. the observer opens a target and receives normal attachment metadata first
+2. the server snapshots the target's current replay range
+3. the attachment enters `bootstrapping`
+4. the server replays retained `TargetOutput` chunks in original `output_seq`
+   order into that attachment
+5. once replay reaches the captured replay tip, the attachment enters `live`
+6. subsequent live `TargetOutput` delivery continues on the same attachment in
+   normal sequence order
+
+Important rule:
+
+- replayed historical output and live output use the same message type and the
+  same `output_seq` space
+
+This keeps the observer runtime simple:
+
+- it does not need a separate bootstrap decoder
+- it only needs ordered `TargetOutput` plus attachment metadata
+- bootstrap and steady-state delivery differ by source window, not by message
+  contract
+
+### 11.4 Ordering And Catch-Up Rule
+
+Late-subscriber recovery must preserve strict per-target output order.
+
+Rules:
+
+- when an attachment starts bootstrap, the server captures one replay tip
+  sequence for that attachment
+- live output with higher sequence numbers may continue to arrive globally, but
+  that attachment must not observe them until replay reaches its captured tip
+- attachment-local bootstrap state therefore has its own cursor:
+  `next_output_seq_to_deliver`
+- once bootstrap catches up to the captured tip, the attachment joins the live
+  fanout set
+
+This avoids interleaving:
+
+- old replay chunk
+- newer live chunk
+- older replay chunk again
+
+which would corrupt terminal state.
+
+### 11.5 Reconnect And Reopen Semantics
+
+In phase 2, observer-side recovery is reopen-based rather than attachment-id
+reuse.
+
+That means:
+
+- if an observing client node disconnects, its remote attachment is treated as
+  lost transport state
+- after reconnect, the observer opens the target again and receives a fresh
+  bootstrap pass from the replay store
+- the new attachment may receive a new `attachment_id`
+
+Authority-side reconnect is different:
+
+- if the same target survives on the authority node, the server may keep the
+  retained replay window already accumulated for that `target_id`
+- after authority reconnect and republish, new output continues to append to
+  that target's replay store
+- if the target exits or is republished as a new target identity, the old replay
+  store is closed and a new one starts
+
+### 11.6 Truncation Policy
+
+Because replay retention is bounded, late bootstrap can be degraded.
+
+The accepted phase-2 rule is explicit truncation, not pretending recovery is
+perfect when the retained replay window is incomplete.
+
+Rules:
+
+- the replay store may discard the oldest retained output once its configured
+  memory or chunk budget is exceeded
+- if an observer opens after truncation has already discarded earlier output,
+  the server replays the earliest retained sequence it still has
+- the attachment must be marked internally as `bootstrap_partial` until later
+  redraw or further output naturally converges the visible state
+
+Product implication:
+
+- phase 2 guarantees ordered live remote interaction
+- phase 2 does not guarantee perfect historical reconstruction for arbitrarily
+  old or arbitrarily chatty remote sessions without a later checkpoint
+  extension
+
+This tradeoff is accepted because it keeps the protocol app-agnostic and lets
+the first cross-host path land without inventing an expensive snapshot
+subsystem first.
+
+### 11.7 UI And Event-Boundary Integration
+
+Bootstrap state must cross runtime boundaries as application events, not raw
+transport callbacks.
+
+The accepted event shape should include equivalents of:
+
+- `RemoteReplayBuffered`
+- `RemoteAttachmentBootstrapStarted`
+- `RemoteAttachmentBootstrapAdvanced`
+- `RemoteAttachmentBootstrapCompleted`
+- `RemoteAttachmentBootstrapPartial`
+
+Responsibilities:
+
+- network runtime delivers ordered `TargetOutput`
+- application service appends output to the replay store
+- attachment bootstrap service replays output into observer mailboxes
+- UI-facing runtimes consume only the resulting attachment state and terminal
+  snapshots
+
+This keeps bootstrap aligned with the same event-driven rule already accepted
+for local runtime work.
+
+### 11.8 Anti-Goals
+
+Phase 2 remote render bootstrap must not:
+
+- require the server to understand Codex, shell, editor, or other
+  application-specific semantic events
+- add a second remote-only rendering protocol alongside `TargetOutput` without
+  a new architecture decision
+- make UI runtimes read transport buffers directly
+- promise perfect long-horizon replay while only retaining bounded history
+
+## 12. Backpressure And Fairness
 
 The accepted backpressure model is:
 
@@ -537,7 +950,7 @@ Rules:
 - the server should not allocate one unbounded queue per observer attachment on
   the hot output path
 
-## 11. Why We Are Choosing gRPC Instead Of WebSocket Or Custom Framed TCP
+## 13. Why We Are Choosing gRPC Instead Of WebSocket Or Custom Framed TCP
 
 WaitAgent should use `tonic` gRPC for the production cross-host path.
 
@@ -563,9 +976,9 @@ Why gRPC is the accepted fit:
 - Tower integration gives us well-understood middleware hooks for limits,
   retries, and observability
 
-## 12. Implementation Mapping
+## 14. Implementation Mapping
 
-### 12.1 `task.t5-08a`
+### 14.1 `task.t5-08a`
 
 Land the first production node ingress built on the chosen stack:
 
@@ -576,7 +989,7 @@ Land the first production node ingress built on the chosen stack:
 - one repo-owned transport facade that isolates generated gRPC code from the
   rest of the runtime
 
-### 12.2 `task.t5-08b`
+### 14.2 `task.t5-08b`
 
 Converge ownership:
 
@@ -584,7 +997,7 @@ Converge ownership:
 - move reconnect and disconnect cleanup there
 - fold publication and authority steady-state ownership into that model
 
-### 12.3 `task.t5-08c`
+### 14.3 `task.t5-08c`
 
 Close the user-visible path:
 
@@ -592,7 +1005,7 @@ Close the user-visible path:
 - validate real cross-host open/input/output/resize behavior
 - retire loopback-only assumptions from the accepted production path
 
-## 13. Acceptance Rule
+## 15. Acceptance Rule
 
 This architecture is accepted only if later implementation preserves all of the
 following:
@@ -601,5 +1014,9 @@ following:
 - logical multiplexing by typed node-session messages instead of socket
   multiplication
 - explicit reconnect ownership in one runtime boundary
+- authenticated node identity binding and canonical-session arbitration in one
+  runtime boundary
+- explicit bootstrap, replay, and late-subscriber recovery ownership without a
+  hidden second rendering protocol
 - mature async runtime and service libraries rather than more hand-rolled
   connection plumbing

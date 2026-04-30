@@ -71,9 +71,9 @@ Responsibilities:
 
 ## 4. Current Default Route
 
-The current default task is `task.t5-08a2`:
+The current default task is `task.t5-08a`:
 
-> Design node trust, dialing policy, and canonical connection ownership.
+> Introduce a real cross-host authority ingress source on the accepted connection boundary.
 
 That task intentionally routes assistants through:
 
@@ -84,11 +84,11 @@ That task intentionally routes assistants through:
 
 This keeps assistants focused on:
 
-- freezing trust bootstrap and canonical node-session ownership before the
-  first cross-host ingress implementation slice starts
+- landing the first production cross-host ingress slice behind one repo-owned
+  gRPC transport facade before broader ownership and rendering integration work
 - preserving the accepted local fixed-chrome activation model while real cross-host remote paths are introduced
 - avoiding remote designs that assume server-owned remote PTYs, a second console UX contract, or resurrected auto-switch behavior
-- keeping phase-2 work anchored on one explicit completion queue `task.t5-08a2 -> task.t5-08a3 -> task.t5-08a -> task.t5-08c`
+- keeping phase-2 work anchored on one explicit completion queue `task.t5-08a -> task.t5-08b -> task.t5-08c`
 
 ## 5. Maintenance Rules
 

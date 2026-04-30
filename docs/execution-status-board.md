@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.27`  
+Version: `v1.30`  
 Status: `Active`  
 Date: `2026-04-30`
 
@@ -35,15 +35,18 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08a2` design node trust, dialing policy, and canonical connection ownership
+- `task.t5-08c` bind remote output into visible console rendering and validate end-to-end cross-host interaction
 
 Why this is the current gate:
 
 - the shared transport-agnostic target registry, control-plane routing, and manual-only server-console model are already in place
 - the dedicated remote node connection architecture is now explicit, including the accepted node-scoped long-connection, bounded backpressure, and reconnect ownership model
 - the node-session proto and RPC contract are now explicit in the protocol doc, including the accepted gRPC service shape, envelope, versioning, status mapping, and reconnect baseline
-- two design gaps still materially affect code shape: node trust plus canonical connection ownership, and remote render bootstrap or replay
-- the remaining phase-2 product gap is still the first production cross-host ingress implementation, but it should not start before those two design slices close
+- the production trust model, dialing direction, duplicate-session collapse, and canonical ownership policy are now explicit in the remote-node architecture doc
+- the render bootstrap, replay, and observer catch-up policy is now explicit too, so the remaining blocker is no longer transport or ownership design drift but the final visible render binding and end-to-end product validation
+- the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
+- shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
+- the remaining phase-2 product gap is now the final visible render binding and end-to-end cross-host validation on that accepted path
 
 ## 3. Current Snapshot
 
@@ -72,7 +75,12 @@ Project status at a glance:
 - `task.t6-01d` is now superseded: auto-switch was explicitly cancelled because automatic focus jumps are considered a poor user experience for this product
 - `task.t6-01e` is now closed in substance: active docs and task state are aligned on a manual-only attention model where waiting state is surfaced in sidebar, picker, badges, counts, and related chrome without changing focus automatically
 - `task.t5-08a1` is now closed in substance: the accepted protocol doc freezes `waitagent.remote.v1`, `NodeSessionService.OpenNodeSession`, typed protobuf envelopes, gRPC error mapping, versioning rules, reconnect baseline, and app-agnostic terminal semantics in place of the old JSON frame contract
-- the next remote queue is now explicit as `task.t5-08a2 -> task.t5-08a3 -> task.t5-08a -> task.t5-08c`, because the product still lacks a completed cross-host path and the remaining design gaps would otherwise force implementation churn
+- `task.t5-08a2` is now closed in substance: the remote-node architecture now fixes hub-and-spoke dialing, rustls mTLS admission, SPIFFE-style node identity binding, canonical session arbitration, duplicate-session containment, and reconnect ownership between node dialers and the server manager
+- `task.t5-08a3` is now closed in substance: the server-owned bounded replay window, in-order observer bootstrap, reopen-based reconnect recovery, and explicit truncation policy now fix the remote render bootstrap contract without inventing a second rendering protocol
+- the original phase-2 remote queue `task.t5-08a -> task.t5-08b -> task.t5-08c` is now through the ingress and ownership slices, leaving visible render binding plus end-to-end validation as the remaining product work
+- `task.t5-08a` is now closed in substance: repo-owned protobuf generation, tonic-facing transport wrappers, a dedicated `remote_node_ingress_runtime`, and real gRPC-backed authority ingress now replace the old local-only assumption on the accepted production registration path
+- `task.t5-08b` is now closed in substance: `RemoteNodeSessionOwnerRuntime` now owns shared authority-session reuse per authority node, steady-state publication transport ownership, disconnect-to-offline projection, and reconnect-plus-replay behavior without dropping the local authority bridge
+- `task.t5-08c` now has stronger proof too: remote main-slot render coverage explicitly includes server-console observer scope, there is now a higher-level `RemoteMainSlotIngressRuntime` grpc-ingress-to-observer render-path combination test, and the acceptance checklist carries a dedicated phase-2 cross-host validation appendix instead of leaving end-to-end verification implicit
 - the public `waitagent server` runtime now carries explicit server-console focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -164,7 +172,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- freeze trust bootstrap, dialing policy, and canonical node-session ownership next so the connection manager can be implemented without transport-side split-brain or duplicate-session ambiguity
+- bind delivered remote output into the visible local workspace and server-console surfaces, then validate real cross-host open, input, output, and resize behavior end to end on the accepted production path
 
 Accepted local architecture direction:
 
@@ -190,12 +198,8 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.t5-08a2` Design node trust, dialing policy, and canonical connection ownership
-2. `task.t5-08a3` Design remote render bootstrap, replay, and late-subscriber recovery
-3. `task.t5-08a` Introduce a real cross-host authority ingress source on the accepted connection boundary
-4. `task.t5-08b` Centralize live node-session ownership and remote registration lifecycle
-5. `task.t5-08c` Bind remote output into visible console rendering and validate end-to-end cross-host interaction
-6. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
+1. `task.t5-08c` Bind remote output into visible console rendering and validate end-to-end cross-host interaction
+2. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

@@ -14,7 +14,7 @@ read_order:
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
 entrypoints:
-  default_task: task.t5-08a2
+  default_task: task.t5-08a
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -47,7 +47,7 @@ directories:
 active_context:
   project_phase: phase-2
   current_stage: remote-network-completion
-  current_focus: continue phase-2 remote work with task.t5-08a2 so trust bootstrap, dialing policy, and canonical connection ownership are fixed before the cross-host ingress implementation starts
+  current_focus: continue phase-2 remote work with task.t5-08a so the first production cross-host ingress source lands behind the accepted gRPC transport boundary
 recommended_primitives:
   - primitive.read-current-task
   - primitive.verification-refresh

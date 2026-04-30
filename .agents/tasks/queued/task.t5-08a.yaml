@@ -2,7 +2,7 @@ id: task.t5-08a
 kind: task
 version: 1
 title: introduce a real cross-host authority ingress source on the accepted connection boundary
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md

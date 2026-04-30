@@ -1,7 +1,28 @@
 kind: state
 version: 1
-last_updated_from: task.t6-01e manual-only attention-policy lock reviewed on 2026-04-29
+last_updated_from: task.t5-08c grpc ingress to visible render-path coverage refreshed on 2026-04-30
 checks:
+  - id: t5-08c-cargo-test-full-suite-grpc-visible-render-refresh
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --config 'source.crates-io.registry="sparse+https://index.crates.io/"' after adding higher-level grpc ingress to observer render-path coverage through `RemoteMainSlotIngressRuntime`
+    status: pass
+  - id: t5-08c-cargo-test-targeted-grpc-visible-render-bridge
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test grpc_ingress_bridges_authority_output_into_visible_observer_render_path --config 'source.crates-io.registry="sparse+https://index.crates.io/"' -- --nocapture after adding a higher-level grpc ingress to visible observer render-path combination test
+    status: pass
+  - id: t5-08c-cargo-test-full-suite-render-path-refresh
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --config 'source.crates-io.registry="sparse+https://index.crates.io/"' after extending visible remote-output coverage to the server-console observer scope and adding the phase-2 cross-host validation checklist
+    status: pass
+  - id: t5-08c-cargo-test-targeted-server-console-observer-render
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test authority_target_output_envelope_flows_back_into_ --config 'source.crates-io.registry="sparse+https://index.crates.io/"' -- --nocapture after adding server-console scoped observer coverage for visible remote target output
+    status: pass
+  - id: t5-08b-cargo-test-full-suite
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --config 'source.crates-io.registry="sparse+https://index.crates.io/"' after centralizing shared authority-session reconnect ownership, offline projection, and publication replay inside `RemoteNodeSessionOwnerRuntime`
+    status: pass
+  - id: t5-08b-cargo-test-shared-authority-targeted
+    command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test shared_authority_session_ --config 'source.crates-io.registry="sparse+https://index.crates.io/"' -- --nocapture after adding reconnect coverage that keeps the local authority bridge alive across upstream node-session loss
+    status: pass
+  - id: t5-08b-cargo-fmt-reconnect-owner-runtime
+    command: cargo fmt after moving shared authority reconnect ownership and replay into `RemoteNodeSessionOwnerRuntime`
+    status: pass
   - id: t6-01e-planning-alignment-review
     command: targeted review of `.agents/` and active docs after cancelling auto-switch and locking server-console on manual-only attention cues
     status: pass

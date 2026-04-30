@@ -104,6 +104,7 @@ pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
         socket_name: &str,
         target_session_name: &str,
         authority_id: &str,
+        target_id: &str,
         transport_socket_path: &str,
     ) -> Result<PathBuf, LifecycleError>;
 
@@ -132,6 +133,7 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
         socket_name: &str,
         target_session_name: &str,
         authority_id: &str,
+        target_id: &str,
         transport_socket_path: &str,
     ) -> Result<PathBuf, LifecycleError> {
         self.ensure_publication_sender_running(socket_name)?;
@@ -139,6 +141,7 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
             socket_name,
             target_session_name,
             authority_id,
+            target_id,
             transport_socket_path,
         )?;
         let authority_socket_path =
@@ -241,6 +244,7 @@ where
                 &command.socket_name,
                 &command.target_session_name,
                 &command.authority_id,
+                &command.target_id,
                 &command.transport_socket_path,
             )
             .map_err(remote_authority_error)?;
@@ -680,6 +684,7 @@ mod tests {
             socket_name: &str,
             target_session_name: &str,
             authority_id: &str,
+            _target_id: &str,
             transport_socket_path: &str,
         ) -> Result<PathBuf, LifecycleError> {
             let session = Arc::new(

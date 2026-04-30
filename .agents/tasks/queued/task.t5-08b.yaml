@@ -2,7 +2,7 @@ id: task.t5-08b
 kind: task
 version: 1
 title: centralize live node-session ownership and remote registration lifecycle
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md

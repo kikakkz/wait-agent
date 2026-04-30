@@ -160,19 +160,19 @@ next:
     status: done
   - id: task.t5-08a2
     title: design node trust, dialing policy, and canonical connection ownership
-    status: in_progress
+    status: done
   - id: task.t5-08a3
     title: design remote render bootstrap, replay, and late-subscriber recovery
-    status: ready
+    status: done
   - id: task.t5-08a
     title: introduce a real cross-host authority ingress source on the accepted connection boundary
-    status: ready
+    status: done
   - id: task.t5-08b
     title: centralize live node-session ownership and remote registration lifecycle
-    status: ready
+    status: done
   - id: task.t5-08c
     title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
-    status: ready
+    status: in_progress
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred

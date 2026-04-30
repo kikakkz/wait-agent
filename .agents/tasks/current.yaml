@@ -1,38 +1,43 @@
-id: task.t5-08a2
+id: task.t5-08c
 kind: task
 version: 1
-title: design node trust, dialing policy, and canonical connection ownership
+title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
 status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md
   why:
-    - section 8.3 only states that mTLS is preferred, but the actual trust bootstrap and ownership policy are still undefined
-    - the node-scoped connection manager cannot be implemented cleanly until dial, accept, duplicate-session, and reconnect authority rules are fixed
+    - the architecture task must first define the accepted attachment fanout and output-delivery model
+    - this slice then closes visible rendering and end-to-end validation on that accepted path
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08a2.yaml
+  file: .agents/tasks/queued/task.t5-08c.yaml
   reference: current
 depends_on:
-  - task.t5-08a1.done
+  - task.t5-08b.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
   - primitive.agents-self-maintenance
 done_criteria:
-  - one accepted design defines mTLS trust bootstrap, node identity binding, certificate lifecycle expectations, and admission policy
-  - one accepted design defines who dials whom, whether both inbound and outbound are allowed, and how duplicate simultaneous connections collapse into one canonical node session
-  - reconnect authority and split-brain resolution rules are explicit
+  - delivered remote output reaches the visible local workspace and server-console target presentations through the accepted observer or render runtime boundaries
+  - real cross-host open, input, output, and resize behavior is validated end to end on the accepted phase-2 path
+  - loopback-only transport assumptions are either removed from the production path or explicitly retired as historical fallback
 verification:
-  - targeted review of trust bootstrap, connection ownership, duplicate-resolution, and reconnect policy
+  - cargo test
+  - manual: real cross-host remote interaction validation
+  - targeted review of remote render-path ownership and end-to-end transport boundaries
 touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
   - docs/remote-node-connection-architecture.md
-  - docs/remote-network-completion-plan.md
   - docs/execution-status-board.md
-  - .agents/state/task-history.yaml
+  - docs/local-acceptance-checklist.md
   - .agents/tasks/backlog.yaml
   - .agents/tasks/current.yaml
-  - .agents/tasks/queued/task.t5-08a2.yaml
-  - .agents/tasks/queued/task.t5-08a.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
 notes:
-  - This is design-only. Do not bake trust assumptions into code before this slice closes.
+  - This slice closes the product path. It should not reopen planning for queue-order UX, auto-switch, or compact-layout polish.

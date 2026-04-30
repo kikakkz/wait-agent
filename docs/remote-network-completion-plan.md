@@ -91,22 +91,24 @@ Not yet complete for the phase outcome:
 - remote output delivery is routed, but the final visible render path and
   end-to-end cross-host validation are not yet closed
 
+Design baseline now fixed before implementation resumes:
+
+- the gRPC proto and RPC contract are explicit
+- production trust, dialing direction, duplicate-session handling, and
+  canonical connection ownership are explicit
+- remote render bootstrap, replay, and late-subscriber recovery are explicit
+
 ## 5. Remaining Queue
 
 The accepted remaining order is:
 
-1. `task.t5-08a2`
-   Freeze node trust, dialing policy, duplicate-session resolution, and
-   canonical connection ownership.
-2. `task.t5-08a3`
-   Freeze remote render bootstrap, replay, and late-subscriber recovery.
-3. `task.t5-08a`
+1. `task.t5-08a`
    Introduce a real cross-host authority ingress source and make it the
    accepted production registration path above the existing source boundary.
-4. `task.t5-08b`
+2. `task.t5-08b`
    Centralize live node-session ownership, registration, and reconnect or
    disconnect handling behind one accepted runtime boundary.
-5. `task.t5-08c`
+3. `task.t5-08c`
    Bind delivered remote output into visible console presentation and validate
    end-to-end cross-host open, input, output, and resize behavior.
 

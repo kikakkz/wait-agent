@@ -10,8 +10,8 @@ use crate::infra::remote_protocol::{
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::{
-    AuthorityConnectionRequest, AuthorityConnectionStarter, AuthorityTransportEvent,
-    QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
+    AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
+    AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
 };
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
@@ -155,6 +155,16 @@ impl RemoteMainSlotPaneRuntime {
             })
     }
 
+    pub(crate) fn start_authority_connection(
+        &self,
+        request: AuthorityConnectionRequest,
+        registry: RemoteConnectionRegistry,
+        tx: mpsc::Sender<AuthorityTransportEvent>,
+    ) -> io::Result<Box<dyn AuthorityConnectionGuard>> {
+        self.authority_connections
+            .start_connection(request, registry, tx)
+    }
+
     pub fn run(&self, command: RemoteMainSlotCommand) -> Result<(), LifecycleError> {
         self.run_surface(main_slot_surface_spec(&command))
     }
@@ -216,8 +226,7 @@ impl RemoteMainSlotPaneRuntime {
             authority_transport_socket_path(&spec.socket_name, &spec.surface_scope, &spec.target);
         let authority_tx = authority_transport_event_sender(event_tx.clone());
         let _authority_listener = self
-            .authority_connections
-            .start_connection(
+            .start_authority_connection(
                 AuthorityConnectionRequest {
                     socket_path: authority_transport_socket_path.clone(),
                     authority_id: target.address.authority_id().to_string(),
@@ -580,7 +589,7 @@ fn spawn_mailbox_watcher(mailbox: LocalNodeMailbox, tx: mpsc::Sender<RemotePaneE
     });
 }
 
-fn apply_authority_envelope(
+pub(crate) fn apply_authority_envelope(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
@@ -787,7 +796,7 @@ fn write_escape(sequence: &str) -> io::Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteSocketTransportError {
+pub(crate) struct RemoteSocketTransportError {
     message: String,
 }
 
@@ -1154,6 +1163,47 @@ mod tests {
         observer.sync().expect("observer sync should succeed");
         let snapshot = observer.snapshot();
         assert_eq!(snapshot.last_output_seq, Some(1));
+        assert_eq!(
+            snapshot.active_screen().lines[0],
+            "a           ".to_string()
+        );
+    }
+
+    #[test]
+    fn authority_target_output_envelope_flows_back_into_server_console_observer_terminal_state() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("server-console:wa-1:console-a")
+            .expect("server-console observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+        let target = remote_target();
+
+        runtime
+            .activate_target(
+                &target,
+                crate::infra::remote_protocol::RemoteConsoleDescriptor {
+                    console_id: "server-console:wa-1:console-a".to_string(),
+                    console_host_id: "server-console:wa-1:console-a".to_string(),
+                    location: crate::domain::session_catalog::ConsoleLocation::ServerConsole,
+                },
+                12,
+                4,
+            )
+            .expect("server-console remote activation should succeed");
+
+        apply_authority_envelope(&runtime, &target, &authority_target_output_envelope(1))
+            .expect("authority target_output should apply for server-console observer");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        observer
+            .sync()
+            .expect("server-console observer sync should succeed");
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.last_output_seq, Some(1));
+        assert_eq!(
+            snapshot.console_id.as_deref(),
+            Some("server-console:wa-1:console-a")
+        );
         assert_eq!(
             snapshot.active_screen().lines[0],
             "a           ".to_string()

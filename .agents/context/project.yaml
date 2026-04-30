@@ -15,11 +15,11 @@ current_phase:
   stage_id: remote-network-completion
   stage_title: close the remaining cross-host interaction gaps on top of the accepted shared catalog and routing boundary
 current_focus:
-  default_task_id: task.t5-08a2
-  focus_statement: the remote node-session proto and RPC contract are now fixed; active work now defines trust bootstrap, dialing policy, and canonical connection ownership before cross-host ingress implementation starts
+  default_task_id: task.t5-08a
+  focus_statement: the remote protocol, trust, and replay baselines are now fixed; active work now lands the first production cross-host ingress slice behind a repo-owned gRPC transport facade
 upcoming_focus:
-  - fix remote render bootstrap and replay semantics after trust and ownership rules are frozen
-  - start `task.t5-08a` only after those design gaps are closed
+  - keep `task.t5-08b` focused on steady-state ownership rather than reopening protocol, trust, or replay policy
+  - keep `task.t5-08c` focused on visible render binding and end-to-end validation once ingress exists
 source_of_truth:
   - docs/execution-status-board.md
   - docs/remote-network-completion-plan.md

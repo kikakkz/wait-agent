@@ -2,9 +2,7 @@ use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::{AttachCommand, RemoteServerConsoleCommand, ServerConsoleCommand};
-use crate::domain::session_catalog::{
-    ConsoleLocation, ManagedSessionRecord, SessionTransport,
-};
+use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
 use crate::lifecycle::LifecycleError;
@@ -12,8 +10,11 @@ use crate::runtime::remote_authority_transport_runtime::authority_transport_sock
 use crate::runtime::remote_main_slot_pane_runtime::{
     RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
 };
+use crate::runtime::remote_node_ingress_runtime::{
+    default_remote_node_ingress_starter_from_env, RemoteNodeIngressStarter,
+};
 use crate::runtime::remote_node_session_runtime::{
-    spawn_remote_node_session_listener, RemoteNodePublicationSink, RemoteNodeSessionError,
+    RemoteNodePublicationSink, RemoteNodeSessionError,
 };
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
@@ -26,6 +27,7 @@ pub struct RemoteServerConsoleRuntime {
     surface_runtime: RemoteMainSlotPaneRuntime,
     publication_runtime: RemoteTargetPublicationRuntime,
     workspace_runtime: WorkspaceCommandRuntime,
+    node_ingress: Box<dyn RemoteNodeIngressStarter>,
 }
 
 impl RemoteServerConsoleRuntime {
@@ -38,6 +40,12 @@ impl RemoteServerConsoleRuntime {
                 RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams()?,
             publication_runtime: RemoteTargetPublicationRuntime::from_build_env()?,
             workspace_runtime: WorkspaceCommandRuntime::from_build_env()?,
+            node_ingress: default_remote_node_ingress_starter_from_env().map_err(|error| {
+                LifecycleError::Io(
+                    "failed to configure remote server-console authority ingress".to_string(),
+                    error,
+                )
+            })?,
         })
     }
 
@@ -199,6 +207,7 @@ impl<'a> ServerConsoleInteractionSurface<'a> {
                 Self::Remote(RemoteServerConsoleInteractionSurface {
                     surface_runtime: &runtime.surface_runtime,
                     publication_runtime: &runtime.publication_runtime,
+                    node_ingress: runtime.node_ingress.as_ref(),
                     command,
                     target,
                 })
@@ -249,6 +258,7 @@ impl<'a> LocalServerConsoleInteractionSurface<'a> {
 struct RemoteServerConsoleInteractionSurface<'a> {
     surface_runtime: &'a RemoteMainSlotPaneRuntime,
     publication_runtime: &'a RemoteTargetPublicationRuntime,
+    node_ingress: &'a dyn RemoteNodeIngressStarter,
     command: &'a RemoteServerConsoleCommand,
     target: &'a ManagedSessionRecord,
 }
@@ -266,15 +276,15 @@ impl<'a> RemoteServerConsoleInteractionSurface<'a> {
                 runtime: self.publication_runtime.clone(),
                 socket_name: spec.socket_name.clone(),
             });
-        let _authority_ingress =
-            spawn_remote_node_session_listener(socket_path, submitter, publication_sink).map_err(
-                |error| {
-                    LifecycleError::Io(
-                        "failed to start remote server-console authority ingress".to_string(),
-                        error,
-                    )
-                },
-            )?;
+        let _authority_ingress = self
+            .node_ingress
+            .start_ingress(socket_path, submitter, publication_sink)
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to start remote server-console authority ingress".to_string(),
+                    error,
+                )
+            })?;
         self.surface_runtime
             .run_surface_with_signal_sink(spec, |signal| match signal {
                 RemoteInteractSignal::ConsoleInputStarted => {
@@ -434,7 +444,6 @@ impl ServerConsoleState {
             .map(server_console_target_label)
             .unwrap_or_else(|| "(none)".to_string())
     }
-
 }
 
 impl ServerConsoleInteractionState {
@@ -513,13 +522,7 @@ fn draw_activation_picker(
     for row in 0..list_rows {
         let target = targets.get(start + row);
         let line = target
-            .map(|target| {
-                activation_target_line(
-                    target,
-                    start + row == selected_index,
-                    width,
-                )
-            })
+            .map(|target| activation_target_line(target, start + row == selected_index, width))
             .unwrap_or_default();
         write!(stdout, "\x1b[{};1H{}\x1b[K", row + header_rows + 1, line).map_err(|error| {
             LifecycleError::Io(

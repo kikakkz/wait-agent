@@ -20,10 +20,8 @@ use crate::infra::tmux::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
-use crate::runtime::remote_target_publication_transport_runtime::{
-    remote_target_publication_socket_path, RemoteTargetPublicationTransportRuntime,
-};
-use std::collections::{BTreeSet, HashMap};
+use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -68,6 +66,7 @@ pub(crate) enum PublicationSenderCommand {
     RegisterLiveSession {
         target_session_name: String,
         authority_id: String,
+        target_id: String,
         transport_socket_path: String,
     },
     UnregisterLiveSession {
@@ -194,6 +193,20 @@ impl RemoteTargetPublicationRuntime {
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
         let changed = apply_publication_envelope(&self.store, socket_name, &envelope)?;
+        if changed {
+            spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_source_target_offline(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        target_id: &str,
+    ) -> Result<(), LifecycleError> {
+        let changed =
+            mark_target_offline_in_store(&self.store, socket_name, session_name, target_id)?;
         if changed {
             spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
         }
@@ -802,83 +815,6 @@ impl RemoteTargetPublicationRuntime {
             }
         }
     }
-
-    pub(crate) fn process_publication_sender_command(
-        &self,
-        socket_name: &str,
-        command: PublicationSenderCommand,
-        transports: &mut HashMap<String, RemoteTargetPublicationTransportRuntime>,
-    ) -> Result<(), LifecycleError> {
-        match command {
-            PublicationSenderCommand::RegisterLiveSession { .. }
-            | PublicationSenderCommand::UnregisterLiveSession { .. } => Ok(()),
-            PublicationSenderCommand::PublishTarget {
-                authority_id,
-                transport_session_id,
-                source_session_name,
-                selector,
-                availability,
-                session_role,
-                workspace_key,
-                command_name,
-                current_path,
-                attached_clients,
-                window_count,
-            } => {
-                let target = ManagedSessionRecord {
-                    address: ManagedSessionAddress::remote_peer(
-                        &authority_id,
-                        &transport_session_id,
-                    ),
-                    selector,
-                    availability: SessionAvailability::parse(availability).ok_or_else(|| {
-                        LifecycleError::Protocol(format!(
-                            "unsupported publication sender availability `{availability}`"
-                        ))
-                    })?,
-                    workspace_dir: None,
-                    workspace_key,
-                    session_role: session_role
-                        .map(|value| {
-                            WorkspaceSessionRole::parse(value).ok_or_else(|| {
-                                LifecycleError::Protocol(format!(
-                                    "unsupported publication sender session role `{value}`"
-                                ))
-                            })
-                        })
-                        .transpose()?,
-                    opened_by: Vec::new(),
-                    attached_clients,
-                    window_count,
-                    command_name,
-                    current_path: current_path.map(PathBuf::from),
-                    task_state: ManagedSessionTaskState::Unknown,
-                };
-                dispatch_publication_transport_send(
-                    transports,
-                    socket_name,
-                    &authority_id,
-                    PublicationTransportDispatch::Publish {
-                        target: &target,
-                        source_session_name: source_session_name.as_deref(),
-                    },
-                )
-            }
-            PublicationSenderCommand::ExitTarget {
-                authority_id,
-                transport_session_id,
-                source_session_name,
-            } => dispatch_publication_transport_send(
-                transports,
-                socket_name,
-                &authority_id,
-                PublicationTransportDispatch::Exit {
-                    transport_session_id: &transport_session_id,
-                    source_session_name: source_session_name.as_deref(),
-                },
-            ),
-        }
-    }
 }
 
 pub(crate) fn ensure_publication_owner_process_running(
@@ -953,6 +889,7 @@ pub(crate) fn signal_publication_sender_live_session_registered(
     socket_name: &str,
     target_session_name: &str,
     authority_id: &str,
+    target_id: &str,
     transport_socket_path: &str,
 ) -> Result<(), LifecycleError> {
     signal_publication_sender_command(
@@ -960,6 +897,7 @@ pub(crate) fn signal_publication_sender_live_session_registered(
         PublicationSenderCommand::RegisterLiveSession {
             target_session_name: target_session_name.to_string(),
             authority_id: authority_id.to_string(),
+            target_id: target_id.to_string(),
             transport_socket_path: transport_socket_path.to_string(),
         },
     )
@@ -975,65 +913,6 @@ pub(crate) fn signal_publication_sender_live_session_unregistered(
             target_session_name: target_session_name.to_string(),
         },
     )
-}
-
-enum PublicationTransportDispatch<'a> {
-    Publish {
-        target: &'a ManagedSessionRecord,
-        source_session_name: Option<&'a str>,
-    },
-    Exit {
-        transport_session_id: &'a str,
-        source_session_name: Option<&'a str>,
-    },
-}
-
-fn dispatch_publication_transport_send(
-    transports: &mut HashMap<String, RemoteTargetPublicationTransportRuntime>,
-    socket_name: &str,
-    authority_id: &str,
-    dispatch: PublicationTransportDispatch<'_>,
-) -> Result<(), LifecycleError> {
-    let send_once = |transport: &RemoteTargetPublicationTransportRuntime| match &dispatch {
-        PublicationTransportDispatch::Publish {
-            target,
-            source_session_name,
-        } => transport
-            .send_target_published(target, *source_session_name)
-            .map_err(remote_target_publication_error),
-        PublicationTransportDispatch::Exit {
-            transport_session_id,
-            source_session_name,
-        } => transport
-            .send_target_exited(transport_session_id, *source_session_name)
-            .map_err(remote_target_publication_error),
-    };
-
-    if !transports.contains_key(authority_id) {
-        let transport = RemoteTargetPublicationTransportRuntime::connect(
-            remote_target_publication_socket_path(socket_name),
-            authority_id,
-        )
-        .map_err(remote_target_publication_error)?;
-        transports.insert(authority_id.to_string(), transport);
-    }
-
-    match send_once(transports.get(authority_id).ok_or_else(|| {
-        LifecycleError::Protocol("publication transport cache missing entry".to_string())
-    })?) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            transports.remove(authority_id);
-            let transport = RemoteTargetPublicationTransportRuntime::connect(
-                remote_target_publication_socket_path(socket_name),
-                authority_id,
-            )
-            .map_err(remote_target_publication_error)?;
-            let result = send_once(&transport);
-            transports.insert(authority_id.to_string(), transport);
-            result
-        }
-    }
 }
 
 pub(crate) fn signal_publication_target_published(
@@ -1282,11 +1161,13 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
         PublicationSenderCommand::RegisterLiveSession {
             target_session_name,
             authority_id,
+            target_id,
             transport_socket_path,
         } => format!(
-            "register_live_session\t{}\t{}\t{}\n",
+            "register_live_session\t{}\t{}\t{}\t{}\n",
             encode_base64(target_session_name.as_bytes()),
             encode_base64(authority_id.as_bytes()),
+            encode_base64(target_id.as_bytes()),
             encode_base64(transport_socket_path.as_bytes())
         ),
         PublicationSenderCommand::UnregisterLiveSession {
@@ -1449,6 +1330,12 @@ fn parse_publication_sender_command(
                         "register_live_session is missing authority field".to_string(),
                     )
                 })?)?;
+            let target_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "register_live_session is missing target id field".to_string(),
+                    )
+                })?)?;
             let transport_socket_path =
                 decode_publication_agent_string_field(parts.next().ok_or_else(|| {
                     LifecycleError::Protocol(
@@ -1463,6 +1350,7 @@ fn parse_publication_sender_command(
             Ok(PublicationSenderCommand::RegisterLiveSession {
                 target_session_name,
                 authority_id,
+                target_id,
                 transport_socket_path,
             })
         }
@@ -1834,6 +1722,29 @@ fn apply_publication_envelope(
     }
 }
 
+fn mark_target_offline_in_store(
+    store: &PublishedTargetStore,
+    socket_name: &str,
+    session_name: &str,
+    target_id: &str,
+) -> Result<bool, LifecycleError> {
+    let records = store
+        .list_records_for_source_binding(socket_name, session_name)
+        .map_err(remote_target_publication_error)?;
+    let mut changed = false;
+    for record in records {
+        if record.target.address.id().as_str() != target_id {
+            continue;
+        }
+        let mut offline_target = record.target.clone();
+        offline_target.availability = SessionAvailability::Offline;
+        changed |= store
+            .upsert_target_from_source(socket_name, Some(session_name), &offline_target)
+            .map_err(remote_target_publication_error)?;
+    }
+    Ok(changed)
+}
+
 fn spawn_socket_chrome_refresh(
     current_executable: &std::path::Path,
     socket_name: &str,
@@ -1859,7 +1770,7 @@ fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chrome_refresh_socket_args, parse_publication_agent_command,
+        chrome_refresh_socket_args, mark_target_offline_in_store, parse_publication_agent_command,
         parse_publication_sender_command, publication_socket_hook_tmux_command,
         published_remote_target_from_local, published_remote_target_record_from_payload,
         remote_target_publication_agent_args, remote_target_publication_agent_socket_path,
@@ -2063,6 +1974,7 @@ mod tests {
             render_publication_sender_command(&PublicationSenderCommand::RegisterLiveSession {
                 target_session_name: "target-host-1".to_string(),
                 authority_id: "peer-a".to_string(),
+                target_id: "remote-peer:peer-a:target-host-1".to_string(),
                 transport_socket_path: "/tmp/waitagent-remote.sock".to_string(),
             });
 
@@ -2074,9 +1986,59 @@ mod tests {
             PublicationSenderCommand::RegisterLiveSession {
                 target_session_name: "target-host-1".to_string(),
                 authority_id: "peer-a".to_string(),
+                target_id: "remote-peer:peer-a:target-host-1".to_string(),
                 transport_socket_path: "/tmp/waitagent-remote.sock".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn mark_target_offline_in_store_keeps_record_and_updates_availability() {
+        let store_path = std::env::temp_dir().join(format!(
+            "waitagent-publication-offline-test-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        let store = crate::infra::published_target_store::PublishedTargetStore::new(&store_path);
+        let target = ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("peer-a", "shell-1"),
+            selector: Some("wa-local:target-host-1".to_string()),
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: Some("wk-1".to_string()),
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 2,
+            window_count: 1,
+            command_name: Some("codex".to_string()),
+            current_path: Some(PathBuf::from("/tmp/demo")),
+            task_state: ManagedSessionTaskState::Unknown,
+        };
+        store
+            .upsert_target_from_source("wa-local", Some("target-host-1"), &target)
+            .expect("target should store");
+
+        let changed = mark_target_offline_in_store(
+            &store,
+            "wa-local",
+            "target-host-1",
+            "remote-peer:peer-a:shell-1",
+        )
+        .expect("offline mark should succeed");
+
+        assert!(changed);
+        let record = store
+            .list_records_for_source_binding("wa-local", "target-host-1")
+            .expect("stored record should load")
+            .into_iter()
+            .next()
+            .expect("record should remain present");
+        assert_eq!(record.target.availability, SessionAvailability::Offline);
+
+        let _ = std::fs::remove_file(store_path);
     }
 
     #[test]

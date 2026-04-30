@@ -2,7 +2,7 @@ id: task.t5-08a3
 kind: task
 version: 1
 title: design remote render bootstrap, replay, and late-subscriber recovery
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md
@@ -14,7 +14,7 @@ source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.t5-08a1.done
+  - task.t5-08a2.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update

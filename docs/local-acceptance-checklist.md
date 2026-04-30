@@ -1,8 +1,8 @@
 # WaitAgent Local Acceptance Checklist
 
-Version: `v1.3`  
+Version: `v1.4`  
 Status: `Signed Off`  
-Date: `2026-04-17`
+Date: `2026-04-30`
 
 ## 1. Purpose
 
@@ -145,3 +145,58 @@ For each failed scenario, record:
 - whether the failure involves picker, fullscreen, shell fidelity, resize, or UTF-8 behavior
 
 The detailed machine-readable verification result should then be synced into `.agents/state/last-verified.yaml` and related task state.
+
+## 7. Phase 2 Remote Validation Extension
+
+This appendix is the human-run validation checklist for `task.t5-08c`.
+
+It does not reopen the local `T4-10` gate.
+It exists so the accepted phase-2 cross-host path can be validated against the
+same visible-behavior standard before the network MVP is marked complete.
+
+### 7.1 Recommended Environment
+
+- one server host running the accepted ingress listener with `WAITAGENT_REMOTE_NODE_INGRESS_ADDR=<bind-addr>`
+- one separate authority host publishing a real remote target and dialing the server with `WAITAGENT_REMOTE_NODE_SESSION_ENDPOINT=http://<server-host>:<port>`
+- one local workspace console and one `waitagent server` console available as independent product surfaces
+- a shell-backed target first, then `codex` or another TUI once the shell path passes
+
+### 7.2 Workspace Remote Target Open
+
+- Publish one remote target from the authority host and confirm it appears in the shared catalog on the local workspace host.
+- Open that remote target from the normal workspace sidebar or picker path.
+- Confirm the main slot enters the remote surface instead of falling back to a local attach path.
+- Confirm the placeholder state changes from waiting to connected once the authority session is live.
+- Run `echo remote-ok` on the authority-side PTY and confirm the bytes become visible in the workspace main slot.
+
+### 7.3 Workspace Remote Input And Resize
+
+- Type normal shell input into the opened remote target from the workspace surface.
+- Confirm the authority-side PTY receives that input exactly once.
+- Resize the local terminal while the remote target is focused.
+- Confirm the remote viewport redraws cleanly and the authority-side PTY receives the explicit resize.
+- Confirm later remote output still appends in order after the resize.
+
+### 7.4 Server Console Remote Interaction
+
+- Start `waitagent server --socket-name <socket>` on the server host.
+- Open the same remote target from the server-console picker.
+- Confirm the remote target renders in the server-console interaction surface rather than only updating hidden state.
+- Type input from the server-console surface and confirm the authority-side PTY receives it.
+- Confirm `Ctrl-]` returns to the picker without breaking the remote target or corrupting later reopen behavior.
+
+### 7.5 Disconnect And Reconnect
+
+- While the remote target is open, stop or sever the authority-side node session.
+- Confirm the visible surface reports the authority disconnect instead of silently freezing.
+- Confirm the published target remains present but becomes unavailable or offline in catalog-driven surfaces.
+- Restore the authority-side node session.
+- Confirm the target becomes reachable again without requiring local catalog surgery.
+- Confirm new authority output becomes visible again after reconnect.
+
+### 7.6 TUI Follow-Up
+
+- Start `codex` or another full-screen TUI inside the remote authority PTY.
+- Confirm the remote workspace surface renders the TUI without obvious corruption.
+- Confirm basic navigation plus submit input still works through the remote path.
+- Confirm server-console reopen of the same remote target still shows continued output instead of a dead surface.

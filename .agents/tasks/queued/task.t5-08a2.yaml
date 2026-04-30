@@ -2,7 +2,7 @@ id: task.t5-08a2
 kind: task
 version: 1
 title: design node trust, dialing policy, and canonical connection ownership
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md

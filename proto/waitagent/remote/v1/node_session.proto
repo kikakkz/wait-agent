@@ -1,0 +1,219 @@
+syntax = "proto3";
+
+package waitagent.remote.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+service NodeSessionService {
+  rpc OpenNodeSession(stream NodeSessionEnvelope)
+      returns (stream NodeSessionEnvelope);
+}
+
+message NodeSessionEnvelope {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  string session_instance_id = 3;
+  optional string correlation_id = 4;
+  optional RouteContext route = 5;
+
+  oneof body {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    Heartbeat heartbeat = 12;
+    SessionNotice session_notice = 13;
+    CommandRejected command_rejected = 14;
+
+    TargetPublished target_published = 20;
+    TargetExited target_exited = 21;
+
+    OpenTargetRequest open_target_request = 30;
+    OpenTargetAccepted open_target_accepted = 31;
+    OpenTargetRejected open_target_rejected = 32;
+    CloseTargetRequest close_target_request = 33;
+
+    ConsoleInput console_input = 40;
+    TargetInputDelivery target_input_delivery = 41;
+
+    PtyResizeRequest pty_resize_request = 50;
+    ApplyPtyResize apply_pty_resize = 51;
+    PtyResizeApplied pty_resize_applied = 52;
+
+    TargetOutput target_output = 60;
+  }
+}
+
+message RouteContext {
+  optional string authority_node_id = 1;
+  optional string target_id = 2;
+  optional string attachment_id = 3;
+  optional string console_id = 4;
+  optional string console_host_id = 5;
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message NodeCapabilities {
+  bool can_publish_targets = 1;
+  bool can_host_observing_consoles = 2;
+  bool can_send_console_input = 3;
+  bool can_consume_authority_control = 4;
+}
+
+message ResumeHint {
+  optional string previous_session_instance_id = 1;
+}
+
+message RecoveryPolicy {
+  bool authority_republish_required = 1;
+  bool observer_reopen_required = 2;
+  bool replay_supported = 3;
+}
+
+message ClientHello {
+  string node_id = 1;
+  string node_instance_id = 2;
+  ProtocolVersion min_supported_version = 3;
+  ProtocolVersion max_supported_version = 4;
+  NodeCapabilities capabilities = 5;
+  optional ResumeHint resume = 6;
+}
+
+message ServerHello {
+  string server_id = 1;
+  string session_instance_id = 2;
+  ProtocolVersion negotiated_version = 3;
+  google.protobuf.Duration heartbeat_interval = 4;
+  RecoveryPolicy recovery_policy = 5;
+}
+
+message Heartbeat {
+  string runtime_id = 1;
+}
+
+enum SessionNoticeKind {
+  SESSION_NOTICE_KIND_UNSPECIFIED = 0;
+  SESSION_NOTICE_KIND_DRAINING = 1;
+  SESSION_NOTICE_KIND_GOING_OFFLINE = 2;
+  SESSION_NOTICE_KIND_RESYNC_REQUIRED = 3;
+  SESSION_NOTICE_KIND_SUPERSEDED = 4;
+}
+
+message SessionNotice {
+  SessionNoticeKind kind = 1;
+  string message = 2;
+}
+
+enum CommandRejectedReason {
+  COMMAND_REJECTED_REASON_UNSPECIFIED = 0;
+  COMMAND_REJECTED_REASON_UNKNOWN_TARGET = 1;
+  COMMAND_REJECTED_REASON_TARGET_OFFLINE = 2;
+  COMMAND_REJECTED_REASON_ATTACHMENT_NOT_OPEN = 3;
+  COMMAND_REJECTED_REASON_RESIZE_DENIED = 4;
+  COMMAND_REJECTED_REASON_STALE_RESIZE_EPOCH = 5;
+  COMMAND_REJECTED_REASON_WRITE_FAILED = 6;
+  COMMAND_REJECTED_REASON_UNSUPPORTED_CAPABILITY = 7;
+}
+
+message CommandRejected {
+  CommandRejectedReason reason = 1;
+  google.rpc.Status status = 2;
+}
+
+message TargetPublished {
+  string target_id = 1;
+  string authority_node_id = 2;
+  string transport = 3;
+  string transport_session_id = 4;
+  optional string selector = 5;
+  string availability = 6;
+  optional string command_name = 7;
+  optional string current_path = 8;
+  optional uint64 attached_count = 9;
+}
+
+message TargetExited {
+  string target_id = 1;
+  string transport_session_id = 2;
+}
+
+message OpenTargetRequest {
+  string target_id = 1;
+  string console_id = 2;
+  string console_location = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message OpenTargetAccepted {
+  string target_id = 1;
+  string attachment_id = 2;
+  string console_id = 3;
+  string availability = 4;
+  uint64 resize_epoch = 5;
+  string resize_authority_console_id = 6;
+}
+
+message OpenTargetRejected {
+  string target_id = 1;
+  string console_id = 2;
+  string reason = 3;
+  google.rpc.Status status = 4;
+}
+
+message CloseTargetRequest {
+  string target_id = 1;
+  string attachment_id = 2;
+}
+
+message ConsoleInput {
+  string attachment_id = 1;
+  string target_id = 2;
+  string console_id = 3;
+  uint64 console_seq = 4;
+  bytes input_bytes = 5;
+}
+
+message TargetInputDelivery {
+  string attachment_id = 1;
+  string target_id = 2;
+  string console_id = 3;
+  string console_host_id = 4;
+  uint64 input_seq = 5;
+  bytes input_bytes = 6;
+}
+
+message PtyResizeRequest {
+  string attachment_id = 1;
+  string target_id = 2;
+  string console_id = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+  uint64 resize_epoch = 6;
+}
+
+message ApplyPtyResize {
+  string target_id = 1;
+  uint64 resize_epoch = 2;
+  string resize_authority_console_id = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message PtyResizeApplied {
+  string target_id = 1;
+  uint64 resize_epoch = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
+}
+
+message TargetOutput {
+  string target_id = 1;
+  uint64 output_seq = 2;
+  string stream = 3;
+  bytes output_bytes = 4;
+}
