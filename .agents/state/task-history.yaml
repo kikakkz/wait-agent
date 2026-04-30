@@ -3,7 +3,7 @@ version: 1
 history:
   - task_id: task.t6-01e
     status: done
-    summary: active planning is now aligned on a manual-only attention model: server-console waiting state is surfaced through sidebar, picker, badges, counts, and FIFO queue state, while auto-switch work is explicitly retired
+    summary: active planning is now aligned on a manual-only attention model: server-console waiting state is surfaced through sidebar, picker, badges, counts, and related chrome cues while auto-switch work is explicitly retired
     source_of_truth:
       file: .agents/tasks/current.yaml
       reference: status

@@ -398,7 +398,7 @@ Must have deterministic unit tests for:
 - One-enter one-switch rule
 - Lock and unlock behavior
 - Continuation protection
-- FIFO waiting order
+- Per-session waiting-attention state transitions
 
 ### 8.2 `pty`
 

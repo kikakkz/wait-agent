@@ -335,8 +335,8 @@ Preconditions:
 
 Main path:
 
-1. Server-side scheduler observes the aggregate waiting queue.
-2. Chrome updates waiting counts, badges, or “next” labels.
+1. Server-side scheduler observes that one or more targets have entered a waiting-attention state.
+2. Chrome updates waiting counts or badges on the affected targets.
 3. Focus remains on the current target until the user chooses to switch.
 4. Local client consoles keep their own focus unchanged.
 

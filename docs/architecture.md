@@ -205,8 +205,8 @@ This is the only place that directly owns PTY file descriptors.
 
 Responsibilities:
 
-- Maintain waiting queue per console
-- Surface manual-only attention cues from that queue
+- Track per-session waiting attention state per console
+- Surface manual-only attention cues from that state
 - Decide which session is eligible when the user explicitly switches or when the focused session disappears
 
 The scheduler must be console-scoped, not global.
@@ -431,9 +431,9 @@ The scheduler observes:
 
 The scheduler may emit:
 
-- `update_waiting_queue`
-- `mark_session_waiting`
-- `mark_session_active`
+- Update per-session waiting indicators in chrome
+- Clear waiting indicators after user attention or renewed activity
+- Mark the currently focused session active for chrome rendering
 
 ### 9.4 Scheduler State Machine
 
