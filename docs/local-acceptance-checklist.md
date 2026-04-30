@@ -163,7 +163,7 @@ same visible-behavior standard before the network MVP is marked complete.
 
 ### 7.2 Workspace Remote Target Open
 
-- Publish one remote target from the authority host and confirm it appears in the shared catalog on the local workspace host.
+- Publish one remote target from the authority host and confirm it appears in the shared catalog on the local workspace host without requiring any pre-existing local publication binding for that target.
 - Open that remote target from the normal workspace sidebar or picker path.
 - Confirm the main slot enters the remote surface instead of falling back to a local attach path.
 - Confirm the placeholder state changes from waiting to connected once the authority session is live.

@@ -132,10 +132,12 @@ fn run_node_ingress_server_loop(
                     );
                 }
                 RemoteNodeTransportEvent::SessionClosed { node_id } => {
+                    let _ = publication_runtime.mark_discovered_node_offline(&node_id);
                     sessions.remove(&node_id);
                 }
                 RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
                     if let Some(node_id) = node_id {
+                        let _ = publication_runtime.mark_discovered_node_offline(&node_id);
                         sessions.remove(&node_id);
                     }
                 }
@@ -173,23 +175,11 @@ fn route_transport_envelope(
         Some(Body::TargetPublished(payload)) => {
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
-            let socket_names = publication_runtime
-                .resolve_source_socket_names(node_id, &payload.transport_session_id)?;
-            for socket_name in socket_names {
-                publication_runtime
-                    .apply_live_publication_envelope(&socket_name, mapped.clone())?;
-            }
-            Ok(())
+            publication_runtime.apply_discovered_publication_envelope(node_id, mapped)
         }
         Some(Body::TargetExited(payload)) => {
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
-            let socket_names = publication_runtime
-                .resolve_source_socket_names(node_id, &payload.transport_session_id)?;
-            for socket_name in socket_names {
-                publication_runtime
-                    .apply_live_publication_envelope(&socket_name, mapped.clone())?;
-            }
-            Ok(())
+            publication_runtime.apply_discovered_publication_envelope(node_id, mapped)
         }
         Some(Body::TargetOutput(payload)) => {
             let Some(session) = session else {
@@ -298,10 +288,8 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
 
 fn extract_target_component(file_name: &str, authority_id: &str) -> Option<String> {
     let prefix = sanitize_socket_component(&format!("remote-peer:{authority_id}:"));
-    file_name
-        .split('-')
-        .find(|segment| segment.starts_with(&prefix))
-        .map(|segment| segment.trim_end_matches(".sock").to_string())
+    let start = file_name.find(&prefix)?;
+    Some(file_name[start..].trim_end_matches(".sock").to_string())
 }
 
 fn sanitize_socket_component(value: &str) -> String {

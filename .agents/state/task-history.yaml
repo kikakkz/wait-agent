@@ -1,6 +1,12 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08c1
+    status: done
+    summary: inbound remote `target_published` and `target_exited` envelopes now land in a node-scoped discovered-target catalog instead of waiting for tmux publication bindings to exist first, workspace sidebar and remote activation consume that shared catalog immediately after connect, disconnect projects those discovered targets offline, and `waitagent ls` stays local-backend only
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c1.yaml
+      reference: status
   - task_id: task.t5-08c
     status: in_progress
     summary: cross-host ingress and shared node-session ownership are now in place, and visible remote-output proof is tighter too: besides the existing workspace and server-console observer-path checks, there is now a higher-level grpc-ingress-to-observer-render combination test across `RemoteMainSlotIngressRuntime`, authority bridging, and observer terminal state, while the local acceptance checklist keeps the explicit phase-2 cross-host validation appendix for real open, input, output, resize, disconnect, and reconnect checks

@@ -1039,6 +1039,9 @@ Converge ownership:
 
 Close the user-visible path:
 
+- land node-scoped remote target discovery in the shared catalog before any
+  target is manually opened, and do not depend on tmux publication bindings as
+  the discovery gate
 - bind output fanout into visible local and server-console rendering
 - validate real cross-host open/input/output/resize behavior
 - retire loopback-only assumptions from the accepted production path

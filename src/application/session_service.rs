@@ -17,6 +17,10 @@ where
         self.gateway.find_session(target)
     }
 
+    pub fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
+        self.gateway.list_sessions()
+    }
+
     pub fn attach_workspace(&self, workspace: &TmuxWorkspaceHandle) -> Result<(), G::Error> {
         self.gateway.attach_workspace(workspace)
     }

@@ -1,7 +1,13 @@
 kind: state
 version: 1
-last_updated_from: task.t5-08c grpc ingress to visible render-path coverage refreshed on 2026-04-30
+last_updated_from: task.t5-08c1 node-level remote discovery catalog wiring refreshed on 2026-04-30
 checks:
+  - id: t5-08c1-cargo-test-full-suite-node-discovery
+    command: cargo test after adding a node-scoped discovered-remote-target catalog, wiring grpc ingress publication events into that catalog, keeping remote disconnect as offline projection, and restoring `waitagent ls` to local-backend semantics
+    status: pass
+  - id: t5-08c1-cargo-test-targeted-discovered-store
+    command: cargo test discovered_remote_target_store -- --nocapture after adding the node-scoped discovered-remote-target store and its offline or remove semantics
+    status: pass
   - id: t5-08c-cargo-test-full-suite-grpc-visible-render-refresh
     command: env ALL_PROXY=socks5://10.1.29.66:7897 HTTPS_PROXY=socks5://10.1.29.66:7897 HTTP_PROXY=socks5://10.1.29.66:7897 CARGO_HTTP_MULTIPLEXING=false CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --config 'source.crates-io.registry="sparse+https://index.crates.io/"' after adding higher-level grpc ingress to observer render-path coverage through `RemoteMainSlotIngressRuntime`
     status: pass

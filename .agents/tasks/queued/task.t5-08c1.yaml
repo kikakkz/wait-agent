@@ -1,0 +1,49 @@
+id: task.t5-08c1
+kind: task
+version: 1
+title: land node-level remote target discovery into the shared catalog
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-node-connection-architecture.md
+  why:
+    - section 14.3 now explicitly requires node-scoped remote target discovery to enter the shared catalog independently of socket-bound publication bindings
+    - the accepted product path requires sidebar and remote activation to consume that shared catalog before real cross-host validation can be considered complete
+target_task_reference: task.t5-08c
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - inbound remote `target_published` and `target_exited` envelopes update a node-scoped discovered-target catalog without depending on pre-existing tmux publication bindings
+  - workspace sidebar and remote activation consume that shared catalog so a newly connected remote node can surface visible targets before any manual open has already happened
+  - remote node disconnect marks discovered targets offline rather than silently removing them from catalog-driven surfaces
+  - `waitagent ls` keeps local backend semantics and does not become a remote connection or remote target listing command
+verification:
+  - cargo test
+  - cargo test discovered_remote_target_store -- --nocapture
+  - targeted review of node-level remote discovery versus socket-scoped publication-binding ownership
+touched_paths:
+  - src/infra
+  - src/application
+  - src/runtime
+  - src/ui
+  - docs/remote-node-connection-architecture.md
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/queued/task.t5-08c.yaml
+  - .agents/tasks/queued/task.t5-08c1.yaml
+  - .agents/tasks/current.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice closes the discovery gap inside `task.t5-08c`; it does not reopen auto-switch, queue UX, or transport redesign.
+  - Socket-bound publication bindings remain for local publication ownership and route coordination, not for first discovery of remote targets on a connected node.

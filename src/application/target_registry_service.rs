@@ -1,8 +1,10 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionTransport;
+use crate::infra::discovered_remote_target_store::DiscoveredRemoteTargetStore;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
+use std::collections::HashMap;
 
 pub trait TargetCatalogGateway {
     type Error;
@@ -25,6 +27,7 @@ where
 pub struct DefaultTargetCatalogGateway {
     local_tmux: EmbeddedTmuxBackend,
     published_remote_targets: PublishedTargetStore,
+    discovered_remote_targets: DiscoveredRemoteTargetStore,
 }
 
 impl DefaultTargetCatalogGateway {
@@ -32,6 +35,7 @@ impl DefaultTargetCatalogGateway {
         Ok(Self {
             local_tmux: EmbeddedTmuxBackend::from_build_env()?,
             published_remote_targets: PublishedTargetStore::default(),
+            discovered_remote_targets: DiscoveredRemoteTargetStore::default(),
         })
     }
 }
@@ -40,10 +44,29 @@ impl TargetCatalogGateway for DefaultTargetCatalogGateway {
     type Error = TmuxError;
 
     fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        let mut targets = self.local_tmux.list_sessions()?;
-        targets.extend(self.published_remote_targets.list_targets()?);
-        Ok(targets)
+        Ok(merge_targets_by_identity([
+            self.local_tmux.list_sessions()?,
+            self.published_remote_targets.list_targets()?,
+            self.discovered_remote_targets.list_targets()?,
+        ]))
     }
+}
+
+fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 3]) -> Vec<ManagedSessionRecord> {
+    let mut merged = Vec::new();
+    let mut positions = HashMap::<String, usize>::new();
+    for targets in groups {
+        for target in targets {
+            let target_id = target.address.id().as_str().to_string();
+            if let Some(index) = positions.get(&target_id).copied() {
+                merged[index] = target;
+            } else {
+                positions.insert(target_id, merged.len());
+                merged.push(target);
+            }
+        }
+    }
+    merged
 }
 
 pub struct TargetRegistryService<G> {

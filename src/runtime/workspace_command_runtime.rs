@@ -150,8 +150,8 @@ impl WorkspaceCommandRuntime {
 
     pub fn run_list(&self) -> Result<(), LifecycleError> {
         let sessions = self
-            .target_registry
-            .list_targets()
+            .session_service
+            .list_sessions()
             .map_err(tmux_runtime_error)?;
         if sessions.is_empty() {
             println!("no waitagent tmux sessions running");

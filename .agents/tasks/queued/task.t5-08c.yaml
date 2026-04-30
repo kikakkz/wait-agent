@@ -2,7 +2,7 @@ id: task.t5-08c
 kind: task
 version: 1
 title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
-status: ready
+status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md
@@ -22,6 +22,7 @@ linked_primitives:
   - primitive.agents-self-maintenance
 done_criteria:
   - a public remote listener and outbound dial product entry exists on accepted CLI arguments rather than environment variables, with default listener bind `0.0.0.0` and default port `7474`
+  - inbound remote target publication reaches the shared catalog through node-scoped discovery rather than depending on pre-existing local publication bindings
   - delivered remote output reaches the visible local workspace and server-console target presentations through the accepted observer or render runtime boundaries
   - real cross-host open, input, output, and resize behavior is validated end to end on the accepted phase-2 path
   - loopback-only transport assumptions are either removed from the production path or explicitly retired as historical fallback
@@ -44,4 +45,4 @@ touched_paths:
   - .agents/state/last-verified.yaml
 notes:
   - This slice closes the product path. It should not reopen planning for queue-order UX, auto-switch, or compact-layout polish.
-  - Remote networking must now converge on public `--port` and `--server` CLI entry, not environment-variable-first startup.
+  - Remote networking must now converge on public `--port` and `--connect` CLI entry, not environment-variable-first startup.

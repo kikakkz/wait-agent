@@ -164,7 +164,16 @@ fn render_session_row(
 }
 
 fn selected_detail_line(session: &ManagedSessionRecord, width: usize) -> String {
-    let detail = format!("{} {}", session.display_label(), session.task_state.label());
+    let detail =
+        if session.availability != crate::domain::session_catalog::SessionAvailability::Online {
+            format!(
+                "{} {}",
+                session.display_label(),
+                session.availability.as_str().to_ascii_uppercase()
+            )
+        } else {
+            format!("{} {}", session.display_label(), session.task_state.label())
+        };
     style_sidebar_detail_line(&right_align(&detail, width), width)
 }
 

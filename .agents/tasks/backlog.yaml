@@ -173,6 +173,9 @@ next:
   - id: task.t5-08c
     title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
     status: in_progress
+  - id: task.t5-08c1
+    title: land node-level remote target discovery into the shared catalog
+    status: done
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred
