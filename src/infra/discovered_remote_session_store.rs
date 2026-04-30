@@ -7,7 +7,8 @@ use crate::infra::tmux::TmuxError;
 use std::fs;
 use std::path::PathBuf;
 
-const DISCOVERED_REMOTE_SESSION_RECORD_VERSION: &str = "v1";
+const DISCOVERED_REMOTE_SESSION_RECORD_VERSION: &str = "v2";
+const DISCOVERED_REMOTE_SESSION_RECORD_VERSION_V1: &str = "v1";
 const OPTIONAL_NONE_SENTINEL: &str = "~";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +194,7 @@ fn render_discovered_remote_session_record(record: &DiscoveredRemoteSessionRecor
         encode_optional_string_field(current_path.as_deref()),
         record.session.attached_clients.to_string(),
         record.session.window_count.to_string(),
+        record.session.task_state.as_str().to_string(),
     ]
     .join("\t")
 }
@@ -201,19 +203,39 @@ fn parse_discovered_remote_session_record(
     line: &str,
 ) -> Result<DiscoveredRemoteSessionRecord, TmuxError> {
     let parts = line.split('\t').collect::<Vec<_>>();
-    if parts.len() != 12 {
-        return Err(TmuxError::new(format!(
-            "discovered remote session record version `{}` must contain 12 tab-separated fields, got {}",
-            DISCOVERED_REMOTE_SESSION_RECORD_VERSION,
-            parts.len()
-        )));
-    }
-    if parts[0] != DISCOVERED_REMOTE_SESSION_RECORD_VERSION {
-        return Err(TmuxError::new(format!(
-            "unsupported discovered remote session record version `{}`",
-            parts[0]
-        )));
-    }
+    let task_state = match parts.first().copied() {
+        Some(DISCOVERED_REMOTE_SESSION_RECORD_VERSION) => {
+            if parts.len() != 13 {
+                return Err(TmuxError::new(format!(
+                    "discovered remote session record version `{}` must contain 13 tab-separated fields, got {}",
+                    DISCOVERED_REMOTE_SESSION_RECORD_VERSION,
+                    parts.len()
+                )));
+            }
+            ManagedSessionTaskState::parse(parts[12]).ok_or_else(|| {
+                TmuxError::new(format!(
+                    "unsupported discovered remote session task state `{}`",
+                    parts[12]
+                ))
+            })?
+        }
+        Some(DISCOVERED_REMOTE_SESSION_RECORD_VERSION_V1) => {
+            if parts.len() != 12 {
+                return Err(TmuxError::new(format!(
+                    "discovered remote session record version `{}` must contain 12 tab-separated fields, got {}",
+                    DISCOVERED_REMOTE_SESSION_RECORD_VERSION_V1,
+                    parts.len()
+                )));
+            }
+            ManagedSessionTaskState::Unknown
+        }
+        Some(other) => {
+            return Err(TmuxError::new(format!(
+                "unsupported discovered remote session record version `{other}`"
+            )));
+        }
+        None => return Err(TmuxError::new("discovered remote session record is empty")),
+    };
 
     let node_id = decode_string_field(parts[1])?;
     let authority_id = decode_string_field(parts[2])?;
@@ -258,7 +280,7 @@ fn parse_discovered_remote_session_record(
             window_count,
             command_name,
             current_path,
-            task_state: ManagedSessionTaskState::Unknown,
+            task_state,
         },
     })
 }

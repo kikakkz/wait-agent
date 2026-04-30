@@ -3,7 +3,8 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_pane_runtime::RemoteMainSlotPaneRuntime;
 use crate::runtime::remote_node_ingress_runtime::{
-    RemoteNodeIngressGuard, RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
+    LocalSocketRemoteNodeIngressSource, RemoteNodeIngressGuard, RemoteNodeIngressRuntime,
+    RemoteNodeIngressStarter,
 };
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodePublicationSink, RemoteNodeSessionError,
@@ -46,8 +47,8 @@ impl RemoteMainSlotIngressRuntime {
                 network.clone(),
             )?,
             RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
-            Box::new(RemoteNodeIngressRuntime::with_grpc_source(
-                network.listener_addr(),
+            Box::new(RemoteNodeIngressRuntime::new(
+                LocalSocketRemoteNodeIngressSource,
             )),
         ))
     }

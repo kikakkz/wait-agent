@@ -278,6 +278,7 @@ impl RemoteNodeSessionOwnerRuntime {
                         current_path,
                         attached_clients,
                         window_count,
+                        task_state,
                     } => {
                         if let Some(source_session_name) = source_session_name.as_deref() {
                             let live_command = PublicationSenderCommand::PublishTarget {
@@ -292,6 +293,7 @@ impl RemoteNodeSessionOwnerRuntime {
                                 current_path: current_path.clone(),
                                 attached_clients,
                                 window_count,
+                                task_state,
                             };
                             if dispatch_live_publication(
                                 source_session_name,
@@ -317,6 +319,7 @@ impl RemoteNodeSessionOwnerRuntime {
                                 current_path,
                                 attached_clients,
                                 window_count,
+                                task_state,
                             },
                         )?;
                     }
@@ -395,6 +398,7 @@ fn dispatch_publication_sender_command(
             current_path,
             attached_clients,
             window_count,
+            task_state,
         } => {
             let target = ManagedSessionRecord {
                 address: ManagedSessionAddress::remote_peer(&authority_id, &transport_session_id),
@@ -420,7 +424,11 @@ fn dispatch_publication_sender_command(
                 window_count,
                 command_name,
                 current_path: current_path.map(PathBuf::from),
-                task_state: ManagedSessionTaskState::Unknown,
+                task_state: ManagedSessionTaskState::parse(task_state).ok_or_else(|| {
+                    LifecycleError::Protocol(format!(
+                        "unsupported publication sender task state `{task_state}`"
+                    ))
+                })?,
             };
             dispatch_cached_publication_transport_send(
                 transports,
@@ -1151,6 +1159,7 @@ mod tests {
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
+                task_state: "confirm",
             },
         )
         .expect("publish command should route through owner transport cache");
@@ -1183,6 +1192,7 @@ mod tests {
                 current_path,
                 attached_clients,
                 window_count,
+                task_state,
             }) => {
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name.as_deref(), Some("target-host-1"));
@@ -1194,6 +1204,7 @@ mod tests {
                 assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
                 assert_eq!(attached_clients, 2);
                 assert_eq!(window_count, 3);
+                assert_eq!(task_state, "confirm");
             }
             other => panic!("unexpected publish payload: {other:?}"),
         }

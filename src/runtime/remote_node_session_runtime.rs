@@ -184,6 +184,7 @@ impl RemoteNodeSessionRuntime {
                 current_path,
                 attached_clients: target.attached_clients,
                 window_count: target.window_count,
+                task_state: target.task_state.as_str(),
             }),
         )
     }
@@ -223,6 +224,7 @@ impl RemoteNodeSessionRuntime {
                 current_path,
                 attached_clients,
                 window_count,
+                task_state,
             } => self.send_payload(
                 NodeSessionChannel::Publication,
                 transport_session_id,
@@ -239,6 +241,7 @@ impl RemoteNodeSessionRuntime {
                     current_path: current_path.clone(),
                     attached_clients: *attached_clients,
                     window_count: *window_count,
+                    task_state,
                 }),
             ),
             PublicationSenderCommand::ExitTarget {
@@ -567,6 +570,10 @@ fn map_outbound_grpc_envelope(
                 command_name: payload.command_name.clone(),
                 current_path: payload.current_path.clone(),
                 attached_count: Some(payload.attached_clients as u64),
+                session_role: payload.session_role.map(str::to_string),
+                workspace_key: payload.workspace_key.clone(),
+                window_count: Some(payload.window_count as u64),
+                task_state: Some(payload.task_state.to_string()),
             }))
         }
         (NodeSessionChannel::Publication, ControlPlanePayload::TargetExited(payload)) => {
@@ -1047,6 +1054,7 @@ mod tests {
                 window_count,
                 session_role,
                 workspace_key,
+                task_state,
             }) => {
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name, None);
@@ -1055,9 +1063,10 @@ mod tests {
                 assert_eq!(command_name.as_deref(), Some("codex"));
                 assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
                 assert_eq!(attached_clients, 2);
-                assert_eq!(window_count, 0);
-                assert_eq!(session_role, None);
-                assert_eq!(workspace_key, None);
+                assert_eq!(window_count, 1);
+                assert_eq!(session_role, Some("target-host"));
+                assert_eq!(workspace_key.as_deref(), Some("wk-1"));
+                assert_eq!(task_state, "unknown");
             }
             other => panic!("unexpected publication payload: {other:?}"),
         }

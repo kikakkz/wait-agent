@@ -1,7 +1,10 @@
 kind: state
 version: 1
-last_updated_from: task.t5-08c3 session-scoped remote routing refreshed on 2026-04-30
+last_updated_from: task.t5-08c4 remote sidebar session metadata plus pane-local ingress refreshed on 2026-04-30
 checks:
+  - id: t5-08c4-cargo-test-remote-sidebar-session-metadata-and-pane-ingress
+    command: cargo test after persisting remote session task-state metadata end to end across publication, grpc node-session sync, discovered-session storage, and switching pane-local remote ingress defaults back to scoped unix sockets so remote main-slot or server-console surfaces stop rebinding the shared public gRPC port
+    status: pass
   - id: t5-08c4-cargo-test-sidebar-remote-node-labeling
     command: cargo test after changing sidebar selection to use stable qualified target identity, updating remote session display labels to include authority plus session, and sorting activation targets so remote sessions stay grouped by node in user-facing lists
     status: pass

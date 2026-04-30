@@ -11,7 +11,7 @@ use crate::runtime::remote_main_slot_pane_runtime::{
     RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
 };
 use crate::runtime::remote_node_ingress_runtime::{
-    RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
+    LocalSocketRemoteNodeIngressSource, RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
 };
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodePublicationSink, RemoteNodeSessionError,
@@ -50,8 +50,8 @@ impl RemoteServerConsoleRuntime {
                 network.clone(),
             )?,
             workspace_runtime: WorkspaceCommandRuntime::from_build_env_with_network(network.clone())?,
-            node_ingress: Box::new(RemoteNodeIngressRuntime::with_grpc_source(
-                network.listener_addr(),
+            node_ingress: Box::new(RemoteNodeIngressRuntime::new(
+                LocalSocketRemoteNodeIngressSource,
             )),
         })
     }

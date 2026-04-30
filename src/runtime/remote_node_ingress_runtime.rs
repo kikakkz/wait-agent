@@ -311,12 +311,22 @@ fn map_target_published_envelope(
             source_session_name: None,
             selector: payload.selector.clone(),
             availability: known_availability(&payload.availability)?,
-            session_role: None,
-            workspace_key: None,
+            session_role: payload
+                .session_role
+                .as_deref()
+                .and_then(crate::domain::workspace::WorkspaceSessionRole::parse)
+                .map(|role| role.as_str()),
+            workspace_key: payload.workspace_key.clone(),
             command_name: payload.command_name.clone(),
             current_path: payload.current_path.clone(),
             attached_clients: payload.attached_count.unwrap_or(0) as usize,
-            window_count: 0,
+            window_count: payload.window_count.unwrap_or(0) as usize,
+            task_state: payload
+                .task_state
+                .as_deref()
+                .and_then(crate::domain::session_catalog::ManagedSessionTaskState::parse)
+                .unwrap_or(crate::domain::session_catalog::ManagedSessionTaskState::Unknown)
+                .as_str(),
         }),
     })
 }

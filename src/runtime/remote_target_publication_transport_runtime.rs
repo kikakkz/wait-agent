@@ -188,6 +188,7 @@ mod tests {
                 current_path,
                 attached_clients,
                 window_count,
+                task_state,
             }) => {
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name.as_deref(), Some("target-host-1"));
@@ -199,6 +200,7 @@ mod tests {
                 assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
                 assert_eq!(attached_clients, 2);
                 assert_eq!(window_count, 3);
+                assert_eq!(task_state, "unknown");
             }
             other => panic!("unexpected payload: {other:?}"),
         }

@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: task.t5-08c4
-focus_statement: connected-node remote session synchronization and session-scoped control-plane routing are now in place; active work now moves to surfacing node-owned remote sessions clearly in sidebar and closing the real cross-host interaction validation loop
+focus_statement: connected-node remote session synchronization, session-scoped routing, remote task-state metadata propagation, and pane-local ingress ownership are now in place; active work is now reduced to closing the real cross-host interaction validation loop against the accepted sidebar-driven remote-session UX
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

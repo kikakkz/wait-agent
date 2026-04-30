@@ -85,6 +85,7 @@ pub(crate) enum PublicationSenderCommand {
         current_path: Option<String>,
         attached_clients: usize,
         window_count: usize,
+        task_state: &'static str,
     },
     ExitTarget {
         authority_id: String,
@@ -985,6 +986,7 @@ pub(crate) fn signal_publication_target_published(
                 .map(|path| path.to_string_lossy().into_owned()),
             attached_clients: target.attached_clients,
             window_count: target.window_count,
+            task_state: target.task_state.as_str(),
         },
     )
 }
@@ -1053,7 +1055,12 @@ fn published_remote_target_record_from_payload(
         window_count: payload.window_count,
         command_name: payload.command_name.clone(),
         current_path: payload.current_path.as_ref().map(PathBuf::from),
-        task_state: ManagedSessionTaskState::Unknown,
+        task_state: ManagedSessionTaskState::parse(payload.task_state).ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "unsupported remote target task state `{}`",
+                payload.task_state
+            ))
+        })?,
     })
 }
 
@@ -1257,8 +1264,9 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
             current_path,
             attached_clients,
             window_count,
+            task_state,
         } => format!(
-            "publish_target\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "publish_target\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             encode_base64(authority_id.as_bytes()),
             encode_base64(transport_session_id.as_bytes()),
             encode_optional_agent_field(source_session_name.as_deref()),
@@ -1270,6 +1278,7 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
             encode_optional_agent_field(current_path.as_deref()),
             attached_clients,
             window_count,
+            task_state,
         ),
         PublicationSenderCommand::ExitTarget {
             authority_id,
@@ -1497,6 +1506,9 @@ fn parse_publication_sender_command(
                 })?
                 .parse::<usize>()
                 .map_err(remote_target_publication_error)?;
+            let task_state = parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing task state field".to_string())
+            })?;
             if parts.next().is_some() {
                 return Err(LifecycleError::Protocol(
                     "publish_target contains unexpected extra fields".to_string(),
@@ -1520,6 +1532,13 @@ fn parse_publication_sender_command(
                 current_path,
                 attached_clients,
                 window_count,
+                task_state: ManagedSessionTaskState::parse(task_state)
+                    .ok_or_else(|| {
+                        LifecycleError::Protocol(format!(
+                            "unsupported publication sender task state `{task_state}`"
+                        ))
+                    })?
+                    .as_str(),
             })
         }
         "exit_target" => {
@@ -1720,7 +1739,7 @@ fn published_remote_target_from_local(
         window_count: local_target.window_count,
         command_name: local_target.command_name.clone(),
         current_path: local_target.current_path.clone(),
-        task_state: ManagedSessionTaskState::Unknown,
+        task_state: local_target.task_state,
     }
 }
 
@@ -1920,6 +1939,7 @@ mod tests {
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
+                task_state: "confirm",
             },
         )
         .expect("publication payload should build a published record");
@@ -1930,6 +1950,7 @@ mod tests {
         assert_eq!(record.availability, SessionAvailability::Online);
         assert_eq!(record.session_role, Some(WorkspaceSessionRole::TargetHost));
         assert_eq!(record.current_path, Some(PathBuf::from("/tmp/demo")));
+        assert_eq!(record.task_state, ManagedSessionTaskState::Confirm);
     }
 
     #[test]
@@ -1947,6 +1968,7 @@ mod tests {
                 current_path: None,
                 attached_clients: 0,
                 window_count: 1,
+                task_state: "unknown",
             },
         )
         .expect_err("unknown availability should fail");
@@ -2069,6 +2091,7 @@ mod tests {
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
+                task_state: "running",
             });
 
         let parsed =
@@ -2088,6 +2111,7 @@ mod tests {
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
+                task_state: "running",
             }
         );
     }
@@ -2202,6 +2226,7 @@ mod tests {
                     current_path: Some("/tmp/demo".to_string()),
                     attached_clients: 2,
                     window_count: 1,
+                    task_state: "input",
                 }),
             },
         )

@@ -210,6 +210,7 @@ fn write_payload(
             write_optional_string(writer, payload.current_path.as_deref())?;
             write_usize(writer, payload.attached_clients)?;
             write_usize(writer, payload.window_count)?;
+            write_string(writer, payload.task_state)?;
         }
         ControlPlanePayload::TargetExited(payload) => {
             write_u8(writer, 10)?;
@@ -301,6 +302,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             current_path: read_optional_string(reader)?,
             attached_clients: read_usize(reader)?,
             window_count: read_usize(reader)?,
+            task_state: read_task_state(reader)?,
         }),
         10 => ControlPlanePayload::TargetExited(TargetExitedPayload {
             transport_session_id: read_string(reader)?,
@@ -392,6 +394,15 @@ fn read_known_static_string(
             "unknown static transport string `{other}`"
         ))),
     }
+}
+
+fn read_task_state(reader: &mut impl Read) -> Result<&'static str, RemoteTransportCodecError> {
+    let value = read_string(reader)?;
+    crate::domain::session_catalog::ManagedSessionTaskState::parse(&value)
+        .map(|state| state.as_str())
+        .ok_or_else(|| {
+            RemoteTransportCodecError::new(format!("unknown task state string `{value}`"))
+        })
 }
 
 fn write_optional_static_string(
@@ -590,6 +601,7 @@ mod tests {
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
+                task_state: "input",
             }),
         };
         let mut bytes = Vec::new();
@@ -627,6 +639,7 @@ mod tests {
                     current_path: Some("/tmp/demo".to_string()),
                     attached_clients: 2,
                     window_count: 1,
+                    task_state: "running",
                 }),
             },
         };

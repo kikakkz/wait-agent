@@ -162,6 +162,7 @@ pub struct TargetPublishedPayload {
     pub current_path: Option<String>,
     pub attached_clients: usize,
     pub window_count: usize,
+    pub task_state: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

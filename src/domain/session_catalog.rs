@@ -114,6 +114,25 @@ pub enum ManagedSessionTaskState {
 }
 
 impl ManagedSessionTaskState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Input => "input",
+            Self::Confirm => "confirm",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "input" => Some(Self::Input),
+            "confirm" => Some(Self::Confirm),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Running => "RUNNING",

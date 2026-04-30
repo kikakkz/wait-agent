@@ -757,6 +757,7 @@ mod tests {
                     current_path: Some("/tmp/demo".to_string()),
                     attached_clients: 1,
                     window_count: 1,
+                    task_state: "input",
                 })
                 .map_err(remote_authority_error)?;
             Ok(())
@@ -951,6 +952,7 @@ mod tests {
                 current_path,
                 attached_clients,
                 window_count,
+                task_state,
             }) => {
                 assert_eq!(transport_session_id, "target-1");
                 assert_eq!(source_session_name.as_deref(), Some("target-1"));
@@ -962,6 +964,7 @@ mod tests {
                 assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
                 assert_eq!(attached_clients, 1);
                 assert_eq!(window_count, 1);
+                assert_eq!(task_state, "input");
             }
             other => panic!("unexpected publication payload: {other:?}"),
         }

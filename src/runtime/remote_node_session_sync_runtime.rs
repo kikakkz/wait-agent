@@ -345,6 +345,10 @@ fn remote_session_published_envelope(
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned()),
             attached_count: Some(session.attached_clients as u64),
+            session_role: session.session_role.map(|role| role.as_str().to_string()),
+            workspace_key: session.workspace_key.clone(),
+            window_count: Some(session.window_count as u64),
+            task_state: Some(session.task_state.as_str().to_string()),
         })),
     }
 }

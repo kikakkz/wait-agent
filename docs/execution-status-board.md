@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08c4` surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
+- `task.t5-08c4` finish end-to-end cross-host validation now that node-scoped remote sidebar rows, remote task-state projection, and pane-local remote ingress ownership are in place
 
 Why this is the current gate:
 
@@ -86,7 +86,7 @@ Project status at a glance:
 - the earlier `task.t5-08c1` discovery batch landed and tested cleanly, but that publication-centric discovered-target model is now explicitly treated as superseded by the accepted `node -> sessions -> attachments` product semantics
 - `task.t5-08c2` is now closed in substance: connected nodes synchronize their current remote sessions directly into the shared catalog on the `--connect` path instead of waiting on the old publication-centric discovered-target flow
 - `task.t5-08c3` is now closed in substance: remote authority and observer traffic carry explicit `session_id` end to end, server fanout state keys off session identity, and `attachment_id` remains only the session-local observer handle
-- the current `task.t5-08c4` code step is now in place too: sidebar selection is keyed by stable target identity instead of bare `session_id`, remote rows display authority plus session in labels such as `codex@10.1.29.165:pty1`, and activation-target ordering now groups remote sessions stably by node and session
+- the current `task.t5-08c4` code step is now substantially in place too: sidebar selection is keyed by stable target identity instead of bare `session_id`, remote rows display authority plus session in labels such as `codex@10.1.29.165:pty1`, remote task-state metadata now survives publication plus grpc sync into the shared catalog instead of collapsing to `U`, and remote main-slot or server-console pane processes now use pane-local scoped ingress instead of rebinding the shared public gRPC listener
 - the dedicated server-console runtime now carries explicit focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -178,7 +178,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- finish the user-facing remote closeout: keep remote sidebar selection stable across same-named sessions on different nodes, surface connected-node session rows clearly in chrome, and then run explicit cross-host manual validation on the accepted `--port` plus `--connect` path
+- run explicit cross-host manual validation on the accepted `--port` plus `--connect` path now that stable remote sidebar selection, node-scoped remote rows, remote task-state projection, and pane-local ingress ownership are all in place in code
 
 Accepted local architecture direction:
 

@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-const PUBLISHED_TARGET_RECORD_VERSION: &str = "v4";
+const PUBLISHED_TARGET_RECORD_VERSION: &str = "v5";
+const PUBLISHED_TARGET_RECORD_VERSION_V4: &str = "v4";
 const PUBLISHED_TARGET_RECORD_VERSION_V3: &str = "v3";
 const PUBLISHED_TARGET_RECORD_VERSION_V2: &str = "v2";
 const PUBLISHED_TARGET_RECORD_VERSION_V1: &str = "v1";
@@ -276,6 +277,7 @@ fn render_published_target_record(record: &PublishedTargetRecord) -> String {
         encode_optional_string_field(current_path.as_deref()),
         record.target.attached_clients.to_string(),
         record.target.window_count.to_string(),
+        record.target.task_state.as_str().to_string(),
     ]
     .join("\t")
 }
@@ -284,10 +286,20 @@ fn parse_published_target_record(line: &str) -> Result<PublishedTargetRecord, Tm
     let parts = line.split('\t').collect::<Vec<_>>();
     let (source_bindings, index_offset) = match parts.first().copied() {
         Some(PUBLISHED_TARGET_RECORD_VERSION) => {
+            if parts.len() != 13 {
+                return Err(TmuxError::new(format!(
+                    "published remote target record version `{}` must contain 13 tab-separated fields, got {}",
+                    PUBLISHED_TARGET_RECORD_VERSION,
+                    parts.len()
+                )));
+            }
+            (decode_source_binding_list_field(parts[1])?, 1)
+        }
+        Some(PUBLISHED_TARGET_RECORD_VERSION_V4) => {
             if parts.len() != 12 {
                 return Err(TmuxError::new(format!(
                     "published remote target record version `{}` must contain 12 tab-separated fields, got {}",
-                    PUBLISHED_TARGET_RECORD_VERSION,
+                    PUBLISHED_TARGET_RECORD_VERSION_V4,
                     parts.len()
                 )));
             }
@@ -370,6 +382,16 @@ fn parse_published_target_record(line: &str) -> Result<PublishedTargetRecord, Tm
             parts[10 + index_offset]
         ))
     })?;
+    let task_state = if parts.first().copied() == Some(PUBLISHED_TARGET_RECORD_VERSION) {
+        ManagedSessionTaskState::parse(parts[11 + index_offset]).ok_or_else(|| {
+            TmuxError::new(format!(
+                "unsupported published remote target task state `{}`",
+                parts[11 + index_offset]
+            ))
+        })?
+    } else {
+        ManagedSessionTaskState::Unknown
+    };
 
     Ok(PublishedTargetRecord {
         source_bindings,
@@ -385,7 +407,7 @@ fn parse_published_target_record(line: &str) -> Result<PublishedTargetRecord, Tm
             window_count,
             command_name,
             current_path,
-            task_state: ManagedSessionTaskState::Unknown,
+            task_state,
         },
     })
 }
