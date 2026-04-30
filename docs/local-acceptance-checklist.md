@@ -156,8 +156,8 @@ same visible-behavior standard before the network MVP is marked complete.
 
 ### 7.1 Recommended Environment
 
-- one server host running the accepted ingress listener with `WAITAGENT_REMOTE_NODE_INGRESS_ADDR=<bind-addr>`
-- one separate authority host publishing a real remote target and dialing the server with `WAITAGENT_REMOTE_NODE_SESSION_ENDPOINT=http://<server-host>:<port>`
+- one server host running WaitAgent with an explicit listener port such as `waitagent server --socket-name <socket> --port 7474`
+- one separate authority host running WaitAgent with outbound server targeting such as `waitagent --port 7474 --server <server-host>:7474`
 - one local workspace console and one `waitagent server` console available as independent product surfaces
 - a shell-backed target first, then `codex` or another TUI once the shell path passes
 
@@ -179,7 +179,7 @@ same visible-behavior standard before the network MVP is marked complete.
 
 ### 7.4 Server Console Remote Interaction
 
-- Start `waitagent server --socket-name <socket>` on the server host.
+- Start `waitagent server --socket-name <socket> --port 7474` on the server host.
 - Open the same remote target from the server-console picker.
 - Confirm the remote target renders in the server-console interaction surface rather than only updating hidden state.
 - Type input from the server-console surface and confirm the authority-side PTY receives it.

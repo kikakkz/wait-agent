@@ -86,6 +86,9 @@ Not yet complete for the phase outcome:
 - the main production authority-registration path is still anchored on local
   Unix-socket ingress or injected test streams rather than a real cross-host
   source
+- the product still lacks one public always-on listener lifecycle and public
+  outbound dial contract, so real cross-host validation cannot yet run through
+  a normal user-facing `--port` / `--server` workflow
 - steady-state live node ownership is still split across several runtimes and
   helper boundaries
 - remote output delivery is routed, but the final visible render path and

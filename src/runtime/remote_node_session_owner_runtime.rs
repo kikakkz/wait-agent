@@ -1,4 +1,4 @@
-use crate::cli::RemoteTargetPublicationSenderCommand;
+use crate::cli::{RemoteNetworkConfig, RemoteTargetPublicationSenderCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
@@ -58,6 +58,7 @@ struct SharedAuthoritySession {
     authority_id: String,
     transport_socket_path: String,
     publication_runtime: RemoteTargetPublicationRuntime,
+    network: RemoteNetworkConfig,
     running: Arc<AtomicBool>,
     owner_started: Arc<AtomicBool>,
     session: Arc<Mutex<Option<Arc<RemoteNodeSessionRuntime>>>>,
@@ -184,12 +185,22 @@ impl SharedAuthoritySession {
 
 pub struct RemoteNodeSessionOwnerRuntime {
     publication_runtime: RemoteTargetPublicationRuntime,
+    network: RemoteNetworkConfig,
 }
 
 impl RemoteNodeSessionOwnerRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         Ok(Self {
-            publication_runtime: RemoteTargetPublicationRuntime::from_build_env()?,
+            publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
+            network,
         })
     }
 
@@ -240,6 +251,7 @@ impl RemoteNodeSessionOwnerRuntime {
                             &authority_id,
                             &target_id,
                             &transport_socket_path,
+                            &self.network,
                             &self.publication_runtime,
                             &mut live_sessions,
                             &mut authority_sessions,
@@ -530,6 +542,7 @@ fn ensure_live_session_route(
     authority_id: &str,
     target_id: &str,
     transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
     publication_runtime: &RemoteTargetPublicationRuntime,
     live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
     authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
@@ -538,6 +551,7 @@ fn ensure_live_session_route(
     ensure_shared_authority_session(
         authority_id,
         transport_socket_path,
+        network,
         publication_runtime.clone(),
         authority_sessions,
     )?;
@@ -628,6 +642,7 @@ fn dispatch_live_publication(
 fn ensure_shared_authority_session(
     authority_id: &str,
     transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
     publication_runtime: RemoteTargetPublicationRuntime,
     authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
 ) -> Result<(), LifecycleError> {
@@ -639,6 +654,7 @@ fn ensure_shared_authority_session(
         authority_id: authority_id.to_string(),
         transport_socket_path: transport_socket_path.to_string(),
         publication_runtime,
+        network: network.clone(),
         running: Arc::new(AtomicBool::new(true)),
         owner_started: Arc::new(AtomicBool::new(false)),
         session: Arc::new(Mutex::new(None)),
@@ -666,6 +682,7 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
             let session = match RemoteNodeSessionRuntime::connect(
                 &shared_session.transport_socket_path,
                 &shared_session.authority_id,
+                shared_session.network.server_endpoint_uri().as_deref(),
             ) {
                 Ok(session) => {
                     reconnect_attempt = 0;
@@ -1055,6 +1072,7 @@ mod tests {
         dispatch_publication_sender_command, ensure_live_session_route,
         live_authority_session_socket_path, SharedAuthoritySession,
     };
+    use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
         NodeSessionEnvelope, ProtocolEnvelope, TargetExitedPayload, TargetInputPayload,
@@ -1244,6 +1262,7 @@ mod tests {
             "peer-a",
             target_id_a,
             transport_socket_path.to_string_lossy().as_ref(),
+            &RemoteNetworkConfig::default(),
             &publication_runtime,
             &mut live_sessions,
             &mut authority_sessions,
@@ -1255,6 +1274,7 @@ mod tests {
             "peer-a",
             target_id_b,
             transport_socket_path.to_string_lossy().as_ref(),
+            &RemoteNetworkConfig::default(),
             &publication_runtime,
             &mut live_sessions,
             &mut authority_sessions,
@@ -1404,6 +1424,7 @@ mod tests {
             "peer-a",
             target_id,
             transport_socket_path.to_string_lossy().as_ref(),
+            &RemoteNetworkConfig::default(),
             &publication_runtime,
             &mut live_sessions,
             &mut authority_sessions,

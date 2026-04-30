@@ -1,5 +1,5 @@
 use crate::application::target_registry_service::TargetRegistryService;
-use crate::cli::UiPaneCommand;
+use crate::cli::{RemoteNetworkConfig, UiPaneCommand};
 use crate::domain::local_runtime::ChromeSurface;
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle};
@@ -16,6 +16,7 @@ pub struct EventDrivenTmuxPaneRuntime<G, R = G> {
     gateway: G,
     target_registry: TargetRegistryService<R>,
     pane_runtime: EventDrivenUiPaneRuntime,
+    network: RemoteNetworkConfig,
 }
 
 impl<G> EventDrivenTmuxPaneRuntime<G, G>
@@ -28,6 +29,7 @@ where
             target_registry: TargetRegistryService::new(gateway.clone()),
             gateway,
             pane_runtime: EventDrivenUiPaneRuntime::new(),
+            network: RemoteNetworkConfig::default(),
         }
     }
 }
@@ -40,10 +42,23 @@ where
     R::Error: ToString,
 {
     pub fn new_with_target_registry(gateway: G, target_registry: TargetRegistryService<R>) -> Self {
+        Self::new_with_target_registry_and_network(
+            gateway,
+            target_registry,
+            RemoteNetworkConfig::default(),
+        )
+    }
+
+    pub fn new_with_target_registry_and_network(
+        gateway: G,
+        target_registry: TargetRegistryService<R>,
+        network: RemoteNetworkConfig,
+    ) -> Self {
         Self {
             gateway,
             target_registry,
             pane_runtime: EventDrivenUiPaneRuntime::new(),
+            network,
         }
     }
 
@@ -131,6 +146,7 @@ where
             &command.session_name,
             active_target.as_deref(),
             visible_sessions,
+            Some(self.network.advertised_listener_label().as_str()),
         ))
     }
 }

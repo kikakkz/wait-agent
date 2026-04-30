@@ -1,10 +1,99 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+
+pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
 
 #[derive(Debug, Clone)]
 pub struct Cli {
+    pub network: RemoteNetworkConfig,
     pub command: Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteNetworkConfig {
+    pub port: u16,
+    pub server: Option<String>,
+}
+
+impl Default for RemoteNetworkConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_REMOTE_NODE_PORT,
+            server: None,
+        }
+    }
+}
+
+impl RemoteNetworkConfig {
+    pub fn listener_addr(&self) -> SocketAddr {
+        SocketAddr::from(([0, 0, 0, 0], self.port))
+    }
+
+    pub fn advertised_listener_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            IpAddr::V4(discover_advertised_lan_ipv4().unwrap_or(Ipv4Addr::LOCALHOST)),
+            self.port,
+        )
+    }
+
+    pub fn advertised_listener_label(&self) -> String {
+        self.advertised_listener_addr().to_string()
+    }
+
+    pub fn server_endpoint_uri(&self) -> Option<String> {
+        self.server.as_ref().map(|server| {
+            if server.contains("://") {
+                server.clone()
+            } else {
+                format!("http://{server}")
+            }
+        })
+    }
+
+    pub fn to_cli_args(&self) -> Vec<String> {
+        let mut args = vec!["--port".to_string(), self.port.to_string()];
+        if let Some(server) = &self.server {
+            args.push("--server".to_string());
+            args.push(server.clone());
+        }
+        args
+    }
+}
+
+fn discover_advertised_lan_ipv4() -> Option<Ipv4Addr> {
+    const PROBE_TARGETS: [([u8; 4], u16); 4] = [
+        ([192, 168, 0, 1], 9),
+        ([10, 0, 0, 1], 9),
+        ([172, 16, 0, 1], 9),
+        ([8, 8, 8, 8], 53),
+    ];
+
+    for (ip, port) in PROBE_TARGETS {
+        let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).ok()?;
+        if socket.connect(SocketAddr::from((ip, port))).is_err() {
+            continue;
+        }
+        let Ok(SocketAddr::V4(local_addr)) = socket.local_addr() else {
+            continue;
+        };
+        let ip = *local_addr.ip();
+        if !ip.is_loopback() && !ip.is_unspecified() {
+            return Some(ip);
+        }
+    }
+
+    None
+}
+
+pub fn prepend_global_network_args(
+    mut command_args: Vec<String>,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    let mut args = network.to_cli_args();
+    args.append(&mut command_args);
+    args
 }
 
 #[derive(Debug, Clone)]
@@ -204,14 +293,17 @@ impl Cli {
 
         if args.is_empty() {
             return Ok(Self {
+                network: RemoteNetworkConfig::default(),
                 command: Command::Help(help_text()),
             });
         }
 
         args.remove(0);
+        let network = parse_global_network_config(&mut args)?;
 
         if args.is_empty() {
             return Ok(Self {
+                network,
                 command: Command::Workspace,
             });
         }
@@ -355,8 +447,46 @@ impl Cli {
             }
         };
 
-        Ok(Self { command })
+        Ok(Self { network, command })
     }
+}
+
+fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkConfig, CliError> {
+    let mut network = RemoteNetworkConfig::default();
+
+    loop {
+        let Some(flag) = args.first().cloned() else {
+            break;
+        };
+        match flag.as_str() {
+            "--port" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--port".to_string()))?;
+                args.remove(0);
+                network.port = value
+                    .parse::<u16>()
+                    .map_err(|_| CliError::InvalidValue("--port".to_string(), value.clone()))?;
+            }
+            "--server" => {
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--server".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue("--server".to_string(), value));
+                }
+                network.server = Some(value);
+            }
+            _ => break,
+        }
+    }
+
+    Ok(network)
 }
 
 fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
@@ -964,11 +1094,11 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
-        "  waitagent",
-        "  waitagent server --socket-name <socket> [--console-name <name>] [--target <target>]",
-        "  waitagent attach [<target>]",
-        "  waitagent ls",
-        "  waitagent detach [<target>]",
+        "  waitagent [--port <port>] [--server <host:port>]",
+        "  waitagent [--port <port>] [--server <host:port>] server --socket-name <socket> [--console-name <name>] [--target <target>]",
+        "  waitagent [--port <port>] [--server <host:port>] attach [<target>]",
+        "  waitagent [--port <port>] [--server <host:port>] ls",
+        "  waitagent [--port <port>] [--server <host:port>] detach [<target>]",
     ]
     .join("\n")
 }
@@ -978,6 +1108,7 @@ pub enum CliError {
     UnknownSubcommand(String),
     UnexpectedArgument(String),
     MissingValue(String),
+    InvalidValue(String, String),
 }
 
 impl fmt::Display for CliError {
@@ -986,6 +1117,9 @@ impl fmt::Display for CliError {
             Self::UnknownSubcommand(command) => write!(f, "unknown subcommand: {command}"),
             Self::UnexpectedArgument(argument) => write!(f, "unexpected argument: {argument}"),
             Self::MissingValue(flag) => write!(f, "missing value for {flag}"),
+            Self::InvalidValue(flag, value) => {
+                write!(f, "invalid value for {flag}: {value}")
+            }
         }
     }
 }
@@ -994,16 +1128,19 @@ impl Error for CliError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, DEFAULT_REMOTE_NODE_PORT};
 
-    fn parse(args: &[&str]) -> Command {
+    fn parse(args: &[&str]) -> Cli {
         let argv = args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>();
-        Cli::parse(argv).expect("cli parse should succeed").command
+        Cli::parse(argv).expect("cli parse should succeed")
     }
 
     #[test]
     fn defaults_to_workspace_command_without_subcommand() {
-        assert!(matches!(parse(&["waitagent"]), Command::Workspace));
+        let cli = parse(&["waitagent"]);
+        assert!(matches!(cli.command, Command::Workspace));
+        assert_eq!(cli.network.port, DEFAULT_REMOTE_NODE_PORT);
+        assert!(cli.network.server.is_none());
     }
 
     #[test]
@@ -1019,7 +1156,7 @@ mod tests {
 
     #[test]
     fn parses_attach_command() {
-        match parse(&["waitagent", "attach"]) {
+        match parse(&["waitagent", "attach"]).command {
             Command::Attach(command) => {
                 assert!(command.target.is_none());
             }
@@ -1028,8 +1165,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_global_network_flags_before_command() {
+        let cli = parse(&[
+            "waitagent",
+            "--port",
+            "8484",
+            "--server",
+            "remote.example:7474",
+            "attach",
+            "wa-1:waitagent-1",
+        ]);
+
+        assert_eq!(cli.network.port, 8484);
+        assert_eq!(cli.network.server.as_deref(), Some("remote.example:7474"));
+        assert_eq!(
+            cli.network.server_endpoint_uri().as_deref(),
+            Some("http://remote.example:7474")
+        );
+        match cli.command {
+            Command::Attach(command) => {
+                assert_eq!(command.target.as_deref(), Some("wa-1:waitagent-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_global_port_value() {
+        let argv = ["waitagent", "--port", "abc"]
+            .iter()
+            .map(|arg| (*arg).into())
+            .collect::<Vec<_>>();
+        let error = Cli::parse(argv).expect_err("invalid port should fail");
+
+        assert_eq!(error.to_string(), "invalid value for --port: abc");
+    }
+
+    #[test]
     fn parses_server_command_with_default_console_name() {
-        match parse(&["waitagent", "server", "--socket-name", "wa-1"]) {
+        match parse(&["waitagent", "server", "--socket-name", "wa-1"]).command {
             Command::Server(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.console_name, "server");
@@ -1050,7 +1224,9 @@ mod tests {
             "ops",
             "--target",
             "peer-a:shell-1",
-        ]) {
+        ])
+        .command
+        {
             Command::Server(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.console_name, "ops");
@@ -1062,7 +1238,7 @@ mod tests {
 
     #[test]
     fn parses_attach_command_with_tmux_target() {
-        match parse(&["waitagent", "attach", "wa-1:waitagent-1"]) {
+        match parse(&["waitagent", "attach", "wa-1:waitagent-1"]).command {
             Command::Attach(command) => {
                 assert_eq!(command.target.as_deref(), Some("wa-1:waitagent-1"));
             }
@@ -1072,7 +1248,7 @@ mod tests {
 
     #[test]
     fn parses_list_command() {
-        assert!(matches!(parse(&["waitagent", "ls"]), Command::List));
+        assert!(matches!(parse(&["waitagent", "ls"]).command, Command::List));
     }
 
     #[test]
@@ -1095,7 +1271,9 @@ mod tests {
             "wa-1",
             "--session-name",
             "waitagent-1",
-        ]) {
+        ])
+        .command
+        {
             Command::UiSidebar(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1115,7 +1293,9 @@ mod tests {
             "console-a",
             "--target",
             "peer-a:shell-1",
-        ]) {
+        ])
+        .command
+        {
             Command::RemoteServerConsole(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.console_name, "console-a");
@@ -1134,7 +1314,9 @@ mod tests {
             "wa-1",
             "--console-name",
             "console-a",
-        ]) {
+        ])
+        .command
+        {
             Command::RemoteServerConsole(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.console_name, "console-a");
@@ -1159,7 +1341,9 @@ mod tests {
             "remote-peer:peer-a:target-1",
             "--transport-socket-path",
             "/tmp/transport.sock",
-        ]) {
+        ])
+        .command
+        {
             Command::RemoteAuthorityTargetHost(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.target_session_name, "target-1");
@@ -1178,7 +1362,9 @@ mod tests {
             "__remote-authority-output-pump",
             "--ingest-socket-path",
             "/tmp/output.sock",
-        ]) {
+        ])
+        .command
+        {
             Command::RemoteAuthorityOutputPump(command) => {
                 assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
             }
@@ -1195,7 +1381,9 @@ mod tests {
             "wa-1",
             "--target-session-name",
             "target-1",
-        ]) {
+        ])
+        .command
+        {
             Command::RemoteTargetUnbindPublication(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.target_session_name, "target-1");
@@ -1215,7 +1403,9 @@ mod tests {
             "client-attached",
             "--session-name",
             "target-1",
-        ]) {
+        ])
+        .command
+        {
             Command::SocketLifecycleHook(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.hook_name.as_deref(), Some("client-attached"));
@@ -1232,7 +1422,9 @@ mod tests {
             "__chrome-refresh-socket",
             "--socket-name",
             "wa-1",
-        ]) {
+        ])
+        .command
+        {
             Command::ChromeRefreshSocket(command) => {
                 assert_eq!(command.socket_name, "wa-1");
             }
@@ -1251,7 +1443,9 @@ mod tests {
             "waitagent-1",
             "--workspace-dir",
             "/tmp/workspace",
-        ]) {
+        ])
+        .command
+        {
             Command::LayoutReconcile(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1272,7 +1466,9 @@ mod tests {
             "waitagent-1",
             "--workspace-dir",
             "/tmp/workspace",
-        ]) {
+        ])
+        .command
+        {
             Command::ChromeRefresh(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1291,7 +1487,9 @@ mod tests {
             "wa-1",
             "--session-name",
             "waitagent-1",
-        ]) {
+        ])
+        .command
+        {
             Command::ChromeRefreshSignal(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1303,7 +1501,7 @@ mod tests {
     #[test]
     fn parses_hidden_chrome_refresh_all_command() {
         assert!(matches!(
-            parse(&["waitagent", "__chrome-refresh-all"]),
+            parse(&["waitagent", "__chrome-refresh-all"]).command,
             Command::ChromeRefreshAll
         ));
     }
@@ -1317,7 +1515,9 @@ mod tests {
             "wa-1",
             "--session-name",
             "waitagent-1",
-        ]) {
+        ])
+        .command
+        {
             Command::CloseSession(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1337,7 +1537,9 @@ mod tests {
             "waitagent-1",
             "--pane-id",
             "%9",
-        ]) {
+        ])
+        .command
+        {
             Command::MainPaneDied(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1358,7 +1560,9 @@ mod tests {
             "waitagent-1",
             "--client-tty",
             "/dev/pts/7",
-        ]) {
+        ])
+        .command
+        {
             Command::FooterMenu(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1377,7 +1581,9 @@ mod tests {
             "wa-1",
             "--session-name",
             "waitagent-1",
-        ]) {
+        ])
+        .command
+        {
             Command::ToggleFullscreen(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
@@ -1388,7 +1594,7 @@ mod tests {
 
     #[test]
     fn parses_detach_command_with_tmux_target() {
-        match parse(&["waitagent", "detach", "waitagent-1"]) {
+        match parse(&["waitagent", "detach", "waitagent-1"]).command {
             Command::Detach(command) => {
                 assert_eq!(command.target.as_deref(), Some("waitagent-1"));
             }

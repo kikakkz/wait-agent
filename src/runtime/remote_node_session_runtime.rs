@@ -38,7 +38,6 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const NODE_SESSION_SERVER_ID: &str = "waitagent-remote-node-session";
-const REMOTE_NODE_SESSION_ENDPOINT_ENV: &str = "WAITAGENT_REMOTE_NODE_SESSION_ENDPOINT";
 
 pub trait RemoteNodePublicationSink: Send + Sync + 'static {
     fn publish(
@@ -88,21 +87,17 @@ impl RemoteNodeSessionRuntime {
     pub fn connect(
         socket_path: impl AsRef<Path>,
         node_id: impl Into<String>,
+        server_endpoint: Option<&str>,
     ) -> Result<Self, RemoteNodeSessionError> {
         let node_id = node_id.into();
-        let transport = match std::env::var(REMOTE_NODE_SESSION_ENDPOINT_ENV) {
-            Ok(endpoint_uri) => RemoteNodeSessionTransport::Grpc(connect_grpc_node_session(
-                &node_id,
-                &endpoint_uri,
-            )?),
-            Err(std::env::VarError::NotPresent) => RemoteNodeSessionTransport::Local(
-                connect_local_node_session(socket_path, &node_id)?,
-            ),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(RemoteNodeSessionError::new(format!(
-                    "`{REMOTE_NODE_SESSION_ENDPOINT_ENV}` must be valid UTF-8"
-                )))
+        let transport = match server_endpoint {
+            Some(endpoint_uri) => {
+                RemoteNodeSessionTransport::Grpc(connect_grpc_node_session(&node_id, endpoint_uri)?)
             }
+            None => RemoteNodeSessionTransport::Local(connect_local_node_session(
+                socket_path,
+                &node_id,
+            )?),
         };
         Ok(Self {
             node_id,
@@ -794,7 +789,7 @@ mod tests {
         .expect("node session listener should bind");
 
         let session = Arc::new(
-            RemoteNodeSessionRuntime::connect(&socket_path, "peer-a")
+            RemoteNodeSessionRuntime::connect(&socket_path, "peer-a", None)
                 .expect("node session should connect"),
         );
 

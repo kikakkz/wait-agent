@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.30`  
+Version: `v1.31`  
 Status: `Active`  
 Date: `2026-04-30`
 
@@ -43,10 +43,11 @@ Why this is the current gate:
 - the dedicated remote node connection architecture is now explicit, including the accepted node-scoped long-connection, bounded backpressure, and reconnect ownership model
 - the node-session proto and RPC contract are now explicit in the protocol doc, including the accepted gRPC service shape, envelope, versioning, status mapping, and reconnect baseline
 - the production trust model, dialing direction, duplicate-session collapse, and canonical ownership policy are now explicit in the remote-node architecture doc
+- the CLI-first network entry contract is now explicit too: remote networking must move off environment-variable startup knobs and onto public `--port` plus `--server` arguments, with default listener bind `0.0.0.0` and default port `7474`
 - the render bootstrap, replay, and observer catch-up policy is now explicit too, so the remaining blocker is no longer transport or ownership design drift but the final visible render binding and end-to-end product validation
 - the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
 - shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
-- the remaining phase-2 product gap is now the final visible render binding and end-to-end cross-host validation on that accepted path
+- the remaining phase-2 product gap is now the public listener or dial product entry plus the final visible render binding and end-to-end cross-host validation on that accepted path
 
 ## 3. Current Snapshot
 
@@ -81,6 +82,7 @@ Project status at a glance:
 - `task.t5-08a` is now closed in substance: repo-owned protobuf generation, tonic-facing transport wrappers, a dedicated `remote_node_ingress_runtime`, and real gRPC-backed authority ingress now replace the old local-only assumption on the accepted production registration path
 - `task.t5-08b` is now closed in substance: `RemoteNodeSessionOwnerRuntime` now owns shared authority-session reuse per authority node, steady-state publication transport ownership, disconnect-to-offline projection, and reconnect-plus-replay behavior without dropping the local authority bridge
 - `task.t5-08c` now has stronger proof too: remote main-slot render coverage explicitly includes server-console observer scope, there is now a higher-level `RemoteMainSlotIngressRuntime` grpc-ingress-to-observer render-path combination test, and the acceptance checklist carries a dedicated phase-2 cross-host validation appendix instead of leaving end-to-end verification implicit
+- `task.t5-08c` also has one newly explicit product gap: there is still no public always-on remote listener plus outbound dial CLI contract in code yet, so real cross-host acceptance cannot close on environment variables or hidden late-start listeners
 - the public `waitagent server` runtime now carries explicit server-console focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -172,7 +174,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- bind delivered remote output into the visible local workspace and server-console surfaces, then validate real cross-host open, input, output, and resize behavior end to end on the accepted production path
+- expose a public always-on remote listener plus outbound dial entry on `--port` and `--server`, then bind delivered remote output into the visible local workspace and server-console surfaces and validate real cross-host open, input, output, and resize behavior end to end on the accepted production path
 
 Accepted local architecture direction:
 

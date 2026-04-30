@@ -25,6 +25,7 @@ mod layout;
 mod remote;
 
 const WAITAGENT_SOCKET_PREFIX: &str = "wa-";
+const SYSTEM_TMUX_PROGRAM: &str = "tmux";
 const WAITAGENT_WORKSPACE_DIR_ENV: &str = "WAITAGENT_WORKSPACE_DIR";
 const WAITAGENT_WORKSPACE_KEY_ENV: &str = "WAITAGENT_WORKSPACE_KEY";
 const WAITAGENT_SESSION_ROLE_ENV: &str = "WAITAGENT_SESSION_ROLE";
@@ -101,6 +102,13 @@ impl EmbeddedTmuxBackend {
     }
 
     pub fn from_build_env() -> Result<Self, TmuxError> {
+        match Self::vendored_from_build_env() {
+            Ok(backend) => Ok(backend),
+            Err(_) => Ok(Self::system_default()),
+        }
+    }
+
+    fn vendored_from_build_env() -> Result<Self, TmuxError> {
         let source = VendoredTmuxSource::discover_from_build_env()?;
         let artifacts = TmuxGlueArtifacts::from_build_env()?;
         let build_status = TmuxGlueBuildStatus::from_build_env()?;
@@ -110,7 +118,22 @@ impl EmbeddedTmuxBackend {
         Ok(backend)
     }
 
+    fn system_default() -> Self {
+        let source = VendoredTmuxSource::system_default();
+        let artifacts = TmuxGlueArtifacts::system_default();
+        let build_config = TmuxGlueBuildConfig::from_artifacts(&artifacts);
+        Self::new(
+            source,
+            artifacts,
+            TmuxGlueBuildStatus::Executed,
+            build_config,
+        )
+    }
+
     fn validate_runtime_artifacts(&self) -> Result<(), TmuxError> {
+        if self.artifacts.tmux_binary_path == Path::new(SYSTEM_TMUX_PROGRAM) {
+            return Ok(());
+        }
         if self.build_status != TmuxGlueBuildStatus::Executed {
             return Err(TmuxError::new(format!(
                 "vendored tmux build is not executable yet: build status is `{}`",
@@ -1279,7 +1302,7 @@ mod tests {
         TmuxGateway, TmuxLayoutGateway, TmuxProgram, TmuxSessionGateway, TmuxSessionName,
         TmuxSocketName, TmuxSplitSize, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::mpsc;
     use std::thread;
@@ -1426,6 +1449,16 @@ mod tests {
             .static_lib_path
             .to_string_lossy()
             .ends_with("/lib/libtmux-glue.a"));
+    }
+
+    #[test]
+    fn system_default_backend_does_not_require_vendored_artifact_files() {
+        let backend = EmbeddedTmuxBackend::system_default();
+
+        assert_eq!(backend.artifacts().tmux_binary_path, PathBuf::from("tmux"));
+        backend
+            .validate_runtime_artifacts()
+            .expect("system tmux fallback should skip vendored artifact validation");
     }
 
     #[test]

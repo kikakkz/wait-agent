@@ -9,6 +9,10 @@ use std::path::PathBuf;
 
 const INSTALL_SCRIPT_PATH: &str = "./scripts/install-build-deps.sh";
 
+fn vendored_tmux_submodule_fixup_hint() -> &'static str {
+    "Run `git submodule update --init --recursive` before building waitagent"
+}
+
 fn execute_vendored_tmux_build(
     plan: &TmuxGlueBuildPlan,
 ) -> crate::tmux_glue_contract::TmuxGlueExecutionReport {
@@ -53,15 +57,20 @@ pub fn run() {
 
     if !vendored_tmux_source.exists() {
         panic!(
-            "vendored tmux source is missing at {}. Initialize the pinned submodule before building waitagent",
-            vendored_tmux_source.display()
+            "vendored tmux source is missing at {}. {}",
+            vendored_tmux_source.display(),
+            vendored_tmux_submodule_fixup_hint()
         );
     }
 
     let plan = TmuxGlueBuildPlan::new(&vendored_tmux_source, &glue_build_root);
-    let metadata = plan
-        .source_metadata()
-        .expect("failed to discover vendored tmux source metadata");
+    let metadata = plan.source_metadata().unwrap_or_else(|error| {
+        panic!(
+            "failed to discover vendored tmux source metadata: {}. {}",
+            error,
+            vendored_tmux_submodule_fixup_hint()
+        )
+    });
     let report = execute_vendored_tmux_build(&plan);
 
     println!(

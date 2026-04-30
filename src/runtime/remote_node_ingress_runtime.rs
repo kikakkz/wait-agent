@@ -30,8 +30,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REMOTE_NODE_INGRESS_ADDR_ENV: &str = "WAITAGENT_REMOTE_NODE_INGRESS_ADDR";
-
 pub trait RemoteNodeIngressGuard: Send {}
 
 impl<T> RemoteNodeIngressGuard for T where T: Send {}
@@ -88,12 +86,6 @@ where
     }
 }
 
-impl RemoteNodeIngressRuntime<LocalSocketRemoteNodeIngressSource> {
-    pub fn with_local_socket_source() -> Self {
-        Self::new(LocalSocketRemoteNodeIngressSource)
-    }
-}
-
 impl RemoteNodeIngressRuntime<GrpcRemoteNodeIngressSource> {
     pub fn with_grpc_source(bind_addr: SocketAddr) -> Self {
         Self::new(GrpcRemoteNodeIngressSource::new(bind_addr))
@@ -129,32 +121,6 @@ impl RemoteNodeIngressSource for LocalSocketRemoteNodeIngressSource {
         publication_sink: Arc<dyn RemoteNodePublicationSink>,
     ) -> io::Result<Self::Guard> {
         spawn_remote_node_session_listener(socket_path, authority_sink, publication_sink)
-    }
-}
-
-pub fn default_remote_node_ingress_starter_from_env(
-) -> io::Result<Box<dyn RemoteNodeIngressStarter>> {
-    match std::env::var(REMOTE_NODE_INGRESS_ADDR_ENV) {
-        Ok(bind_addr) => {
-            let bind_addr = bind_addr.parse::<SocketAddr>().map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "invalid `{REMOTE_NODE_INGRESS_ADDR_ENV}` value `{bind_addr}`: {error}"
-                    ),
-                )
-            })?;
-            Ok(Box::new(RemoteNodeIngressRuntime::with_grpc_source(
-                bind_addr,
-            )))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(Box::new(
-            RemoteNodeIngressRuntime::with_local_socket_source(),
-        )),
-        Err(std::env::VarError::NotUnicode(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("`{REMOTE_NODE_INGRESS_ADDR_ENV}` must be valid UTF-8"),
-        )),
     }
 }
 

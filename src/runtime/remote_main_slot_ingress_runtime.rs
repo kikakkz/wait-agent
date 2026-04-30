@@ -1,9 +1,9 @@
-use crate::cli::RemoteMainSlotCommand;
+use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_pane_runtime::RemoteMainSlotPaneRuntime;
 use crate::runtime::remote_node_ingress_runtime::{
-    default_remote_node_ingress_starter_from_env, RemoteNodeIngressGuard, RemoteNodeIngressStarter,
+    RemoteNodeIngressGuard, RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
 };
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodePublicationSink, RemoteNodeSessionError,
@@ -35,15 +35,20 @@ impl RemoteMainSlotIngressRuntime {
     }
 
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         Ok(Self::new(
-            RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams()?,
-            RemoteTargetPublicationRuntime::from_build_env()?,
-            default_remote_node_ingress_starter_from_env().map_err(|error| {
-                LifecycleError::Io(
-                    "failed to configure remote main-slot authority ingress".to_string(),
-                    error,
-                )
-            })?,
+            RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams_and_network(
+                network.clone(),
+            )?,
+            RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
+            Box::new(RemoteNodeIngressRuntime::with_grpc_source(
+                network.listener_addr(),
+            )),
         ))
     }
 

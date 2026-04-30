@@ -1,7 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::UiPaneCommand;
+use crate::cli::{RemoteNetworkConfig, UiPaneCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
@@ -34,12 +34,19 @@ const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
 
 pub struct EventDrivenPaneRuntime {
     backend: EmbeddedTmuxBackend,
+    network: RemoteNetworkConfig,
 }
 
 impl EventDrivenPaneRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(event_pane_error)?;
-        Ok(Self { backend })
+        Ok(Self { backend, network })
     }
 
     pub fn run_sidebar(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
@@ -53,11 +60,12 @@ impl EventDrivenPaneRuntime {
             spawn_pane_event_stream(self.backend.clone(), &command, true).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
             })?;
-        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry(
+        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry_and_network(
             self.backend.clone(),
             TargetRegistryService::new(
                 DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
             ),
+            self.network.clone(),
         );
         let mut last_buffer = String::new();
 
@@ -95,11 +103,12 @@ impl EventDrivenPaneRuntime {
             spawn_pane_event_stream(self.backend.clone(), &command, false).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
             })?;
-        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry(
+        let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry_and_network(
             self.backend.clone(),
             TargetRegistryService::new(
                 DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
             ),
+            self.network.clone(),
         );
         let mut last_buffer = String::new();
         let workspace = workspace_handle(&command);

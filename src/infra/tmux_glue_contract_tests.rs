@@ -1,8 +1,8 @@
 use super::{
     ProcessTmuxGlueExecutor, TmuxGlueBuildConfig, TmuxGlueBuildError, TmuxGlueBuildPlan,
     TmuxGlueBuildStep, TmuxGlueBuildStepKind, TmuxGlueExecutionError, TmuxGlueLayout,
-    TmuxGlueManifest, TmuxGlueManifestWriter, TmuxGlueStepExecutor, TmuxGlueTool,
-    TMUX_GLUE_CONTRACT_VERSION,
+    TmuxGlueManifest, TmuxGlueManifestWriter, TmuxGlueSourceMetadata, TmuxGlueStepExecutor,
+    TmuxGlueTool, TMUX_GLUE_CONTRACT_VERSION,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -68,6 +68,39 @@ fn build_plan_prepares_layout_and_manifest() {
             .expect("source version should exist"),
         "test-1.0"
     );
+}
+
+#[test]
+fn source_metadata_missing_configure_ac_points_to_submodule_init() {
+    let source_path = temp_path("tmux-src-missing-configure");
+    fs::create_dir_all(&source_path).expect("source path should be creatable");
+
+    let error = TmuxGlueSourceMetadata::discover(&source_path)
+        .expect_err("missing configure.ac should fail");
+
+    assert!(error
+        .to_string()
+        .contains("git submodule update --init --recursive"));
+    assert!(error.to_string().contains("missing or incomplete"));
+}
+
+#[test]
+fn source_metadata_missing_autogen_points_to_submodule_init() {
+    let source_path = temp_path("tmux-src-missing-autogen");
+    fs::create_dir_all(&source_path).expect("source path should be creatable");
+    fs::write(
+        source_path.join("configure.ac"),
+        "AC_INIT([tmux], test-1.0)\n",
+    )
+    .expect("configure.ac should be writable");
+
+    let error =
+        TmuxGlueSourceMetadata::discover(&source_path).expect_err("missing autogen.sh should fail");
+
+    assert!(error
+        .to_string()
+        .contains("git submodule update --init --recursive"));
+    assert!(error.to_string().contains("missing or incomplete"));
 }
 
 #[test]

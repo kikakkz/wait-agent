@@ -58,6 +58,7 @@ impl EventDrivenChromeRuntime {
                 &model.active_session,
                 model.active_target.as_deref(),
                 &model.sessions,
+                model.listener_display.as_deref(),
                 model.width,
             );
             if self.last_footer_buffer.as_ref() != Some(&pane_buffer) {
@@ -71,6 +72,7 @@ impl EventDrivenChromeRuntime {
                 &model.active_session,
                 model.active_target.as_deref(),
                 &model.sessions,
+                model.listener_display.as_deref(),
                 fullscreen_width,
             );
             if self.last_fullscreen_footer_buffer.as_ref() != Some(&fullscreen_buffer) {
@@ -130,6 +132,7 @@ mod tests {
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
+                listener_display: Some("192.168.1.22:7474".to_string()),
             }),
             0,
         );
@@ -142,12 +145,16 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("keys: ^N new"))
+            .map(|buffer| {
+                buffer.contains("keys: ^N new") && buffer.contains("listen: 192.168.1.22:7474")
+            })
             .unwrap_or(false));
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-n] new"))
+            .map(|buffer| {
+                buffer.contains("[Ctrl-n] new") && buffer.contains("listen: 192.168.1.22:7474")
+            })
             .unwrap_or(false));
     }
 
@@ -168,6 +175,7 @@ mod tests {
             active_session: "sess-1".to_string(),
             active_target: Some("wa-1:sess-1".to_string()),
             sessions: vec![session("wa-1", "sess-1", "bash")],
+            listener_display: None,
         });
         let first = runtime.apply_event(&event, 0);
         let second = runtime.apply_event(&event, 0);
@@ -193,6 +201,7 @@ mod tests {
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
+                listener_display: None,
             }),
             0,
         );

@@ -1,8 +1,8 @@
 use crate::cli::{
-    RemoteTargetBindPublicationCommand, RemoteTargetPublicationAgentCommand,
-    RemoteTargetPublicationOwnerCommand, RemoteTargetPublicationServerCommand,
-    RemoteTargetReconcilePublicationsCommand, RemoteTargetUnbindPublicationCommand,
-    SocketLifecycleHookCommand,
+    prepend_global_network_args, RemoteNetworkConfig, RemoteTargetBindPublicationCommand,
+    RemoteTargetPublicationAgentCommand, RemoteTargetPublicationOwnerCommand,
+    RemoteTargetPublicationServerCommand, RemoteTargetReconcilePublicationsCommand,
+    RemoteTargetUnbindPublicationCommand, SocketLifecycleHookCommand,
 };
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
@@ -123,10 +123,17 @@ pub struct RemoteTargetPublicationRuntime {
     store: PublishedTargetStore,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
+    network: RemoteNetworkConfig,
 }
 
 impl RemoteTargetPublicationRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         Ok(Self {
             store: PublishedTargetStore::default(),
             local_tmux: EmbeddedTmuxBackend::from_build_env()
@@ -137,6 +144,7 @@ impl RemoteTargetPublicationRuntime {
                     error,
                 )
             })?,
+            network,
         })
     }
 
@@ -522,7 +530,10 @@ impl RemoteTargetPublicationRuntime {
         }
 
         Command::new(&self.current_executable)
-            .args(remote_target_publication_server_args(socket_name))
+            .args(remote_target_publication_server_args(
+                socket_name,
+                &self.network,
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -564,6 +575,26 @@ impl RemoteTargetPublicationRuntime {
             self.signal_publication_reconcile(socket_name)?;
         }
         Ok(())
+    }
+
+    pub fn resolve_source_socket_names(
+        &self,
+        authority_id: &str,
+        transport_session_id: &str,
+    ) -> Result<Vec<String>, LifecycleError> {
+        let bindings = self
+            .local_tmux
+            .list_remote_publication_bindings()
+            .map_err(remote_target_publication_error)?;
+        let mut socket_names = BTreeSet::new();
+        for binding in bindings {
+            if binding.authority_id == authority_id
+                && binding.transport_session_id == transport_session_id
+            {
+                socket_names.insert(binding.socket_name);
+            }
+        }
+        Ok(socket_names.into_iter().collect())
     }
 
     fn ensure_publication_hooks_on_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
@@ -669,7 +700,10 @@ impl RemoteTargetPublicationRuntime {
         }
 
         Command::new(&self.current_executable)
-            .args(remote_target_publication_agent_args(socket_name))
+            .args(remote_target_publication_agent_args(
+                socket_name,
+                &self.network,
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -692,7 +726,11 @@ impl RemoteTargetPublicationRuntime {
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
-        ensure_publication_sender_process_running(&self.current_executable, socket_name)
+        ensure_publication_sender_process_running(
+            &self.current_executable,
+            socket_name,
+            &self.network,
+        )
     }
 
     fn ensure_publication_owner_running(
@@ -704,6 +742,7 @@ impl RemoteTargetPublicationRuntime {
             &self.current_executable,
             socket_name,
             target_session_name,
+            &self.network,
         )
     }
 
@@ -821,6 +860,7 @@ pub(crate) fn ensure_publication_owner_process_running(
     current_executable: &std::path::Path,
     socket_name: &str,
     target_session_name: &str,
+    network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
     let socket_path = remote_target_publication_owner_socket_path(socket_name, target_session_name);
     if publication_owner_available(&socket_path) {
@@ -834,6 +874,7 @@ pub(crate) fn ensure_publication_owner_process_running(
         .args(remote_target_publication_owner_args(
             socket_name,
             target_session_name,
+            network,
         ))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -856,6 +897,7 @@ pub(crate) fn ensure_publication_owner_process_running(
 pub(crate) fn ensure_publication_sender_process_running(
     current_executable: &std::path::Path,
     socket_name: &str,
+    network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
     let socket_path = remote_target_publication_sender_socket_path(socket_name);
     if publication_sender_available(&socket_path) {
@@ -866,7 +908,7 @@ pub(crate) fn ensure_publication_sender_process_running(
     }
 
     Command::new(current_executable)
-        .args(remote_target_publication_sender_args(socket_name))
+        .args(remote_target_publication_sender_args(socket_name, network))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1020,41 +1062,63 @@ where
     )
 }
 
-fn remote_target_publication_server_args(socket_name: &str) -> Vec<String> {
-    vec![
-        "__remote-target-publication-server".to_string(),
-        "--socket-name".to_string(),
-        socket_name.to_string(),
-    ]
+fn remote_target_publication_server_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-server".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
 }
 
-fn remote_target_publication_agent_args(socket_name: &str) -> Vec<String> {
-    vec![
-        "__remote-target-publication-agent".to_string(),
-        "--socket-name".to_string(),
-        socket_name.to_string(),
-    ]
+fn remote_target_publication_agent_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-agent".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
 }
 
-pub(crate) fn remote_target_publication_sender_args(socket_name: &str) -> Vec<String> {
-    vec![
-        "__remote-target-publication-sender".to_string(),
-        "--socket-name".to_string(),
-        socket_name.to_string(),
-    ]
+pub(crate) fn remote_target_publication_sender_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-sender".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
 }
 
 fn remote_target_publication_owner_args(
     socket_name: &str,
     target_session_name: &str,
+    network: &RemoteNetworkConfig,
 ) -> Vec<String> {
-    vec![
-        "__remote-target-publication-owner".to_string(),
-        "--socket-name".to_string(),
-        socket_name.to_string(),
-        "--target-session-name".to_string(),
-        target_session_name.to_string(),
-    ]
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-owner".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+            "--target-session-name".to_string(),
+            target_session_name.to_string(),
+        ],
+        network,
+    )
 }
 
 fn publication_socket_hook_tmux_command(executable: &str, socket_name: &str) -> String {
@@ -1779,6 +1843,7 @@ mod tests {
         render_publication_sender_command, socket_lifecycle_publication_action,
         PublicationAgentCommand, PublicationSenderCommand, SocketLifecyclePublicationAction,
     };
+    use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
@@ -1841,8 +1906,10 @@ mod tests {
     #[test]
     fn publication_server_args_target_hidden_listener_command() {
         assert_eq!(
-            remote_target_publication_server_args("wa-local"),
+            remote_target_publication_server_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
+                "--port",
+                "7474",
                 "__remote-target-publication-server",
                 "--socket-name",
                 "wa-local",
@@ -1853,8 +1920,10 @@ mod tests {
     #[test]
     fn publication_agent_args_target_hidden_listener_command() {
         assert_eq!(
-            remote_target_publication_agent_args("wa-local"),
+            remote_target_publication_agent_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
+                "--port",
+                "7474",
                 "__remote-target-publication-agent",
                 "--socket-name",
                 "wa-local",
@@ -1874,8 +1943,10 @@ mod tests {
     #[test]
     fn publication_sender_args_target_hidden_listener_command() {
         assert_eq!(
-            remote_target_publication_sender_args("wa-local"),
+            remote_target_publication_sender_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
+                "--port",
+                "7474",
                 "__remote-target-publication-sender",
                 "--socket-name",
                 "wa-local",

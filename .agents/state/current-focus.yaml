@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: task.t5-08c
-focus_statement: cross-host ingress and shared node-session ownership are now in place; active work now moves to binding delivered remote output into visible local and server-console rendering and validating the full cross-host open, input, output, and resize path
+focus_statement: cross-host ingress and shared node-session ownership are now in place, but the product still lacks a public always-on listener and outbound dial entry; active work now moves to converging remote networking on `--port` and `--server`, then binding delivered remote output into visible local and server-console rendering and validating the full cross-host open, input, output, and resize path
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

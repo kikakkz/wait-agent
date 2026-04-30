@@ -17,6 +17,7 @@ impl SessionCatalogProjectionService {
         active_session: &str,
         active_target: Option<&str>,
         sessions: Vec<ManagedSessionRecord>,
+        listener_display: Option<&str>,
     ) -> usize
     where
         P: LocalRuntimeEventPublisher,
@@ -27,6 +28,7 @@ impl SessionCatalogProjectionService {
                 active_session: active_session.to_string(),
                 active_target: active_target.map(str::to_string),
                 sessions,
+                listener_display: listener_display.map(str::to_string),
             },
         ))
     }
@@ -57,6 +59,7 @@ mod tests {
                 "sess-1",
                 Some("wa-1:sess-1"),
                 vec![session("wa-1", "sess-1")],
+                Some("192.168.1.22:7474"),
             ),
             1
         );
@@ -68,11 +71,13 @@ mod tests {
                 active_session,
                 active_target,
                 sessions,
+                listener_display,
             }) => {
                 assert_eq!(active_socket, "wa-1");
                 assert_eq!(active_session, "sess-1");
                 assert_eq!(active_target.as_deref(), Some("wa-1:sess-1"));
                 assert_eq!(sessions.len(), 1);
+                assert_eq!(listener_display.as_deref(), Some("192.168.1.22:7474"));
             }
             other => panic!("unexpected event payload: {other:?}"),
         }

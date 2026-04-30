@@ -1,7 +1,9 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::{AttachCommand, RemoteServerConsoleCommand, ServerConsoleCommand};
+use crate::cli::{
+    AttachCommand, RemoteNetworkConfig, RemoteServerConsoleCommand, ServerConsoleCommand,
+};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
@@ -11,7 +13,7 @@ use crate::runtime::remote_main_slot_pane_runtime::{
     RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
 };
 use crate::runtime::remote_node_ingress_runtime::{
-    default_remote_node_ingress_starter_from_env, RemoteNodeIngressStarter,
+    RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
 };
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodePublicationSink, RemoteNodeSessionError,
@@ -32,20 +34,27 @@ pub struct RemoteServerConsoleRuntime {
 
 impl RemoteServerConsoleRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         Ok(Self {
             target_registry: TargetRegistryService::new(
                 DefaultTargetCatalogGateway::from_build_env().map_err(target_catalog_error)?,
             ),
             surface_runtime:
-                RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams()?,
-            publication_runtime: RemoteTargetPublicationRuntime::from_build_env()?,
-            workspace_runtime: WorkspaceCommandRuntime::from_build_env()?,
-            node_ingress: default_remote_node_ingress_starter_from_env().map_err(|error| {
-                LifecycleError::Io(
-                    "failed to configure remote server-console authority ingress".to_string(),
-                    error,
-                )
-            })?,
+                RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams_and_network(
+                    network.clone(),
+                )?,
+            publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
+            workspace_runtime: WorkspaceCommandRuntime::from_build_env_with_network(network.clone())?,
+            node_ingress: Box::new(RemoteNodeIngressRuntime::with_grpc_source(
+                network.listener_addr(),
+            )),
         })
     }
 
@@ -68,6 +77,8 @@ impl RemoteServerConsoleRuntime {
     }
 
     pub fn run_public(&self, command: ServerConsoleCommand) -> Result<(), LifecycleError> {
+        self.publication_runtime
+            .ensure_configured_publications_on_socket(&command.socket_name)?;
         self.run(RemoteServerConsoleCommand {
             socket_name: command.socket_name,
             console_name: command.console_name,

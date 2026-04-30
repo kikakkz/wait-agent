@@ -1,4 +1,6 @@
-use crate::cli::{RemoteAuthorityOutputPumpCommand, RemoteAuthorityTargetHostCommand};
+use crate::cli::{
+    RemoteAuthorityOutputPumpCommand, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
+};
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
@@ -204,9 +206,10 @@ where
 pub struct RemoteAuthorityOutputPumpRuntime;
 
 impl RemoteAuthorityTargetHostRuntime<EmbeddedTmuxBackend, RemoteTargetPublicationRuntime> {
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
+    pub fn from_build_env(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
         let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_authority_error)?;
-        let publication_gateway = RemoteTargetPublicationRuntime::from_build_env()?;
+        let publication_gateway =
+            RemoteTargetPublicationRuntime::from_build_env_with_network(network)?;
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
                 "failed to locate current waitagent executable".to_string(),
@@ -688,7 +691,7 @@ mod tests {
             transport_socket_path: &str,
         ) -> Result<PathBuf, LifecycleError> {
             let session = Arc::new(
-                RemoteNodeSessionRuntime::connect(transport_socket_path, authority_id)
+                RemoteNodeSessionRuntime::connect(transport_socket_path, authority_id, None)
                     .map_err(remote_authority_error)?,
             );
             let running = Arc::new(AtomicBool::new(true));

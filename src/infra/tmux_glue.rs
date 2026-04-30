@@ -42,6 +42,12 @@ impl VendoredTmuxSource {
         })
     }
 
+    pub fn system_default() -> Self {
+        Self {
+            path: PathBuf::from("tmux"),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -101,6 +107,18 @@ impl TmuxGlueArtifacts {
     pub fn from_build_env() -> Result<Self, TmuxError> {
         let manifest = TmuxGlueManifest::from_build_env()?;
         Self::from_manifest(&manifest)
+    }
+
+    pub fn system_default() -> Self {
+        Self {
+            source_path: PathBuf::new(),
+            build_root: PathBuf::new(),
+            tmux_binary_path: PathBuf::from("tmux"),
+            static_lib_path: PathBuf::new(),
+            include_dir_path: PathBuf::new(),
+            configure_stamp_path: PathBuf::new(),
+            build_stamp_path: PathBuf::new(),
+        }
     }
 }
 

@@ -1,9 +1,12 @@
-use crate::cli::Command;
+use crate::cli::{Command, RemoteNetworkConfig};
 use crate::error::AppError;
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
+use crate::runtime::remote_node_ingress_server_runtime::{
+    RemoteNodeIngressServerGuard, RemoteNodeIngressServerRuntime,
+};
 use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
 use crate::runtime::remote_server_console_runtime::RemoteServerConsoleRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -21,6 +24,7 @@ pub struct CommandDispatcher {
     footer_menu_runtime: FooterMenuRuntime,
     remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime,
     remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime,
+    _remote_node_ingress_server_guard: Option<RemoteNodeIngressServerGuard>,
     remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
     remote_server_console_runtime: RemoteServerConsoleRuntime,
     remote_target_publication_runtime: RemoteTargetPublicationRuntime,
@@ -28,18 +32,38 @@ pub struct CommandDispatcher {
 }
 
 impl CommandDispatcher {
-    pub fn from_build_env() -> Result<Self, AppError> {
+    pub fn from_build_env_with_network_and_command(
+        network: RemoteNetworkConfig,
+        command: &Command,
+    ) -> Result<Self, AppError> {
+        let remote_node_ingress_server_guard = if command_owns_process_listener(command) {
+            Some(
+                RemoteNodeIngressServerRuntime::from_build_env_with_network(network.clone())?
+                    .start()?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
-            workspace_runtime: WorkspaceCommandRuntime::from_build_env()?,
-            pane_runtime: EventDrivenPaneRuntime::from_build_env()?,
+            workspace_runtime: WorkspaceCommandRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
+            pane_runtime: EventDrivenPaneRuntime::from_build_env_with_network(network.clone())?,
             footer_menu_runtime: FooterMenuRuntime::from_build_env()?,
             remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime::from_build_env(
+                network.clone(),
             )?,
-            remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime::from_build_env()?,
-            remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime::from_build_env()?,
-            remote_server_console_runtime: RemoteServerConsoleRuntime::from_build_env()?,
-            remote_target_publication_runtime: RemoteTargetPublicationRuntime::from_build_env()?,
-            layout_runtime: WorkspaceLayoutRuntime::from_build_env()?,
+            remote_main_slot_ingress_runtime:
+                RemoteMainSlotIngressRuntime::from_build_env_with_network(network.clone())?,
+            _remote_node_ingress_server_guard: remote_node_ingress_server_guard,
+            remote_node_session_owner_runtime:
+                RemoteNodeSessionOwnerRuntime::from_build_env_with_network(network.clone())?,
+            remote_server_console_runtime: RemoteServerConsoleRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
+            remote_target_publication_runtime:
+                RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
+            layout_runtime: WorkspaceLayoutRuntime::from_build_env_with_network(network)?,
         })
     }
 
@@ -174,4 +198,35 @@ impl CommandDispatcher {
             }
         }
     }
+}
+
+fn command_owns_process_listener(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::ChromeRefreshSocket(_)
+            | Command::UiSidebar(_)
+            | Command::UiFooter(_)
+            | Command::RemoteMainSlot(_)
+            | Command::RemoteServerConsole(_)
+            | Command::RemoteAuthorityTargetHost(_)
+            | Command::RemoteAuthorityOutputPump(_)
+            | Command::RemoteTargetPublicationServer(_)
+            | Command::RemoteTargetPublicationAgent(_)
+            | Command::RemoteTargetPublicationSender(_)
+            | Command::RemoteTargetPublicationOwner(_)
+            | Command::SocketLifecycleHook(_)
+            | Command::RemoteTargetBindPublication(_)
+            | Command::RemoteTargetUnbindPublication(_)
+            | Command::RemoteTargetReconcilePublications(_)
+            | Command::ActivateTarget(_)
+            | Command::NewTarget(_)
+            | Command::MainPaneDied(_)
+            | Command::FooterMenu(_)
+            | Command::ToggleFullscreen(_)
+            | Command::CloseSession(_)
+            | Command::LayoutReconcile(_)
+            | Command::ChromeRefresh(_)
+            | Command::ChromeRefreshSignal(_)
+            | Command::ChromeRefreshAll
+    )
 }

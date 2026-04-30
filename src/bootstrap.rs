@@ -6,7 +6,11 @@ use crate::error::AppError;
 // behavior does not drift back into ad hoc or historical entrypoints.
 pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse(std::env::args_os())?;
-    let dispatcher = crate::command::dispatch::CommandDispatcher::from_build_env()?;
+    let dispatcher =
+        crate::command::dispatch::CommandDispatcher::from_build_env_with_network_and_command(
+            cli.network.clone(),
+            &cli.command,
+        )?;
 
     dispatcher.dispatch(cli.command)
 }

@@ -18,6 +18,7 @@ impl FooterUi {
                 &model.active_session,
                 model.active_target.as_deref(),
                 &model.sessions,
+                model.listener_display.as_deref(),
                 model.width,
             )
         } else {
@@ -26,6 +27,7 @@ impl FooterUi {
                 &model.active_session,
                 model.active_target.as_deref(),
                 &model.sessions,
+                model.listener_display.as_deref(),
                 model.width,
             )
         }
@@ -36,6 +38,7 @@ impl FooterUi {
         active_session: &str,
         active_target: Option<&str>,
         sessions: &[ManagedSessionRecord],
+        listener_display: Option<&str>,
         width: usize,
     ) -> String {
         render_footer(
@@ -43,6 +46,7 @@ impl FooterUi {
             active_session,
             active_target,
             sessions,
+            listener_display,
             width,
             FooterProjection::Pane,
         )
@@ -53,6 +57,7 @@ impl FooterUi {
         active_session: &str,
         active_target: Option<&str>,
         sessions: &[ManagedSessionRecord],
+        listener_display: Option<&str>,
         width: usize,
     ) -> String {
         render_footer(
@@ -60,6 +65,7 @@ impl FooterUi {
             active_session,
             active_target,
             sessions,
+            listener_display,
             width,
             FooterProjection::FullscreenStatus,
         )
@@ -71,13 +77,14 @@ fn render_footer(
     active_session: &str,
     active_target: Option<&str>,
     sessions: &[ManagedSessionRecord],
+    listener_display: Option<&str>,
     width: usize,
     projection: FooterProjection,
 ) -> String {
     let width = width.max(1);
     let active = active_session_record(active_socket, active_session, active_target, sessions);
     let counts = task_counts(sessions);
-    let left = left_status_text(projection, sessions.len(), &counts);
+    let left = left_status_text(projection, sessions.len(), &counts, listener_display);
     let right = active
         .and_then(|session| {
             session
@@ -139,11 +146,17 @@ fn left_status_text(
     projection: FooterProjection,
     total_sessions: usize,
     counts: &TaskCounts,
+    listener_display: Option<&str>,
 ) -> String {
+    let listen = listener_display
+        .map(|value| format!("  |  listen: {value}"))
+        .unwrap_or_default();
     match projection {
-        FooterProjection::Pane => "keys: ^N new  ^O fullscreen  C-b s menu".to_string(),
+        FooterProjection::Pane => {
+            format!("keys: ^N new  ^O fullscreen  C-b s menu{listen}")
+        }
         FooterProjection::FullscreenStatus => format!(
-            "keys: [Ctrl-o] fullscreen off  [Ctrl-n] new  [Ctrl-b s] menu | total:{} R:{} I:{} C:{} U:{} | [PgUp/PgDn] page  [Up/Down] line",
+            "keys: [Ctrl-o] fullscreen off  [Ctrl-n] new  [Ctrl-b s] menu{listen} | total:{} R:{} I:{} C:{} U:{} | [PgUp/PgDn] page  [Up/Down] line",
             total_sessions,
             counts.running,
             counts.input,
@@ -216,12 +229,14 @@ mod tests {
                 current_path: Some(PathBuf::from("/tmp/demo")),
                 task_state: ManagedSessionTaskState::Input,
             }],
+            Some("192.168.1.22:7474"),
             96,
         );
 
         assert!(output.contains("keys: ^N new"));
         assert!(output.contains("^O fullscreen"));
         assert!(output.contains("C-b s menu"));
+        assert!(output.contains("listen: 192.168.1.22:7474"));
         assert!(output.contains("^N new"));
         assert!(!output.contains("^W cmd"));
         assert!(!output.contains("^Q quit"));
@@ -266,12 +281,14 @@ mod tests {
                     task_state: ManagedSessionTaskState::Confirm,
                 },
             ],
+            Some("192.168.1.22:7474"),
             180,
         );
 
         assert!(output.contains("[Ctrl-o] fullscreen off"));
         assert!(output.contains("[Ctrl-n] new"));
         assert!(output.contains("[Ctrl-b s] menu"));
+        assert!(output.contains("listen: 192.168.1.22:7474"));
         assert!(output.contains("total:2 R:0 I:1 C:1 U:0"));
         assert!(output.contains("[PgUp/PgDn] page"));
         assert!(output.contains("[Up/Down] line"));

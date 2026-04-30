@@ -48,6 +48,7 @@ impl EventDrivenUiPaneRuntime {
         active_session: &str,
         active_target: Option<&str>,
         sessions: Vec<ManagedSessionRecord>,
+        listener_display: Option<&str>,
     ) -> EventDrivenChromeRenderUpdate {
         self.session_catalog_projection.publish_snapshot(
             &mut self.bus,
@@ -55,6 +56,7 @@ impl EventDrivenUiPaneRuntime {
             active_session,
             active_target,
             sessions,
+            listener_display,
         );
         self.drain_pending_events(now_millis())
     }
@@ -145,6 +147,7 @@ struct EventDrivenUiPaneState {
     active_session: String,
     active_target: Option<String>,
     sessions: Vec<ManagedSessionRecord>,
+    listener_display: Option<String>,
     selected_session_id: Option<String>,
 }
 
@@ -156,11 +159,13 @@ impl EventDrivenUiPaneState {
                 active_session,
                 active_target,
                 sessions,
+                listener_display,
             }) => {
                 self.active_socket = active_socket.clone();
                 self.active_session = active_session.clone();
                 self.active_target = active_target.clone();
                 self.sessions = sessions.clone();
+                self.listener_display = listener_display.clone();
                 self.ensure_active_target();
                 self.ensure_selected_session();
             }
@@ -384,6 +389,7 @@ mod tests {
             "sess-1",
             Some("wa-1:sess-1"),
             vec![session("wa-1", "sess-1", "bash")],
+            Some("192.168.1.22:7474"),
         );
 
         assert!(update
@@ -394,12 +400,16 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("keys: ^N new"))
+            .map(|buffer| {
+                buffer.contains("keys: ^N new") && buffer.contains("listen: 192.168.1.22:7474")
+            })
             .unwrap_or(false));
         assert!(update
             .fullscreen_status
             .as_ref()
-            .map(|buffer| buffer.contains("[Ctrl-n] new"))
+            .map(|buffer| {
+                buffer.contains("[Ctrl-n] new") && buffer.contains("listen: 192.168.1.22:7474")
+            })
             .unwrap_or(false));
     }
 
@@ -415,6 +425,7 @@ mod tests {
                 session("wa-1", "sess-1", "bash"),
                 session("wa-2", "sess-2", "codex"),
             ],
+            None,
         );
 
         let outcome = runtime.apply_sidebar_input_bytes(b"\x1b[B");
@@ -441,6 +452,7 @@ mod tests {
                 session("wa-1", "sess-1", "bash"),
                 session("wa-2", "sess-2", "codex"),
             ],
+            None,
         );
 
         let current = runtime.apply_sidebar_input_bytes(b"\r");
@@ -472,6 +484,7 @@ mod tests {
                 session("wa-1", "sess-1", "bash"),
                 session("wa-1", "sess-2", "codex"),
             ],
+            None,
         );
 
         runtime.apply_sidebar_input_bytes(b"\x1b[B");
@@ -483,6 +496,7 @@ mod tests {
                 session("wa-1", "sess-1", "bash"),
                 session("wa-1", "sess-2", "codex"),
             ],
+            None,
         );
 
         assert_eq!(runtime.state.active_target.as_deref(), Some("wa-1:sess-2"));

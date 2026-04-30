@@ -524,31 +524,70 @@ own reconnect policy.
 
 ### 10.1 Accepted Production Topology
 
-The accepted phase-2 production topology is hub-and-spoke:
+The accepted phase-2 production topology remains server-centric for session
+ownership, but listener lifecycle is now universal:
 
-- `waitagent server` binds the production gRPC listener
-- every non-server WaitAgent node dials the server outbound
+- every `waitagent` process starts one node-session listener at startup
+- the default listener bind address is `0.0.0.0`
+- the listener port is configured by CLI flag `--port <port>`
+- if `--port` is omitted, WaitAgent uses default port `7474`
+- `waitagent server` remains the accepted rendezvous point for phase-2 remote
+  sessions
+- non-server WaitAgent nodes may still dial the server outbound
 - the same long-lived outbound node session carries authority publication,
   authority input or resize delivery, observer open, observer input, and
   observer output fanout traffic
 
 The accepted default is therefore:
 
-- server accepts inbound node sessions
-- client nodes initiate outbound node sessions
-- server does not dial back out to nodes in phase 2
+- every node listens
+- the server accepts inbound node sessions as the default rendezvous endpoint
+- client or authority nodes initiate outbound node sessions toward a configured
+  server endpoint when remote connectivity is desired
+- server-originated dial-back is still not part of the accepted phase-2
+  production contract
 
 Reasons:
 
-- one outbound dial from the node side works better with NAT and firewall
-  realities than requiring inbound reachability to every node
+- always-on listeners give the product one predictable network surface instead
+  of hidden late-start listeners tied to remote pane activation
+- a fixed default bind address plus default port gives operators and users a
+  concrete connection target even before custom deployment tuning
+- retaining server-centric outbound dial as the default phase-2 flow still
+  fits NAT and firewall realities better than requiring peer-to-peer inbound
+  reachability everywhere
 - one bidirectional stream already gives the server a native downlink channel
   without inventing a second transport
-- canonical connection ownership is much simpler when there is one dial
-  direction in production
 
 Future peer-to-peer or server-initiated dialing would require a separate design
 task. They are not part of the accepted phase-2 production contract.
+
+### 10.1.1 Accepted CLI Network Contract
+
+The accepted user-facing configuration contract is CLI-first, not
+environment-variable-first.
+
+Rules:
+
+- listener configuration must come from `--port`
+- outbound remote dialing configuration must come from `--server <host:port>`
+- WaitAgent must not require environment variables as the primary product
+  interface for production remote networking
+- existing environment variables may survive only as temporary internal
+  compatibility shims during migration, and they must be retired from active
+  docs and user-facing guidance
+
+Accepted defaults:
+
+- listener bind address: `0.0.0.0`
+- listener default port: `7474`
+
+Accepted examples:
+
+- `waitagent --port 7474`
+- `waitagent server --socket-name <socket> --port 7474`
+- `waitagent --server server.example.com:7474`
+- `waitagent server --socket-name <socket> --port 7474 --server hub.example.com:7474`
 
 ### 10.2 Transport Trust Model
 

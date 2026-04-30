@@ -28,6 +28,7 @@ pub struct FooterViewModel {
     pub active_session: String,
     pub active_target: Option<String>,
     pub sessions: Vec<ManagedSessionRecord>,
+    pub listener_display: Option<String>,
     pub width: usize,
     pub fullscreen: bool,
 }

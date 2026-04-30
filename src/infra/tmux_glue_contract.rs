@@ -21,6 +21,13 @@ pub const TMUX_CONFIGURE_AC_FILE_NAME: &str = "configure.ac";
 pub const TMUX_AUTOGEN_SCRIPT_FILE_NAME: &str = "autogen.sh";
 const YACC_CANDIDATE_PROGRAM_NAMES: &[&str] = &["yacc", "bison", "byacc"];
 
+fn vendored_tmux_submodule_hint(source_path: &Path) -> String {
+    format!(
+        "vendored tmux submodule at `{}` is missing or incomplete. Initialize it with `git submodule update --init --recursive`",
+        source_path.display()
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxGlueContractError {
     message: String,
@@ -153,8 +160,9 @@ impl TmuxGlueSourceMetadata {
         let autogen_script_path = source_path.join(TMUX_AUTOGEN_SCRIPT_FILE_NAME);
         let configure_contents = fs::read_to_string(&configure_ac_path).map_err(|error| {
             TmuxGlueContractError::new(format!(
-                "failed to read vendored tmux configure input `{}`: {error}",
-                configure_ac_path.display()
+                "failed to read vendored tmux configure input `{}`: {error}. {}",
+                configure_ac_path.display(),
+                vendored_tmux_submodule_hint(&source_path)
             ))
         })?;
         let Some((package_name, version)) = parse_ac_init(&configure_contents) else {
@@ -165,8 +173,9 @@ impl TmuxGlueSourceMetadata {
         };
         if !autogen_script_path.exists() {
             return Err(TmuxGlueContractError::new(format!(
-                "vendored tmux autogen script is missing at `{}`",
-                autogen_script_path.display()
+                "vendored tmux autogen script is missing at `{}`. {}",
+                autogen_script_path.display(),
+                vendored_tmux_submodule_hint(&source_path)
             )));
         }
         Ok(Self {
@@ -247,8 +256,8 @@ impl TmuxGlueBuildPlan {
     pub fn validate_source(&self) -> Result<(), TmuxGlueContractError> {
         if !self.layout.source_path.exists() {
             return Err(TmuxGlueContractError::new(format!(
-                "vendored tmux source is missing at {}",
-                self.layout.source_path.display()
+                "{}",
+                vendored_tmux_submodule_hint(&self.layout.source_path)
             )));
         }
         TmuxGlueSourceMetadata::discover(self.layout.source_path.clone())?;

@@ -1,7 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::RemoteMainSlotCommand;
+use crate::cli::{prepend_global_network_args, RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
@@ -45,6 +45,7 @@ pub struct RemoteMainSlotPaneRuntime {
     authority_connections: Box<dyn AuthorityConnectionStarter>,
     external_authority_streams: Option<QueuedAuthorityStreamSink>,
     current_executable: PathBuf,
+    network: RemoteNetworkConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +75,14 @@ enum AuthorityTransportStatus {
 
 impl RemoteMainSlotPaneRuntime {
     pub fn from_build_env_with_external_authority_streams() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_external_authority_streams_and_network(
+            RemoteNetworkConfig::default(),
+        )
+    }
+
+    pub fn from_build_env_with_external_authority_streams_and_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
                 "failed to locate current waitagent executable".to_string(),
@@ -83,9 +92,10 @@ impl RemoteMainSlotPaneRuntime {
         let target_registry = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
         );
-        Ok(Self::new_with_external_authority_streams(
+        Ok(Self::new_with_external_authority_streams_and_network(
             target_registry,
             current_executable,
+            network,
         ))
     }
 
@@ -93,12 +103,14 @@ impl RemoteMainSlotPaneRuntime {
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         current_executable: PathBuf,
+        network: RemoteNetworkConfig,
     ) -> Self {
         Self::new_with_optional_external_authority_streams(
             target_registry,
             authority_connections,
             None,
             current_executable,
+            network,
         )
     }
 
@@ -107,12 +119,14 @@ impl RemoteMainSlotPaneRuntime {
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         external_authority_streams: Option<QueuedAuthorityStreamSink>,
         current_executable: PathBuf,
+        network: RemoteNetworkConfig,
     ) -> Self {
         Self {
             target_registry,
             authority_connections,
             external_authority_streams,
             current_executable,
+            network,
         }
     }
 
@@ -120,12 +134,25 @@ impl RemoteMainSlotPaneRuntime {
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         current_executable: PathBuf,
     ) -> Self {
+        Self::new_with_external_authority_streams_and_network(
+            target_registry,
+            current_executable,
+            RemoteNetworkConfig::default(),
+        )
+    }
+
+    pub fn new_with_external_authority_streams_and_network(
+        target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        current_executable: PathBuf,
+        network: RemoteNetworkConfig,
+    ) -> Self {
         let (starter, sink) = QueuedAuthorityStreamStarter::channel();
         Self::new_with_optional_external_authority_streams(
             target_registry,
             Box::new(starter),
             Some(sink),
             current_executable,
+            network,
         )
     }
 
@@ -376,6 +403,7 @@ impl RemoteMainSlotPaneRuntime {
                 &resolved,
                 target,
                 transport_socket_path,
+                &self.network,
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -755,20 +783,24 @@ fn remote_authority_target_host_args(
     resolved: &ResolvedLocalAuthorityTargetHost,
     target: &ManagedSessionRecord,
     transport_socket_path: &Path,
+    network: &RemoteNetworkConfig,
 ) -> Vec<String> {
-    vec![
-        "__remote-authority-target-host".to_string(),
-        "--socket-name".to_string(),
-        resolved.socket_name.clone(),
-        "--target-session-name".to_string(),
-        resolved.target_session_name.clone(),
-        "--authority-id".to_string(),
-        target.address.authority_id().to_string(),
-        "--target-id".to_string(),
-        target.address.id().as_str().to_string(),
-        "--transport-socket-path".to_string(),
-        transport_socket_path.display().to_string(),
-    ]
+    prepend_global_network_args(
+        vec![
+            "__remote-authority-target-host".to_string(),
+            "--socket-name".to_string(),
+            resolved.socket_name.clone(),
+            "--target-session-name".to_string(),
+            resolved.target_session_name.clone(),
+            "--authority-id".to_string(),
+            target.address.authority_id().to_string(),
+            "--target-id".to_string(),
+            target.address.id().as_str().to_string(),
+            "--transport-socket-path".to_string(),
+            transport_socket_path.display().to_string(),
+        ],
+        network,
+    )
 }
 
 pub(crate) fn main_slot_surface_spec(command: &RemoteMainSlotCommand) -> RemoteInteractSurfaceSpec {
@@ -867,7 +899,7 @@ mod tests {
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
     };
-    use crate::cli::RemoteMainSlotCommand;
+    use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
     use crate::domain::session_catalog::{
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
@@ -1050,6 +1082,7 @@ mod tests {
             target_registry,
             Box::new(crate::runtime::remote_authority_connection_runtime::LocalAuthoritySocketBridgeStarter),
             PathBuf::from("/tmp/waitagent"),
+            RemoteNetworkConfig::default(),
         );
 
         let (_client, server) = UnixStream::pair().expect("stream pair should open");
@@ -1392,11 +1425,14 @@ mod tests {
             },
             &remote_target_with_selector("wa-local:shell-host"),
             Path::new("/tmp/authority.sock"),
+            &RemoteNetworkConfig::default(),
         );
 
         assert_eq!(
             args,
             vec![
+                "--port",
+                "7474",
                 "__remote-authority-target-host",
                 "--socket-name",
                 "wa-local",

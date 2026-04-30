@@ -30,6 +30,7 @@ pub enum SessionCatalogEvent {
         active_session: String,
         active_target: Option<String>,
         sessions: Vec<ManagedSessionRecord>,
+        listener_display: Option<String>,
     },
 }
 
@@ -64,6 +65,7 @@ mod tests {
             active_session: "sess-1".to_string(),
             active_target: Some("wa-1:sess-1".to_string()),
             sessions: vec![session("wa-1", "sess-1")],
+            listener_display: Some("192.168.1.22:7474".to_string()),
         });
 
         assert_eq!(event.event_group(), EventGroup::Session);

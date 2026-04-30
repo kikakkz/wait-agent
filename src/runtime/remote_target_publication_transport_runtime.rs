@@ -21,7 +21,7 @@ impl RemoteTargetPublicationTransportRuntime {
         node_id: impl Into<String>,
     ) -> Result<Self, RemoteTargetPublicationTransportError> {
         let node_id = node_id.into();
-        let session = RemoteNodeSessionRuntime::connect(socket_path, node_id.clone())?;
+        let session = RemoteNodeSessionRuntime::connect(socket_path, node_id.clone(), None)?;
         Ok(Self { node_id, session })
     }
 

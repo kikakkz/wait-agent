@@ -5,7 +5,10 @@ use crate::application::layout_service::{
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::{CloseSessionCommand, LayoutReconcileCommand, UiPaneCommand};
+use crate::cli::{
+    prepend_global_network_args, CloseSessionCommand, LayoutReconcileCommand, RemoteNetworkConfig,
+    UiPaneCommand,
+};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
@@ -34,10 +37,17 @@ pub struct WorkspaceLayoutRuntime {
     layout_service: LayoutService<EmbeddedTmuxBackend>,
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     current_executable: std::path::PathBuf,
+    network: RemoteNetworkConfig,
 }
 
 impl WorkspaceLayoutRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_layout_error)?;
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
@@ -54,6 +64,7 @@ impl WorkspaceLayoutRuntime {
             ),
             backend,
             current_executable,
+            network,
         })
     }
 
@@ -434,25 +445,31 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
     ) -> TmuxProgram {
         TmuxProgram::new(self.current_executable.display().to_string())
-            .with_args(vec![
-                "__ui-sidebar".to_string(),
-                "--socket-name".to_string(),
-                workspace.socket_name.as_str().to_string(),
-                "--session-name".to_string(),
-                workspace.session_name.as_str().to_string(),
-            ])
+            .with_args(prepend_global_network_args(
+                vec![
+                    "__ui-sidebar".to_string(),
+                    "--socket-name".to_string(),
+                    workspace.socket_name.as_str().to_string(),
+                    "--session-name".to_string(),
+                    workspace.session_name.as_str().to_string(),
+                ],
+                &self.network,
+            ))
             .with_start_directory(workspace_dir)
     }
 
     fn footer_program(&self, workspace: &TmuxWorkspaceHandle, workspace_dir: &Path) -> TmuxProgram {
         TmuxProgram::new(self.current_executable.display().to_string())
-            .with_args(vec![
-                "__ui-footer".to_string(),
-                "--socket-name".to_string(),
-                workspace.socket_name.as_str().to_string(),
-                "--session-name".to_string(),
-                workspace.session_name.as_str().to_string(),
-            ])
+            .with_args(prepend_global_network_args(
+                vec![
+                    "__ui-footer".to_string(),
+                    "--socket-name".to_string(),
+                    workspace.socket_name.as_str().to_string(),
+                    "--session-name".to_string(),
+                    workspace.session_name.as_str().to_string(),
+                ],
+                &self.network,
+            ))
             .with_start_directory(workspace_dir)
     }
 

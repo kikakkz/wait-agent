@@ -17,11 +17,13 @@ impl ChromeProjectionService {
                 active_session,
                 active_target,
                 sessions,
+                listener_display,
             }) => {
                 self.state.active_socket = active_socket.clone();
                 self.state.active_session = active_session.clone();
                 self.state.active_target = active_target.clone();
                 self.state.sessions = sessions.clone();
+                self.state.listener_display = listener_display.clone();
                 self.state.ensure_active_target();
                 self.ensure_selected_target();
                 self.emit_both()
@@ -131,6 +133,7 @@ impl ChromeProjectionService {
             active_session: self.state.active_session.clone(),
             active_target: self.state.active_target.clone(),
             sessions: self.state.sessions.clone(),
+            listener_display: self.state.listener_display.clone(),
             width,
             fullscreen: self.state.fullscreen,
         })
@@ -144,6 +147,7 @@ struct ChromeProjectionState {
     active_target: Option<String>,
     selected_target: Option<String>,
     sessions: Vec<ManagedSessionRecord>,
+    listener_display: Option<String>,
     sidebar_surface: ChromeSurfaceSize,
     footer_width: usize,
     fullscreen_footer_width: usize,
@@ -222,6 +226,7 @@ mod tests {
                     "bash",
                     ManagedSessionTaskState::Input,
                 )],
+                listener_display: Some("192.168.1.22:7474".to_string()),
             },
         ));
 
@@ -230,6 +235,13 @@ mod tests {
             Some(24)
         );
         assert_eq!(update.footer.as_ref().map(|view| view.width), Some(80));
+        assert_eq!(
+            update
+                .footer
+                .as_ref()
+                .and_then(|view| view.listener_display.as_deref()),
+            Some("192.168.1.22:7474")
+        );
         assert_eq!(
             update
                 .sidebar
@@ -265,6 +277,7 @@ mod tests {
                     session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
                     session("wa-2", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
+                listener_display: None,
             },
         ));
 
@@ -309,6 +322,7 @@ mod tests {
                     "bash",
                     ManagedSessionTaskState::Input,
                 )],
+                listener_display: None,
             },
         ));
 
@@ -346,6 +360,7 @@ mod tests {
                     session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
                     session("wa-1", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
+                listener_display: None,
             },
         ));
 
@@ -358,6 +373,7 @@ mod tests {
                     session("wa-1", "sess-1", "bash", ManagedSessionTaskState::Input),
                     session("wa-1", "sess-2", "codex", ManagedSessionTaskState::Input),
                 ],
+                listener_display: None,
             },
         ));
 

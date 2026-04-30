@@ -6,7 +6,7 @@ use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DetachCommand, MainPaneDiedCommand, NewTargetCommand,
-    ToggleFullscreenCommand,
+    RemoteNetworkConfig, ToggleFullscreenCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
@@ -36,6 +36,12 @@ pub struct WorkspaceCommandRuntime {
 
 impl WorkspaceCommandRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
+        Self::from_build_env_with_network(RemoteNetworkConfig::default())
+    }
+
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_runtime_error)?;
         let current_executable = std::env::current_exe().map_err(|error| {
             LifecycleError::Io(
@@ -45,7 +51,7 @@ impl WorkspaceCommandRuntime {
         })?;
         let entry_runtime = WorkspaceEntryRuntime::new(
             WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
-            WorkspaceLayoutRuntime::from_build_env()?,
+            WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
         );
         let session_service = SessionService::new(backend.clone());
         let target_registry = TargetRegistryService::new(
@@ -54,7 +60,8 @@ impl WorkspaceCommandRuntime {
         let main_slot_backend = backend.clone();
         let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())?;
         let command_target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())?;
-        let remote_target_publication_runtime = RemoteTargetPublicationRuntime::from_build_env()?;
+        let remote_target_publication_runtime =
+            RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?;
 
         Ok(Self {
             path_service: WorkspacePathService::new(),
@@ -62,18 +69,19 @@ impl WorkspaceCommandRuntime {
             main_slot_runtime: MainSlotRuntime::new(
                 main_slot_backend.clone(),
                 target_host_runtime,
-                WorkspaceLayoutRuntime::from_build_env()?,
+                WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
                 TargetRegistryService::new(
                     DefaultTargetCatalogGateway::from_build_env().map_err(tmux_runtime_error)?,
                 ),
                 current_executable,
+                network.clone(),
             ),
             fullscreen_runtime: NativePaneFullscreenRuntime::new(
                 backend.clone(),
                 TargetRegistryService::new(
                     DefaultTargetCatalogGateway::from_build_env().map_err(tmux_runtime_error)?,
                 ),
-                WorkspaceLayoutRuntime::from_build_env()?,
+                WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
             ),
             remote_target_publication_runtime,
             target_host_runtime: command_target_host_runtime,

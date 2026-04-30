@@ -2,6 +2,7 @@ use crate::application::layout_service::{FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE};
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::cli::{ActivateTargetCommand, MainPaneDiedCommand, NewTargetCommand};
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceConfig;
@@ -27,6 +28,7 @@ pub struct MainSlotRuntime {
     layout_runtime: WorkspaceLayoutRuntime,
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     current_executable: PathBuf,
+    network: RemoteNetworkConfig,
 }
 
 impl MainSlotRuntime {
@@ -36,6 +38,7 @@ impl MainSlotRuntime {
         layout_runtime: WorkspaceLayoutRuntime,
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         current_executable: PathBuf,
+        network: RemoteNetworkConfig,
     ) -> Self {
         Self {
             backend,
@@ -43,6 +46,7 @@ impl MainSlotRuntime {
             layout_runtime,
             target_registry,
             current_executable,
+            network,
         }
     }
 
@@ -325,6 +329,7 @@ impl MainSlotRuntime {
                     &self.current_executable,
                     current_workspace,
                     &target.address.qualified_target(),
+                    &self.network,
                 ),
             )
             .map_err(main_slot_error)?;
@@ -579,17 +584,21 @@ fn remote_main_slot_program(
     executable: &Path,
     current_workspace: &CurrentWorkspace,
     target: &str,
+    network: &RemoteNetworkConfig,
 ) -> TmuxProgram {
     TmuxProgram::new(executable.display().to_string())
-        .with_args(vec![
-            "__remote-main-slot".to_string(),
-            "--socket-name".to_string(),
-            current_workspace.socket_name.clone(),
-            "--session-name".to_string(),
-            current_workspace.session_name.clone(),
-            "--target".to_string(),
-            target.to_string(),
-        ])
+        .with_args(prepend_global_network_args(
+            vec![
+                "__remote-main-slot".to_string(),
+                "--socket-name".to_string(),
+                current_workspace.socket_name.clone(),
+                "--session-name".to_string(),
+                current_workspace.session_name.clone(),
+                "--target".to_string(),
+                target.to_string(),
+            ],
+            network,
+        ))
         .with_start_directory(&current_workspace.workspace_dir)
 }
 
@@ -615,6 +624,7 @@ mod tests {
         next_target_host_session, remote_main_slot_program, split_qualified_target,
         target_socket_name, CurrentWorkspace,
     };
+    use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
@@ -699,12 +709,15 @@ mod tests {
             std::path::Path::new("/tmp/waitagent"),
             &workspace,
             "peer-a:shell-1",
+            &RemoteNetworkConfig::default(),
         );
 
         assert_eq!(program.program, "/tmp/waitagent");
         assert_eq!(
             program.args,
             vec![
+                "--port".to_string(),
+                "7474".to_string(),
                 "__remote-main-slot".to_string(),
                 "--socket-name".to_string(),
                 "wa-1".to_string(),
