@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08c` bind remote output into visible console rendering and validate end-to-end cross-host interaction
+- `task.t5-08c4` surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
 
 Why this is the current gate:
 
@@ -47,7 +47,7 @@ Why this is the current gate:
 - the render bootstrap, replay, and observer catch-up policy is now explicit too, so the remaining blocker is no longer transport or ownership design drift but the final visible render binding and end-to-end product validation
 - the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
 - shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
-- the remaining phase-2 product gap is now the public listener or dial product entry plus the final visible render binding and end-to-end cross-host validation on that accepted path
+- the remaining phase-2 product gap is now the final user-facing polish on that accepted path: sidebar and related activation surfaces must present connected remote node sessions clearly, and the product still needs explicit cross-host manual validation
 
 ## 3. Current Snapshot
 
@@ -83,7 +83,10 @@ Project status at a glance:
 - `task.t5-08b` is now closed in substance: `RemoteNodeSessionOwnerRuntime` now owns shared authority-session reuse per authority node, steady-state publication transport ownership, disconnect-to-offline projection, and reconnect-plus-replay behavior without dropping the local authority bridge
 - `task.t5-08c` now has stronger proof too: remote main-slot render coverage explicitly includes server-console observer scope, there is now a higher-level `RemoteMainSlotIngressRuntime` grpc-ingress-to-observer render-path combination test, and the acceptance checklist carries a dedicated phase-2 cross-host validation appendix instead of leaving end-to-end verification implicit
 - `task.t5-08c` no longer lacks a public listener or dial contract in code: every process now starts the listener on the accepted path, `--port` owns listener configuration, `--connect` owns outbound dialing, and the remaining phase-2 gap is real cross-host validation plus any last visible render-path defects found there
-- the newly explicit `task.t5-08c1` discovery gap is now closed too: inbound remote publication no longer waits for tmux publication bindings to exist first, a node-scoped discovered-target catalog feeds sidebar and remote activation immediately after connect, disconnect projects those discovered targets offline, and `waitagent ls` stays local-backend only
+- the earlier `task.t5-08c1` discovery batch landed and tested cleanly, but that publication-centric discovered-target model is now explicitly treated as superseded by the accepted `node -> sessions -> attachments` product semantics
+- `task.t5-08c2` is now closed in substance: connected nodes synchronize their current remote sessions directly into the shared catalog on the `--connect` path instead of waiting on the old publication-centric discovered-target flow
+- `task.t5-08c3` is now closed in substance: remote authority and observer traffic carry explicit `session_id` end to end, server fanout state keys off session identity, and `attachment_id` remains only the session-local observer handle
+- the current `task.t5-08c4` code step is now in place too: sidebar selection is keyed by stable target identity instead of bare `session_id`, remote rows display authority plus session in labels such as `codex@10.1.29.165:pty1`, and activation-target ordering now groups remote sessions stably by node and session
 - the dedicated server-console runtime now carries explicit focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -175,7 +178,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- validate the accepted always-on listener plus outbound dial path on real cross-host nodes, then close the remaining visible-render and interaction gaps on the local workspace and server-console surfaces
+- finish the user-facing remote closeout: keep remote sidebar selection stable across same-named sessions on different nodes, surface connected-node session rows clearly in chrome, and then run explicit cross-host manual validation on the accepted `--port` plus `--connect` path
 
 Accepted local architecture direction:
 
@@ -201,7 +204,7 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.t5-08c` Bind remote output into visible console rendering and validate end-to-end cross-host interaction
+1. `task.t5-08c4` Surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
 2. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.

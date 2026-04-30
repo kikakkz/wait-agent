@@ -28,12 +28,12 @@ impl ChromeProjectionService {
                 self.ensure_selected_target();
                 self.emit_both()
             }
-            LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged { session_id }) => {
+            LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged { target }) => {
                 self.state.selected_target = self
                     .state
                     .sessions
                     .iter()
-                    .find(|session| session.address.session_id() == session_id)
+                    .find(|session| session.address.qualified_target() == *target)
                     .map(|session| session.address.qualified_target());
                 self.emit_sidebar()
             }
@@ -283,7 +283,7 @@ mod tests {
 
         let update = service.apply_event(&LocalRuntimeEvent::Chrome(
             ChromeEvent::SidebarSelectionChanged {
-                session_id: "sess-2".to_string(),
+                target: "wa-2:sess-2".to_string(),
             },
         ));
 

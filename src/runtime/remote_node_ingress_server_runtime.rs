@@ -132,12 +132,12 @@ fn run_node_ingress_server_loop(
                     );
                 }
                 RemoteNodeTransportEvent::SessionClosed { node_id } => {
-                    let _ = publication_runtime.mark_discovered_node_offline(&node_id);
+                    let _ = publication_runtime.mark_discovered_remote_node_offline(&node_id);
                     sessions.remove(&node_id);
                 }
                 RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
                     if let Some(node_id) = node_id {
-                        let _ = publication_runtime.mark_discovered_node_offline(&node_id);
+                        let _ = publication_runtime.mark_discovered_remote_node_offline(&node_id);
                         sessions.remove(&node_id);
                     }
                 }
@@ -175,25 +175,30 @@ fn route_transport_envelope(
         Some(Body::TargetPublished(payload)) => {
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
-            publication_runtime.apply_discovered_publication_envelope(node_id, mapped)
+            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
         }
         Some(Body::TargetExited(payload)) => {
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
-            publication_runtime.apply_discovered_publication_envelope(node_id, mapped)
+            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
         }
         Some(Body::TargetOutput(payload)) => {
             let Some(session) = session else {
                 return Ok(());
             };
             let bytes_base64 = encode_base64(&payload.output_bytes);
+            let session_id = route_session_id(&envelope)
+                .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                .unwrap_or_else(|| payload.target_id.clone());
             let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
-            let target_component = sanitize_socket_component(&target_id);
+            let target_component =
+                sanitize_socket_component(&format!("remote-peer:{node_id}:{session_id}"));
             let mut stale = Vec::new();
             for (path, bridge) in &session.bridges {
                 if bridge.target_component != target_component {
                     continue;
                 }
                 if let Err(error) = bridge.transport.send_target_output(
+                    &session_id,
                     &target_id,
                     payload.output_seq,
                     known_output_stream(&payload.stream).map_err(remote_node_ingress_error)?,
@@ -317,6 +322,7 @@ fn map_authority_command_to_grpc(
                 attachment_id: Some(payload.attachment_id.clone()),
                 console_id: Some(payload.console_id.clone()),
                 console_host_id: Some(payload.console_host_id.clone()),
+                session_id: Some(payload.session_id.clone()),
             }),
             Some(Body::TargetInputDelivery(TargetInputDelivery {
                 attachment_id: payload.attachment_id,
@@ -324,6 +330,7 @@ fn map_authority_command_to_grpc(
                 console_id: payload.console_id,
                 console_host_id: payload.console_host_id,
                 input_seq: payload.input_seq,
+                session_id: payload.session_id,
                 input_bytes: decode_base64(&payload.bytes_base64).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
                 })?,
@@ -336,6 +343,7 @@ fn map_authority_command_to_grpc(
                 attachment_id: None,
                 console_id: None,
                 console_host_id: None,
+                session_id: Some(payload.session_id.clone()),
             }),
             Some(Body::ApplyPtyResize(ApplyPtyResize {
                 target_id: payload.target_id,
@@ -343,6 +351,7 @@ fn map_authority_command_to_grpc(
                 resize_authority_console_id: payload.resize_authority_console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                session_id: payload.session_id,
             })),
         ),
     };
@@ -369,6 +378,8 @@ fn map_target_published_envelope(
         timestamp: timestamp_string(envelope),
         sender_id: node_id.to_string(),
         correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| derive_session_id_from_target_id(&payload.target_id)),
         target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
         attachment_id: route_attachment_id(envelope),
         console_id: route_console_id(envelope),
@@ -399,6 +410,8 @@ fn map_target_exited_envelope(
         timestamp: timestamp_string(envelope),
         sender_id: node_id.to_string(),
         correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| derive_session_id_from_target_id(&payload.target_id)),
         target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
         attachment_id: route_attachment_id(envelope),
         console_id: route_console_id(envelope),
@@ -441,6 +454,13 @@ fn route_target_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
         .and_then(|route| route.target_id.clone())
 }
 
+fn route_session_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
+    envelope
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone())
+}
+
 fn route_attachment_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
     envelope
         .route
@@ -453,6 +473,26 @@ fn route_console_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
         .route
         .as_ref()
         .and_then(|route| route.console_id.clone())
+}
+
+fn payload_session_id(payload_session_id: &str, target_id: &str) -> Option<String> {
+    if !payload_session_id.is_empty() {
+        Some(payload_session_id.to_string())
+    } else {
+        derive_session_id_from_target_id(target_id)
+    }
+}
+
+fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
+    let mut parts = target_id.splitn(3, ':');
+    let _transport = parts.next()?;
+    let _authority = parts.next()?;
+    let session_id = parts.next()?;
+    if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id.to_string())
+    }
 }
 
 fn timestamp_string(envelope: &GrpcNodeSessionEnvelope) -> String {

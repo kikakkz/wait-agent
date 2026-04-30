@@ -43,15 +43,25 @@ The distinction is only:
 
 - local target -> tmux-backed main-slot rebinding
 - remote target -> network-backed interact runtime in the main slot
+- a connected remote node contributes one or more remote sessions into the same
+  shared catalog, starting with its current default session immediately after
+  `waitagent --connect`
 
 ## 3. Terms
 
 - `target`
   A user-selectable session-like object that appears in sidebar or footer
   chrome and can be opened in a console.
+- `session`
+  The concrete runtime object hosted by one node. In remote mode this is the
+  primary product routing identity; the current UI may still render it as a
+  target row.
 - `console`
   One interaction surface such as the local workspace main slot or a
   future server-side workspace console.
+- `attachment`
+  One console-to-session open handle. It is not a session identity and it is
+  not a transport connection.
 - `open target in console`
   Bind one console surface to one target so that the console can observe and,
   when permitted, interact with it.
@@ -144,6 +154,14 @@ The shared target catalog must support at least:
 - which console currently has PTY resize authority when PTY resize is active
   for that target
 
+Remote-session rule:
+
+- the product-facing record synchronized from a connected node is a remote
+  session, not a publication-only target stub
+- one node may contribute many remote sessions to the shared catalog
+- one fresh outbound connection must contribute the node's current default
+  session before any manual open, attach, or `new` action occurs
+
 Compatibility rule:
 
 - local tmux selectors such as `socket:session` may remain as compatibility or
@@ -169,11 +187,12 @@ The accepted resumed remote queue is:
 5. `task.t6-01`
    Implement the server-side workspace console as another target-opening
    surface that consumes the same shared catalog.
-6. `task.t5-08 -> task.t5-08c`
+6. `task.t5-08 -> task.t5-08c4`
    Close the remaining cross-host network gap by replacing local-only
-   authority ingress assumptions, centralizing live node ownership, binding
-   delivered remote output into visible console rendering, and now front-loading
-   a dedicated node-connection architecture design.
+   authority ingress assumptions, centralizing live node ownership, correcting
+   the remote shared-catalog model to `node -> sessions -> attachments`,
+   routing interaction by session, and then binding delivered remote output
+   into visible console rendering.
 
 ## 8. Anti-Goals
 

@@ -1,6 +1,6 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionTransport;
-use crate::infra::discovered_remote_target_store::DiscoveredRemoteTargetStore;
+use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
@@ -27,7 +27,7 @@ where
 pub struct DefaultTargetCatalogGateway {
     local_tmux: EmbeddedTmuxBackend,
     published_remote_targets: PublishedTargetStore,
-    discovered_remote_targets: DiscoveredRemoteTargetStore,
+    discovered_remote_sessions: DiscoveredRemoteSessionStore,
 }
 
 impl DefaultTargetCatalogGateway {
@@ -35,7 +35,7 @@ impl DefaultTargetCatalogGateway {
         Ok(Self {
             local_tmux: EmbeddedTmuxBackend::from_build_env()?,
             published_remote_targets: PublishedTargetStore::default(),
-            discovered_remote_targets: DiscoveredRemoteTargetStore::default(),
+            discovered_remote_sessions: DiscoveredRemoteSessionStore::default(),
         })
     }
 }
@@ -47,7 +47,7 @@ impl TargetCatalogGateway for DefaultTargetCatalogGateway {
         Ok(merge_targets_by_identity([
             self.local_tmux.list_sessions()?,
             self.published_remote_targets.list_targets()?,
-            self.discovered_remote_targets.list_targets()?,
+            self.discovered_remote_sessions.list_sessions()?,
         ]))
     }
 }
@@ -116,11 +116,13 @@ where
     }
 
     pub fn list_activation_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        Ok(self
+        let mut targets = self
             .list_targets()?
             .into_iter()
             .filter(is_activation_target)
-            .collect())
+            .collect::<Vec<_>>();
+        sort_targets_for_display(&mut targets);
+        Ok(targets)
     }
 
     pub fn find_target(&self, value: &str) -> Result<Option<ManagedSessionRecord>, G::Error> {
@@ -221,12 +223,39 @@ pub fn project_visible_targets(
         }
     }
 
+    sort_targets_for_display(&mut visible_targets);
     visible_targets
 }
 
 pub fn is_activation_target(target: &ManagedSessionRecord) -> bool {
     (target.address.transport() == &SessionTransport::LocalTmux && target.is_target_host())
         || target.address.transport() == &SessionTransport::RemotePeer
+}
+
+fn sort_targets_for_display(targets: &mut [ManagedSessionRecord]) {
+    targets.sort_by(|left, right| {
+        transport_sort_key(left)
+            .cmp(&transport_sort_key(right))
+            .then_with(|| {
+                left.address
+                    .authority_id()
+                    .cmp(right.address.authority_id())
+            })
+            .then_with(|| left.address.session_id().cmp(right.address.session_id()))
+            .then_with(|| {
+                left.command_name
+                    .as_deref()
+                    .unwrap_or("bash")
+                    .cmp(right.command_name.as_deref().unwrap_or("bash"))
+            })
+    });
+}
+
+fn transport_sort_key(target: &ManagedSessionRecord) -> u8 {
+    match target.address.transport() {
+        SessionTransport::LocalTmux => 0,
+        SessionTransport::RemotePeer => 1,
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +500,25 @@ mod tests {
         );
 
         assert_eq!(targets[1].command_name.as_deref(), Some("remote-codex"));
+    }
+
+    #[test]
+    fn activation_targets_sort_remote_sessions_by_node_then_session() {
+        let registry = TargetRegistryService::new(FakeGateway {
+            targets: vec![
+                remote_session("peer-b", "shell-2", "bash"),
+                remote_session("peer-a", "shell-3", "bash"),
+                remote_session("peer-a", "shell-1", "codex"),
+            ],
+        });
+
+        let targets = registry
+            .list_activation_targets()
+            .expect("activation targets should list successfully");
+
+        assert_eq!(targets[0].address.qualified_target(), "peer-a:shell-1");
+        assert_eq!(targets[1].address.qualified_target(), "peer-a:shell-3");
+        assert_eq!(targets[2].address.qualified_target(), "peer-b:shell-2");
     }
 
     fn session(

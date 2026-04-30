@@ -2,13 +2,13 @@ id: task.t5-08c
 kind: task
 version: 1
 title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
-status: in_progress
+status: superseded
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md
   why:
-    - the architecture task must first define the accepted attachment fanout and output-delivery model
-    - this slice then closes visible rendering and end-to-end validation on that accepted path
+    - this historical umbrella remains useful context, but the accepted execution path is now the bounded session-centric split `task.t5-08c2 -> task.t5-08c4`
+    - active implementation should no longer continue under one publication-centric catch-all slice
 target_task_reference: task.t5-08c
 source_of_truth:
   file: .agents/tasks/backlog.yaml
@@ -44,5 +44,5 @@ touched_paths:
   - .agents/state/task-history.yaml
   - .agents/state/last-verified.yaml
 notes:
-  - This slice closes the product path. It should not reopen planning for queue-order UX, auto-switch, or compact-layout polish.
-  - Remote networking must now converge on public `--port` and `--connect` CLI entry, not environment-variable-first startup.
+  - This umbrella is retained only as historical context after the session-centric redesign.
+  - Active work now runs through `task.t5-08c2 -> task.t5-08c4`.

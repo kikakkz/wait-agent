@@ -288,6 +288,7 @@ mod tests {
                 timestamp: "0Z".to_string(),
                 sender_id: "server".to_string(),
                 correlation_id: None,
+                session_id: Some("shell-1".to_string()),
                 target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                 attachment_id: Some("attach-1".to_string()),
                 console_id: Some("console-a".to_string()),

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct RemoteControlPlaneService {
     next_message_id: u64,
     next_attachment_id: u64,
-    target_states: HashMap<String, RemoteTargetState>,
+    session_states: HashMap<String, RemoteSessionState>,
 }
 
 impl RemoteControlPlaneService {
@@ -28,12 +28,13 @@ impl RemoteControlPlaneService {
         rows: usize,
     ) -> Result<Vec<RoutedControlPlaneMessage>, RemoteControlPlaneError> {
         validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
         let target_id = target.address.id().as_str().to_string();
         let attachment_id = {
             let state = self
-                .target_states
-                .entry(target_id.clone())
-                .or_insert_with(RemoteTargetState::new);
+                .session_states
+                .entry(session_id.clone())
+                .or_insert_with(RemoteSessionState::new);
             let existing_index = state.attachments.iter().position(|attachment| {
                 attachment.console.console_id == console.console_id
                     && attachment.console.console_host_id == console.console_host_id
@@ -48,8 +49,8 @@ impl RemoteControlPlaneService {
         };
         let (resize_epoch, authority_console_id, authority_host_id) = {
             let state = self
-                .target_states
-                .get_mut(&target_id)
+                .session_states
+                .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::MissingAuthorityState)?;
             state.last_open_ordinal += 1;
             state.pty_resize_epoch += 1;
@@ -71,10 +72,12 @@ impl RemoteControlPlaneService {
             )
         };
         let open_ok = self.server_message(
+            Some(session_id.clone()),
             Some(target_id.clone()),
             Some(attachment_id.clone()),
             Some(console.console_id.clone()),
             ControlPlanePayload::OpenTargetOk(OpenTargetOkPayload {
+                session_id: session_id.clone(),
                 target_id: target_id.clone(),
                 attachment_id: attachment_id.clone(),
                 console_id: console.console_id.clone(),
@@ -86,10 +89,12 @@ impl RemoteControlPlaneService {
             }),
         );
         let authority_changed = self.server_message(
+            Some(session_id.clone()),
             Some(target_id.clone()),
             None,
             None,
             ControlPlanePayload::ResizeAuthorityChanged(ResizeAuthorityChangedPayload {
+                session_id: session_id.clone(),
                 target_id: target_id.clone(),
                 resize_epoch,
                 resize_authority_console_id: authority_console_id.clone(),
@@ -106,7 +111,7 @@ impl RemoteControlPlaneService {
             },
             RoutedControlPlaneMessage {
                 destination: ControlPlaneDestination::AllOpenedObservers {
-                    target_id: target_id.clone(),
+                    session_id: session_id.clone(),
                 },
                 envelope: authority_changed,
             },
@@ -121,6 +126,7 @@ impl RemoteControlPlaneService {
         bytes_base64: impl Into<String>,
     ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
         validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
         let target_id = target.address.id().as_str().to_string();
         if console_seq == 0 {
             return Err(RemoteControlPlaneError::InvalidConsoleSequence);
@@ -128,8 +134,8 @@ impl RemoteControlPlaneService {
 
         let (input_seq, console_id, console_host_id) = {
             let state = self
-                .target_states
-                .get_mut(&target_id)
+                .session_states
+                .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::TargetNotOpened(target_id.clone()))?;
             let attachment = state
                 .attachments
@@ -150,11 +156,13 @@ impl RemoteControlPlaneService {
                 target.address.authority_id().to_string(),
             ),
             envelope: self.server_message(
+                Some(session_id.clone()),
                 Some(target_id.clone()),
                 Some(attachment_id.to_string()),
                 Some(console_id.clone()),
                 ControlPlanePayload::TargetInput(TargetInputPayload {
                     attachment_id: attachment_id.to_string(),
+                    session_id,
                     target_id,
                     console_id,
                     console_host_id,
@@ -173,11 +181,12 @@ impl RemoteControlPlaneService {
         rows: usize,
     ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
         validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
         let target_id = target.address.id().as_str().to_string();
         let (resize_epoch, authority_console_id) = {
             let state = self
-                .target_states
-                .get_mut(&target_id)
+                .session_states
+                .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::TargetNotOpened(target_id.clone()))?;
             let authority_attachment_id = state
                 .pty_resize_authority_attachment_id
@@ -203,10 +212,12 @@ impl RemoteControlPlaneService {
                 target.address.authority_id().to_string(),
             ),
             envelope: self.server_message(
+                Some(session_id.clone()),
                 Some(target_id.clone()),
                 Some(attachment_id.to_string()),
                 Some(authority_console_id.clone()),
                 ControlPlanePayload::ApplyResize(ApplyResizePayload {
+                    session_id,
                     target_id,
                     resize_epoch,
                     resize_authority_console_id: authority_console_id,
@@ -225,23 +236,26 @@ impl RemoteControlPlaneService {
         bytes_base64: impl Into<String>,
     ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
         validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
         let target_id = target.address.id().as_str().to_string();
         if output_seq == 0 {
             return Err(RemoteControlPlaneError::InvalidOutputSequence);
         }
-        if !self.target_states.contains_key(&target_id) {
+        if !self.session_states.contains_key(&session_id) {
             return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
         }
 
         Ok(RoutedControlPlaneMessage {
             destination: ControlPlaneDestination::AllOpenedObservers {
-                target_id: target.address.id().as_str().to_string(),
+                session_id: session_id.clone(),
             },
             envelope: self.server_message(
+                Some(session_id.clone()),
                 Some(target.address.id().as_str().to_string()),
                 None,
                 None,
                 ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                    session_id,
                     target_id: target.address.id().as_str().to_string(),
                     output_seq,
                     stream,
@@ -257,11 +271,12 @@ impl RemoteControlPlaneService {
         attachment_id: &str,
     ) -> Result<Vec<RoutedControlPlaneMessage>, RemoteControlPlaneError> {
         validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
         let target_id = target.address.id().as_str().to_string();
         let close_outcome = {
             let state = self
-                .target_states
-                .get_mut(&target_id)
+                .session_states
+                .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::TargetNotOpened(target_id.clone()))?;
             let removed_index = state
                 .attachments
@@ -300,7 +315,7 @@ impl RemoteControlPlaneService {
         match close_outcome {
             CloseOutcome::ClosedWithoutAuthorityChange { .. } => Ok(Vec::new()),
             CloseOutcome::ClosedLastAttachment { .. } => {
-                self.target_states.remove(&target_id);
+                self.session_states.remove(&session_id);
                 Ok(Vec::new())
             }
             CloseOutcome::PromotedNewAuthority {
@@ -310,10 +325,12 @@ impl RemoteControlPlaneService {
                 pty_size,
             } => {
                 let authority_changed = self.server_message(
+                    Some(session_id.clone()),
                     Some(target_id.clone()),
                     None,
                     None,
                     ControlPlanePayload::ResizeAuthorityChanged(ResizeAuthorityChangedPayload {
+                        session_id: session_id.clone(),
                         target_id: target_id.clone(),
                         resize_epoch,
                         resize_authority_console_id: next_authority.console.console_id.clone(),
@@ -326,7 +343,7 @@ impl RemoteControlPlaneService {
                 Ok(vec![
                     RoutedControlPlaneMessage {
                         destination: ControlPlaneDestination::AllOpenedObservers {
-                            target_id: target_id.clone(),
+                            session_id: session_id.clone(),
                         },
                         envelope: authority_changed,
                     },
@@ -335,6 +352,7 @@ impl RemoteControlPlaneService {
                             removed.console.console_host_id,
                         ),
                         envelope: self.server_message(
+                            Some(session_id),
                             Some(target_id),
                             Some(removed.attachment_id),
                             Some(removed.console.console_id),
@@ -366,9 +384,9 @@ impl RemoteControlPlaneService {
                         envelope: message.envelope.clone(),
                     });
                 }
-                ControlPlaneDestination::AllOpenedObservers { target_id } => {
-                    let state = self.target_states.get(target_id).ok_or_else(|| {
-                        RemoteControlPlaneError::TargetNotOpened(target_id.clone())
+                ControlPlaneDestination::AllOpenedObservers { session_id } => {
+                    let state = self.session_states.get(session_id).ok_or_else(|| {
+                        RemoteControlPlaneError::TargetNotOpened(session_id.clone())
                     })?;
                     let node_ids = state
                         .attachments
@@ -389,6 +407,7 @@ impl RemoteControlPlaneService {
 
     fn server_message(
         &mut self,
+        session_id: Option<String>,
         target_id: Option<String>,
         attachment_id: Option<String>,
         console_id: Option<String>,
@@ -402,6 +421,7 @@ impl RemoteControlPlaneService {
             timestamp: now_rfc3339_like(),
             sender_id: SERVER_SENDER_ID.to_string(),
             correlation_id: None,
+            session_id,
             target_id,
             attachment_id,
             console_id,
@@ -451,7 +471,7 @@ impl std::fmt::Display for RemoteControlPlaneError {
 impl std::error::Error for RemoteControlPlaneError {}
 
 #[derive(Debug, Clone)]
-struct RemoteTargetState {
+struct RemoteSessionState {
     input_seq: u64,
     pty_resize_epoch: u64,
     last_open_ordinal: u64,
@@ -460,7 +480,7 @@ struct RemoteTargetState {
     attachments: Vec<RemoteAttachment>,
 }
 
-impl RemoteTargetState {
+impl RemoteSessionState {
     fn new() -> Self {
         Self {
             input_seq: 0,

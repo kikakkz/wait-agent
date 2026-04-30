@@ -7,61 +7,61 @@ use crate::infra::tmux::TmuxError;
 use std::fs;
 use std::path::PathBuf;
 
-const DISCOVERED_TARGET_RECORD_VERSION: &str = "v1";
+const DISCOVERED_REMOTE_SESSION_RECORD_VERSION: &str = "v1";
 const OPTIONAL_NONE_SENTINEL: &str = "~";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredRemoteTargetStore {
+pub struct DiscoveredRemoteSessionStore {
     path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredRemoteTargetRecord {
+pub struct DiscoveredRemoteSessionRecord {
     pub node_id: String,
-    pub target: ManagedSessionRecord,
+    pub session: ManagedSessionRecord,
 }
 
-impl Default for DiscoveredRemoteTargetStore {
+impl Default for DiscoveredRemoteSessionStore {
     fn default() -> Self {
-        Self::new(default_discovered_remote_target_store_path())
+        Self::new(default_discovered_remote_session_store_path())
     }
 }
 
-impl DiscoveredRemoteTargetStore {
+impl DiscoveredRemoteSessionStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
-    pub fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
+    pub fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         Ok(self
             .list_records()?
             .into_iter()
-            .map(|record| record.target)
+            .map(|record| record.session)
             .collect())
     }
 
-    pub fn list_records(&self) -> Result<Vec<DiscoveredRemoteTargetRecord>, TmuxError> {
+    pub fn list_records(&self) -> Result<Vec<DiscoveredRemoteSessionRecord>, TmuxError> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
 
         let contents = fs::read_to_string(&self.path).map_err(|error| {
             TmuxError::new(format!(
-                "failed to read discovered remote target store {}: {error}",
+                "failed to read discovered remote session store {}: {error}",
                 self.path.display()
             ))
         })?;
         contents
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(parse_discovered_remote_target_record)
+            .map(parse_discovered_remote_session_record)
             .collect()
     }
 
     pub fn list_records_for_node(
         &self,
         node_id: &str,
-    ) -> Result<Vec<DiscoveredRemoteTargetRecord>, TmuxError> {
+    ) -> Result<Vec<DiscoveredRemoteSessionRecord>, TmuxError> {
         Ok(self
             .list_records()?
             .into_iter()
@@ -69,20 +69,20 @@ impl DiscoveredRemoteTargetStore {
             .collect())
     }
 
-    pub fn upsert_target_from_node(
+    pub fn upsert_session_from_node(
         &self,
         node_id: &str,
-        target: &ManagedSessionRecord,
+        session: &ManagedSessionRecord,
     ) -> Result<bool, TmuxError> {
-        validate_discovered_remote_target(target)?;
+        validate_discovered_remote_session(session)?;
         let mut records = self.list_records()?;
-        let updated = DiscoveredRemoteTargetRecord {
+        let updated = DiscoveredRemoteSessionRecord {
             node_id: node_id.to_string(),
-            target: target.clone(),
+            session: session.clone(),
         };
         if let Some(existing) = records.iter_mut().find(|record| {
             record.node_id == node_id
-                && record.target.address.id().as_str() == target.address.id().as_str()
+                && record.session.address.id().as_str() == session.address.id().as_str()
         }) {
             if *existing == updated {
                 return Ok(false);
@@ -95,20 +95,20 @@ impl DiscoveredRemoteTargetStore {
         Ok(true)
     }
 
-    pub fn remove_target_from_node(
+    pub fn remove_session_from_node(
         &self,
         node_id: &str,
         authority_id: &str,
         transport_session_id: &str,
     ) -> Result<bool, TmuxError> {
-        let target_id = ManagedSessionAddress::remote_peer(authority_id, transport_session_id)
+        let session_id = ManagedSessionAddress::remote_peer(authority_id, transport_session_id)
             .id()
             .as_str()
             .to_string();
         let mut records = self.list_records()?;
         let prior_len = records.len();
         records.retain(|record| {
-            !(record.node_id == node_id && record.target.address.id().as_str() == target_id)
+            !(record.node_id == node_id && record.session.address.id().as_str() == session_id)
         });
         if prior_len == records.len() {
             return Ok(false);
@@ -117,15 +117,15 @@ impl DiscoveredRemoteTargetStore {
         Ok(true)
     }
 
-    pub fn mark_node_targets_offline(&self, node_id: &str) -> Result<bool, TmuxError> {
+    pub fn mark_node_sessions_offline(&self, node_id: &str) -> Result<bool, TmuxError> {
         let mut records = self.list_records()?;
         let mut changed = false;
         for record in &mut records {
             if record.node_id != node_id {
                 continue;
             }
-            if record.target.availability != SessionAvailability::Offline {
-                record.target.availability = SessionAvailability::Offline;
+            if record.session.availability != SessionAvailability::Offline {
+                record.session.availability = SessionAvailability::Offline;
                 changed = true;
             }
         }
@@ -135,11 +135,11 @@ impl DiscoveredRemoteTargetStore {
         Ok(changed)
     }
 
-    fn write_records(&self, records: &[DiscoveredRemoteTargetRecord]) -> Result<(), TmuxError> {
+    fn write_records(&self, records: &[DiscoveredRemoteSessionRecord]) -> Result<(), TmuxError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 TmuxError::new(format!(
-                    "failed to create discovered remote target directory {}: {error}",
+                    "failed to create discovered remote session directory {}: {error}",
                     parent.display()
                 ))
             })?;
@@ -149,7 +149,7 @@ impl DiscoveredRemoteTargetStore {
         } else {
             let mut lines = records
                 .iter()
-                .map(render_discovered_remote_target_record)
+                .map(render_discovered_remote_session_record)
                 .collect::<Vec<_>>()
                 .join("\n");
             lines.push('\n');
@@ -157,60 +157,60 @@ impl DiscoveredRemoteTargetStore {
         };
         fs::write(&self.path, contents).map_err(|error| {
             TmuxError::new(format!(
-                "failed to write discovered remote target store {}: {error}",
+                "failed to write discovered remote session store {}: {error}",
                 self.path.display()
             ))
         })
     }
 }
 
-fn default_discovered_remote_target_store_path() -> PathBuf {
-    std::env::temp_dir().join("waitagent-discovered-remote-targets.tsv")
+fn default_discovered_remote_session_store_path() -> PathBuf {
+    std::env::temp_dir().join("waitagent-discovered-remote-sessions.tsv")
 }
 
-fn render_discovered_remote_target_record(record: &DiscoveredRemoteTargetRecord) -> String {
+fn render_discovered_remote_session_record(record: &DiscoveredRemoteSessionRecord) -> String {
     let current_path = record
-        .target
+        .session
         .current_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
     [
-        DISCOVERED_TARGET_RECORD_VERSION.to_string(),
+        DISCOVERED_REMOTE_SESSION_RECORD_VERSION.to_string(),
         encode_string_field(&record.node_id),
-        encode_string_field(record.target.address.authority_id()),
-        encode_string_field(record.target.address.session_id()),
-        encode_optional_string_field(record.target.selector.as_deref()),
-        record.target.availability.as_str().to_string(),
+        encode_string_field(record.session.address.authority_id()),
+        encode_string_field(record.session.address.session_id()),
+        encode_optional_string_field(record.session.selector.as_deref()),
+        record.session.availability.as_str().to_string(),
         encode_optional_string_field(
             record
-                .target
+                .session
                 .session_role
                 .as_ref()
                 .map(WorkspaceSessionRole::as_str),
         ),
-        encode_optional_string_field(record.target.workspace_key.as_deref()),
-        encode_optional_string_field(record.target.command_name.as_deref()),
+        encode_optional_string_field(record.session.workspace_key.as_deref()),
+        encode_optional_string_field(record.session.command_name.as_deref()),
         encode_optional_string_field(current_path.as_deref()),
-        record.target.attached_clients.to_string(),
-        record.target.window_count.to_string(),
+        record.session.attached_clients.to_string(),
+        record.session.window_count.to_string(),
     ]
     .join("\t")
 }
 
-fn parse_discovered_remote_target_record(
+fn parse_discovered_remote_session_record(
     line: &str,
-) -> Result<DiscoveredRemoteTargetRecord, TmuxError> {
+) -> Result<DiscoveredRemoteSessionRecord, TmuxError> {
     let parts = line.split('\t').collect::<Vec<_>>();
     if parts.len() != 12 {
         return Err(TmuxError::new(format!(
-            "discovered remote target record version `{}` must contain 12 tab-separated fields, got {}",
-            DISCOVERED_TARGET_RECORD_VERSION,
+            "discovered remote session record version `{}` must contain 12 tab-separated fields, got {}",
+            DISCOVERED_REMOTE_SESSION_RECORD_VERSION,
             parts.len()
         )));
     }
-    if parts[0] != DISCOVERED_TARGET_RECORD_VERSION {
+    if parts[0] != DISCOVERED_REMOTE_SESSION_RECORD_VERSION {
         return Err(TmuxError::new(format!(
-            "unsupported discovered remote target record version `{}`",
+            "unsupported discovered remote session record version `{}`",
             parts[0]
         )));
     }
@@ -221,7 +221,7 @@ fn parse_discovered_remote_target_record(
     let selector = decode_optional_string_field(parts[4])?;
     let availability = SessionAvailability::parse(parts[5]).ok_or_else(|| {
         TmuxError::new(format!(
-            "unsupported discovered remote target availability `{}`",
+            "unsupported discovered remote session availability `{}`",
             parts[5]
         ))
     })?;
@@ -233,20 +233,20 @@ fn parse_discovered_remote_target_record(
     let current_path = decode_optional_string_field(parts[9])?.map(PathBuf::from);
     let attached_clients = parts[10].parse::<usize>().map_err(|error| {
         TmuxError::new(format!(
-            "invalid discovered remote target attached client count `{}`: {error}",
+            "invalid discovered remote session attached client count `{}`: {error}",
             parts[10]
         ))
     })?;
     let window_count = parts[11].parse::<usize>().map_err(|error| {
         TmuxError::new(format!(
-            "invalid discovered remote target window count `{}`: {error}",
+            "invalid discovered remote session window count `{}`: {error}",
             parts[11]
         ))
     })?;
 
-    Ok(DiscoveredRemoteTargetRecord {
+    Ok(DiscoveredRemoteSessionRecord {
         node_id,
-        target: ManagedSessionRecord {
+        session: ManagedSessionRecord {
             address: ManagedSessionAddress::remote_peer(authority_id, transport_session_id),
             selector,
             availability,
@@ -263,11 +263,12 @@ fn parse_discovered_remote_target_record(
     })
 }
 
-fn validate_discovered_remote_target(target: &ManagedSessionRecord) -> Result<(), TmuxError> {
-    if target.address.transport() != &crate::domain::session_catalog::SessionTransport::RemotePeer {
+fn validate_discovered_remote_session(session: &ManagedSessionRecord) -> Result<(), TmuxError> {
+    if session.address.transport() != &crate::domain::session_catalog::SessionTransport::RemotePeer
+    {
         return Err(TmuxError::new(format!(
-            "discovered target `{}` is not a remote-peer target",
-            target.address.id().as_str()
+            "discovered session `{}` is not a remote-peer session",
+            session.address.id().as_str()
         )));
     }
     Ok(())
@@ -282,7 +283,7 @@ fn decode_string_field(value: &str) -> Result<String, TmuxError> {
         .map_err(|error| TmuxError::new(format!("invalid base64 field `{value}`: {error}")))?;
     String::from_utf8(decoded).map_err(|error| {
         TmuxError::new(format!(
-            "discovered target field is not valid UTF-8: {error}"
+            "discovered remote session field is not valid UTF-8: {error}"
         ))
     })
 }
@@ -302,7 +303,7 @@ fn decode_optional_string_field(value: &str) -> Result<Option<String>, TmuxError
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveredRemoteTargetStore, SessionAvailability};
+    use super::{DiscoveredRemoteSessionStore, SessionAvailability};
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
@@ -310,18 +311,18 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn discovered_remote_target_store_round_trips_node_records() {
+    fn discovered_remote_session_store_round_trips_node_records() {
         let path = test_store_path("round-trip");
-        let store = DiscoveredRemoteTargetStore::new(&path);
+        let store = DiscoveredRemoteSessionStore::new(&path);
         store
-            .upsert_target_from_node("peer-a", &remote_target("peer-a", "shell-1"))
-            .expect("target should store");
+            .upsert_session_from_node("peer-a", &remote_session("peer-a", "shell-1"))
+            .expect("session should store");
 
         let stored = store.list_records().expect("records should load");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].node_id, "peer-a");
         assert_eq!(
-            stored[0].target.address.qualified_target(),
+            stored[0].session.address.qualified_target(),
             "peer-a:shell-1"
         );
 
@@ -329,15 +330,15 @@ mod tests {
     }
 
     #[test]
-    fn discovered_remote_target_store_marks_node_targets_offline() {
+    fn discovered_remote_session_store_marks_node_sessions_offline() {
         let path = test_store_path("offline");
-        let store = DiscoveredRemoteTargetStore::new(&path);
+        let store = DiscoveredRemoteSessionStore::new(&path);
         store
-            .upsert_target_from_node("peer-a", &remote_target("peer-a", "shell-1"))
-            .expect("target should store");
+            .upsert_session_from_node("peer-a", &remote_session("peer-a", "shell-1"))
+            .expect("session should store");
 
         let changed = store
-            .mark_node_targets_offline("peer-a")
+            .mark_node_sessions_offline("peer-a")
             .expect("offline mark should succeed");
 
         assert!(changed);
@@ -347,35 +348,35 @@ mod tests {
             .into_iter()
             .next()
             .expect("record should remain present");
-        assert_eq!(record.target.availability, SessionAvailability::Offline);
+        assert_eq!(record.session.availability, SessionAvailability::Offline);
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn discovered_remote_target_store_removes_only_matching_node_target() {
+    fn discovered_remote_session_store_removes_only_matching_node_session() {
         let path = test_store_path("remove");
-        let store = DiscoveredRemoteTargetStore::new(&path);
+        let store = DiscoveredRemoteSessionStore::new(&path);
         store
-            .upsert_target_from_node("peer-a", &remote_target("peer-a", "shell-1"))
-            .expect("first target should store");
+            .upsert_session_from_node("peer-a", &remote_session("peer-a", "shell-1"))
+            .expect("first session should store");
         store
-            .upsert_target_from_node("peer-b", &remote_target("peer-b", "shell-1"))
-            .expect("second target should store");
+            .upsert_session_from_node("peer-b", &remote_session("peer-b", "shell-1"))
+            .expect("second session should store");
 
         let changed = store
-            .remove_target_from_node("peer-a", "peer-a", "shell-1")
-            .expect("target should remove");
+            .remove_session_from_node("peer-a", "peer-a", "shell-1")
+            .expect("session should remove");
 
         assert!(changed);
-        let remaining = store.list_targets().expect("targets should load");
+        let remaining = store.list_sessions().expect("sessions should load");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].address.qualified_target(), "peer-b:shell-1");
 
         let _ = std::fs::remove_file(path);
     }
 
-    fn remote_target(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
+    fn remote_session(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::remote_peer(authority_id, session_id),
             selector: Some(format!("wa-{authority_id}:{session_id}")),
@@ -394,7 +395,7 @@ mod tests {
 
     fn test_store_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "waitagent-discovered-remote-target-store-{name}-{}-{}.tsv",
+            "waitagent-discovered-remote-session-store-{name}-{}-{}.tsv",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

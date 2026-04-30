@@ -37,7 +37,7 @@ pub enum SessionCatalogEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChromeEvent {
     SidebarSelectionChanged {
-        session_id: String,
+        target: String,
     },
     SurfaceResized {
         surface: ChromeSurface,

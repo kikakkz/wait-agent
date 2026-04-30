@@ -1,7 +1,25 @@
 kind: state
 version: 1
-last_updated_from: task.t5-08c1 node-level remote discovery catalog wiring refreshed on 2026-04-30
+last_updated_from: task.t5-08c3 session-scoped remote routing refreshed on 2026-04-30
 checks:
+  - id: t5-08c4-cargo-test-sidebar-remote-node-labeling
+    command: cargo test after changing sidebar selection to use stable qualified target identity, updating remote session display labels to include authority plus session, and sorting activation targets so remote sessions stay grouped by node in user-facing lists
+    status: pass
+  - id: t5-08c3-cargo-test-full-suite-session-routing
+    command: cargo test after introducing explicit `session_id` routing across the remote protocol, control-plane state, grpc ingress or egress bridges, and local authority transport helpers while keeping `target_id` only as the qualified catalog identity
+    status: pass
+  - id: t5-08c3-cargo-build-session-routing
+    command: cargo build after adding explicit `session_id` fields to the remote protocol and grpc route context, keying remote control-plane fanout by session state, and updating local plus grpc bridge runtimes accordingly
+    status: pass
+  - id: t5-08c2-cargo-test-runtime-starts-and-publishes-local-sessions
+    command: cargo test remote_node_session_sync_runtime -- --nocapture after adding an always-on outbound remote session sync runtime on the `--connect` path and covering its startup publication behavior with a focused test
+    status: pass
+  - id: t5-08c2-cargo-build-session-centric-catalog
+    command: cargo build after replacing the discovered remote target store with a discovered remote session store, rewiring shared-catalog consumption to session semantics, and renaming ingress or runtime discovered-node handlers accordingly
+    status: pass
+  - id: t5-08c2-cargo-test-session-centric-catalog
+    command: cargo test after updating the server-side discovered remote catalog path from publication-centric target semantics to session-centric node-owned remote session records and starting outbound local-session synchronization on the `--connect` path
+    status: pass
   - id: t5-08c1-cargo-test-full-suite-node-discovery
     command: cargo test after adding a node-scoped discovered-remote-target catalog, wiring grpc ingress publication events into that catalog, keeping remote disconnect as offline projection, and restoring `waitagent ls` to local-backend semantics
     status: pass

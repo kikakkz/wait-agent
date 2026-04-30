@@ -32,6 +32,7 @@ pub struct ProtocolEnvelope<P> {
     pub timestamp: String,
     pub sender_id: String,
     pub correlation_id: Option<String>,
+    pub session_id: Option<String>,
     pub target_id: Option<String>,
     pub attachment_id: Option<String>,
     pub console_id: Option<String>,
@@ -88,6 +89,7 @@ pub struct ServerHelloPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenTargetOkPayload {
+    pub session_id: String,
     pub target_id: String,
     pub attachment_id: String,
     pub console_id: String,
@@ -100,6 +102,7 @@ pub struct OpenTargetOkPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenTargetRejectedPayload {
+    pub session_id: String,
     pub target_id: String,
     pub console_id: String,
     pub code: &'static str,
@@ -108,6 +111,7 @@ pub struct OpenTargetRejectedPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResizeAuthorityChangedPayload {
+    pub session_id: String,
     pub target_id: String,
     pub resize_epoch: u64,
     pub resize_authority_console_id: String,
@@ -119,6 +123,7 @@ pub struct ResizeAuthorityChangedPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetInputPayload {
     pub attachment_id: String,
+    pub session_id: String,
     pub target_id: String,
     pub console_id: String,
     pub console_host_id: String,
@@ -128,6 +133,7 @@ pub struct TargetInputPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetOutputPayload {
+    pub session_id: String,
     pub target_id: String,
     pub output_seq: u64,
     pub stream: &'static str,
@@ -136,6 +142,7 @@ pub struct TargetOutputPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyResizePayload {
+    pub session_id: String,
     pub target_id: String,
     pub resize_epoch: u64,
     pub resize_authority_console_id: String,
@@ -181,7 +188,7 @@ pub struct RemoteConsoleDescriptor {
 pub enum ControlPlaneDestination {
     ObserverNode(String),
     AuthorityNode(String),
-    AllOpenedObservers { target_id: String },
+    AllOpenedObservers { session_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

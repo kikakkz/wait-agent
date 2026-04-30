@@ -48,8 +48,8 @@ The accepted outcome is:
 - server-originated command interactions are displayed on the remote client in
   the same semantic shape as the local path, and remote terminal-app
   interactions map back to the server without a separate degraded UX contract
-- target publication, disconnect, and reconnect behavior stay owned by
-  explicit runtimes rather than ad hoc helper lifecycles
+- remote session synchronization, disconnect, and reconnect behavior stay owned
+  by explicit runtimes rather than ad hoc helper lifecycles
 
 ## 3. Non-Negotiable Rules
 
@@ -93,6 +93,9 @@ Not yet complete for the phase outcome:
   helper boundaries
 - remote output delivery is routed, but the final visible render path and
   end-to-end cross-host validation are not yet closed
+- the most recent implementation batch also proved that a publication-centric
+  discovered-target model is not the accepted product end state, so the
+  remaining work is now explicitly session-centric
 
 Design baseline now fixed before implementation resumes:
 
@@ -111,7 +114,14 @@ The accepted remaining order is:
 2. `task.t5-08b`
    Centralize live node-session ownership, registration, and reconnect or
    disconnect handling behind one accepted runtime boundary.
-3. `task.t5-08c`
+3. `task.t5-08c2`
+   Synchronize connected remote node sessions into the shared catalog so a
+   connected node contributes its default session immediately and later session
+   lifecycle changes follow the same catalog model.
+4. `task.t5-08c3`
+   Route remote control-plane traffic by session and demote attachment to
+   observer scope.
+5. `task.t5-08c4`
    Bind delivered remote output into visible console presentation and validate
    end-to-end cross-host open, input, output, and resize behavior.
 

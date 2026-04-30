@@ -5,6 +5,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteObserverSnapshot {
+    pub session_id: Option<String>,
     pub target_id: Option<String>,
     pub attachment_id: Option<String>,
     pub console_id: Option<String>,
@@ -25,6 +26,7 @@ impl RemoteObserverSnapshot {
 pub struct RemoteObserverRuntime {
     mailbox: LocalNodeMailbox,
     processed_envelopes: usize,
+    session_id: Option<String>,
     target_id: Option<String>,
     attachment_id: Option<String>,
     console_id: Option<String>,
@@ -41,6 +43,7 @@ impl RemoteObserverRuntime {
         Self {
             mailbox,
             processed_envelopes: 0,
+            session_id: None,
             target_id: None,
             attachment_id: None,
             console_id: None,
@@ -64,6 +67,7 @@ impl RemoteObserverRuntime {
 
     pub fn snapshot(&self) -> RemoteObserverSnapshot {
         RemoteObserverSnapshot {
+            session_id: self.session_id.clone(),
             target_id: self.target_id.clone(),
             attachment_id: self.attachment_id.clone(),
             console_id: self.console_id.clone(),
@@ -82,6 +86,7 @@ impl RemoteObserverRuntime {
     ) -> Result<(), RemoteObserverRuntimeError> {
         match &envelope.payload {
             ControlPlanePayload::OpenTargetOk(payload) => {
+                self.session_id = Some(payload.session_id.clone());
                 self.target_id = Some(payload.target_id.clone());
                 self.attachment_id = Some(payload.attachment_id.clone());
                 self.console_id = Some(payload.console_id.clone());
@@ -93,6 +98,7 @@ impl RemoteObserverRuntime {
                 Ok(())
             }
             ControlPlanePayload::ResizeAuthorityChanged(payload) => {
+                self.session_id = Some(payload.session_id.clone());
                 self.target_id = Some(payload.target_id.clone());
                 self.resize_epoch = Some(payload.resize_epoch);
                 self.resize_authority_console_id =
@@ -124,6 +130,7 @@ impl RemoteObserverRuntime {
                 payload.target_id
             ))
         })?;
+        self.session_id = Some(payload.session_id.clone());
         self.target_id = Some(payload.target_id.clone());
         self.terminal.feed(&decoded);
         self.last_output_seq = Some(payload.output_seq);

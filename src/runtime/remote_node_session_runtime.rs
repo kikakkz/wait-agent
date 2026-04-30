@@ -135,6 +135,7 @@ impl RemoteNodeSessionRuntime {
 
     pub fn send_target_output(
         &self,
+        session_id: &str,
         target_id: &str,
         output_seq: u64,
         stream: &'static str,
@@ -142,9 +143,11 @@ impl RemoteNodeSessionRuntime {
     ) -> Result<(), RemoteNodeSessionError> {
         self.send_payload(
             NodeSessionChannel::Authority,
+            session_id,
             target_id,
             "authority-msg",
             ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                session_id: session_id.to_string(),
                 target_id: target_id.to_string(),
                 output_seq,
                 stream,
@@ -164,6 +167,7 @@ impl RemoteNodeSessionRuntime {
             .map(|path| path.to_string_lossy().into_owned());
         self.send_payload(
             NodeSessionChannel::Publication,
+            target.address.session_id(),
             target.address.id().as_str(),
             "publication-msg",
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
@@ -192,6 +196,7 @@ impl RemoteNodeSessionRuntime {
         let target_id = format!("remote-peer:{}:{transport_session_id}", self.node_id);
         self.send_payload(
             NodeSessionChannel::Publication,
+            transport_session_id,
             &target_id,
             "publication-msg",
             ControlPlanePayload::TargetExited(TargetExitedPayload {
@@ -220,6 +225,7 @@ impl RemoteNodeSessionRuntime {
                 window_count,
             } => self.send_payload(
                 NodeSessionChannel::Publication,
+                transport_session_id,
                 &format!("remote-peer:{authority_id}:{transport_session_id}"),
                 "publication-msg",
                 ControlPlanePayload::TargetPublished(TargetPublishedPayload {
@@ -241,6 +247,7 @@ impl RemoteNodeSessionRuntime {
                 source_session_name,
             } => self.send_payload(
                 NodeSessionChannel::Publication,
+                transport_session_id,
                 &format!("remote-peer:{authority_id}:{transport_session_id}"),
                 "publication-msg",
                 ControlPlanePayload::TargetExited(TargetExitedPayload {
@@ -300,6 +307,7 @@ impl RemoteNodeSessionRuntime {
     fn send_payload(
         &self,
         channel: NodeSessionChannel,
+        session_id: &str,
         target_id: &str,
         message_scope: &str,
         payload: ControlPlanePayload,
@@ -316,6 +324,7 @@ impl RemoteNodeSessionRuntime {
             timestamp: now_rfc3339_like(),
             sender_id: self.node_id.clone(),
             correlation_id: None,
+            session_id: Some(session_id.to_string()),
             target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: None,
@@ -457,10 +466,16 @@ fn recv_local_authority_command(
 fn map_inbound_grpc_authority_event(
     envelope: GrpcNodeSessionEnvelope,
 ) -> Option<GrpcAuthorityEvent> {
+    let route_session_id = route_session_id(&envelope);
     match envelope.body {
         Some(GrpcBody::TargetInputDelivery(payload)) => Some(GrpcAuthorityEvent::Command(
             RemoteAuthorityCommand::TargetInput(TargetInputPayload {
                 attachment_id: payload.attachment_id,
+                session_id: grpc_session_id(
+                    route_session_id,
+                    &payload.session_id,
+                    &payload.target_id,
+                ),
                 target_id: payload.target_id,
                 console_id: payload.console_id,
                 console_host_id: payload.console_host_id,
@@ -470,6 +485,11 @@ fn map_inbound_grpc_authority_event(
         )),
         Some(GrpcBody::ApplyPtyResize(payload)) => Some(GrpcAuthorityEvent::Command(
             RemoteAuthorityCommand::ApplyResize(ApplyResizePayload {
+                session_id: grpc_session_id(
+                    route_session_id,
+                    &payload.session_id,
+                    &payload.target_id,
+                ),
                 target_id: payload.target_id,
                 resize_epoch: payload.resize_epoch,
                 resize_authority_console_id: payload.resize_authority_console_id,
@@ -499,6 +519,7 @@ fn map_outbound_grpc_envelope(
             ControlPlanePayload::TargetInput(payload) => Some(payload.console_host_id.clone()),
             _ => None,
         },
+        session_id: envelope.session_id.clone(),
     });
     let body = match (&channel, &envelope.payload) {
         (NodeSessionChannel::Authority, ControlPlanePayload::TargetOutput(payload)) => {
@@ -506,6 +527,7 @@ fn map_outbound_grpc_envelope(
                 target_id: payload.target_id.clone(),
                 output_seq: payload.output_seq,
                 stream: payload.stream.to_string(),
+                session_id: payload.session_id.clone(),
                 output_bytes: decode_base64(&payload.bytes_base64)
                     .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
             }))
@@ -517,6 +539,7 @@ fn map_outbound_grpc_envelope(
                 console_id: payload.console_id.clone(),
                 console_host_id: payload.console_host_id.clone(),
                 input_seq: payload.input_seq,
+                session_id: payload.session_id.clone(),
                 input_bytes: decode_base64(&payload.bytes_base64)
                     .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
             }))
@@ -528,6 +551,7 @@ fn map_outbound_grpc_envelope(
                 resize_authority_console_id: payload.resize_authority_console_id.clone(),
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                session_id: payload.session_id.clone(),
             }))
         }
         (NodeSessionChannel::Publication, ControlPlanePayload::TargetPublished(payload)) => {
@@ -571,6 +595,43 @@ fn map_outbound_grpc_envelope(
         route,
         body: Some(body),
     })
+}
+
+fn route_session_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
+    envelope
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone())
+}
+
+fn grpc_session_id(
+    route_session_id: Option<String>,
+    payload_session_id: &str,
+    target_id: &str,
+) -> String {
+    route_session_id
+        .filter(|session_id| !session_id.is_empty())
+        .or_else(|| {
+            if payload_session_id.is_empty() {
+                None
+            } else {
+                Some(payload_session_id.to_string())
+            }
+        })
+        .or_else(|| derive_session_id_from_target_id(target_id))
+        .unwrap_or_else(|| target_id.to_string())
+}
+
+fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
+    let mut parts = target_id.splitn(3, ':');
+    let _transport = parts.next()?;
+    let _authority = parts.next()?;
+    let session_id = parts.next()?;
+    if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id.to_string())
+    }
 }
 
 pub fn spawn_remote_node_session_listener(
@@ -812,11 +873,13 @@ mod tests {
                     timestamp: "1Z".to_string(),
                     sender_id: "observer".to_string(),
                     correlation_id: None,
+                    session_id: Some("shell-1".to_string()),
                     target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                     attachment_id: Some("att-1".to_string()),
                     console_id: Some("console-1".to_string()),
                     payload: ControlPlanePayload::TargetInput(TargetInputPayload {
                         attachment_id: "att-1".to_string(),
+                        session_id: "shell-1".to_string(),
                         target_id: "remote-peer:peer-a:shell-1".to_string(),
                         console_id: "console-1".to_string(),
                         console_host_id: "wa-local".to_string(),
@@ -906,7 +969,7 @@ mod tests {
         }
 
         session
-            .send_target_output("remote-peer:peer-a:shell-1", 7, "pty", "YQ==")
+            .send_target_output("shell-1", "remote-peer:peer-a:shell-1", 7, "pty", "YQ==")
             .expect("target output should send through grpc node session");
         let authority_event = event_rx
             .recv_timeout(TEST_TIMEOUT)
@@ -935,11 +998,13 @@ mod tests {
                         timestamp: "1Z".to_string(),
                         sender_id: "server".to_string(),
                         correlation_id: None,
+                        session_id: Some("shell-1".to_string()),
                         target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                         attachment_id: Some("attach-1".to_string()),
                         console_id: Some("console-1".to_string()),
                         payload: ControlPlanePayload::TargetInput(TargetInputPayload {
                             attachment_id: "attach-1".to_string(),
+                            session_id: "shell-1".to_string(),
                             target_id: "remote-peer:peer-a:shell-1".to_string(),
                             console_id: "console-1".to_string(),
                             console_host_id: "host-1".to_string(),

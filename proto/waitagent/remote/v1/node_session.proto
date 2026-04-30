@@ -50,6 +50,7 @@ message RouteContext {
   optional string attachment_id = 3;
   optional string console_id = 4;
   optional string console_host_id = 5;
+  optional string session_id = 6;
 }
 
 message ProtocolVersion {
@@ -156,6 +157,7 @@ message OpenTargetAccepted {
   string availability = 4;
   uint64 resize_epoch = 5;
   string resize_authority_console_id = 6;
+  string session_id = 7;
 }
 
 message OpenTargetRejected {
@@ -163,6 +165,7 @@ message OpenTargetRejected {
   string console_id = 2;
   string reason = 3;
   google.rpc.Status status = 4;
+  string session_id = 5;
 }
 
 message CloseTargetRequest {
@@ -176,6 +179,7 @@ message ConsoleInput {
   string console_id = 3;
   uint64 console_seq = 4;
   bytes input_bytes = 5;
+  string session_id = 6;
 }
 
 message TargetInputDelivery {
@@ -185,6 +189,7 @@ message TargetInputDelivery {
   string console_host_id = 4;
   uint64 input_seq = 5;
   bytes input_bytes = 6;
+  string session_id = 7;
 }
 
 message PtyResizeRequest {
@@ -194,6 +199,7 @@ message PtyResizeRequest {
   uint32 cols = 4;
   uint32 rows = 5;
   uint64 resize_epoch = 6;
+  string session_id = 7;
 }
 
 message ApplyPtyResize {
@@ -202,6 +208,7 @@ message ApplyPtyResize {
   string resize_authority_console_id = 3;
   uint32 cols = 4;
   uint32 rows = 5;
+  string session_id = 6;
 }
 
 message PtyResizeApplied {
@@ -209,6 +216,7 @@ message PtyResizeApplied {
   uint64 resize_epoch = 2;
   uint32 cols = 3;
   uint32 rows = 4;
+  string session_id = 5;
 }
 
 message TargetOutput {
@@ -216,4 +224,5 @@ message TargetOutput {
   uint64 output_seq = 2;
   string stream = 3;
   bytes output_bytes = 4;
+  string session_id = 5;
 }

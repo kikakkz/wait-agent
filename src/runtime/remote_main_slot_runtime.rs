@@ -54,6 +54,7 @@ impl RemoteControlPlaneSink for UnconfiguredRemoteControlPlaneSink {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteAttachmentBinding {
+    pub session_id: String,
     pub target_id: String,
     pub attachment_id: String,
     pub console_id: String,
@@ -194,6 +195,7 @@ fn extract_open_binding(messages: &[RoutedControlPlaneMessage]) -> Option<Remote
         .iter()
         .find_map(|message| match &message.envelope.payload {
             ControlPlanePayload::OpenTargetOk(payload) => Some(RemoteAttachmentBinding {
+                session_id: payload.session_id.clone(),
                 target_id: payload.target_id.clone(),
                 attachment_id: payload.attachment_id.clone(),
                 console_id: payload.console_id.clone(),
@@ -238,6 +240,7 @@ mod tests {
         assert_eq!(
             binding,
             RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),

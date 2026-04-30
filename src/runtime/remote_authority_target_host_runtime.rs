@@ -332,6 +332,7 @@ where
                     output_seq += 1;
                     if let Err(error) = transport
                         .send_target_output(
+                            &command.target_session_name,
                             &command.target_id,
                             output_seq,
                             "pty",
@@ -1053,11 +1054,13 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
+            session_id: Some("target-1".to_string()),
             target_id: Some("remote-peer:peer-a:target-1".to_string()),
             attachment_id: Some("attach-1".to_string()),
             console_id: Some("console-a".to_string()),
             payload: ControlPlanePayload::TargetInput(TargetInputPayload {
                 attachment_id: "attach-1".to_string(),
+                session_id: "target-1".to_string(),
                 target_id: "remote-peer:peer-a:target-1".to_string(),
                 console_id: "console-a".to_string(),
                 console_host_id: "observer-a".to_string(),
@@ -1075,10 +1078,12 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
+            session_id: Some("target-1".to_string()),
             target_id: Some("remote-peer:peer-a:target-1".to_string()),
             attachment_id: Some("attach-1".to_string()),
             console_id: Some("console-a".to_string()),
             payload: ControlPlanePayload::ApplyResize(ApplyResizePayload {
+                session_id: "target-1".to_string(),
                 target_id: "remote-peer:peer-a:target-1".to_string(),
                 resize_epoch: 2,
                 resize_authority_console_id: "console-a".to_string(),

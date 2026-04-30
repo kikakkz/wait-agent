@@ -42,6 +42,10 @@ impl RemoteNetworkConfig {
         self.advertised_listener_addr().to_string()
     }
 
+    pub fn advertised_node_id(&self) -> String {
+        self.advertised_listener_addr().ip().to_string()
+    }
+
     pub fn connect_endpoint_uri(&self) -> Option<String> {
         self.connect.as_ref().map(|connect| {
             if connect.contains("://") {

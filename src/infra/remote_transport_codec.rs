@@ -41,6 +41,7 @@ pub fn write_control_plane_envelope(
     write_string(writer, &envelope.timestamp)?;
     write_string(writer, &envelope.sender_id)?;
     write_optional_string(writer, envelope.correlation_id.as_deref())?;
+    write_optional_string(writer, envelope.session_id.as_deref())?;
     write_optional_string(writer, envelope.target_id.as_deref())?;
     write_optional_string(writer, envelope.attachment_id.as_deref())?;
     write_optional_string(writer, envelope.console_id.as_deref())?;
@@ -65,6 +66,7 @@ pub fn read_control_plane_envelope(
     let timestamp = read_string(reader)?;
     let sender_id = read_string(reader)?;
     let correlation_id = read_optional_string(reader)?;
+    let session_id = read_optional_string(reader)?;
     let target_id = read_optional_string(reader)?;
     let attachment_id = read_optional_string(reader)?;
     let console_id = read_optional_string(reader)?;
@@ -78,6 +80,7 @@ pub fn read_control_plane_envelope(
         timestamp,
         sender_id,
         correlation_id,
+        session_id,
         target_id,
         attachment_id,
         console_id,
@@ -140,6 +143,7 @@ fn write_payload(
         }
         ControlPlanePayload::OpenTargetOk(payload) => {
             write_u8(writer, 3)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.attachment_id)?;
             write_string(writer, &payload.console_id)?;
@@ -151,6 +155,7 @@ fn write_payload(
         }
         ControlPlanePayload::OpenTargetRejected(payload) => {
             write_u8(writer, 4)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.console_id)?;
             write_static_string(writer, payload.code)?;
@@ -158,6 +163,7 @@ fn write_payload(
         }
         ControlPlanePayload::ResizeAuthorityChanged(payload) => {
             write_u8(writer, 5)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.resize_epoch)?;
             write_string(writer, &payload.resize_authority_console_id)?;
@@ -168,6 +174,7 @@ fn write_payload(
         ControlPlanePayload::TargetInput(payload) => {
             write_u8(writer, 6)?;
             write_string(writer, &payload.attachment_id)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_string(writer, &payload.console_id)?;
             write_string(writer, &payload.console_host_id)?;
@@ -176,6 +183,7 @@ fn write_payload(
         }
         ControlPlanePayload::TargetOutput(payload) => {
             write_u8(writer, 7)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.output_seq)?;
             write_static_string(writer, payload.stream)?;
@@ -183,6 +191,7 @@ fn write_payload(
         }
         ControlPlanePayload::ApplyResize(payload) => {
             write_u8(writer, 8)?;
+            write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.resize_epoch)?;
             write_string(writer, &payload.resize_authority_console_id)?;
@@ -231,6 +240,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             session_recovery_policy: read_known_static_string(reader)?,
         }),
         3 => ControlPlanePayload::OpenTargetOk(OpenTargetOkPayload {
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             attachment_id: read_string(reader)?,
             console_id: read_string(reader)?,
@@ -241,12 +251,14 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             initial_snapshot: read_optional_string(reader)?,
         }),
         4 => ControlPlanePayload::OpenTargetRejected(OpenTargetRejectedPayload {
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             console_id: read_string(reader)?,
             code: read_known_static_string(reader)?,
             message: read_string(reader)?,
         }),
         5 => ControlPlanePayload::ResizeAuthorityChanged(ResizeAuthorityChangedPayload {
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,
             resize_authority_console_id: read_string(reader)?,
@@ -256,6 +268,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
         }),
         6 => ControlPlanePayload::TargetInput(TargetInputPayload {
             attachment_id: read_string(reader)?,
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             console_id: read_string(reader)?,
             console_host_id: read_string(reader)?,
@@ -263,12 +276,14 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             bytes_base64: read_string(reader)?,
         }),
         7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             output_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
             bytes_base64: read_string(reader)?,
         }),
         8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
+            session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,
             resize_authority_console_id: read_string(reader)?,
@@ -530,10 +545,12 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: Some("corr-1".to_string()),
+            session_id: Some("shell-1".to_string()),
             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
             attachment_id: None,
             console_id: None,
             payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq: 7,
                 stream: "pty",
@@ -558,6 +575,7 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: None,
+            session_id: Some("shell-1".to_string()),
             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
             attachment_id: None,
             console_id: None,
@@ -594,6 +612,7 @@ mod tests {
                 timestamp: "2026-04-28T00:00:00Z".to_string(),
                 sender_id: "peer-a".to_string(),
                 correlation_id: None,
+                session_id: Some("shell-1".to_string()),
                 target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                 attachment_id: None,
                 console_id: None,

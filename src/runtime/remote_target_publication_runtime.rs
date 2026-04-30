@@ -10,7 +10,7 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::base64::{decode_base64, encode_base64};
-use crate::infra::discovered_remote_target_store::DiscoveredRemoteTargetStore;
+use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
 use crate::infra::published_target_store::{PublishedTargetSourceBinding, PublishedTargetStore};
 use crate::infra::remote_protocol::{
     ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, TargetPublishedPayload,
@@ -122,7 +122,7 @@ struct PublicationOwnerSnapshot {
 #[derive(Clone)]
 pub struct RemoteTargetPublicationRuntime {
     store: PublishedTargetStore,
-    discovered_store: DiscoveredRemoteTargetStore,
+    discovered_store: DiscoveredRemoteSessionStore,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
     network: RemoteNetworkConfig,
@@ -138,7 +138,7 @@ impl RemoteTargetPublicationRuntime {
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
             store: PublishedTargetStore::default(),
-            discovered_store: DiscoveredRemoteTargetStore::default(),
+            discovered_store: DiscoveredRemoteSessionStore::default(),
             local_tmux: EmbeddedTmuxBackend::from_build_env()
                 .map_err(remote_target_publication_error)?,
             current_executable: std::env::current_exe().map_err(|error| {
@@ -210,21 +210,22 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    pub fn apply_discovered_publication_envelope(
+    pub fn apply_discovered_remote_session_envelope(
         &self,
         node_id: &str,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
         let changed =
-            apply_discovered_publication_envelope(&self.discovered_store, node_id, &envelope)?;
+            apply_discovered_remote_session_envelope(&self.discovered_store, node_id, &envelope)?;
         if changed {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
         Ok(())
     }
 
-    pub fn mark_discovered_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
-        let changed = mark_discovered_node_offline_in_store(&self.discovered_store, node_id)?;
+    pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+        let changed =
+            mark_discovered_remote_node_offline_in_store(&self.discovered_store, node_id)?;
         if changed {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
@@ -1790,23 +1791,24 @@ fn apply_publication_envelope(
     }
 }
 
-fn apply_discovered_publication_envelope(
-    store: &DiscoveredRemoteTargetStore,
+fn apply_discovered_remote_session_envelope(
+    store: &DiscoveredRemoteSessionStore,
     node_id: &str,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<bool, LifecycleError> {
     match &envelope.payload {
         ControlPlanePayload::TargetPublished(payload) => {
-            let target = published_remote_target_record_from_payload(&envelope.sender_id, payload)?;
+            let session =
+                published_remote_target_record_from_payload(&envelope.sender_id, payload)?;
             store
-                .upsert_target_from_node(node_id, &target)
+                .upsert_session_from_node(node_id, &session)
                 .map_err(remote_target_publication_error)
         }
         ControlPlanePayload::TargetExited(payload) => store
-            .remove_target_from_node(node_id, &envelope.sender_id, &payload.transport_session_id)
+            .remove_session_from_node(node_id, &envelope.sender_id, &payload.transport_session_id)
             .map_err(remote_target_publication_error),
         other => Err(LifecycleError::Protocol(format!(
-            "unexpected discovered remote target payload `{}`",
+            "unexpected discovered remote session payload `{}`",
             other.message_type()
         ))),
     }
@@ -1835,12 +1837,12 @@ fn mark_target_offline_in_store(
     Ok(changed)
 }
 
-fn mark_discovered_node_offline_in_store(
-    store: &DiscoveredRemoteTargetStore,
+fn mark_discovered_remote_node_offline_in_store(
+    store: &DiscoveredRemoteSessionStore,
     node_id: &str,
 ) -> Result<bool, LifecycleError> {
     store
-        .mark_node_targets_offline(node_id)
+        .mark_node_sessions_offline(node_id)
         .map_err(remote_target_publication_error)
 }
 
@@ -1880,8 +1882,8 @@ fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_discovered_publication_envelope, chrome_refresh_socket_args,
-        mark_discovered_node_offline_in_store, mark_target_offline_in_store,
+        apply_discovered_remote_session_envelope, chrome_refresh_socket_args,
+        mark_discovered_remote_node_offline_in_store, mark_target_offline_in_store,
         parse_publication_agent_command, parse_publication_sender_command,
         publication_socket_hook_tmux_command, published_remote_target_from_local,
         published_remote_target_record_from_payload, remote_target_publication_agent_args,
@@ -1896,7 +1898,7 @@ mod tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use crate::infra::discovered_remote_target_store::DiscoveredRemoteTargetStore;
+    use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
     use crate::infra::remote_protocol::{
         ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
     };
@@ -2164,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_publication_envelope_upserts_remote_target_for_node() {
+    fn discovered_publication_envelope_upserts_remote_session_for_node() {
         let store_path = std::env::temp_dir().join(format!(
             "waitagent-discovered-publication-test-{}-{}.txt",
             std::process::id(),
@@ -2173,9 +2175,9 @@ mod tests {
                 .expect("system clock should be after unix epoch")
                 .as_nanos()
         ));
-        let store = DiscoveredRemoteTargetStore::new(&store_path);
+        let store = DiscoveredRemoteSessionStore::new(&store_path);
 
-        let changed = apply_discovered_publication_envelope(
+        let changed = apply_discovered_remote_session_envelope(
             &store,
             "peer-a",
             &ProtocolEnvelope {
@@ -2185,6 +2187,7 @@ mod tests {
                 timestamp: "0Z".to_string(),
                 sender_id: "peer-a".to_string(),
                 correlation_id: None,
+                session_id: Some("shell-1".to_string()),
                 target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                 attachment_id: None,
                 console_id: None,
@@ -2211,8 +2214,8 @@ mod tests {
             .into_iter()
             .next()
             .expect("record should exist");
-        assert_eq!(record.target.address.qualified_target(), "peer-a:shell-1");
-        assert_eq!(record.target.command_name.as_deref(), Some("codex"));
+        assert_eq!(record.session.address.qualified_target(), "peer-a:shell-1");
+        assert_eq!(record.session.command_name.as_deref(), Some("codex"));
 
         let _ = std::fs::remove_file(store_path);
     }
@@ -2227,8 +2230,8 @@ mod tests {
                 .expect("system clock should be after unix epoch")
                 .as_nanos()
         ));
-        let store = DiscoveredRemoteTargetStore::new(&store_path);
-        let target = ManagedSessionRecord {
+        let store = DiscoveredRemoteSessionStore::new(&store_path);
+        let session = ManagedSessionRecord {
             address: ManagedSessionAddress::remote_peer("peer-a", "shell-1"),
             selector: Some("wa-peer-a:shell-1".to_string()),
             availability: SessionAvailability::Online,
@@ -2243,11 +2246,11 @@ mod tests {
             task_state: ManagedSessionTaskState::Unknown,
         };
         store
-            .upsert_target_from_node("peer-a", &target)
-            .expect("target should store");
+            .upsert_session_from_node("peer-a", &session)
+            .expect("session should store");
 
-        let changed =
-            mark_discovered_node_offline_in_store(&store, "peer-a").expect("offline should apply");
+        let changed = mark_discovered_remote_node_offline_in_store(&store, "peer-a")
+            .expect("offline should apply");
 
         assert!(changed);
         let record = store
@@ -2256,7 +2259,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("record should remain");
-        assert_eq!(record.target.availability, SessionAvailability::Offline);
+        assert_eq!(record.session.availability, SessionAvailability::Offline);
 
         let _ = std::fs::remove_file(store_path);
     }

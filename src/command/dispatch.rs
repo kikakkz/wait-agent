@@ -8,6 +8,9 @@ use crate::runtime::remote_node_ingress_server_runtime::{
     RemoteNodeIngressServerGuard, RemoteNodeIngressServerRuntime,
 };
 use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
+use crate::runtime::remote_node_session_sync_runtime::{
+    RemoteNodeSessionSyncGuard, RemoteNodeSessionSyncRuntime,
+};
 use crate::runtime::remote_server_console_runtime::RemoteServerConsoleRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
@@ -25,6 +28,7 @@ pub struct CommandDispatcher {
     remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime,
     remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime,
     _remote_node_ingress_server_guard: Option<RemoteNodeIngressServerGuard>,
+    _remote_node_session_sync_guard: Option<RemoteNodeSessionSyncGuard>,
     remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
     remote_server_console_runtime: RemoteServerConsoleRuntime,
     remote_target_publication_runtime: RemoteTargetPublicationRuntime,
@@ -44,6 +48,15 @@ impl CommandDispatcher {
         } else {
             None
         };
+        let remote_node_session_sync_guard =
+            if command_owns_remote_session_sync(command) && network.connect.is_some() {
+                Some(
+                    RemoteNodeSessionSyncRuntime::from_build_env_with_network(network.clone())?
+                        .start()?,
+                )
+            } else {
+                None
+            };
         Ok(Self {
             workspace_runtime: WorkspaceCommandRuntime::from_build_env_with_network(
                 network.clone(),
@@ -56,6 +69,7 @@ impl CommandDispatcher {
             remote_main_slot_ingress_runtime:
                 RemoteMainSlotIngressRuntime::from_build_env_with_network(network.clone())?,
             _remote_node_ingress_server_guard: remote_node_ingress_server_guard,
+            _remote_node_session_sync_guard: remote_node_session_sync_guard,
             remote_node_session_owner_runtime:
                 RemoteNodeSessionOwnerRuntime::from_build_env_with_network(network.clone())?,
             remote_server_console_runtime: RemoteServerConsoleRuntime::from_build_env_with_network(
@@ -225,4 +239,8 @@ fn command_owns_process_listener(command: &Command) -> bool {
             | Command::ChromeRefreshSignal(_)
             | Command::ChromeRefreshAll
     )
+}
+
+fn command_owns_remote_session_sync(command: &Command) -> bool {
+    matches!(command, Command::Workspace | Command::Attach(_))
 }

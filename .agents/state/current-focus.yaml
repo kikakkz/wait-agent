@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c
-focus_statement: cross-host ingress, shared node-session ownership, public `--port` or `--connect` networking, and node-level remote target discovery are now in place; active work inside `task.t5-08c` is reduced to real cross-host validation plus any remaining visible render or interaction defects found there
+current_task: task.t5-08c4
+focus_statement: connected-node remote session synchronization and session-scoped control-plane routing are now in place; active work now moves to surfacing node-owned remote sessions clearly in sidebar and closing the real cross-host interaction validation loop
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

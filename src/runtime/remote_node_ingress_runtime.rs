@@ -301,6 +301,8 @@ fn map_target_published_envelope(
         timestamp: timestamp_string(envelope),
         sender_id: node_id.to_string(),
         correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| derive_session_id_from_target_id(&payload.target_id)),
         target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
         attachment_id: route_attachment_id(envelope),
         console_id: route_console_id(envelope),
@@ -331,6 +333,8 @@ fn map_target_exited_envelope(
         timestamp: timestamp_string(envelope),
         sender_id: node_id.to_string(),
         correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| derive_session_id_from_target_id(&payload.target_id)),
         target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
         attachment_id: route_attachment_id(envelope),
         console_id: route_console_id(envelope),
@@ -353,10 +357,14 @@ fn map_target_output_envelope(
         timestamp: timestamp_string(envelope),
         sender_id: node_id.to_string(),
         correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
         target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
         attachment_id: route_attachment_id(envelope),
         console_id: route_console_id(envelope),
         payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+            session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                .unwrap_or_else(|| payload.target_id.clone()),
             target_id: payload.target_id.clone(),
             output_seq: payload.output_seq,
             stream: known_output_stream(&payload.stream)?,
@@ -393,6 +401,7 @@ fn map_outbound_control_plane_envelope(
             ControlPlanePayload::TargetInput(payload) => Some(payload.console_host_id.clone()),
             _ => None,
         },
+        session_id: envelope.session_id.clone(),
     });
     let body = match envelope.payload {
         ControlPlanePayload::TargetInput(payload) => {
@@ -402,6 +411,7 @@ fn map_outbound_control_plane_envelope(
                 console_id: payload.console_id,
                 console_host_id: payload.console_host_id,
                 input_seq: payload.input_seq,
+                session_id: payload.session_id,
                 input_bytes: decode_base64(&payload.bytes_base64).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
                 })?,
@@ -413,6 +423,7 @@ fn map_outbound_control_plane_envelope(
             resize_authority_console_id: payload.resize_authority_console_id,
             cols: payload.cols as u32,
             rows: payload.rows as u32,
+            session_id: payload.session_id,
         })),
         _ => None,
     };
@@ -475,6 +486,13 @@ fn route_target_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
         .and_then(|route| route.target_id.clone())
 }
 
+fn route_session_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
+    envelope
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone())
+}
+
 fn route_attachment_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
     envelope
         .route
@@ -487,6 +505,26 @@ fn route_console_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
         .route
         .as_ref()
         .and_then(|route| route.console_id.clone())
+}
+
+fn grpc_payload_session_id(payload_session_id: &str, target_id: &str) -> Option<String> {
+    if !payload_session_id.is_empty() {
+        Some(payload_session_id.to_string())
+    } else {
+        derive_session_id_from_target_id(target_id)
+    }
+}
+
+fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
+    let mut parts = target_id.splitn(3, ':');
+    let _transport = parts.next()?;
+    let _authority = parts.next()?;
+    let session_id = parts.next()?;
+    if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id.to_string())
+    }
 }
 
 fn timestamp_string(envelope: &GrpcNodeSessionEnvelope) -> String {
@@ -614,11 +652,13 @@ mod tests {
                             timestamp: "1Z".to_string(),
                             sender_id: "server".to_string(),
                             correlation_id: None,
+                            session_id: Some("shell-1".to_string()),
                             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                             attachment_id: Some("attach-1".to_string()),
                             console_id: Some("console-1".to_string()),
                             payload: ControlPlanePayload::TargetInput(TargetInputPayload {
                                 attachment_id: "attach-1".to_string(),
+                                session_id: "shell-1".to_string(),
                                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                                 console_id: "console-1".to_string(),
                                 console_host_id: "host-1".to_string(),
@@ -706,11 +746,13 @@ mod tests {
                 attachment_id: None,
                 console_id: None,
                 console_host_id: None,
+                session_id: Some("shell-1".to_string()),
             }),
             body: Some(Body::TargetOutput(TargetOutput {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq: 7,
                 stream: "pty".to_string(),
+                session_id: "shell-1".to_string(),
                 output_bytes: b"a".to_vec(),
             })),
         }

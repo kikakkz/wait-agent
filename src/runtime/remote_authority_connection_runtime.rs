@@ -771,10 +771,12 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: None,
+            session_id: Some("shell-1".to_string()),
             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
             attachment_id: None,
             console_id: None,
             payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq,
                 stream: "pty",

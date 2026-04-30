@@ -304,11 +304,13 @@ mod tests {
                 attachment_id: None,
                 console_id: None,
                 console_host_id: None,
+                session_id: Some("shell-1".to_string()),
             }),
             body: Some(Body::TargetOutput(TargetOutput {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq: 7,
                 stream: "pty".to_string(),
+                session_id: "shell-1".to_string(),
                 output_bytes: b"a".to_vec(),
             })),
         }

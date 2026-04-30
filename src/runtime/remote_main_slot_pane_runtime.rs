@@ -1108,6 +1108,7 @@ mod tests {
         let lines = placeholder_lines(
             &remote_target(),
             &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
@@ -1132,6 +1133,7 @@ mod tests {
         let lines = placeholder_lines(
             &remote_target(),
             &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
@@ -1303,6 +1305,7 @@ mod tests {
             },
             RemoteAuthorityCommand::ApplyResize(
                 crate::infra::remote_protocol::ApplyResizePayload {
+                    session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     resize_epoch: 1,
                     resize_authority_console_id: "console-a".to_string(),
@@ -1328,6 +1331,7 @@ mod tests {
             RemoteAuthorityCommand::TargetInput(
                 crate::infra::remote_protocol::TargetInputPayload {
                     attachment_id: "attach-1".to_string(),
+                    session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     console_id: "console-a".to_string(),
                     console_host_id: "observer-a".to_string(),
@@ -1346,10 +1350,12 @@ mod tests {
                 timestamp: "2026-04-28T00:00:00Z".to_string(),
                 sender_id: "peer-a".to_string(),
                 correlation_id: None,
+                session_id: Some("shell-1".to_string()),
                 target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                 attachment_id: None,
                 console_id: None,
                 payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                    session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     output_seq: 1,
                     stream: "pty",
@@ -1456,10 +1462,12 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: None,
+            session_id: Some("shell-1".to_string()),
             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
             attachment_id: None,
             console_id: None,
             payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq,
                 stream: "pty",

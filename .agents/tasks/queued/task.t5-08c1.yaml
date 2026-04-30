@@ -2,7 +2,7 @@ id: task.t5-08c1
 kind: task
 version: 1
 title: land node-level remote target discovery into the shared catalog
-status: done
+status: superseded
 priority: high
 design_ref:
   doc: docs/remote-node-connection-architecture.md
@@ -45,5 +45,5 @@ touched_paths:
   - .agents/state/task-history.yaml
   - .agents/state/last-verified.yaml
 notes:
-  - This slice closes the discovery gap inside `task.t5-08c`; it does not reopen auto-switch, queue UX, or transport redesign.
-  - Socket-bound publication bindings remain for local publication ownership and route coordination, not for first discovery of remote targets on a connected node.
+  - This slice landed and tested cleanly, but its publication-centric discovered-target model is no longer the accepted end state.
+  - The current remote redesign replaces this with connected-node session synchronization under `task.t5-08c2`.

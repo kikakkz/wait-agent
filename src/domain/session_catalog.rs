@@ -268,7 +268,7 @@ impl ManagedSessionRecord {
         format!(
             "{}@{}",
             self.command_name.as_deref().unwrap_or("bash"),
-            self.address.display_location()
+            self.display_scope()
         )
     }
 
@@ -283,6 +283,17 @@ impl ManagedSessionRecord {
                 "detached"
             }
         )
+    }
+
+    fn display_scope(&self) -> String {
+        match self.address.transport() {
+            SessionTransport::LocalTmux => "local".to_string(),
+            SessionTransport::RemotePeer => format!(
+                "{}:{}",
+                self.address.authority_id(),
+                self.address.display_session_id()
+            ),
+        }
     }
 }
 
@@ -381,6 +392,26 @@ mod tests {
         };
 
         assert_eq!(record.display_label(), "codex@local");
+    }
+
+    #[test]
+    fn remote_session_display_label_includes_authority_and_session() {
+        let record = ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("10.1.29.165", "pty1"),
+            selector: Some("10.1.29.165:pty1".to_string()),
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("codex".to_string()),
+            current_path: None,
+            task_state: ManagedSessionTaskState::Running,
+        };
+
+        assert_eq!(record.display_label(), "codex@10.1.29.165:pty1");
     }
 
     #[test]

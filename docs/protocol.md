@@ -22,7 +22,7 @@ It complements:
 ## 2. Scope
 
 This protocol covers only `server <-> client node` communication for remote
-target publication, open, input, output, and PTY-control traffic.
+session synchronization, open, input, output, and PTY-control traffic.
 
 It does not change the accepted local product path:
 
@@ -74,14 +74,14 @@ base64 PTY payloads, or ad hoc framed sockets as the primary cross-host path.
 1. The PTY owner stays remote.
    The server never pretends to own a remote PTY locally.
 2. The protocol is app-agnostic.
-   It carries terminal bytes, resize intent, publication state, and attachment
-   control. It must not depend on recognizing Codex, shell, editor, or other
-   TUI-specific semantic events.
+   It carries terminal bytes, resize intent, remote-session state, and
+   attachment control. It must not depend on recognizing Codex, shell, editor,
+   or other TUI-specific semantic events.
 3. Remote and local parity is terminal parity.
    The user should observe the same visible command, output, resize, and prompt
    behavior. The transport boundary may add latency, but it must not create a
    second interaction model.
-4. One node session multiplexes many logical targets.
+4. One node session multiplexes many logical remote sessions.
    WaitAgent must not open one production transport connection per target or
    per observer pane.
 5. Input is shared and ordered by the server.
@@ -180,6 +180,7 @@ message RouteContext {
   optional string attachment_id = 3;
   optional string console_id = 4;
   optional string console_host_id = 5;
+  optional string session_id = 6;
 }
 ```
 
@@ -192,6 +193,17 @@ Rules:
   socket names or pane ids
 - message payloads use protobuf `bytes` for terminal data; no base64 wrapper is
   used in gRPC mode
+
+Identifier rule:
+
+- `authority_node_id` identifies the connected node that owns the transport
+- `session_id` is the stable routing identity for one remote session under the
+  connected node
+- `target_id` remains the catalog and UI identity for that session, derived as
+  a qualified remote target such as `remote-peer:<node_id>:<session_id>`
+- `attachment_id` identifies one console attachment under that session and is
+  not itself a routing identity
+- `console_id` identifies the observer or interaction surface
 
 ## 8. Handshake And Session Control
 
@@ -266,9 +278,10 @@ status rather than an in-band envelope.
 
 ## 9. Message Families
 
-### 9.1 Publication Messages
+### 9.1 Remote Session Synchronization Messages
 
-Authority nodes publish and withdraw targets through:
+Authority nodes synchronize remote-session presence through the compatibility
+message names:
 
 - `TargetPublished`
 - `TargetExited`
@@ -285,9 +298,12 @@ Accepted `TargetPublished` fields:
 
 Rules:
 
-- the authority node is the only writer of authoritative target-host metadata
+- in protocol `v1`, these historical message names carry remote-session
+  synchronization rather than a product-level publication abstraction
+- the authority node is the only writer of authoritative remote-session
+  metadata
 - repeated `TargetPublished` messages replace the current replicated metadata
-  for that `target_id`
+  for that session identity
 - `selector` is compatibility metadata, not the primary identity key
 
 ### 9.2 Observer Attachment Messages

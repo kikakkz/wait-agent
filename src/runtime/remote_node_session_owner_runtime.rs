@@ -970,6 +970,7 @@ fn forward_host_output_to_session(
         match envelope.payload {
             ControlPlanePayload::TargetOutput(payload) => {
                 session.send_target_output(
+                    &payload.session_id,
                     &payload.target_id,
                     payload.output_seq,
                     payload.stream,
@@ -1001,6 +1002,7 @@ fn forward_host_output_to_shared_session(
                 };
                 if session
                     .send_target_output(
+                        &payload.session_id,
                         &payload.target_id,
                         payload.output_seq,
                         payload.stream,
@@ -1029,6 +1031,10 @@ fn forward_host_output_to_shared_session(
 fn authority_command_envelope(
     command: RemoteAuthorityCommand,
 ) -> ProtocolEnvelope<ControlPlanePayload> {
+    let session_id = match &command {
+        RemoteAuthorityCommand::TargetInput(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
+    };
     let payload = match command {
         RemoteAuthorityCommand::TargetInput(payload) => ControlPlanePayload::TargetInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
@@ -1040,6 +1046,7 @@ fn authority_command_envelope(
         timestamp: now_rfc3339_like(),
         sender_id: "waitagent-live-authority-owner".to_string(),
         correlation_id: None,
+        session_id,
         target_id: None,
         attachment_id: None,
         console_id: None,
@@ -1546,6 +1553,11 @@ mod tests {
     ) -> ProtocolEnvelope<ControlPlanePayload> {
         let payload = ControlPlanePayload::TargetInput(TargetInputPayload {
             attachment_id: attachment_id.to_string(),
+            session_id: target_id
+                .splitn(3, ':')
+                .nth(2)
+                .unwrap_or(target_id)
+                .to_string(),
             target_id: target_id.to_string(),
             console_id: console_id.to_string(),
             console_host_id: "host-a".to_string(),
@@ -1559,6 +1571,13 @@ mod tests {
             timestamp: "1Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
+            session_id: Some(
+                target_id
+                    .splitn(3, ':')
+                    .nth(2)
+                    .unwrap_or(target_id)
+                    .to_string(),
+            ),
             target_id: Some(target_id.to_string()),
             attachment_id: Some(attachment_id.to_string()),
             console_id: Some(console_id.to_string()),
@@ -1572,6 +1591,11 @@ mod tests {
         rows: usize,
     ) -> ProtocolEnvelope<ControlPlanePayload> {
         let payload = ControlPlanePayload::ApplyResize(ApplyResizePayload {
+            session_id: target_id
+                .splitn(3, ':')
+                .nth(2)
+                .unwrap_or(target_id)
+                .to_string(),
             target_id: target_id.to_string(),
             resize_epoch: 1,
             resize_authority_console_id: "console-b".to_string(),
@@ -1585,6 +1609,13 @@ mod tests {
             timestamp: "1Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
+            session_id: Some(
+                target_id
+                    .splitn(3, ':')
+                    .nth(2)
+                    .unwrap_or(target_id)
+                    .to_string(),
+            ),
             target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: Some("console-b".to_string()),

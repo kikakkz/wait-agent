@@ -9,16 +9,16 @@ design_ref:
   why:
     - after shared-catalog synchronization and session-scoped routing are corrected, the product still needs the visible sidebar and end-to-end proof to match the accepted remote-session UX
     - this slice closes the user-facing contract that one node can expose many sessions and those sessions behave like local ones except for the transport boundary
+target_task_reference: task.t5-08c
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08c4.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t5-08c3.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
-  - primitive.agents-self-maintenance
 done_criteria:
   - sidebar and related activation surfaces render synchronized remote sessions under their connected node semantics, including rows such as `codex@10.1.29.165:pty1`
   - remote open, input, output, and resize behavior work end to end on the accepted session-centric path without auto-switch or FIFO queue regressions
@@ -34,8 +34,8 @@ touched_paths:
   - docs/execution-status-board.md
   - docs/local-acceptance-checklist.md
   - .agents/tasks/backlog.yaml
-  - .agents/tasks/current.yaml
   - .agents/tasks/queued/task.t5-08c4.yaml
   - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
 notes:
   - This slice closes the product path. It should not reopen compact-layout polish unless validation proves it blocks the network MVP.

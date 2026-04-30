@@ -29,7 +29,7 @@ It complements:
 The accepted production model is:
 
 - one long-lived node-scoped connection per remote authority node
-- many logical target interactions multiplexed over that node connection
+- many logical remote sessions multiplexed over that node connection
 - many console attachments fan out from server-owned target state, not from
   duplicated transport sockets
 - remote interaction must preserve the same visible command, output, resize,
@@ -43,7 +43,7 @@ This means:
   target-scoped Unix socket listeners
 
 The transport session belongs to the node.
-Targets and attachments are logical state carried over that session.
+Remote sessions and attachments are logical state carried over that session.
 
 User-experience rule:
 
@@ -142,8 +142,8 @@ Other runtimes send commands to it through bounded async channels.
 WaitAgent already has the right logical shape in protocol terms:
 
 - authority traffic
-- publication traffic
-- target identity
+- remote-session catalog synchronization traffic
+- session identity
 - attachment identity
 - console identity
 
@@ -159,6 +159,10 @@ One primary bidirectional streaming RPC should carry:
 - `TargetPublished`
 - `TargetExited`
 - heartbeat and reconnect metadata
+
+In protocol `v1`, `TargetPublished` and `TargetExited` remain compatibility
+wire names, but their product meaning is remote-session synchronization rather
+than publication-centric target discovery.
 
 This means WaitAgent does not need a second transport socket per target, and
 it does not need a hand-rolled framing layer for production transport.
@@ -179,7 +183,7 @@ The contract must define:
 - one primary bidirectional streaming RPC for steady-state node traffic
 - typed messages for authority traffic, publication traffic, heartbeat, and
   reconnect metadata
-- stable identifiers for `node_id`, `target_id`, `attachment_id`, and
+- stable identifiers for `node_id`, session identity, `attachment_id`, and
   `console_id`
 
 The accepted service shape is:
@@ -192,6 +196,9 @@ The accepted message strategy is:
 - use protobuf `oneof` for transport message variants
 - keep transport-level message types explicit instead of passing opaque blobs
 - preserve existing domain semantics, but re-express them as protobuf schema
+- keep `node_id` as transport identity, `session_id` as logical routing
+  identity inside that node session, and `attachment_id` as a session-local
+  observer handle rather than a transport key
 
 This contract is not optional polish.
 It is the boundary that fixes the application protocol before more transport

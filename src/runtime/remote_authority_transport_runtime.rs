@@ -83,12 +83,14 @@ impl RemoteAuthorityTransportRuntime {
 
     pub fn send_target_output(
         &self,
+        session_id: &str,
         target_id: &str,
         output_seq: u64,
         stream: &'static str,
         bytes_base64: impl Into<String>,
     ) -> Result<(), RemoteAuthorityTransportError> {
         let payload = ControlPlanePayload::TargetOutput(TargetOutputPayload {
+            session_id: session_id.to_string(),
             target_id: target_id.to_string(),
             output_seq,
             stream,
@@ -105,6 +107,7 @@ impl RemoteAuthorityTransportRuntime {
             timestamp: now_rfc3339_like(),
             sender_id: self.node_id.clone(),
             correlation_id: None,
+            session_id: Some(session_id.to_string()),
             target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: None,
@@ -359,6 +362,7 @@ mod tests {
                 .expect("target input should decode"),
             RemoteAuthorityCommand::TargetInput(TargetInputPayload {
                 attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 console_id: "console-a".to_string(),
                 console_host_id: "observer-a".to_string(),
@@ -368,7 +372,7 @@ mod tests {
         );
 
         transport
-            .send_target_output("remote-peer:peer-a:shell-1", 11, "pty", "Yg==")
+            .send_target_output("shell-1", "remote-peer:peer-a:shell-1", 11, "pty", "Yg==")
             .expect("target output should send");
         match rx
             .recv_timeout(Duration::from_secs(1))
@@ -405,11 +409,13 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
+            session_id: Some("shell-1".to_string()),
             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
             attachment_id: Some("attach-1".to_string()),
             console_id: Some("console-a".to_string()),
             payload: ControlPlanePayload::TargetInput(TargetInputPayload {
                 attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 console_id: "console-a".to_string(),
                 console_host_id: "observer-a".to_string(),

@@ -171,11 +171,20 @@ next:
     title: centralize live node-session ownership and remote registration lifecycle
     status: done
   - id: task.t5-08c
-    title: bind remote output into visible console rendering and validate end-to-end cross-host interaction
-    status: in_progress
+    title: original remote phase-completion umbrella superseded by bounded session-centric slices
+    status: superseded
   - id: task.t5-08c1
-    title: land node-level remote target discovery into the shared catalog
+    title: landed node-level remote target discovery slice later superseded by session-centric catalog synchronization
+    status: superseded
+  - id: task.t5-08c2
+    title: synchronize connected remote node sessions into the shared catalog
     status: done
+  - id: task.t5-08c3
+    title: route remote control-plane traffic by session and demote attachment to observer scope
+    status: done
+  - id: task.t5-08c4
+    title: surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
+    status: in_progress
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred
@@ -219,6 +228,7 @@ notes:
   - 2026-04-27 update: `task.t5-06c` is complete enough to close after current consumers were rerouted through a dedicated target-registry service, so active work now moves to `task.t5-07`, the first real remote transport-routing slice.
   - 2026-04-29 refinement: the original `task.t6-01` umbrella was first split into bounded slices and later corrected again when the planned auto-switch slice was cancelled in favor of a manual-only attention policy lock.
   - 2026-04-30 refinement: `task.t5-07`, `task.t6-01e`, and `task.t5-08a1` closed the current control-plane, server-console-planning, and protocol-contract gaps; implementation remains deliberately paused behind the remaining design slices `task.t5-08a2 -> task.t5-08a3` before `task.t5-08a -> task.t5-08c` resumes.
+  - 2026-04-30 correction: the previously landed `task.t5-08c1` discovered-target slice is no longer the accepted end state because the remote product model is `node -> sessions -> attachments`, so active work is now re-split into `task.t5-08c2 -> task.t5-08c4`.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

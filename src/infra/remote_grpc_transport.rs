@@ -110,6 +110,22 @@ impl RemoteNodeSessionHandle {
             .send(envelope)
             .map_err(|_| RemoteNodeTransportError::new("remote node session is no longer open"))
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        node_id: impl Into<String>,
+        session_instance_id: impl Into<String>,
+    ) -> (Self, tokio_mpsc::UnboundedReceiver<NodeSessionEnvelope>) {
+        let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
+        (
+            Self {
+                node_id: node_id.into(),
+                session_instance_id: session_instance_id.into(),
+                outbound_tx,
+            },
+            outbound_rx,
+        )
+    }
 }
 
 impl GrpcRemoteNodeTransportGuard {

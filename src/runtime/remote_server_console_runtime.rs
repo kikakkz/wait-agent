@@ -733,7 +733,10 @@ mod tests {
         state.reconcile_targets(&targets);
 
         assert_eq!(state.selected_index(&targets), Some(1));
-        assert_eq!(state.focused_target_label(&targets), "bash@remote:target");
+        assert_eq!(
+            state.focused_target_label(&targets),
+            "bash@peer-a:shell-1:target"
+        );
     }
 
     #[test]
@@ -753,7 +756,7 @@ mod tests {
     fn activation_target_line_shows_task_state_without_queue_metadata() {
         let line = activation_target_line(&confirm_target("peer-b", "shell-2"), false, 120);
 
-        assert!(line.contains("bash@remote:target"));
+        assert!(line.contains("bash@peer-b:shell-2:target"));
         assert!(!line.contains("q1"));
         assert!(!line.contains("next"));
     }

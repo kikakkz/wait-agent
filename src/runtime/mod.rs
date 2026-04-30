@@ -15,6 +15,7 @@ pub mod remote_node_ingress_runtime;
 pub mod remote_node_ingress_server_runtime;
 pub mod remote_node_session_owner_runtime;
 pub mod remote_node_session_runtime;
+pub mod remote_node_session_sync_runtime;
 pub mod remote_node_transport_runtime;
 pub mod remote_observer_runtime;
 pub mod remote_server_console_runtime;

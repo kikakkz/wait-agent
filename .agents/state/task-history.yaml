@@ -1,6 +1,42 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08c4
+    status: in_progress
+    summary: session-scoped remote control-plane routing is now explicit across protocol, local control-plane state, grpc ingress, and authority bridges; sidebar selection now keys off stable target identity instead of bare `session_id`, remote rows show authority plus session in display labels, and activation ordering groups remote sessions by node while the remaining gap is still explicit cross-host validation
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c3
+    status: done
+    summary: remote authority and observer traffic now carry explicit `session_id` end to end, server fanout state is keyed by session instead of publication-centric target ownership, `attachment_id` remains only the session-local observer handle, and grpc plus local control-plane bridges preserve `target_id` only as the catalog-facing qualified remote target identity
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c3.yaml
+      reference: status
+  - task_id: task.t5-08c3
+    status: in_progress
+    summary: after fixing the remote shared catalog to synchronize node-owned sessions directly, active work now moves to tightening the routing contract so transport stays keyed by node while authority and observer messages route by session and attachment remains only a session-local observer handle
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c2
+    status: done
+    summary: connected nodes now synchronize local tmux sessions directly into the shared remote catalog through an always-on outbound session-sync runtime on the `--connect` path, session create or update or exit deltas replace the old publication-centric discovered-target flow, and the server continues to project disconnect as remote-session offline instead of silent removal
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c2.yaml
+      reference: status
+  - task_id: task.t5-08c2
+    status: in_progress
+    summary: the active remote correction slice now replaces publication-centric discovered-target thinking with a session-centric shared-catalog model where connected nodes synchronize remote sessions directly and attachment remains only a session-local observer handle
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c1
+    status: superseded
+    summary: the earlier discovered-target catalog slice landed and tested cleanly, but it is no longer the accepted end state because the product model is `node -> sessions -> attachments` rather than publication-centric remote targets
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
   - task_id: task.t5-08c1
     status: done
     summary: inbound remote `target_published` and `target_exited` envelopes now land in a node-scoped discovered-target catalog instead of waiting for tmux publication bindings to exist first, workspace sidebar and remote activation consume that shared catalog immediately after connect, disconnect projects those discovered targets offline, and `waitagent ls` stays local-backend only
