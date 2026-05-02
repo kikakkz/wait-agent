@@ -10,6 +10,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::Builder;
@@ -333,11 +334,22 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     .expect("std listener should convert into tokio listener");
                 let incoming = TcpListenerStream::new(listener);
                 let failure_tx = event_tx.clone();
-                let service = TransportNodeSessionService { event_tx };
+                let session_shutdowns = Arc::new(Mutex::new(Vec::new()));
+                let shutdown_registry = session_shutdowns.clone();
+                let service = TransportNodeSessionService {
+                    event_tx,
+                    session_shutdowns,
+                };
                 let server = Server::builder()
                     .add_service(NodeSessionServiceServer::new(service))
                     .serve_with_incoming_shutdown(incoming, async move {
                         let _ = shutdown_rx.await;
+                        let mut guard = shutdown_registry.lock().expect(
+                            "grpc inbound session shutdown registry mutex should not be poisoned",
+                        );
+                        for shutdown in guard.drain(..) {
+                            let _ = shutdown.send(());
+                        }
                     });
                 if let Err(error) = server.await {
                     let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -373,6 +385,7 @@ impl std::error::Error for RemoteNodeTransportError {}
 
 struct TransportNodeSessionService {
     event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
+    session_shutdowns: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
 }
 
 type NodeSessionResponseStream =
@@ -406,6 +419,11 @@ impl NodeSessionService for TransportNodeSessionService {
 
         let session_instance_id = format!("server-session-{}", now_millis());
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
+        let (session_shutdown_tx, session_shutdown_rx) = oneshot::channel();
+        self.session_shutdowns
+            .lock()
+            .expect("grpc inbound session shutdown registry mutex should not be poisoned")
+            .push(session_shutdown_tx);
         let session = RemoteNodeSessionHandle {
             node_id: node_id.clone(),
             session_instance_id: session_instance_id.clone(),
@@ -448,9 +466,27 @@ impl NodeSessionService for TransportNodeSessionService {
             let _ = event_tx.send(RemoteNodeTransportEvent::SessionClosed { node_id });
         });
 
-        Ok(Response::new(Box::pin(
-            UnboundedReceiverStream::new(outbound_rx).map(Ok),
-        )))
+        let (response_tx, response_rx) = tokio_mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut outbound_rx = outbound_rx;
+            tokio::pin!(session_shutdown_rx);
+            loop {
+                tokio::select! {
+                    _ = &mut session_shutdown_rx => break,
+                    maybe_envelope = outbound_rx.recv() => {
+                        let Some(envelope) = maybe_envelope else {
+                            break;
+                        };
+                        if response_tx.send(envelope).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let outbound_stream = UnboundedReceiverStream::new(response_rx).map(Ok);
+
+        Ok(Response::new(Box::pin(outbound_stream)))
     }
 }
 

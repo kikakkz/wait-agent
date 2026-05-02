@@ -690,6 +690,16 @@ mod tests {
     }
 
     #[test]
+    fn next_target_host_session_ignores_remote_targets_when_local_target_host_exits() {
+        let sessions = vec![
+            session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
+            remote_session("192.168.31.18", "pty1"),
+        ];
+
+        assert!(next_target_host_session(&sessions, "wa-1", Some("wa-1:target-a")).is_none());
+    }
+
+    #[test]
     fn next_target_host_session_returns_none_when_only_active_target_remains() {
         let sessions = vec![
             session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
@@ -776,6 +786,23 @@ mod tests {
             command_name: Some("bash".to_string()),
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
+        }
+    }
+
+    fn remote_session(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
+        ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer(authority_id, session_id),
+            selector: Some(format!("{authority_id}:{session_id}")),
+            availability: crate::domain::session_catalog::SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 1,
+            window_count: 1,
+            command_name: Some("codex".to_string()),
+            current_path: None,
+            task_state: ManagedSessionTaskState::Running,
         }
     }
 }

@@ -241,9 +241,9 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+    pub fn remove_discovered_remote_node(&self, node_id: &str) -> Result<(), LifecycleError> {
         let live_workspace_sockets = self.live_workspace_socket_names()?;
-        self.signal_remote_runtime_owner_mark_offline_live_workspaces(
+        self.signal_remote_runtime_owner_remove_node_live_workspaces(
             &live_workspace_sockets,
             node_id,
         )?;
@@ -324,14 +324,14 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    fn signal_remote_runtime_owner_mark_offline_live_workspaces(
+    fn signal_remote_runtime_owner_remove_node_live_workspaces(
         &self,
         socket_names: &[String],
         node_id: &str,
     ) -> Result<(), LifecycleError> {
         for socket_name in socket_names {
             self.remote_runtime_owner
-                .mark_node_offline(socket_name, node_id)?;
+                .remove_node(socket_name, node_id)?;
         }
         Ok(())
     }
@@ -1997,9 +1997,7 @@ mod tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use crate::infra::remote_protocol::{
-        TargetPublishedPayload,
-    };
+    use crate::infra::remote_protocol::TargetPublishedPayload;
     use crate::infra::tmux::RemoteTargetPublicationBinding;
     use std::path::PathBuf;
 

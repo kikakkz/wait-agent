@@ -132,12 +132,12 @@ fn run_node_ingress_server_loop(
                     );
                 }
                 RemoteNodeTransportEvent::SessionClosed { node_id } => {
-                    let _ = publication_runtime.mark_discovered_remote_node_offline(&node_id);
+                    let _ = publication_runtime.remove_discovered_remote_node(&node_id);
                     sessions.remove(&node_id);
                 }
                 RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
                     if let Some(node_id) = node_id {
-                        let _ = publication_runtime.mark_discovered_remote_node_offline(&node_id);
+                        let _ = publication_runtime.remove_discovered_remote_node(&node_id);
                         sessions.remove(&node_id);
                     }
                 }

@@ -3,7 +3,9 @@ use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::tmux::tmux_socket_dir;
+use crate::infra::tmux::{
+    tmux_socket_dir, EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName,
+};
 use crate::lifecycle::LifecycleError;
 use std::collections::HashMap;
 use std::fs;
@@ -43,7 +45,7 @@ enum RemoteRuntimeOwnerCommandEnvelope {
         authority_id: String,
         transport_session_id: String,
     },
-    MarkNodeOffline {
+    RemoveNode {
         node_id: String,
     },
     Snapshot,
@@ -167,15 +169,11 @@ impl RemoteRuntimeOwnerRuntime {
         )
     }
 
-    pub fn mark_node_offline(
-        &self,
-        socket_name: &str,
-        node_id: &str,
-    ) -> Result<(), LifecycleError> {
+    pub fn remove_node(&self, socket_name: &str, node_id: &str) -> Result<(), LifecycleError> {
         self.ensure_owner_running(socket_name)?;
         signal_remote_runtime_owner_command(
             socket_name,
-            RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline {
+            RemoteRuntimeOwnerCommandEnvelope::RemoveNode {
                 node_id: node_id.to_string(),
             },
         )
@@ -288,16 +286,12 @@ fn handle_remote_runtime_owner_client(
                 .remove(&key);
             Ok(None)
         }
-        RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
+        RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
             let mut guard = state
                 .records
                 .lock()
                 .expect("remote runtime owner state mutex should not be poisoned");
-            for record in guard.values_mut() {
-                if record.node_id == node_id {
-                    record.session.availability = SessionAvailability::Offline;
-                }
-            }
+            guard.retain(|_, record| record.node_id != node_id);
             Ok(None)
         }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => {
@@ -353,7 +347,14 @@ fn remote_runtime_owner_available(socket_path: &Path) -> bool {
 }
 
 fn backend_socket_still_exists(socket_name: &str) -> bool {
-    tmux_socket_dir().join(socket_name).exists()
+    let socket_path = tmux_socket_dir().join(socket_name);
+    if !socket_path.exists() {
+        return false;
+    }
+    let Ok(backend) = EmbeddedTmuxBackend::from_build_env() else {
+        return false;
+    };
+    backend.socket_is_live(&TmuxSocketName::new(socket_name))
 }
 
 pub(crate) fn remote_runtime_owner_socket_path(socket_name: &str) -> PathBuf {
@@ -409,8 +410,8 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
             escape_field(authority_id),
             escape_field(transport_session_id)
         ),
-        RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
-            format!("mark_node_offline\t{}\n", escape_field(node_id))
+        RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
+            format!("remove_node\t{}\n", escape_field(node_id))
         }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot\n".to_string(),
     }
@@ -462,16 +463,16 @@ fn parse_remote_runtime_owner_command(
                 transport_session_id,
             })
         }
-        "mark_node_offline" => {
+        "remove_node" => {
             let node_id = unescape_field(parts.next().ok_or_else(|| {
-                LifecycleError::Protocol("mark_node_offline is missing node id".to_string())
+                LifecycleError::Protocol("remove_node is missing node id".to_string())
             })?)?;
             if parts.next().is_some() {
                 return Err(LifecycleError::Protocol(
-                    "mark_node_offline contains unexpected extra fields".to_string(),
+                    "remove_node contains unexpected extra fields".to_string(),
                 ));
             }
-            Ok(RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id })
+            Ok(RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id })
         }
         "snapshot" => Ok(RemoteRuntimeOwnerCommandEnvelope::Snapshot),
         other => Err(LifecycleError::Protocol(format!(
@@ -689,10 +690,11 @@ fn remote_runtime_owner_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        backend_socket_still_exists, parse_remote_runtime_owner_command,
-        parse_remote_runtime_owner_snapshot, remote_runtime_owner_args,
-        remote_runtime_owner_socket_path, render_remote_runtime_owner_command,
-        render_remote_runtime_owner_snapshot, RemoteRuntimeOwnerCommandEnvelope,
+        backend_socket_still_exists, handle_remote_runtime_owner_client,
+        parse_remote_runtime_owner_command, parse_remote_runtime_owner_snapshot,
+        remote_runtime_owner_args, remote_runtime_owner_socket_path,
+        render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
+        OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
         RemoteRuntimeOwnerSnapshot,
     };
     use crate::cli::RemoteNetworkConfig;
@@ -700,7 +702,13 @@ mod tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     fn remote_session(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
@@ -776,6 +784,24 @@ mod tests {
     }
 
     #[test]
+    fn remote_runtime_owner_command_round_trips_remove_node() {
+        let rendered =
+            render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::RemoveNode {
+                node_id: "peer-a".to_string(),
+            });
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
+                assert_eq!(node_id, "peer-a");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_runtime_owner_snapshot_round_trips_sessions() {
         let payload = render_remote_runtime_owner_snapshot(&[super::OwnerStateRecord {
             node_id: "peer-a".to_string(),
@@ -794,6 +820,61 @@ mod tests {
     }
 
     #[test]
+    fn remove_node_command_drops_all_sessions_for_matching_node() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty1"),
+                    },
+                ),
+                (
+                    "peer-a\tremote-peer:peer-a:pty2".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty2"),
+                    },
+                ),
+                (
+                    "peer-b\tremote-peer:peer-b:pty9".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-b".to_string(),
+                        session: remote_session("peer-b", "pty9"),
+                    },
+                ),
+            ]))),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::RemoveNode {
+                        node_id: "peer-a".to_string(),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert!(response.is_none());
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        assert_eq!(records.len(), 1);
+        assert!(records.contains_key("peer-b\tremote-peer:peer-b:pty9"));
+    }
+
+    #[test]
     fn remote_runtime_owner_socket_path_lives_in_tmp() {
         let path = remote_runtime_owner_socket_path("wa-test");
 
@@ -809,7 +890,7 @@ mod tests {
         assert!(!backend_socket_still_exists(&socket_name));
 
         std::fs::write(&socket_path, b"stub").expect("socket marker should be writable");
-        assert!(backend_socket_still_exists(&socket_name));
+        assert!(!backend_socket_still_exists(&socket_name));
 
         std::fs::remove_file(&socket_path).expect("socket marker should clean up");
     }

@@ -191,6 +191,11 @@ impl EmbeddedTmuxBackend {
         self.run_on_socket(socket_name, args).map(|_| ())
     }
 
+    pub(crate) fn socket_is_live(&self, socket_name: &TmuxSocketName) -> bool {
+        self.run_on_socket(socket_name, &["list-sessions".to_string()])
+            .is_ok()
+    }
+
     pub(crate) fn show_session_option(
         &self,
         workspace: &TmuxWorkspaceHandle,
