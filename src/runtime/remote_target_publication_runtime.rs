@@ -224,18 +224,20 @@ impl RemoteTargetPublicationRuntime {
         let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
         let changed =
             apply_discovered_remote_session_envelope(&self.discovered_store, node_id, &envelope)?;
+        let mut owner_changed = false;
         if let Some(session) = remote_session.published_session {
-            signal_remote_runtime_owner_upsert_all(&self.remote_runtime_owner, node_id, &session)?;
+            owner_changed |=
+                signal_remote_runtime_owner_upsert_all(&self.remote_runtime_owner, node_id, &session)?;
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
-            signal_remote_runtime_owner_remove_all(
+            owner_changed |= signal_remote_runtime_owner_remove_all(
                 &self.remote_runtime_owner,
                 node_id,
                 &authority_id,
                 &transport_session_id,
             )?;
         }
-        if changed {
+        if should_refresh_discovered_remote_catalog(changed, owner_changed) {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
         Ok(())
@@ -244,8 +246,9 @@ impl RemoteTargetPublicationRuntime {
     pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
         let changed =
             mark_discovered_remote_node_offline_in_store(&self.discovered_store, node_id)?;
-        signal_remote_runtime_owner_mark_offline_all(&self.remote_runtime_owner, node_id)?;
-        if changed {
+        let owner_changed =
+            signal_remote_runtime_owner_mark_offline_all(&self.remote_runtime_owner, node_id)?;
+        if should_refresh_discovered_remote_catalog(changed, owner_changed) {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
         Ok(())
@@ -1945,11 +1948,12 @@ fn signal_remote_runtime_owner_upsert_all(
     owner: &RemoteRuntimeOwnerRuntime,
     node_id: &str,
     session: &ManagedSessionRecord,
-) -> Result<(), LifecycleError> {
-    for socket_name in list_remote_runtime_owner_socket_names()? {
+) -> Result<bool, LifecycleError> {
+    let socket_names = list_remote_runtime_owner_socket_names()?;
+    for socket_name in &socket_names {
         owner.upsert_session(&socket_name, node_id, session)?;
     }
-    Ok(())
+    Ok(!socket_names.is_empty())
 }
 
 fn signal_remote_runtime_owner_remove_all(
@@ -1957,21 +1961,23 @@ fn signal_remote_runtime_owner_remove_all(
     node_id: &str,
     authority_id: &str,
     transport_session_id: &str,
-) -> Result<(), LifecycleError> {
-    for socket_name in list_remote_runtime_owner_socket_names()? {
+) -> Result<bool, LifecycleError> {
+    let socket_names = list_remote_runtime_owner_socket_names()?;
+    for socket_name in &socket_names {
         owner.remove_session(&socket_name, node_id, authority_id, transport_session_id)?;
     }
-    Ok(())
+    Ok(!socket_names.is_empty())
 }
 
 fn signal_remote_runtime_owner_mark_offline_all(
     owner: &RemoteRuntimeOwnerRuntime,
     node_id: &str,
-) -> Result<(), LifecycleError> {
-    for socket_name in list_remote_runtime_owner_socket_names()? {
+) -> Result<bool, LifecycleError> {
+    let socket_names = list_remote_runtime_owner_socket_names()?;
+    for socket_name in &socket_names {
         owner.mark_node_offline(&socket_name, node_id)?;
     }
-    Ok(())
+    Ok(!socket_names.is_empty())
 }
 
 fn list_remote_runtime_owner_socket_names() -> Result<Vec<String>, LifecycleError> {
@@ -1995,6 +2001,13 @@ fn parse_remote_runtime_owner_socket_name(file_name: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+fn should_refresh_discovered_remote_catalog(
+    discovered_store_changed: bool,
+    owner_changed: bool,
+) -> bool {
+    discovered_store_changed || owner_changed
+}
+
 fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
     vec![
         "__chrome-refresh-socket".to_string(),
@@ -2014,8 +2027,9 @@ mod tests {
         remote_target_publication_agent_socket_path, remote_target_publication_sender_args,
         remote_target_publication_sender_socket_path, remote_target_publication_server_args,
         render_publication_agent_command, render_publication_sender_command,
-        socket_lifecycle_publication_action, spawn_chrome_refresh_all, PublicationAgentCommand,
-        PublicationSenderCommand, SocketLifecyclePublicationAction,
+        should_refresh_discovered_remote_catalog, socket_lifecycle_publication_action,
+        spawn_chrome_refresh_all, PublicationAgentCommand, PublicationSenderCommand,
+        SocketLifecyclePublicationAction,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -2392,6 +2406,13 @@ mod tests {
         assert_eq!(record.session.availability, SessionAvailability::Offline);
 
         let _ = std::fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn discovered_remote_catalog_refreshes_when_owner_state_changes() {
+        assert!(should_refresh_discovered_remote_catalog(false, true));
+        assert!(should_refresh_discovered_remote_catalog(true, false));
+        assert!(!should_refresh_discovered_remote_catalog(false, false));
     }
 
     #[test]

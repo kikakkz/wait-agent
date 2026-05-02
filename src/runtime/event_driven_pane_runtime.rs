@@ -235,6 +235,7 @@ fn redraw_if_changed(buffer: String, last_buffer: &mut String) -> Result<(), Lif
 }
 
 fn write_buffer(stdout: &mut impl Write, buffer: &str) -> io::Result<()> {
+    write!(stdout, "\x1b[H\x1b[2J")?;
     for (index, line) in buffer.split('\n').enumerate() {
         let row = index + 1;
         write!(stdout, "\x1b[{row};1H{line}\x1b[K")?;
@@ -461,26 +462,26 @@ mod tests {
     use super::{activate_target_run_shell_args, write_buffer};
 
     #[test]
-    fn single_line_pane_render_does_not_issue_clear_below_buffer() {
+    fn single_line_pane_render_clears_screen_then_draws_first_row() {
         let mut output = Vec::new();
 
         write_buffer(&mut output, "keys: ^W cmd").expect("footer render should write");
 
         let rendered = String::from_utf8(output).expect("writer should emit utf8 escape payload");
+        assert!(rendered.starts_with("\x1b[H\x1b[2J"));
         assert!(rendered.contains("\x1b[1;1Hkeys: ^W cmd\x1b[K"));
-        assert!(!rendered.contains("\x1b[2;1H\x1b[J"));
     }
 
     #[test]
-    fn multi_line_pane_render_keeps_row_local_clears_only() {
+    fn multi_line_pane_render_clears_screen_then_draws_each_row() {
         let mut output = Vec::new();
 
         write_buffer(&mut output, "line1\nline2").expect("sidebar render should write");
 
         let rendered = String::from_utf8(output).expect("writer should emit utf8 escape payload");
+        assert!(rendered.starts_with("\x1b[H\x1b[2J"));
         assert!(rendered.contains("\x1b[1;1Hline1\x1b[K"));
         assert!(rendered.contains("\x1b[2;1Hline2\x1b[K"));
-        assert!(!rendered.contains("\x1b[J"));
     }
 
     #[test]
