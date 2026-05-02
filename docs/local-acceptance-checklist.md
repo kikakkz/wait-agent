@@ -194,7 +194,16 @@ same visible-behavior standard before the network MVP is marked complete.
 - Confirm the target becomes reachable again without requiring local catalog surgery.
 - Confirm new authority output becomes visible again after reconnect.
 
-### 7.6 TUI Follow-Up
+### 7.6 Detach And Reattach Continuity
+
+- With one live remote node connected and at least one remote session visible in the sidebar, detach the current local WaitAgent client.
+- Reattach to the same local backend.
+- Confirm the same live remote session rows reappear without requiring a reconnect command or any cache-file recovery.
+- Stop the owning local backend completely.
+- Start a fresh local WaitAgent backend without reconnecting any remote node.
+- Confirm remote session rows are empty on cold start instead of replaying stale state from an earlier run.
+
+### 7.7 TUI Follow-Up
 
 - Start `codex` or another full-screen TUI inside the remote authority PTY.
 - Confirm the remote workspace surface renders the TUI without obvious corruption.

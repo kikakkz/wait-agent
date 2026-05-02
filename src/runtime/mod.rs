@@ -18,6 +18,7 @@ pub mod remote_node_session_runtime;
 pub mod remote_node_session_sync_runtime;
 pub mod remote_node_transport_runtime;
 pub mod remote_observer_runtime;
+pub mod remote_runtime_owner_runtime;
 pub mod remote_server_console_runtime;
 pub mod remote_target_publication_runtime;
 pub mod remote_target_publication_transport_runtime;

@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.31`  
+Version: `v1.32`  
 Status: `Active`  
 Date: `2026-04-30`
 
@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08c4` finish end-to-end cross-host validation now that node-scoped remote sidebar rows, remote task-state projection, and pane-local remote ingress ownership are in place
+- `task.t5-08c4b` replace file-backed remote sidebar state with a backend-scoped runtime owner before resuming detach or reattach and end-to-end cross-host validation
 
 Why this is the current gate:
 
@@ -47,7 +47,8 @@ Why this is the current gate:
 - the render bootstrap, replay, and observer catch-up policy is now explicit too, so the remaining blocker is no longer transport or ownership design drift but the final visible render binding and end-to-end product validation
 - the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
 - shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
-- the remaining phase-2 product gap is now the final user-facing polish on that accepted path: sidebar and related activation surfaces must present connected remote node sessions clearly, and the product still needs explicit cross-host manual validation
+- the latest review also exposed a real architecture bug: remote sidebar rows are still partially sourced from file-backed runtime caches, which can surface stale remote sessions before any live connection exists
+- that means the next accepted step is not more patch-style validation; it is to make one backend-scoped remote owner the only runtime source of truth for connected remote nodes and sessions, so detach or reattach and later validation rest on a clean ownership boundary
 
 ## 3. Current Snapshot
 
@@ -86,7 +87,8 @@ Project status at a glance:
 - the earlier `task.t5-08c1` discovery batch landed and tested cleanly, but that publication-centric discovered-target model is now explicitly treated as superseded by the accepted `node -> sessions -> attachments` product semantics
 - `task.t5-08c2` is now closed in substance: connected nodes synchronize their current remote sessions directly into the shared catalog on the `--connect` path instead of waiting on the old publication-centric discovered-target flow
 - `task.t5-08c3` is now closed in substance: remote authority and observer traffic carry explicit `session_id` end to end, server fanout state keys off session identity, and `attachment_id` remains only the session-local observer handle
-- the current `task.t5-08c4` code step is now substantially in place too: sidebar selection is keyed by stable target identity instead of bare `session_id`, remote rows display authority plus session in labels such as `codex@10.1.29.165:pty1`, remote task-state metadata now survives publication plus grpc sync into the shared catalog instead of collapsing to `U`, and remote main-slot or server-console pane processes now use pane-local scoped ingress instead of rebinding the shared public gRPC listener
+- the earlier `task.t5-08c4` delivery also surfaced a correction: while stable remote labels, task-state projection, and pane-local ingress ownership are in place, the remaining remote catalog path still merges file-backed discovered-session state into the visible sidebar and is therefore not an accepted end state
+- a dedicated remote runtime-owner design is now locked too: one backend-scoped sidecar must outlive attached UI clients, own live node and remote-session state in memory, and expose that state through a clean local IPC boundary instead of `/tmp` caches
 - the dedicated server-console runtime now carries explicit focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -178,7 +180,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- run explicit cross-host manual validation on the accepted `--port` plus `--connect` path now that stable remote sidebar selection, node-scoped remote rows, remote task-state projection, and pane-local ingress ownership are all in place in code
+- prove detach or reattach continuity, backend-scoped owner exit semantics, and explicit cross-host validation now that the user-visible remote catalog is runtime-only and no longer reads any file-backed remote session source
 
 Accepted local architecture direction:
 
@@ -204,7 +206,7 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.t5-08c4` Surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
+1. `task.t5-08c4d` Close detach or reattach continuity, owner restart semantics, and explicit cross-host validation on the runtime-only path
 2. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.

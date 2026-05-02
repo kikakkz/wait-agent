@@ -1,7 +1,16 @@
 kind: state
 version: 1
-last_updated_from: task.t5-08c4 remote sidebar session metadata plus pane-local ingress refreshed on 2026-04-30
+last_updated_from: task.t5-08c4d runtime-only remote catalog cleanup and owner lifecycle verification refreshed on 2026-05-02
 checks:
+  - id: t5-08c4d-cargo-build-runtime-only-remote-catalog
+    command: cargo build after tying the backend-scoped remote owner lifecycle to tmux socket liveness and removing file-backed published-target reads from the user-visible target catalog
+    status: pass
+  - id: t5-08c4d-cargo-test-remote-runtime-owner
+    command: cargo test remote_runtime_owner_ -- --nocapture after adding backend-socket liveness coverage and empty-on-owner-loss snapshot semantics for the backend-scoped remote owner
+    status: pass
+  - id: t5-08c4d-cargo-test-target-registry
+    command: cargo test target_registry -- --nocapture after removing file-backed published-target reads from the visible target catalog and keeping activation or visibility projections on local tmux plus live owner snapshot only
+    status: pass
   - id: t5-08c4-cargo-test-remote-sidebar-session-metadata-and-pane-ingress
     command: cargo test after persisting remote session task-state metadata end to end across publication, grpc node-session sync, discovered-session storage, and switching pane-local remote ingress defaults back to scoped unix sockets so remote main-slot or server-console surfaces stop rebinding the shared public gRPC port
     status: pass

@@ -21,6 +21,7 @@ use crate::infra::tmux::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
 use std::collections::BTreeSet;
 use std::fs;
@@ -124,6 +125,7 @@ struct PublicationOwnerSnapshot {
 pub struct RemoteTargetPublicationRuntime {
     store: PublishedTargetStore,
     discovered_store: DiscoveredRemoteSessionStore,
+    remote_runtime_owner: RemoteRuntimeOwnerRuntime,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
     network: RemoteNetworkConfig,
@@ -140,6 +142,9 @@ impl RemoteTargetPublicationRuntime {
         Ok(Self {
             store: PublishedTargetStore::default(),
             discovered_store: DiscoveredRemoteSessionStore::default(),
+            remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
             local_tmux: EmbeddedTmuxBackend::from_build_env()
                 .map_err(remote_target_publication_error)?,
             current_executable: std::env::current_exe().map_err(|error| {
@@ -216,8 +221,20 @@ impl RemoteTargetPublicationRuntime {
         node_id: &str,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
+        let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
         let changed =
             apply_discovered_remote_session_envelope(&self.discovered_store, node_id, &envelope)?;
+        if let Some(session) = remote_session.published_session {
+            signal_remote_runtime_owner_upsert_all(&self.remote_runtime_owner, node_id, &session)?;
+        }
+        if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
+            signal_remote_runtime_owner_remove_all(
+                &self.remote_runtime_owner,
+                node_id,
+                &authority_id,
+                &transport_session_id,
+            )?;
+        }
         if changed {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
@@ -227,6 +244,7 @@ impl RemoteTargetPublicationRuntime {
     pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
         let changed =
             mark_discovered_remote_node_offline_in_store(&self.discovered_store, node_id)?;
+        signal_remote_runtime_owner_mark_offline_all(&self.remote_runtime_owner, node_id)?;
         if changed {
             spawn_chrome_refresh_all(&self.current_executable)?;
         }
@@ -1833,6 +1851,39 @@ fn apply_discovered_remote_session_envelope(
     }
 }
 
+struct DiscoveredRemoteSessionEnvelopeEffect {
+    published_session: Option<ManagedSessionRecord>,
+    exited_session: Option<(String, String)>,
+}
+
+fn discovered_remote_session_from_envelope(
+    authority_id: &str,
+    envelope: &ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<DiscoveredRemoteSessionEnvelopeEffect, LifecycleError> {
+    match &envelope.payload {
+        ControlPlanePayload::TargetPublished(payload) => {
+            Ok(DiscoveredRemoteSessionEnvelopeEffect {
+                published_session: Some(published_remote_target_record_from_payload(
+                    &envelope.sender_id,
+                    payload,
+                )?),
+                exited_session: None,
+            })
+        }
+        ControlPlanePayload::TargetExited(payload) => Ok(DiscoveredRemoteSessionEnvelopeEffect {
+            published_session: None,
+            exited_session: Some((
+                authority_id.to_string(),
+                payload.transport_session_id.clone(),
+            )),
+        }),
+        _ => Ok(DiscoveredRemoteSessionEnvelopeEffect {
+            published_session: None,
+            exited_session: None,
+        }),
+    }
+}
+
 fn mark_target_offline_in_store(
     store: &PublishedTargetStore,
     socket_name: &str,
@@ -1888,6 +1939,60 @@ fn spawn_chrome_refresh_all(current_executable: &std::path::Path) -> Result<(), 
         .spawn()
         .map(|_| ())
         .map_err(remote_target_publication_error)
+}
+
+fn signal_remote_runtime_owner_upsert_all(
+    owner: &RemoteRuntimeOwnerRuntime,
+    node_id: &str,
+    session: &ManagedSessionRecord,
+) -> Result<(), LifecycleError> {
+    for socket_name in list_remote_runtime_owner_socket_names()? {
+        owner.upsert_session(&socket_name, node_id, session)?;
+    }
+    Ok(())
+}
+
+fn signal_remote_runtime_owner_remove_all(
+    owner: &RemoteRuntimeOwnerRuntime,
+    node_id: &str,
+    authority_id: &str,
+    transport_session_id: &str,
+) -> Result<(), LifecycleError> {
+    for socket_name in list_remote_runtime_owner_socket_names()? {
+        owner.remove_session(&socket_name, node_id, authority_id, transport_session_id)?;
+    }
+    Ok(())
+}
+
+fn signal_remote_runtime_owner_mark_offline_all(
+    owner: &RemoteRuntimeOwnerRuntime,
+    node_id: &str,
+) -> Result<(), LifecycleError> {
+    for socket_name in list_remote_runtime_owner_socket_names()? {
+        owner.mark_node_offline(&socket_name, node_id)?;
+    }
+    Ok(())
+}
+
+fn list_remote_runtime_owner_socket_names() -> Result<Vec<String>, LifecycleError> {
+    let mut socket_names = Vec::new();
+    for entry in fs::read_dir(std::env::temp_dir()).map_err(remote_target_publication_error)? {
+        let entry = entry.map_err(remote_target_publication_error)?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(socket_name) = parse_remote_runtime_owner_socket_name(&name) else {
+            continue;
+        };
+        socket_names.push(socket_name);
+    }
+    Ok(socket_names)
+}
+
+fn parse_remote_runtime_owner_socket_name(file_name: &str) -> Option<String> {
+    file_name
+        .strip_prefix("waitagent-remote-runtime-owner-")?
+        .strip_suffix(".sock")
+        .map(|value| value.to_string())
 }
 
 fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {

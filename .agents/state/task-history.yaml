@@ -1,6 +1,42 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08c4d
+    status: in_progress
+    summary: the live remote owner snapshot is now the only accepted user-visible remote catalog source, published-target TSV reads are removed from the visible catalog, and owner lifetime is now tied to backend socket liveness so active work can move to detach or reattach continuity and explicit cross-host validation
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4c
+    status: done
+    summary: sidebar-visible remote catalog reads now come from the backend-scoped remote owner snapshot only, and user-visible remote rows no longer merge file-backed discovered-session or published-target TSV state
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4c.yaml
+      reference: status
+  - task_id: task.t5-08c4b
+    status: done
+    summary: one backend-scoped remote owner sidecar plus local IPC snapshot boundary now exists, startup ensures it for workspace and attach flows, and connect or disconnect producers can publish live node-session ownership into that owner without making sidebar consumers read stale cache files
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4b.yaml
+      reference: status
+  - task_id: task.t5-08c4b
+    status: in_progress
+    summary: the earlier remote sidebar validation umbrella is now re-sliced because file-backed discovered-session state is not an acceptable runtime model; active work moves first to a backend-scoped remote owner sidecar that survives detach, owns live node and session state in memory, and exposes a clean local snapshot boundary to catalog consumers
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4a
+    status: done
+    summary: the project now explicitly rejects TSV-backed remote sidebar state and accepts one backend-scoped remote runtime owner as the only source of truth for live node and remote-session state, with the remaining queue split into owner-runtime, catalog-migration, and validation slices
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4a.yaml
+      reference: status
+  - task_id: task.t5-08c4
+    status: superseded
+    summary: the original sidebar-plus-validation umbrella was too broad and masked a real architecture bug, so it is superseded by bounded slices that first replace file-backed remote session state with a backend-scoped runtime owner
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
   - task_id: task.t5-08c4
     status: in_progress
     summary: session-scoped remote control-plane routing is now explicit across protocol, local control-plane state, grpc ingress, and authority bridges; sidebar selection now keys off stable target identity instead of bare `session_id`, remote rows show authority plus session in display labels, and activation ordering groups remote sessions by node while the remaining gap is still explicit cross-host validation

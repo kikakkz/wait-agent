@@ -13,6 +13,7 @@ use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
@@ -28,6 +29,7 @@ pub struct WorkspaceCommandRuntime {
     entry_runtime: WorkspaceEntryRuntime,
     main_slot_runtime: MainSlotRuntime,
     fullscreen_runtime: NativePaneFullscreenRuntime,
+    remote_runtime_owner_runtime: RemoteRuntimeOwnerRuntime,
     remote_target_publication_runtime: RemoteTargetPublicationRuntime,
     target_host_runtime: TargetHostRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
@@ -60,6 +62,8 @@ impl WorkspaceCommandRuntime {
         let main_slot_backend = backend.clone();
         let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())?;
         let command_target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())?;
+        let remote_runtime_owner_runtime =
+            RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
         let remote_target_publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?;
 
@@ -83,6 +87,7 @@ impl WorkspaceCommandRuntime {
                 ),
                 WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
             ),
+            remote_runtime_owner_runtime,
             remote_target_publication_runtime,
             target_host_runtime: command_target_host_runtime,
             session_service,
@@ -93,6 +98,8 @@ impl WorkspaceCommandRuntime {
     pub fn run_workspace_entry(&self) -> Result<(), LifecycleError> {
         let workspace_dir = self.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
+        self.remote_runtime_owner_runtime
+            .ensure_owner_running(workspace.workspace_handle.socket_name.as_str())?;
         self.main_slot_runtime.ensure_initial_target_materialized(
             &workspace.workspace_handle,
             &workspace.workspace_dir,
@@ -110,19 +117,23 @@ impl WorkspaceCommandRuntime {
         match command.target.clone() {
             Some(target) => {
                 let session = self.attachable_session(target)?;
+                self.remote_runtime_owner_runtime
+                    .ensure_owner_running(session.address.server_id())?;
                 self.session_service
                     .attach_session(&session)
                     .map_err(tmux_runtime_error)
             }
-            None => self
-                .session_service
-                .resolve_default_attach_session()
-                .map_err(tmux_runtime_error)
-                .and_then(|session| {
-                    self.session_service
-                        .attach_session(&session)
-                        .map_err(tmux_runtime_error)
-                }),
+            None => {
+                let session = self
+                    .session_service
+                    .resolve_default_attach_session()
+                    .map_err(tmux_runtime_error)?;
+                self.remote_runtime_owner_runtime
+                    .ensure_owner_running(session.address.server_id())?;
+                self.session_service
+                    .attach_session(&session)
+                    .map_err(tmux_runtime_error)
+            }
         }
     }
 

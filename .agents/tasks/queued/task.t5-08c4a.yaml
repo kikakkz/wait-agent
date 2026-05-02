@@ -1,0 +1,39 @@
+id: task.t5-08c4a
+kind: task
+version: 1
+title: lock the backend-scoped remote runtime-owner design and realign the execution queue
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - the project needed an explicit design correction because the current remote sidebar path still depended on file-backed discovered-session state
+    - this slice authorizes the remaining implementation queue to move onto a backend-scoped runtime owner instead of patching the stale cache path further
+target_task_reference: task.t5-08c4
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c3.done
+linked_primitives:
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - the accepted owner-runtime architecture is documented
+  - the remaining queue is split into bounded implementation slices
+  - active task state points to the first implementation slice
+verification:
+  - targeted review of docs and `.agents` alignment
+touched_paths:
+  - docs/remote-runtime-owner-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4a.yaml
+  - .agents/tasks/queued/task.t5-08c4b.yaml
+  - .agents/tasks/queued/task.t5-08c4c.yaml
+  - .agents/tasks/queued/task.t5-08c4d.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice is complete once design and task-state alignment are landed. It owns no runtime code changes.

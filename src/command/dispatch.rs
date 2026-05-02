@@ -11,6 +11,7 @@ use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRun
 use crate::runtime::remote_node_session_sync_runtime::{
     RemoteNodeSessionSyncGuard, RemoteNodeSessionSyncRuntime,
 };
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_server_console_runtime::RemoteServerConsoleRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
@@ -30,6 +31,7 @@ pub struct CommandDispatcher {
     _remote_node_ingress_server_guard: Option<RemoteNodeIngressServerGuard>,
     _remote_node_session_sync_guard: Option<RemoteNodeSessionSyncGuard>,
     remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
+    remote_runtime_owner_runtime: RemoteRuntimeOwnerRuntime,
     remote_server_console_runtime: RemoteServerConsoleRuntime,
     remote_target_publication_runtime: RemoteTargetPublicationRuntime,
     layout_runtime: WorkspaceLayoutRuntime,
@@ -72,6 +74,9 @@ impl CommandDispatcher {
             _remote_node_session_sync_guard: remote_node_session_sync_guard,
             remote_node_session_owner_runtime:
                 RemoteNodeSessionOwnerRuntime::from_build_env_with_network(network.clone())?,
+            remote_runtime_owner_runtime: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
+                network.clone(),
+            )?,
             remote_server_console_runtime: RemoteServerConsoleRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
@@ -130,6 +135,10 @@ impl CommandDispatcher {
             Command::RemoteTargetPublicationOwner(command) => self
                 .remote_target_publication_runtime
                 .run_publication_owner(command)
+                .map_err(AppError::from),
+            Command::RemoteRuntimeOwner(command) => self
+                .remote_runtime_owner_runtime
+                .run_owner(command)
                 .map_err(AppError::from),
             Command::SocketLifecycleHook(command) => {
                 let socket_name = command.socket_name.clone();
@@ -224,6 +233,7 @@ fn command_owns_process_listener(command: &Command) -> bool {
             | Command::RemoteTargetPublicationAgent(_)
             | Command::RemoteTargetPublicationSender(_)
             | Command::RemoteTargetPublicationOwner(_)
+            | Command::RemoteRuntimeOwner(_)
             | Command::SocketLifecycleHook(_)
             | Command::RemoteTargetBindPublication(_)
             | Command::RemoteTargetUnbindPublication(_)

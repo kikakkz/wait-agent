@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c4
-focus_statement: connected-node remote session synchronization, session-scoped routing, remote task-state metadata propagation, and pane-local ingress ownership are now in place; active work is now reduced to closing the real cross-host interaction validation loop against the accepted sidebar-driven remote-session UX
+current_task: task.t5-08c4d
+focus_statement: the runtime-only remote catalog boundary is now in place, so active work moves to proving detach or reattach continuity, backend-scoped owner exit semantics, and explicit cross-host validation without reviving any file-backed sidebar recovery
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -114,6 +114,7 @@ pub enum Command {
     RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
     RemoteTargetPublicationSender(RemoteTargetPublicationSenderCommand),
     RemoteTargetPublicationOwner(RemoteTargetPublicationOwnerCommand),
+    RemoteRuntimeOwner(RemoteRuntimeOwnerCommand),
     SocketLifecycleHook(SocketLifecycleHookCommand),
     RemoteTargetBindPublication(RemoteTargetBindPublicationCommand),
     RemoteTargetUnbindPublication(RemoteTargetUnbindPublicationCommand),
@@ -209,6 +210,11 @@ pub struct RemoteTargetPublicationSenderCommand {
 pub struct RemoteTargetPublicationOwnerCommand {
     pub socket_name: String,
     pub target_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteRuntimeOwnerCommand {
+    pub socket_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -352,6 +358,10 @@ impl Cli {
             "__remote-target-publication-owner" => {
                 args.remove(0);
                 Command::RemoteTargetPublicationOwner(parse_remote_target_publication_owner(args)?)
+            }
+            "__remote-runtime-owner" => {
+                args.remove(0);
+                Command::RemoteRuntimeOwner(parse_remote_runtime_owner(args)?)
             }
             "__socket-lifecycle-hook" => {
                 args.remove(0);
@@ -771,6 +781,24 @@ fn parse_remote_target_publication_sender(
     }
 
     Ok(RemoteTargetPublicationSenderCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_runtime_owner(args: Vec<String>) -> Result<RemoteRuntimeOwnerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteRuntimeOwnerCommand {
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
     })

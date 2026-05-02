@@ -1,0 +1,41 @@
+id: task.t5-08c4b
+kind: task
+version: 1
+title: introduce the backend-scoped remote owner sidecar and local IPC snapshot boundary
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - the visible remote catalog needs one durable runtime owner per backend so detach or reattach no longer depends on stale cache files
+    - this slice establishes the accepted in-memory ownership and local IPC boundary before sidebar consumers are switched over
+target_task_reference: task.t5-08c4
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4a.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - one backend-scoped remote owner sidecar exists as the accepted runtime owner for live node and session state
+  - the owner exposes a local IPC snapshot or registration boundary for producers and consumers
+  - owner state is held in memory instead of `DiscoveredRemoteSessionStore`
+verification:
+  - cargo test
+  - targeted review of owner lifecycle and IPC boundary
+touched_paths:
+  - src/runtime
+  - src/infra
+  - src/application
+  - docs/remote-runtime-owner-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4b.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice owns the runtime boundary only. It should not yet finish sidebar migration or manual cross-host validation.

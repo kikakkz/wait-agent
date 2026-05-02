@@ -183,8 +183,20 @@ next:
     title: route remote control-plane traffic by session and demote attachment to observer scope
     status: done
   - id: task.t5-08c4
-    title: surface node-scoped remote sessions in sidebar and finish end-to-end cross-host validation
+    title: original remote sidebar plus validation umbrella superseded by backend-scoped runtime-owner slices
+    status: superseded
+  - id: task.t5-08c4a
+    title: lock the backend-scoped remote runtime-owner design and realign the execution queue
+    status: done
+  - id: task.t5-08c4b
+    title: introduce the backend-scoped remote owner sidecar and local IPC snapshot boundary
     status: in_progress
+  - id: task.t5-08c4c
+    title: route shared-catalog and sidebar remote state through the live owner snapshot and retire file-backed remote sidebar sources
+    status: ready
+  - id: task.t5-08c4d
+    title: close detach or reattach continuity, owner restart semantics, and cross-host validation on the runtime-only path
+    status: ready
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred

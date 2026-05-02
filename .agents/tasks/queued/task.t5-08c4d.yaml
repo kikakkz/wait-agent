@@ -2,23 +2,23 @@ id: task.t5-08c4d
 kind: task
 version: 1
 title: close detach or reattach continuity, owner restart semantics, and cross-host validation on the runtime-only path
-status: in_progress
+status: ready
 priority: high
 design_ref:
   doc: docs/remote-runtime-owner-architecture.md
   why:
     - once runtime ownership and catalog migration are complete, the product still needs explicit proof that remote state survives detach correctly and disappears correctly when the backend or node is gone
     - this slice closes the user-facing acceptance loop on the accepted runtime-only model
+target_task_reference: task.t5-08c4
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08c4d.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t5-08c4c.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
-  - primitive.agents-self-maintenance
 done_criteria:
   - detach and later reattach show the same live remote sessions while the backend-scoped owner remains alive
   - owner absence or backend shutdown clears remote rows instead of replaying stale cache state

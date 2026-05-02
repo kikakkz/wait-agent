@@ -1,10 +1,10 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionTransport;
-use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
-use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub trait TargetCatalogGateway {
     type Error;
@@ -26,16 +26,20 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultTargetCatalogGateway {
     local_tmux: EmbeddedTmuxBackend,
-    published_remote_targets: PublishedTargetStore,
-    discovered_remote_sessions: DiscoveredRemoteSessionStore,
+    remote_runtime_owner: RemoteRuntimeOwnerRuntime,
+    current_socket_name: Option<String>,
 }
 
 impl DefaultTargetCatalogGateway {
     pub fn from_build_env() -> Result<Self, TmuxError> {
         Ok(Self {
             local_tmux: EmbeddedTmuxBackend::from_build_env()?,
-            published_remote_targets: PublishedTargetStore::default(),
-            discovered_remote_sessions: DiscoveredRemoteSessionStore::default(),
+            remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env().map_err(|error| {
+                TmuxError::new(format!(
+                    "failed to initialize remote runtime owner gateway: {error}"
+                ))
+            })?,
+            current_socket_name: current_tmux_socket_name_from_env(),
         })
     }
 }
@@ -44,15 +48,26 @@ impl TargetCatalogGateway for DefaultTargetCatalogGateway {
     type Error = TmuxError;
 
     fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+        let remote_sessions = match self.current_socket_name.as_deref() {
+            Some(socket_name) => self
+                .remote_runtime_owner
+                .try_snapshot(socket_name)
+                .map_err(|error| {
+                    TmuxError::new(format!(
+                        "failed to read remote runtime owner snapshot for socket `{socket_name}`: {error}"
+                    ))
+                })?
+                .sessions,
+            None => Vec::new(),
+        };
         Ok(merge_targets_by_identity([
             self.local_tmux.list_sessions()?,
-            self.published_remote_targets.list_targets()?,
-            self.discovered_remote_sessions.list_sessions()?,
+            remote_sessions,
         ]))
     }
 }
 
-fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 3]) -> Vec<ManagedSessionRecord> {
+fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 2]) -> Vec<ManagedSessionRecord> {
     let mut merged = Vec::new();
     let mut positions = HashMap::<String, usize>::new();
     for targets in groups {
@@ -256,6 +271,19 @@ fn transport_sort_key(target: &ManagedSessionRecord) -> u8 {
         SessionTransport::LocalTmux => 0,
         SessionTransport::RemotePeer => 1,
     }
+}
+
+fn current_tmux_socket_name_from_env() -> Option<String> {
+    let tmux = std::env::var("TMUX").ok()?;
+    let socket_path = tmux.split(',').next()?.trim();
+    if socket_path.is_empty() {
+        return None;
+    }
+    Path::new(socket_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
