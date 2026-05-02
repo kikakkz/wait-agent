@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.32`  
+Version: `v1.34`  
 Status: `Active`  
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08c4b` replace file-backed remote sidebar state with a backend-scoped runtime owner before resuming detach or reattach and end-to-end cross-host validation
+- `task.t5-08c4d1` correct backend-scoped local session export semantics before detach or reattach and end-to-end cross-host validation resume
 
 Why this is the current gate:
 
@@ -47,8 +47,9 @@ Why this is the current gate:
 - the render bootstrap, replay, and observer catch-up policy is now explicit too, so the remaining blocker is no longer transport or ownership design drift but the final visible render binding and end-to-end product validation
 - the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
 - shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
-- the latest review also exposed a real architecture bug: remote sidebar rows are still partially sourced from file-backed runtime caches, which can surface stale remote sessions before any live connection exists
-- that means the next accepted step is not more patch-style validation; it is to make one backend-scoped remote owner the only runtime source of truth for connected remote nodes and sessions, so detach or reattach and later validation rest on a clean ownership boundary
+- the file-backed remote sidebar source has now been removed from the accepted visible-catalog path
+- the latest review exposed the next architecture bug instead: one node connection is still not cleanly separated from the node's publishable local session set, so helper tmux sessions and same-machine unrelated backend sessions can leak into the remote catalog
+- that means the current gate is first to finish the business session boundary itself: publish only backend-owned local sessions, never publish workspace chrome, never republish remote projections, and only then move on to detach or reattach and explicit cross-host behavior on that corrected model
 
 ## 3. Current Snapshot
 
@@ -153,6 +154,7 @@ Project status at a glance:
 - the first `task.t6-01` slice now exists too: a hidden `remote_server_console_runtime` reuses the same remote observer, authority-ingress, and live publication path as the local remote main-slot instead of inventing a second server-console remote stack
 - the current `task.t6-01` slice now exists as well: the dedicated server-console surface now supports a long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker
 - the remaining `task.t6-01` gap is now narrower again: target discovery, activation routing, explicit focus, and real submit or manual-switch signal ownership are already in code, so any future T6 work should stay limited to manual-only attention-cue polish rather than focus automation
+- the current remote review also fixed an important concept boundary for the last phase-2 slice: `--connect` is a node connection, not a session; one connection may publish many backend-owned local sessions; those sessions route by `session_id`; and remote projections are locally consumable but must never be republished
 
 ## 4. Milestone Summary
 
@@ -180,7 +182,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- prove detach or reattach continuity, backend-scoped owner exit semantics, and explicit cross-host validation now that the user-visible remote catalog is runtime-only and no longer reads any file-backed remote session source
+- correct backend-scoped local session export boundaries on the runtime-only path so one node connection publishes only real backend-owned sessions
 
 Accepted local architecture direction:
 
@@ -206,8 +208,10 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.t5-08c4d` Close detach or reattach continuity, owner restart semantics, and explicit cross-host validation on the runtime-only path
-2. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
+1. `task.t5-08c4d1` Correct backend-scoped local session export semantics on the runtime-only path
+2. `task.t5-08c4d2` Close detach or reattach continuity plus owner restart semantics on the corrected runtime-only path
+3. `task.t5-08c4d3` Run explicit cross-host validation and acceptance-doc closeout on the corrected runtime-only path
+4. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

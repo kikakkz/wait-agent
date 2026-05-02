@@ -1,0 +1,41 @@
+id: task.t5-08c4d2
+kind: task
+version: 1
+title: close detach or reattach continuity and owner restart semantics on the corrected runtime-only path
+status: in_progress
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - once the export boundary is corrected, the next accepted proof is that live remote sessions survive detach correctly and disappear correctly when the backend or owner is gone
+    - this slice isolates lifecycle semantics from session-publication model changes and from final cross-host acceptance
+source_of_truth:
+  file: .agents/tasks/current.yaml
+  reference: current
+depends_on:
+  - task.t5-08c4d1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - detach and later reattach show the same live remote sessions while the backend-scoped owner remains alive
+  - owner absence or backend shutdown clears remote rows instead of replaying stale cache state
+  - owner restart and reconnect behavior do not recreate duplicate remote rows
+verification:
+  - cargo test
+  - manual: detach or reattach lifecycle validation
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d2.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice validates runtime-only lifecycle semantics. It should not widen into cross-host product acceptance yet.

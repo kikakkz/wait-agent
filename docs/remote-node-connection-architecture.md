@@ -1,8 +1,8 @@
 # WaitAgent Remote Node Connection Architecture
 
-Version: `v1.0`
+Version: `v1.1`
 Status: `Accepted for task.t5-08a -> task.t5-08c`
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -41,9 +41,19 @@ This means:
 - WaitAgent must not open one transport connection per observing console
 - WaitAgent must not keep production behavior centered on pane-scoped or
   target-scoped Unix socket listeners
+- WaitAgent must not treat every tmux session visible on the machine as part of
+  the node's publishable remote session set
 
 The transport session belongs to the node.
 Remote sessions and attachments are logical state carried over that session.
+
+Publish boundary rule:
+
+- `--connect` establishes the node connection
+- the node then publishes its current backend-scoped local session set over
+  that connection
+- remote-projected sessions learned from other nodes are consumable locally but
+  must not be published again through the same node connection
 
 User-experience rule:
 
@@ -248,6 +258,27 @@ Output fanout happens in two steps:
 
 The transport does not know about individual observer panes.
 It only carries node messages and target identity.
+
+### 5.8 Local Session Set Producer
+
+The connection actor must consume one explicit producer boundary for the local
+session set.
+
+That producer must return only:
+
+- sessions owned by the current backend
+- sessions that are user-visible and switchable
+- sessions that have stable routable `session_id` values
+
+That producer must not return:
+
+- fixed workspace chrome containers
+- pane ids
+- machine-global tmux sessions from unrelated backends
+- remote sessions projected from other nodes
+
+This boundary exists to keep the business session model clean even when the
+local implementation still uses tmux internally.
 
 ### 5.7 Mirrored Interaction Parity
 

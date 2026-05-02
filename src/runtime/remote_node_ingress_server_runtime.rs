@@ -1,4 +1,4 @@
-use crate::cli::RemoteNetworkConfig;
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
@@ -13,11 +13,13 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
     REMOTE_PROTOCOL_VERSION,
 };
+use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -28,10 +30,13 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BRIDGE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const REMOTE_NODE_INGRESS_OWNER_READY_RETRIES: usize = 20;
+const REMOTE_NODE_INGRESS_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 
 pub struct RemoteNodeIngressServerRuntime {
     publication_runtime: RemoteTargetPublicationRuntime,
     network: RemoteNetworkConfig,
+    socket_name: String,
 }
 
 pub struct RemoteNodeIngressServerGuard {
@@ -57,15 +62,69 @@ enum InternalEvent {
 }
 
 impl RemoteNodeIngressServerRuntime {
-    pub fn from_build_env_with_network(
+    pub fn from_build_env_with_network_and_socket(
         network: RemoteNetworkConfig,
+        socket_name: impl Into<String>,
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
             publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
             network,
+            socket_name: socket_name.into(),
         })
+    }
+
+    pub fn run_owner(&self) -> Result<(), LifecycleError> {
+        let socket_path = remote_node_ingress_owner_socket_path(&self.socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .map_err(remote_node_ingress_error)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(remote_node_ingress_error)?;
+        let _guard = self.start()?;
+        while backend_socket_still_exists(&self.socket_name) {
+            let _ = drain_owner_ping(&listener);
+            thread::sleep(BRIDGE_REFRESH_INTERVAL);
+        }
+        let _ = fs::remove_file(&socket_path);
+        Ok(())
+    }
+
+    pub fn ensure_owner_running(
+        socket_name: &str,
+        network: &RemoteNetworkConfig,
+    ) -> Result<(), LifecycleError> {
+        let socket_path = remote_node_ingress_owner_socket_path(socket_name);
+        if remote_node_ingress_owner_available(&socket_path) {
+            return Ok(());
+        }
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let current_executable = std::env::current_exe().map_err(|error| {
+            LifecycleError::Io(
+                "failed to locate current waitagent executable".to_string(),
+                error,
+            )
+        })?;
+        spawn_waitagent_sidecar(
+            &current_executable,
+            remote_node_ingress_owner_args(socket_name, network),
+        )
+        .map_err(remote_node_ingress_error)?;
+        for _ in 0..REMOTE_NODE_INGRESS_OWNER_READY_RETRIES {
+            if remote_node_ingress_owner_available(&socket_path) {
+                return Ok(());
+            }
+            thread::sleep(REMOTE_NODE_INGRESS_OWNER_READY_SLEEP);
+        }
+        Err(LifecycleError::Protocol(format!(
+            "remote node ingress owner for socket `{socket_name}` did not become ready"
+        )))
     }
 
     pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
@@ -76,9 +135,11 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
+        let socket_name = self.socket_name.clone();
         let worker = thread::spawn(move || {
             let _ = run_node_ingress_server_loop(
                 publication_runtime,
+                socket_name,
                 transport_rx,
                 internal_rx,
                 internal_tx,
@@ -89,6 +150,49 @@ impl RemoteNodeIngressServerRuntime {
             worker: Some(worker),
         })
     }
+}
+
+fn remote_node_ingress_owner_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("waitagent-remote-node-ingress-{socket_name}.sock"))
+}
+
+fn remote_node_ingress_owner_args(socket_name: &str, network: &RemoteNetworkConfig) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-node-ingress-server".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
+}
+
+fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+fn drain_owner_ping(listener: &std::os::unix::net::UnixListener) -> io::Result<()> {
+    loop {
+        match listener.accept() {
+            Ok((_stream, _)) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn backend_socket_still_exists(socket_name: &str) -> bool {
+    let socket_path = tmux_socket_dir().join(socket_name);
+    if !socket_path.exists() {
+        return false;
+    }
+    let Ok(backend) = EmbeddedTmuxBackend::from_build_env() else {
+        return false;
+    };
+    backend.socket_is_live(&TmuxSocketName::new(socket_name))
 }
 
 impl Drop for RemoteNodeIngressServerGuard {
@@ -102,6 +206,7 @@ impl Drop for RemoteNodeIngressServerGuard {
 
 fn run_node_ingress_server_loop(
     publication_runtime: RemoteTargetPublicationRuntime,
+    socket_name: String,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
@@ -126,18 +231,21 @@ fn run_node_ingress_server_loop(
                     }
                     let _ = route_transport_envelope(
                         &publication_runtime,
+                        &socket_name,
                         &node_id,
                         envelope,
                         sessions.get_mut(&node_id),
                     );
                 }
                 RemoteNodeTransportEvent::SessionClosed { node_id } => {
-                    let _ = publication_runtime.remove_discovered_remote_node(&node_id);
+                    let _ = publication_runtime
+                        .remove_discovered_remote_node_on_socket(&socket_name, &node_id);
                     sessions.remove(&node_id);
                 }
                 RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
                     if let Some(node_id) = node_id {
-                        let _ = publication_runtime.remove_discovered_remote_node(&node_id);
+                        let _ = publication_runtime
+                            .remove_discovered_remote_node_on_socket(&socket_name, &node_id);
                         sessions.remove(&node_id);
                     }
                 }
@@ -167,6 +275,7 @@ fn run_node_ingress_server_loop(
 
 fn route_transport_envelope(
     publication_runtime: &RemoteTargetPublicationRuntime,
+    socket_name: &str,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,
     session: Option<&mut ActiveNodeIngressSession>,
@@ -175,11 +284,19 @@ fn route_transport_envelope(
         Some(Body::TargetPublished(payload)) => {
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
-            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
+            publication_runtime.apply_discovered_remote_session_envelope_on_socket(
+                socket_name,
+                node_id,
+                mapped,
+            )
         }
         Some(Body::TargetExited(payload)) => {
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
-            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
+            publication_runtime.apply_discovered_remote_session_envelope_on_socket(
+                socket_name,
+                node_id,
+                mapped,
+            )
         }
         Some(Body::TargetOutput(payload)) => {
             let Some(session) = session else {
@@ -531,7 +648,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_authority_socket_paths, extract_target_component};
+    use super::{
+        discover_authority_socket_paths, extract_target_component, RemoteNodeIngressServerRuntime,
+    };
+    use crate::cli::RemoteNetworkConfig;
     use std::fs;
     use std::path::PathBuf;
     use std::process;
@@ -568,6 +688,17 @@ mod tests {
         let _ = fs::remove_file(matching_a);
         let _ = fs::remove_file(matching_b);
         let _ = fs::remove_file(different_authority);
+    }
+
+    #[test]
+    fn ingress_runtime_is_explicitly_scoped_to_one_workspace_socket() {
+        let runtime = RemoteNodeIngressServerRuntime::from_build_env_with_network_and_socket(
+            RemoteNetworkConfig::default(),
+            "wa-socket-a",
+        )
+        .expect("runtime should build");
+
+        let _ = runtime;
     }
 
     fn temp_dir_path(file_name: &str) -> PathBuf {

@@ -6,13 +6,15 @@ use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DetachCommand, MainPaneDiedCommand, NewTargetCommand,
-    RemoteNetworkConfig, ToggleFullscreenCommand,
+    RemoteNetworkConfig, RemoteNodeIngressServerCommand, ToggleFullscreenCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
+use crate::runtime::remote_node_ingress_server_runtime::RemoteNodeIngressServerRuntime;
+use crate::runtime::remote_node_session_sync_runtime::RemoteNodeSessionSyncRuntime;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
@@ -34,6 +36,7 @@ pub struct WorkspaceCommandRuntime {
     target_host_runtime: TargetHostRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+    network: RemoteNetworkConfig,
 }
 
 impl WorkspaceCommandRuntime {
@@ -92,6 +95,7 @@ impl WorkspaceCommandRuntime {
             target_host_runtime: command_target_host_runtime,
             session_service,
             target_registry,
+            network,
         })
     }
 
@@ -108,6 +112,8 @@ impl WorkspaceCommandRuntime {
             .ensure_configured_publications_on_socket(
                 workspace.workspace_handle.socket_name.as_str(),
             )?;
+        self.start_remote_node_ingress(workspace.workspace_handle.socket_name.as_str())?;
+        self.start_remote_session_sync(workspace.workspace_handle.socket_name.as_str())?;
         self.session_service
             .attach_workspace(&workspace.workspace_handle)
             .map_err(tmux_runtime_error)
@@ -119,6 +125,8 @@ impl WorkspaceCommandRuntime {
                 let session = self.attachable_session(target)?;
                 self.remote_runtime_owner_runtime
                     .ensure_owner_running(session.address.server_id())?;
+                self.start_remote_node_ingress(session.address.server_id())?;
+                self.start_remote_session_sync(session.address.server_id())?;
                 self.session_service
                     .attach_session(&session)
                     .map_err(tmux_runtime_error)
@@ -130,6 +138,8 @@ impl WorkspaceCommandRuntime {
                     .map_err(tmux_runtime_error)?;
                 self.remote_runtime_owner_runtime
                     .ensure_owner_running(session.address.server_id())?;
+                self.start_remote_node_ingress(session.address.server_id())?;
+                self.start_remote_session_sync(session.address.server_id())?;
                 self.session_service
                     .attach_session(&session)
                     .map_err(tmux_runtime_error)
@@ -242,6 +252,33 @@ impl WorkspaceCommandRuntime {
             )));
         }
         Ok(session)
+    }
+
+    fn start_remote_session_sync(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        if self.network.connect.is_none() {
+            return Ok(());
+        }
+        RemoteNodeSessionSyncRuntime::ensure_owner_running(socket_name, &self.network)?;
+        Ok(())
+    }
+
+    fn start_remote_node_ingress(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        RemoteNodeIngressServerRuntime::ensure_owner_running(socket_name, &self.network)
+    }
+
+    pub fn run_remote_node_ingress_server(
+        &self,
+        command: RemoteNodeIngressServerCommand,
+    ) -> Result<(), LifecycleError> {
+        RemoteNodeIngressServerRuntime::from_build_env_with_network_and_socket(
+            self.network.clone(),
+            command.socket_name,
+        )?
+        .run_owner()
+    }
+
+    pub fn network_config(&self) -> RemoteNetworkConfig {
+        self.network.clone()
     }
 }
 

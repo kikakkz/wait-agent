@@ -2,7 +2,7 @@ id: task.t5-08c4d3
 kind: task
 version: 1
 title: run end-to-end cross-host validation and acceptance closeout on the corrected runtime-only path
-status: in_progress
+status: ready
 priority: high
 design_ref:
   doc: docs/remote-network-completion-plan.md
@@ -10,8 +10,8 @@ design_ref:
     - after the export boundary and runtime-only lifecycle semantics are correct, the remaining accepted proof is explicit cross-host product validation on the public `--port` plus `--connect` contract
     - this slice closes phase-2 human-facing acceptance state rather than mixing final validation into lower-level runtime refactors
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08c4d3.yaml
-  reference: current
+  file: .agents/tasks/backlog.yaml
+  reference: next
 depends_on:
   - task.t5-08c4d2.done
 linked_primitives:

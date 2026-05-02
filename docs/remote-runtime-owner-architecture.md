@@ -1,8 +1,8 @@
 # WaitAgent Remote Runtime Owner Architecture
 
-Version: `v1.0`
+Version: `v1.2`
 Status: `Accepted for task.t5-08c4a -> task.t5-08c4d`
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -205,6 +205,14 @@ The accepted catalog composition becomes:
 - local tmux sessions from the local tmux gateway
 - remote sessions from the backend-scoped remote owner snapshot
 
+Accepted producer boundary refinement:
+
+- the local producer that feeds outbound remote publication must be the current
+  backend's local session set, not raw tmux enumeration
+- the remote owner snapshot must contain only connected-node remote projections
+- remote owner state must never be looped back into the outbound local session
+  publisher
+
 Rejected composition:
 
 - local tmux sessions
@@ -238,6 +246,7 @@ This means:
 - one `waitagent --connect` may expose many remote sessions under that node
 - one connected node should appear as multiple rows such as
   `codex@10.1.29.165:pty1`
+- each row corresponds to one exported session and must appear only once
 - server-to-client and client-to-server messages continue routing by
   `session_id`, not by one-off attachment handles
 
@@ -278,7 +287,9 @@ The migration away from the current design is:
 4. remove `DiscoveredRemoteSessionStore` from the sidebar-visible catalog path
 5. remove any remaining file-backed remote sidebar source, including legacy
    published-target merge paths that are no longer product-correct
-6. validate `detach -> reattach -> connect -> disconnect` against the accepted
+6. correct the backend-scoped local session export boundary so outbound
+   publication stops using raw tmux enumeration
+7. validate `detach -> reattach -> connect -> disconnect` against the accepted
    runtime-only model
 
 ## 11. Task Split
@@ -293,9 +304,17 @@ The remaining `task.t5-08c4` queue is split into:
 3. `task.t5-08c4c`
    Switch shared-catalog and sidebar remote state to the live owner snapshot
    and retire file-backed remote sidebar sources.
-4. `task.t5-08c4d`
-   Close detach or reattach continuity, owner restart semantics, and explicit
-   cross-host manual validation on the accepted runtime-only path.
+4. `task.t5-08c4d1`
+   Correct the backend-scoped local session export boundary so one `--connect`
+   publishes only the current backend's local publishable sessions and never
+   emits workspace chrome, machine-global tmux leftovers, or remote
+   projections.
+5. `task.t5-08c4d2`
+   Close detach or reattach continuity plus owner restart semantics on the
+   corrected runtime-only path.
+6. `task.t5-08c4d3`
+   Run explicit end-to-end cross-host manual validation and align acceptance
+   docs and status state on the corrected model.
 
 ## 12. Anti-Goals
 

@@ -3,17 +3,15 @@ use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::tmux::{
-    tmux_socket_dir, EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName,
-};
+use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -322,13 +320,11 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
         let _ = fs::remove_file(&socket_path);
     }
 
-    Command::new(current_executable)
-        .args(remote_runtime_owner_args(socket_name, network))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(remote_runtime_owner_error)?;
+    spawn_waitagent_sidecar(
+        current_executable,
+        remote_runtime_owner_args(socket_name, network),
+    )
+    .map_err(remote_runtime_owner_error)?;
 
     for _ in 0..REMOTE_RUNTIME_OWNER_READY_RETRIES {
         if remote_runtime_owner_available(&socket_path) {

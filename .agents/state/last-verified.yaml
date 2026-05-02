@@ -2,6 +2,33 @@ kind: state
 version: 1
 last_updated_from: task.t5-08c4d runtime-only remote catalog cleanup and owner lifecycle verification refreshed on 2026-05-02
 checks:
+  - id: t5-08c4d2-cargo-test-remote-node-ingress-server-runtime
+    command: cargo test remote_node_ingress_server_runtime -- --nocapture after moving public remote ingress onto a backend-scoped detached sidecar and keeping its socket-scoped projection logic explicit
+    status: pass
+  - id: t5-08c4d2-cargo-test-target-registry-socket-scoped-pane-catalog
+    command: cargo test target_registry -- --nocapture after making hidden pane target catalogs bind to the explicit workspace socket instead of ambient TMUX environment state
+    status: pass
+  - id: t5-08c4d2-manual-detach-reattach-runtime-continuity
+    command: manual on 2026-05-02 using fresh ports 7594 and 7595: start server `./target/debug/waitagent --port 7594`, start client `./target/debug/waitagent --port 7595 --connect 127.0.0.1:7594`, verify server runtime-owner snapshot shows one remote row and sidebar shows one `bash@192.168.31.69`, run `./target/debug/waitagent detach 95edbedcf35f8aea`, verify listener `0.0.0.0:7594` and runtime-owner snapshot both remain live, then `./target/debug/waitagent attach 95edbedcf35f8aea` and verify sidebar still shows exactly one remote row with no duplicate replay
+    status: pass
+  - id: t5-08c4d2-cargo-test-remote-node-session-sync-runtime-owner-readiness
+    command: cargo test remote_node_session_sync_runtime -- --nocapture after moving outbound node-session sync ownership onto a backend-scoped sidecar and binding an owner socket for readiness
+    status: pass
+  - id: t5-08c4d2-cli-hidden-remote-session-sync-owner
+    command: cargo test parses_hidden_remote_session_sync_owner_command -- --nocapture after adding the backend-scoped remote session sync sidecar command surface
+    status: pass
+  - id: t5-08c4d1-cargo-test-remote-node-session-sync-runtime
+    command: cargo test remote_node_session_sync_runtime -- --nocapture after making outbound session sync socket-scoped and filtering exported local sessions to target-host records on the current backend only
+    status: pass
+  - id: t5-08c4d1-cargo-test-session-service
+    command: cargo test session_service -- --nocapture after moving remote session sync startup under workspace or attach socket resolution
+    status: pass
+  - id: t5-08c4d1-cargo-test-main-slot-runtime
+    command: cargo test main_slot_runtime -- --nocapture after making remote export use backend-scoped target-host session semantics
+    status: pass
+  - id: t5-08c4d1-cargo-test-target-registry
+    command: cargo test target_registry -- --nocapture after making remote export use backend-scoped target-host session semantics
+    status: pass
   - id: t5-08c4d-cargo-build-runtime-only-remote-catalog
     command: cargo build after tying the backend-scoped remote owner lifecycle to tmux socket liveness and removing file-backed published-target reads from the user-visible target catalog
     status: pass

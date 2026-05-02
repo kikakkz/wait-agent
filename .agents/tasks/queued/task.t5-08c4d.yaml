@@ -20,6 +20,9 @@ linked_primitives:
   - primitive.task-history-update
   - primitive.task-board-sync
 done_criteria:
+  - one `--connect` establishes one node connection and publishes only the current backend's local publishable session set
+  - local helper sessions such as workspace chrome and remote-projected sessions are excluded from outbound publication
+  - each exported local session appears exactly once as one remote row and remains routable by `session_id`
   - detach and later reattach show the same live remote sessions while the backend-scoped owner remains alive
   - owner absence or backend shutdown clears remote rows instead of replaying stale cache state
   - explicit cross-host manual validation passes on the accepted `--port` plus `--connect` path
@@ -40,3 +43,4 @@ touched_paths:
   - .agents/state/last-verified.yaml
 notes:
   - This slice closes the user-facing proof. It should not resurrect cache-backed sidebar recovery.
+  - The accepted business model is `node connection -> backend-owned local sessions -> observer attachments`, not raw tmux enumeration.

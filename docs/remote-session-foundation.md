@@ -1,8 +1,8 @@
 # WaitAgent Remote Session Foundation
 
-Version: `v1.2`
+Version: `v1.3`
 Status: `Accepted`
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -43,9 +43,11 @@ The distinction is only:
 
 - local target -> tmux-backed main-slot rebinding
 - remote target -> network-backed interact runtime in the main slot
-- a connected remote node contributes one or more remote sessions into the same
-  shared catalog, starting with its current default session immediately after
-  `waitagent --connect`
+- `waitagent --connect` creates one node-level connection, not one session
+- a connected remote node contributes its current local session set into the
+  same shared catalog immediately after connect succeeds, including the current
+  default session and any other already-existing local sessions owned by that
+  backend
 
 ## 3. Terms
 
@@ -56,6 +58,9 @@ The distinction is only:
   The concrete runtime object hosted by one node. In remote mode this is the
   primary product routing identity; the current UI may still render it as a
   target row.
+- `local session set`
+  The backend-scoped set of publishable local sessions owned by one node. This
+  is the set that `--connect` exports to a remote server.
 - `console`
   One interaction surface such as the local workspace main slot or a
   future server-side workspace console.
@@ -70,6 +75,15 @@ The distinction is only:
 - `server control plane`
   The server-side routing, aggregate registry, and authority-coordination
   surface for remote targets. It is not the PTY owner for remote targets.
+
+Session export rule:
+
+- a session is a user-visible, switchable shell or PTY context
+- a session is not a tmux pane
+- a session is not the fixed workspace chrome container
+- a node connection is not a session
+- current internal helper sessions such as `workspace-chrome` are local
+  implementation details and must not surface as remote-visible sessions
 
 ## 4. Non-Negotiable Rules
 
@@ -95,6 +109,13 @@ The distinction is only:
    The resumed remote foundation work must first establish the correct target
    model and routing boundaries. Rich target-state inference for sidebar rows
    may follow later.
+7. Export only backend-owned local sessions
+   `--connect` must publish only the current backend's local session set.
+   It must not scan and publish every tmux session visible on the machine.
+8. Never republish remote projections
+   Sessions learned from another node are remote projections. They may appear
+   in the local catalog, but they must never be published again through this
+   node's own outbound connection.
 
 ## 5. Interaction Model
 
@@ -138,7 +159,40 @@ The first accepted PTY-resize rule is:
 - whichever console most recently opened the remote target becomes the resize
   authority until another explicit open or authority handoff occurs
 
-## 6. Target Model Requirements
+## 6. Session Export Boundary
+
+The accepted publishable session model is:
+
+- one backend may own many local sessions
+- each local session contributes exactly one user-visible row
+- each published row must map to one routable `session_id`
+- the exported set is backend-scoped, not machine-scoped
+
+Current implementation guidance:
+
+- the local workspace chrome session is not publishable
+- the publishable local session is the user-facing target-host side of the
+  backend session model, or a future equivalent exportable session abstraction
+- local detached tmux artifacts that are not current backend-owned user
+  sessions are not publishable just because tmux can still enumerate them
+
+Initial synchronization rule:
+
+- once `--connect` succeeds, the node must publish the full current local
+  session set immediately
+- the default local session is included in that set, but it is not the only
+  session that must be published
+- later session create, rename, exit, and availability changes flow as deltas
+
+Projection rule:
+
+- remote sessions learned from another node enter the local shared catalog as
+  remote projections
+- remote projections are locally consumable and switchable
+- remote projections are not part of the local session set and must never be
+  re-exported by `--connect`
+
+## 7. Target Model Requirements
 
 The shared target catalog must support at least:
 
@@ -159,8 +213,11 @@ Remote-session rule:
 - the product-facing record synchronized from a connected node is a remote
   session, not a publication-only target stub
 - one node may contribute many remote sessions to the shared catalog
-- one fresh outbound connection must contribute the node's current default
-  session before any manual open, attach, or `new` action occurs
+- one fresh outbound connection must contribute the node's current local
+  session set before any manual open on the server is required
+- the current default session must appear immediately as part of that set
+- each contributed remote session must appear exactly once in the shared
+  catalog and sidebar-visible surfaces
 
 Compatibility rule:
 
@@ -168,7 +225,7 @@ Compatibility rule:
   CLI-facing selectors, but they must stop serving as the only internal target
   identity shape
 
-## 7. Implementation Split
+## 8. Implementation Split
 
 The accepted resumed remote queue is:
 
@@ -194,13 +251,17 @@ The accepted resumed remote queue is:
    routing interaction by session, and then binding delivered remote output
    into visible console rendering.
 
-## 8. Anti-Goals
+## 9. Anti-Goals
 
 - do not model remote targets as server-owned PTYs
 - do not let remote work reintroduce detached-client switching or attach-based
   target changes
 - do not make local tmux inspection the universal source of truth for target
   identity
+- do not expose `workspace-chrome`, pane ids, or machine-global tmux leftovers
+  as remote-visible business sessions
+- do not republish remote sessions through another node just because they are
+  present in the local shared catalog
 - do not force remote-state probing into the same slice as registry-shape and
   transport-boundary work
 - do not create a remote-only catalog shape that later has to be merged back

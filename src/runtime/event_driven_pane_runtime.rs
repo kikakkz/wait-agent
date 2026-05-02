@@ -68,7 +68,10 @@ impl EventDrivenPaneRuntime {
         let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry_and_network(
             self.backend.clone(),
             TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    command.socket_name.clone(),
+                )
+                .map_err(event_pane_error)?,
             ),
             self.network.clone(),
         );
@@ -111,7 +114,10 @@ impl EventDrivenPaneRuntime {
         let mut chrome = EventDrivenTmuxPaneRuntime::new_with_target_registry_and_network(
             self.backend.clone(),
             TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(event_pane_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    command.socket_name.clone(),
+                )
+                .map_err(event_pane_error)?,
             ),
             self.network.clone(),
         );

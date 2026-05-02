@@ -1,8 +1,8 @@
 # WaitAgent Remote Network Completion Plan
 
-Version: `v1.3`
+Version: `v1.4`
 Status: `Accepted for task.t5-08 -> task.t5-08c`
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -121,9 +121,19 @@ The accepted remaining order is:
 4. `task.t5-08c3`
    Route remote control-plane traffic by session and demote attachment to
    observer scope.
-5. `task.t5-08c4`
-   Bind delivered remote output into visible console presentation and validate
-   end-to-end cross-host open, input, output, and resize behavior.
+5. `task.t5-08c4a -> task.t5-08c4c`
+   Replace file-backed remote sidebar state with one backend-scoped runtime
+   owner and make the live owner snapshot the only accepted remote catalog
+   source.
+6. `task.t5-08c4d1`
+   Correct the backend-scoped local session export boundary so node
+   connections publish only backend-owned local sessions.
+7. `task.t5-08c4d2`
+   Validate detach or reattach continuity plus owner restart semantics on the
+   corrected runtime-only path.
+8. `task.t5-08c4d3`
+   Validate end-to-end cross-host open, input, output, resize, and shutdown on
+   the corrected runtime-only path.
 
 `task.t3-07` remains optional and deferred. It must not preempt this queue
 unless acceptance evidence proves compact-layout work is blocking the product.

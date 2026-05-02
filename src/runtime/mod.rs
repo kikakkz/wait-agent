@@ -23,6 +23,7 @@ pub mod remote_server_console_runtime;
 pub mod remote_target_publication_runtime;
 pub mod remote_target_publication_transport_runtime;
 pub mod remote_transport_runtime;
+pub mod sidecar_process_runtime;
 pub mod target_host_runtime;
 pub mod workspace_command_runtime;
 pub mod workspace_entry_runtime;

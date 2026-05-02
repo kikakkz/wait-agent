@@ -1,4 +1,4 @@
-use crate::cli::RemoteNetworkConfig;
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand};
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
@@ -8,16 +8,22 @@ use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
 };
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway};
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
+use std::fs;
 use std::io;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
+const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
+const REMOTE_SESSION_SYNC_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 
 pub trait LocalSessionCatalog: Send + 'static {
     type Error: ToString;
@@ -25,11 +31,34 @@ pub trait LocalSessionCatalog: Send + 'static {
     fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error>;
 }
 
-impl LocalSessionCatalog for EmbeddedTmuxBackend {
-    type Error = crate::infra::tmux::TmuxError;
+#[derive(Clone)]
+pub struct SocketScopedLocalSessionCatalog<G> {
+    gateway: G,
+    socket_name: TmuxSocketName,
+}
+
+impl<G> SocketScopedLocalSessionCatalog<G> {
+    pub fn new(gateway: G, socket_name: TmuxSocketName) -> Self {
+        Self {
+            gateway,
+            socket_name,
+        }
+    }
+}
+
+impl<G> LocalSessionCatalog for SocketScopedLocalSessionCatalog<G>
+where
+    G: TmuxSessionGateway + Send + 'static,
+    G::Error: ToString,
+{
+    type Error = G::Error;
 
     fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        self.list_sessions()
+        let sessions = self.gateway.list_sessions_on_socket(&self.socket_name)?;
+        Ok(exportable_local_sessions_for_socket(
+            sessions,
+            self.socket_name.as_str(),
+        ))
     }
 }
 
@@ -57,7 +86,7 @@ impl OutboundRemoteNodeTransport for GrpcRemoteNodeTransport {
     }
 }
 
-pub struct RemoteNodeSessionSyncRuntime<G = EmbeddedTmuxBackend, T = GrpcRemoteNodeTransport> {
+pub struct RemoteNodeSessionSyncRuntime<G, T = GrpcRemoteNodeTransport> {
     gateway: G,
     transport: T,
     network: RemoteNetworkConfig,
@@ -70,15 +99,74 @@ pub struct RemoteNodeSessionSyncGuard {
     worker: Option<thread::JoinHandle<()>>,
 }
 
-impl RemoteNodeSessionSyncRuntime {
-    pub fn from_build_env_with_network(
+impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBackend>> {
+    pub fn from_build_env_with_network_and_socket(
         network: RemoteNetworkConfig,
+        socket_name: &str,
     ) -> Result<Self, LifecycleError> {
         Ok(Self::new(
-            EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
+            SocketScopedLocalSessionCatalog::new(
+                EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
+                TmuxSocketName::new(socket_name),
+            ),
             GrpcRemoteNodeTransport::new(),
             network,
         ))
+    }
+
+    pub fn run_owner(
+        command: RemoteSessionSyncOwnerCommand,
+        network: RemoteNetworkConfig,
+    ) -> Result<(), LifecycleError> {
+        let socket_path = remote_session_sync_owner_socket_path(&command.socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(remote_session_sync_error)?;
+        let _guard =
+            Self::from_build_env_with_network_and_socket(network, &command.socket_name)?.start()?;
+        while backend_socket_still_exists(&command.socket_name) {
+            let _ = drain_owner_ping(&listener);
+            thread::sleep(SESSION_SYNC_POLL_INTERVAL);
+        }
+        let _ = fs::remove_file(&socket_path);
+        Ok(())
+    }
+
+    pub fn ensure_owner_running(
+        socket_name: &str,
+        network: &RemoteNetworkConfig,
+    ) -> Result<(), LifecycleError> {
+        let socket_path = remote_session_sync_owner_socket_path(socket_name);
+        if remote_session_sync_owner_available(&socket_path) {
+            return Ok(());
+        }
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let current_executable = std::env::current_exe().map_err(|error| {
+            LifecycleError::Io(
+                "failed to locate current waitagent executable".to_string(),
+                error,
+            )
+        })?;
+        spawn_waitagent_sidecar(
+            &current_executable,
+            remote_session_sync_owner_args(socket_name, network),
+        )
+        .map_err(remote_session_sync_error)?;
+        for _ in 0..REMOTE_SESSION_SYNC_OWNER_READY_RETRIES {
+            if remote_session_sync_owner_available(&socket_path) {
+                return Ok(());
+            }
+            thread::sleep(REMOTE_SESSION_SYNC_OWNER_READY_SLEEP);
+        }
+        Err(LifecycleError::Protocol(format!(
+            "remote session sync owner for socket `{socket_name}` did not become ready"
+        )))
     }
 }
 
@@ -275,6 +363,17 @@ fn local_sessions_by_local_id(
         .collect()
 }
 
+fn exportable_local_sessions_for_socket(
+    sessions: Vec<ManagedSessionRecord>,
+    socket_name: &str,
+) -> Vec<ManagedSessionRecord> {
+    sessions
+        .into_iter()
+        .filter(|session| session.address.server_id() == socket_name)
+        .filter(|session| session.is_target_host())
+        .collect()
+}
+
 #[derive(Debug)]
 struct SessionSyncDelta {
     publish: Vec<ManagedSessionRecord>,
@@ -408,11 +507,65 @@ where
     )
 }
 
+fn remote_session_sync_owner_args(socket_name: &str, network: &RemoteNetworkConfig) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-session-sync-owner".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
+}
+
+fn remote_session_sync_owner_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-session-sync-owner-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
+}
+
+fn remote_session_sync_owner_available(socket_path: &Path) -> bool {
+    UnixStream::connect(socket_path).is_ok()
+}
+
+fn drain_owner_ping(listener: &UnixListener) -> io::Result<()> {
+    loop {
+        match listener.accept() {
+            Ok((_stream, _addr)) => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn backend_socket_still_exists(socket_name: &str) -> bool {
+    let socket_path = crate::infra::tmux::tmux_socket_dir().join(socket_name);
+    if !socket_path.exists() {
+        return false;
+    }
+    EmbeddedTmuxBackend::from_build_env()
+        .map(|backend| backend.socket_is_live(&TmuxSocketName::new(socket_name)))
+        .unwrap_or(false)
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_session_sync_delta, local_sessions_by_local_id, remote_session_exited_envelope,
-        remote_session_published_envelope, LocalSessionCatalog, OutboundRemoteNodeTransport,
+        compute_session_sync_delta, exportable_local_sessions_for_socket,
+        local_sessions_by_local_id, remote_session_exited_envelope,
+        remote_session_published_envelope, remote_session_sync_owner_available,
+        remote_session_sync_owner_socket_path, LocalSessionCatalog, OutboundRemoteNodeTransport,
         RemoteNodeSessionSyncRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
@@ -425,6 +578,8 @@ mod tests {
         OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
     };
     use std::collections::HashMap;
+    use std::fs;
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
@@ -512,6 +667,37 @@ mod tests {
         drop(guard);
     }
 
+    #[test]
+    fn exportable_local_sessions_for_socket_keeps_only_target_hosts_on_current_socket() {
+        let sessions = exportable_local_sessions_for_socket(
+            vec![
+                session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
+                session_with_role("wa-1", "shell-1", WorkspaceSessionRole::TargetHost),
+                session_with_role("wa-2", "shell-2", WorkspaceSessionRole::TargetHost),
+            ],
+            "wa-1",
+        );
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].address.server_id(), "wa-1");
+        assert_eq!(sessions[0].address.session_id(), "shell-1");
+        assert!(sessions[0].is_target_host());
+    }
+
+    #[test]
+    fn remote_session_sync_owner_available_observes_bound_owner_socket() {
+        let socket_name = format!("wa-test-sync-owner-{}", std::process::id());
+        let socket_path = remote_session_sync_owner_socket_path(&socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        assert!(!remote_session_sync_owner_available(&socket_path));
+        let listener = UnixListener::bind(&socket_path).expect("owner socket should bind");
+        assert!(remote_session_sync_owner_available(&socket_path));
+        drop(listener);
+        let _ = fs::remove_file(&socket_path);
+    }
+
     #[derive(Clone)]
     struct FakeGateway {
         sessions: Vec<ManagedSessionRecord>,
@@ -581,13 +767,21 @@ mod tests {
     }
 
     fn session(socket_name: &str, session_id: &str) -> ManagedSessionRecord {
+        session_with_role(socket_name, session_id, WorkspaceSessionRole::TargetHost)
+    }
+
+    fn session_with_role(
+        socket_name: &str,
+        session_id: &str,
+        session_role: WorkspaceSessionRole,
+    ) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::local_tmux(socket_name, session_id),
             selector: Some(format!("{socket_name}:{session_id}")),
             availability: SessionAvailability::Online,
             workspace_dir: None,
             workspace_key: Some(session_id.to_string()),
-            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            session_role: Some(session_role),
             opened_by: Vec::new(),
             attached_clients: 1,
             window_count: 1,

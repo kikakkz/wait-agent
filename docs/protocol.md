@@ -1,8 +1,8 @@
 # WaitAgent Protocol
 
-Version: `v2.0`
+Version: `v2.1`
 Status: `Accepted for task.t5-08a1`
-Date: `2026-04-30`
+Date: `2026-05-02`
 
 ## 1. Purpose
 
@@ -197,13 +197,20 @@ Rules:
 Identifier rule:
 
 - `authority_node_id` identifies the connected node that owns the transport
-- `session_id` is the stable routing identity for one remote session under the
-  connected node
+- `session_id` is the stable routing identity for one exported local session
+  under the connected node
 - `target_id` remains the catalog and UI identity for that session, derived as
   a qualified remote target such as `remote-peer:<node_id>:<session_id>`
 - `attachment_id` identifies one console attachment under that session and is
   not itself a routing identity
 - `console_id` identifies the observer or interaction surface
+
+Session-shape rule:
+
+- `session_id` must identify a user-visible publishable session
+- `session_id` must not identify a pane id or fixed workspace chrome helper
+- sessions projected from another remote node must not be sent back out again
+  as this node's own published sessions
 
 ## 8. Handshake And Session Control
 
@@ -255,6 +262,8 @@ Rules:
 - `RecoveryPolicy` must at least state whether authority republish is required,
   whether observer-side attachment reopen is required, and whether any replay
   facility exists at all
+- a successful hello is followed by immediate publication of the node's current
+  local session set, not only one default session
 
 ### 8.2 Heartbeat And Session Notices
 

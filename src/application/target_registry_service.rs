@@ -32,6 +32,18 @@ pub struct DefaultTargetCatalogGateway {
 
 impl DefaultTargetCatalogGateway {
     pub fn from_build_env() -> Result<Self, TmuxError> {
+        Self::from_build_env_with_current_socket_name(current_tmux_socket_name_from_env())
+    }
+
+    pub fn from_build_env_with_socket_name(
+        socket_name: impl Into<String>,
+    ) -> Result<Self, TmuxError> {
+        Self::from_build_env_with_current_socket_name(Some(socket_name.into()))
+    }
+
+    fn from_build_env_with_current_socket_name(
+        current_socket_name: Option<String>,
+    ) -> Result<Self, TmuxError> {
         Ok(Self {
             local_tmux: EmbeddedTmuxBackend::from_build_env()?,
             remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env().map_err(|error| {
@@ -39,7 +51,7 @@ impl DefaultTargetCatalogGateway {
                     "failed to initialize remote runtime owner gateway: {error}"
                 ))
             })?,
-            current_socket_name: current_tmux_socket_name_from_env(),
+            current_socket_name,
         })
     }
 }
@@ -86,6 +98,17 @@ fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 2]) -> Vec<Mana
 
 pub struct TargetRegistryService<G> {
     gateway: G,
+}
+
+impl<G> Clone for TargetRegistryService<G>
+where
+    G: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            gateway: self.gateway.clone(),
+        }
+    }
 }
 
 impl<G> TargetRegistryService<G>

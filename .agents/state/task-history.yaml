@@ -1,6 +1,36 @@
 kind: state
 version: 1
 history:
+  - task_id: task.t5-08c4d2
+    status: done
+    summary: backend-scoped remote lifecycle is now continuous on the runtime-only path: public ingress moved onto a detached socket-scoped sidecar, hidden pane target catalogs bind to their explicit workspace socket instead of ambient `TMUX`, and manual connect plus detach plus reattach validation now preserves one live remote row without duplicate replay
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4d2.yaml
+      reference: status
+  - task_id: task.t5-08c4d3
+    status: in_progress
+    summary: with backend-scoped export and lifecycle continuity now validated, active work moves to explicit cross-host interaction and acceptance closeout on the public `--port` plus `--connect` path
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4d1
+    status: done
+    summary: outbound remote session publication is now backend-scoped: `workspace` and `attach` start session sync only after resolving the active socket, session sync enumerates only that socket, and only target-host sessions are exported so workspace chrome and same-machine unrelated backends no longer leak into the remote catalog
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4d1.yaml
+      reference: status
+  - task_id: task.t5-08c4d1
+    status: in_progress
+    summary: the earlier runtime-only validation umbrella is now split again because the accepted model requires one node connection to publish only the current backend's local publishable sessions, so active work moves first to correcting that export boundary before lifecycle and cross-host acceptance continue
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4d
+    status: superseded
+    summary: the original runtime-only validation umbrella is now superseded by bounded slices for backend-scoped session export semantics, runtime-only lifecycle validation, and final cross-host acceptance
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
   - task_id: task.t5-08c4d
     status: in_progress
     summary: the live remote owner snapshot is now the only accepted user-visible remote catalog source, published-target TSV reads are removed from the visible catalog, and owner lifetime is now tied to backend socket liveness so active work can move to detach or reattach continuity and explicit cross-host validation

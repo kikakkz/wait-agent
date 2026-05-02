@@ -1,0 +1,45 @@
+id: task.t5-08c4d1
+kind: task
+version: 1
+title: correct backend-scoped local session export semantics on the runtime-only remote path
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-runtime-owner-architecture.md
+  why:
+    - the accepted design now fixes `--connect` as one node connection that publishes the current backend's local session set rather than raw tmux enumeration
+    - detach or reattach and cross-host validation are not trustworthy until the outbound publish boundary matches the accepted business session model
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - one `--connect` establishes one node connection and publishes only the current backend's local publishable session set
+  - local helper sessions such as workspace chrome and remote-projected sessions are excluded from outbound publication
+  - same-machine unrelated backend sessions are excluded from outbound publication
+  - each exported local session appears exactly once as one remote row and remains routable by `session_id`
+verification:
+  - cargo test
+  - targeted review of backend-scoped local session export and session-centric remote publication boundaries
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/domain
+  - src/infra
+  - docs/remote-runtime-owner-architecture.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d.yaml
+  - .agents/tasks/queued/task.t5-08c4d1.yaml
+  - .agents/tasks/queued/task.t5-08c4d2.yaml
+  - .agents/tasks/queued/task.t5-08c4d3.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice corrects the business session export boundary before lifecycle and cross-host acceptance work continues.

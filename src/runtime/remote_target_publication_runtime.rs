@@ -22,6 +22,7 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
@@ -213,19 +214,22 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    pub fn apply_discovered_remote_session_envelope(
+    pub fn apply_discovered_remote_session_envelope_on_socket(
         &self,
+        socket_name: &str,
         node_id: &str,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = self.live_workspace_socket_names()?;
+        let live_workspace_sockets = vec![socket_name.to_string()];
         let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
         if let Some(session) = remote_session.published_session {
-            self.signal_remote_runtime_owner_upsert_live_workspaces(
-                &live_workspace_sockets,
-                node_id,
-                &session,
-            )?;
+            if is_publishable_discovered_remote_session(&session) {
+                self.signal_remote_runtime_owner_upsert_live_workspaces(
+                    &live_workspace_sockets,
+                    node_id,
+                    &session,
+                )?;
+            }
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
             self.signal_remote_runtime_owner_remove_live_workspaces(
@@ -241,8 +245,12 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    pub fn remove_discovered_remote_node(&self, node_id: &str) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = self.live_workspace_socket_names()?;
+    pub fn remove_discovered_remote_node_on_socket(
+        &self,
+        socket_name: &str,
+        node_id: &str,
+    ) -> Result<(), LifecycleError> {
+        let live_workspace_sockets = vec![socket_name.to_string()];
         self.signal_remote_runtime_owner_remove_node_live_workspaces(
             &live_workspace_sockets,
             node_id,
@@ -336,6 +344,7 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
         let sessions = self
             .local_tmux
@@ -633,16 +642,11 @@ impl RemoteTargetPublicationRuntime {
             let _ = fs::remove_file(&socket_path);
         }
 
-        Command::new(&self.current_executable)
-            .args(remote_target_publication_server_args(
-                socket_name,
-                &self.network,
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(remote_target_publication_error)?;
+        spawn_waitagent_sidecar(
+            &self.current_executable,
+            remote_target_publication_server_args(socket_name, &self.network),
+        )
+        .map_err(remote_target_publication_error)?;
 
         for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
             if publication_server_available(&socket_path) {
@@ -783,16 +787,11 @@ impl RemoteTargetPublicationRuntime {
             let _ = fs::remove_file(&socket_path);
         }
 
-        Command::new(&self.current_executable)
-            .args(remote_target_publication_agent_args(
-                socket_name,
-                &self.network,
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(remote_target_publication_error)?;
+        spawn_waitagent_sidecar(
+            &self.current_executable,
+            remote_target_publication_agent_args(socket_name, &self.network),
+        )
+        .map_err(remote_target_publication_error)?;
 
         for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
             if publication_agent_available(&socket_path) {
@@ -954,17 +953,11 @@ pub(crate) fn ensure_publication_owner_process_running(
         let _ = fs::remove_file(&socket_path);
     }
 
-    Command::new(current_executable)
-        .args(remote_target_publication_owner_args(
-            socket_name,
-            target_session_name,
-            network,
-        ))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(remote_target_publication_error)?;
+    spawn_waitagent_sidecar(
+        current_executable,
+        remote_target_publication_owner_args(socket_name, target_session_name, network),
+    )
+    .map_err(remote_target_publication_error)?;
 
     for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
         if publication_owner_available(&socket_path) {
@@ -991,13 +984,11 @@ pub(crate) fn ensure_publication_sender_process_running(
         let _ = fs::remove_file(&socket_path);
     }
 
-    Command::new(current_executable)
-        .args(remote_target_publication_sender_args(socket_name, network))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(remote_target_publication_error)?;
+    spawn_waitagent_sidecar(
+        current_executable,
+        remote_target_publication_sender_args(socket_name, network),
+    )
+    .map_err(remote_target_publication_error)?;
 
     for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
         if publication_sender_available(&socket_path) {
@@ -1971,6 +1962,10 @@ fn live_workspace_socket_names_from_sessions(sessions: &[ManagedSessionRecord]) 
     socket_names.into_iter().collect()
 }
 
+fn is_publishable_discovered_remote_session(session: &ManagedSessionRecord) -> bool {
+    session.address.transport() == &SessionTransport::RemotePeer && session.is_target_host()
+}
+
 fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
     vec![
         "__chrome-refresh-socket".to_string(),
@@ -1982,15 +1977,16 @@ fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chrome_refresh_socket_args, live_workspace_socket_names_from_sessions,
-        mark_target_offline_in_store, parse_publication_agent_command,
-        parse_publication_sender_command, publication_socket_hook_tmux_command,
-        published_remote_target_from_local, published_remote_target_record_from_payload,
-        remote_target_publication_agent_args, remote_target_publication_agent_socket_path,
-        remote_target_publication_sender_args, remote_target_publication_sender_socket_path,
-        remote_target_publication_server_args, render_publication_agent_command,
-        render_publication_sender_command, socket_lifecycle_publication_action,
-        PublicationAgentCommand, PublicationSenderCommand, SocketLifecyclePublicationAction,
+        chrome_refresh_socket_args, is_publishable_discovered_remote_session,
+        live_workspace_socket_names_from_sessions, mark_target_offline_in_store,
+        parse_publication_agent_command, parse_publication_sender_command,
+        publication_socket_hook_tmux_command, published_remote_target_from_local,
+        published_remote_target_record_from_payload, remote_target_publication_agent_args,
+        remote_target_publication_agent_socket_path, remote_target_publication_sender_args,
+        remote_target_publication_sender_socket_path, remote_target_publication_server_args,
+        render_publication_agent_command, render_publication_sender_command,
+        socket_lifecycle_publication_action, PublicationAgentCommand, PublicationSenderCommand,
+        SocketLifecyclePublicationAction,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -2342,6 +2338,37 @@ mod tests {
         ]);
 
         assert_eq!(sockets, vec!["wa-1".to_string(), "wa-2".to_string()]);
+    }
+
+    #[test]
+    fn discovered_remote_session_filter_accepts_only_remote_target_hosts() {
+        let remote_target = ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("10.1.1.8", "pty1"),
+            selector: Some("10.1.1.8:pty1".to_string()),
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: Some("wk-r".to_string()),
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 1,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            current_path: None,
+            task_state: ManagedSessionTaskState::Running,
+        };
+        let remote_workspace = ManagedSessionRecord {
+            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+            ..remote_target.clone()
+        };
+        let local_target = ManagedSessionRecord {
+            address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            ..remote_target.clone()
+        };
+
+        assert!(is_publishable_discovered_remote_session(&remote_target));
+        assert!(!is_publishable_discovered_remote_session(&remote_workspace));
+        assert!(!is_publishable_discovered_remote_session(&local_target));
     }
 
     #[test]

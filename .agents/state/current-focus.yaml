@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c4d
-focus_statement: the runtime-only remote catalog boundary is now in place, so active work moves to proving detach or reattach continuity, backend-scoped owner exit semantics, and explicit cross-host validation without reviving any file-backed sidebar recovery
+current_task: task.t5-08c4d3
+focus_statement: the runtime-only remote path now survives connect, detach, and reattach on backend-scoped sidecars, so active work moves to explicit cross-host interaction validation and acceptance closeout on the public --port plus --connect contract
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

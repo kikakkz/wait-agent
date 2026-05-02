@@ -4,13 +4,8 @@ use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
-use crate::runtime::remote_node_ingress_server_runtime::{
-    RemoteNodeIngressServerGuard, RemoteNodeIngressServerRuntime,
-};
 use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
-use crate::runtime::remote_node_session_sync_runtime::{
-    RemoteNodeSessionSyncGuard, RemoteNodeSessionSyncRuntime,
-};
+use crate::runtime::remote_node_session_sync_runtime::RemoteNodeSessionSyncRuntime;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_server_console_runtime::RemoteServerConsoleRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -28,8 +23,6 @@ pub struct CommandDispatcher {
     footer_menu_runtime: FooterMenuRuntime,
     remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime,
     remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime,
-    _remote_node_ingress_server_guard: Option<RemoteNodeIngressServerGuard>,
-    _remote_node_session_sync_guard: Option<RemoteNodeSessionSyncGuard>,
     remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
     remote_runtime_owner_runtime: RemoteRuntimeOwnerRuntime,
     remote_server_console_runtime: RemoteServerConsoleRuntime,
@@ -40,25 +33,8 @@ pub struct CommandDispatcher {
 impl CommandDispatcher {
     pub fn from_build_env_with_network_and_command(
         network: RemoteNetworkConfig,
-        command: &Command,
+        _command: &Command,
     ) -> Result<Self, AppError> {
-        let remote_node_ingress_server_guard = if command_owns_process_listener(command) {
-            Some(
-                RemoteNodeIngressServerRuntime::from_build_env_with_network(network.clone())?
-                    .start()?,
-            )
-        } else {
-            None
-        };
-        let remote_node_session_sync_guard =
-            if command_owns_remote_session_sync(command) && network.connect.is_some() {
-                Some(
-                    RemoteNodeSessionSyncRuntime::from_build_env_with_network(network.clone())?
-                        .start()?,
-                )
-            } else {
-                None
-            };
         Ok(Self {
             workspace_runtime: WorkspaceCommandRuntime::from_build_env_with_network(
                 network.clone(),
@@ -70,8 +46,6 @@ impl CommandDispatcher {
             )?,
             remote_main_slot_ingress_runtime:
                 RemoteMainSlotIngressRuntime::from_build_env_with_network(network.clone())?,
-            _remote_node_ingress_server_guard: remote_node_ingress_server_guard,
-            _remote_node_session_sync_guard: remote_node_session_sync_guard,
             remote_node_session_owner_runtime:
                 RemoteNodeSessionOwnerRuntime::from_build_env_with_network(network.clone())?,
             remote_runtime_owner_runtime: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
@@ -135,6 +109,15 @@ impl CommandDispatcher {
             Command::RemoteTargetPublicationOwner(command) => self
                 .remote_target_publication_runtime
                 .run_publication_owner(command)
+                .map_err(AppError::from),
+            Command::RemoteSessionSyncOwner(command) => RemoteNodeSessionSyncRuntime::run_owner(
+                command,
+                self.workspace_runtime.network_config(),
+            )
+            .map_err(AppError::from),
+            Command::RemoteNodeIngressServer(command) => self
+                .workspace_runtime
+                .run_remote_node_ingress_server(command)
                 .map_err(AppError::from),
             Command::RemoteRuntimeOwner(command) => self
                 .remote_runtime_owner_runtime
@@ -219,26 +202,8 @@ impl CommandDispatcher {
     }
 }
 
-fn command_owns_process_listener(command: &Command) -> bool {
-    matches!(command, Command::Workspace)
-}
-
-fn command_owns_remote_session_sync(command: &Command) -> bool {
-    matches!(command, Command::Workspace | Command::Attach(_))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::command_owns_process_listener;
-    use crate::cli::{AttachCommand, Command};
-
     #[test]
-    fn only_workspace_owns_process_listener() {
-        assert!(command_owns_process_listener(&Command::Workspace));
-        assert!(!command_owns_process_listener(&Command::List));
-        assert!(!command_owns_process_listener(&Command::Attach(
-            AttachCommand::default()
-        )));
-        assert!(!command_owns_process_listener(&Command::ChromeRefreshAll));
-    }
+    fn dispatcher_module_builds_without_host_global_listener_gate() {}
 }

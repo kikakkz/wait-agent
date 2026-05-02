@@ -114,6 +114,8 @@ pub enum Command {
     RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
     RemoteTargetPublicationSender(RemoteTargetPublicationSenderCommand),
     RemoteTargetPublicationOwner(RemoteTargetPublicationOwnerCommand),
+    RemoteSessionSyncOwner(RemoteSessionSyncOwnerCommand),
+    RemoteNodeIngressServer(RemoteNodeIngressServerCommand),
     RemoteRuntimeOwner(RemoteRuntimeOwnerCommand),
     SocketLifecycleHook(SocketLifecycleHookCommand),
     RemoteTargetBindPublication(RemoteTargetBindPublicationCommand),
@@ -210,6 +212,16 @@ pub struct RemoteTargetPublicationSenderCommand {
 pub struct RemoteTargetPublicationOwnerCommand {
     pub socket_name: String,
     pub target_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteSessionSyncOwnerCommand {
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteNodeIngressServerCommand {
+    pub socket_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -358,6 +370,14 @@ impl Cli {
             "__remote-target-publication-owner" => {
                 args.remove(0);
                 Command::RemoteTargetPublicationOwner(parse_remote_target_publication_owner(args)?)
+            }
+            "__remote-session-sync-owner" => {
+                args.remove(0);
+                Command::RemoteSessionSyncOwner(parse_remote_session_sync_owner(args)?)
+            }
+            "__remote-node-ingress-server" => {
+                args.remove(0);
+                Command::RemoteNodeIngressServer(parse_remote_node_ingress_server(args)?)
             }
             "__remote-runtime-owner" => {
                 args.remove(0);
@@ -799,6 +819,46 @@ fn parse_remote_runtime_owner(args: Vec<String>) -> Result<RemoteRuntimeOwnerCom
     }
 
     Ok(RemoteRuntimeOwnerCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_session_sync_owner(
+    args: Vec<String>,
+) -> Result<RemoteSessionSyncOwnerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteSessionSyncOwnerCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+    })
+}
+
+fn parse_remote_node_ingress_server(
+    args: Vec<String>,
+) -> Result<RemoteNodeIngressServerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteNodeIngressServerCommand {
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
     })
@@ -1558,6 +1618,40 @@ mod tests {
             Command::ToggleFullscreen(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_session_sync_owner_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-session-sync-owner",
+            "--socket-name",
+            "wa-1",
+        ])
+        .command
+        {
+            Command::RemoteSessionSyncOwner(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_node_ingress_server_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-node-ingress-server",
+            "--socket-name",
+            "wa-1",
+        ])
+        .command
+        {
+            Command::RemoteNodeIngressServer(command) => {
+                assert_eq!(command.socket_name, "wa-1");
             }
             other => panic!("unexpected command: {other:?}"),
         }
