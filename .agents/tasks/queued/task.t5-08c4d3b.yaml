@@ -7,10 +7,10 @@ priority: high
 design_ref:
   doc: docs/remote-live-mirror-design.md
   why:
-    - the current cross-host placeholder failure is caused by the missing session-scoped live-mirror control path rather than by one isolated rendering bug
-    - this slice establishes the protocol and server-owned mirror route that every later PTY-owner and visible-parity step depends on
+    - the current remote session surface can open a row but cannot request a real live mirror for that session
+    - this slice establishes the server-owned per-session mirror route plus explicit protocol messages instead of implicit placeholder-only behavior
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08c4d3b.yaml
+  file: .agents/tasks/current.yaml
   reference: current
 depends_on:
   - task.t5-08c4d3a.done
@@ -31,15 +31,18 @@ touched_paths:
   - src/infra/remote_grpc_proto.rs
   - src/infra/remote_grpc_transport.rs
   - src/infra/remote_protocol.rs
-  - src/runtime
-  - src/application
-  - docs/remote-live-mirror-design.md
+  - src/runtime/remote_node_ingress_runtime.rs
+  - src/runtime/remote_node_session_runtime.rs
+  - src/runtime/remote_main_slot_ingress_runtime.rs
+  - src/runtime/remote_main_slot_runtime.rs
+  - src/runtime/remote_main_slot_pane_runtime.rs
   - docs/protocol.md
   - docs/execution-status-board.md
   - .agents/tasks/backlog.yaml
   - .agents/tasks/current.yaml
   - .agents/tasks/queued/task.t5-08c4d3b.yaml
-  - .agents/state/task-history.yaml
   - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
 notes:
   - This slice owns the protocol and server route boundary only. It should not yet finish PTY-owner mirror reuse or final acceptance.
+

@@ -1,6 +1,7 @@
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ControlPlaneDestination, ControlPlanePayload, NodeBoundControlPlaneMessage,
+    ApplyResizePayload, ControlPlaneDestination, ControlPlanePayload, MirrorBootstrapChunkPayload,
+    MirrorBootstrapCompletePayload, NodeBoundControlPlaneMessage, OpenMirrorRequestPayload,
     OpenTargetOkPayload, ProtocolEnvelope, RemoteConsoleDescriptor, ResizeAuthorityChangedPayload,
     RoutedControlPlaneMessage, TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
     SERVER_SENDER_ID,
@@ -52,6 +53,9 @@ impl RemoteControlPlaneService {
                 .session_states
                 .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::MissingAuthorityState)?;
+            if !state.mirror_open {
+                state.mirror_open = true;
+            }
             state.last_open_ordinal += 1;
             state.pty_resize_epoch += 1;
             state.attachments.push(RemoteAttachment {
@@ -104,7 +108,7 @@ impl RemoteControlPlaneService {
             }),
         );
 
-        Ok(vec![
+        let mut messages = vec![
             RoutedControlPlaneMessage {
                 destination: ControlPlaneDestination::ObserverNode(console.console_host_id.clone()),
                 envelope: open_ok,
@@ -115,7 +119,33 @@ impl RemoteControlPlaneService {
                 },
                 envelope: authority_changed,
             },
-        ])
+        ];
+        if self
+            .session_states
+            .get(&session_id)
+            .map(|state| state.mirror_open && state.attachments.len() == 1)
+            .unwrap_or(false)
+        {
+            messages.push(RoutedControlPlaneMessage {
+                destination: ControlPlaneDestination::AuthorityNode(
+                    target.address.authority_id().to_string(),
+                ),
+                envelope: self.server_message(
+                    Some(session_id.clone()),
+                    Some(target_id.clone()),
+                    None,
+                    Some(console.console_id.clone()),
+                    ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                        session_id,
+                        target_id,
+                        console_id: console.console_id,
+                        cols,
+                        rows,
+                    }),
+                ),
+            });
+        }
+        Ok(messages)
     }
 
     pub fn route_console_input(
@@ -265,6 +295,70 @@ impl RemoteControlPlaneService {
         })
     }
 
+    pub fn route_mirror_bootstrap_chunk(
+        &mut self,
+        target: &ManagedSessionRecord,
+        chunk_seq: u64,
+        stream: &'static str,
+        bytes_base64: impl Into<String>,
+    ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
+        validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
+        let target_id = target.address.id().as_str().to_string();
+        if !self.session_states.contains_key(&session_id) {
+            return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
+        }
+
+        Ok(RoutedControlPlaneMessage {
+            destination: ControlPlaneDestination::AllOpenedObservers {
+                session_id: session_id.clone(),
+            },
+            envelope: self.server_message(
+                Some(session_id.clone()),
+                Some(target.address.id().as_str().to_string()),
+                None,
+                None,
+                ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                    session_id,
+                    target_id: target.address.id().as_str().to_string(),
+                    chunk_seq,
+                    stream,
+                    bytes_base64: bytes_base64.into(),
+                }),
+            ),
+        })
+    }
+
+    pub fn route_mirror_bootstrap_complete(
+        &mut self,
+        target: &ManagedSessionRecord,
+        last_chunk_seq: u64,
+    ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
+        validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
+        let target_id = target.address.id().as_str().to_string();
+        if !self.session_states.contains_key(&session_id) {
+            return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
+        }
+
+        Ok(RoutedControlPlaneMessage {
+            destination: ControlPlaneDestination::AllOpenedObservers {
+                session_id: session_id.clone(),
+            },
+            envelope: self.server_message(
+                Some(session_id.clone()),
+                Some(target.address.id().as_str().to_string()),
+                None,
+                None,
+                ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+                    session_id,
+                    target_id: target.address.id().as_str().to_string(),
+                    last_chunk_seq,
+                }),
+            ),
+        })
+    }
+
     pub fn close_target(
         &mut self,
         target: &ManagedSessionRecord,
@@ -316,7 +410,23 @@ impl RemoteControlPlaneService {
             CloseOutcome::ClosedWithoutAuthorityChange { .. } => Ok(Vec::new()),
             CloseOutcome::ClosedLastAttachment { .. } => {
                 self.session_states.remove(&session_id);
-                Ok(Vec::new())
+                Ok(vec![RoutedControlPlaneMessage {
+                    destination: ControlPlaneDestination::AuthorityNode(
+                        target.address.authority_id().to_string(),
+                    ),
+                    envelope: self.server_message(
+                        Some(session_id),
+                        Some(target_id),
+                        None,
+                        None,
+                        ControlPlanePayload::CloseMirrorRequest(
+                            crate::infra::remote_protocol::CloseMirrorRequestPayload {
+                                session_id: target.address.session_id().to_string(),
+                                target_id: target.address.id().as_str().to_string(),
+                            },
+                        ),
+                    ),
+                }])
             }
             CloseOutcome::PromotedNewAuthority {
                 removed,
@@ -472,6 +582,7 @@ impl std::error::Error for RemoteControlPlaneError {}
 
 #[derive(Debug, Clone)]
 struct RemoteSessionState {
+    mirror_open: bool,
     input_seq: u64,
     pty_resize_epoch: u64,
     last_open_ordinal: u64,
@@ -483,6 +594,7 @@ struct RemoteSessionState {
 impl RemoteSessionState {
     fn new() -> Self {
         Self {
+            mirror_open: false,
             input_seq: 0,
             pty_resize_epoch: 0,
             last_open_ordinal: 0,
@@ -577,7 +689,7 @@ mod tests {
             )
             .expect("open should succeed");
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         assert!(matches!(
             messages[0].destination,
             ControlPlaneDestination::ObserverNode(ref node) if node == "observer-a"
@@ -598,6 +710,20 @@ mod tests {
             ControlPlanePayload::ResizeAuthorityChanged(payload) => {
                 assert_eq!(payload.cols, None);
                 assert_eq!(payload.rows, None);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+        assert!(matches!(
+            messages[2].destination,
+            ControlPlaneDestination::AuthorityNode(ref node) if node == "peer-a"
+        ));
+        match &messages[2].envelope.payload {
+            ControlPlanePayload::OpenMirrorRequest(payload) => {
+                assert_eq!(payload.session_id, "shell-1");
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.console_id, "console-a");
+                assert_eq!(payload.cols, 120);
+                assert_eq!(payload.rows, 40);
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -786,6 +912,71 @@ mod tests {
             deliveries[2].envelope.payload,
             ControlPlanePayload::ResizeAuthorityChanged(_)
         ));
+    }
+
+    #[test]
+    fn second_open_reuses_existing_mirror_route_without_duplicate_open_request() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+        let second_open = service
+            .open_target(
+                &target,
+                console("console-b", "observer-b", ConsoleLocation::ServerConsole),
+                140,
+                50,
+            )
+            .expect("second open should succeed");
+
+        assert_eq!(second_open.len(), 2);
+        assert!(!second_open.iter().any(|message| matches!(
+            message.envelope.payload,
+            ControlPlanePayload::OpenMirrorRequest(_)
+        )));
+    }
+
+    #[test]
+    fn closing_last_attachment_emits_close_mirror_request() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        let first_open = service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+        let attachment = match &first_open[0].envelope.payload {
+            ControlPlanePayload::OpenTargetOk(payload) => payload.attachment_id.clone(),
+            other => panic!("unexpected payload: {other:?}"),
+        };
+
+        let close_messages = service
+            .close_target(&target, &attachment)
+            .expect("closing the last attachment should succeed");
+
+        assert_eq!(close_messages.len(), 1);
+        assert!(matches!(
+            close_messages[0].destination,
+            ControlPlaneDestination::AuthorityNode(ref node) if node == "peer-a"
+        ));
+        match &close_messages[0].envelope.payload {
+            ControlPlanePayload::CloseMirrorRequest(payload) => {
+                assert_eq!(payload.session_id, "shell-1");
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
     }
 
     #[test]

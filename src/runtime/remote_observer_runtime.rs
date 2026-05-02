@@ -14,6 +14,8 @@ pub struct RemoteObserverSnapshot {
     pub resize_authority_console_id: Option<String>,
     pub resize_authority_host_id: Option<String>,
     pub last_output_seq: Option<u64>,
+    pub has_visible_output: bool,
+    pub bootstrap_complete: bool,
     pub screen: ScreenState,
 }
 
@@ -35,6 +37,8 @@ pub struct RemoteObserverRuntime {
     resize_authority_console_id: Option<String>,
     resize_authority_host_id: Option<String>,
     last_output_seq: Option<u64>,
+    has_visible_output: bool,
+    bootstrap_complete: bool,
     terminal: TerminalEngine,
 }
 
@@ -52,6 +56,8 @@ impl RemoteObserverRuntime {
             resize_authority_console_id: None,
             resize_authority_host_id: None,
             last_output_seq: None,
+            has_visible_output: false,
+            bootstrap_complete: false,
             terminal: TerminalEngine::new(terminal_size(cols, rows)),
         }
     }
@@ -76,6 +82,8 @@ impl RemoteObserverRuntime {
             resize_authority_console_id: self.resize_authority_console_id.clone(),
             resize_authority_host_id: self.resize_authority_host_id.clone(),
             last_output_seq: self.last_output_seq,
+            has_visible_output: self.has_visible_output,
+            bootstrap_complete: self.bootstrap_complete,
             screen: self.terminal.state(),
         }
     }
@@ -106,9 +114,33 @@ impl RemoteObserverRuntime {
                 self.resize_authority_host_id = Some(payload.resize_authority_host_id.clone());
                 Ok(())
             }
+            ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                self.apply_bootstrap_chunk(payload)
+            }
+            ControlPlanePayload::MirrorBootstrapComplete(_payload) => {
+                self.bootstrap_complete = true;
+                Ok(())
+            }
             ControlPlanePayload::TargetOutput(payload) => self.apply_target_output(payload),
             _ => Ok(()),
         }
+    }
+
+    fn apply_bootstrap_chunk(
+        &mut self,
+        payload: &crate::infra::remote_protocol::MirrorBootstrapChunkPayload,
+    ) -> Result<(), RemoteObserverRuntimeError> {
+        let decoded = decode_base64(&payload.bytes_base64).map_err(|error| {
+            RemoteObserverRuntimeError::new(format!(
+                "failed to decode mirror_bootstrap_chunk for `{}`: {error}",
+                payload.target_id
+            ))
+        })?;
+        self.session_id = Some(payload.session_id.clone());
+        self.target_id = Some(payload.target_id.clone());
+        self.terminal.feed(&decoded);
+        self.has_visible_output = true;
+        Ok(())
     }
 
     fn apply_target_output(
@@ -134,6 +166,7 @@ impl RemoteObserverRuntime {
         self.target_id = Some(payload.target_id.clone());
         self.terminal.feed(&decoded);
         self.last_output_seq = Some(payload.output_seq);
+        self.has_visible_output = true;
         Ok(())
     }
 }
@@ -297,6 +330,7 @@ mod tests {
 
         let snapshot = observer.snapshot();
         assert_eq!(snapshot.last_output_seq, Some(1));
+        assert!(snapshot.has_visible_output);
         assert_eq!(
             snapshot.active_screen().lines,
             vec![
@@ -339,6 +373,52 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "remote observer received out-of-order target_output for `remote-peer:peer-a:shell-1`: 1 after 2"
+        );
+    }
+
+    #[test]
+    fn sync_feeds_bootstrap_into_terminal_state_without_output_seq() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+
+        runtime
+            .activate_target(
+                &remote_target("peer-a", "shell-1"),
+                console("console-a", "observer-a"),
+                12,
+                4,
+            )
+            .expect("remote activation should succeed");
+        runtime
+            .send_mirror_bootstrap_chunk(
+                &remote_target("peer-a", "shell-1"),
+                1,
+                "pty",
+                "aGVsbG8NCndvcmxk",
+            )
+            .expect("bootstrap chunk should fan out");
+        runtime
+            .send_mirror_bootstrap_complete(&remote_target("peer-a", "shell-1"), 1)
+            .expect("bootstrap complete should fan out");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        assert_eq!(observer.sync().expect("sync should succeed"), 4);
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.last_output_seq, None);
+        assert!(snapshot.has_visible_output);
+        assert!(snapshot.bootstrap_complete);
+        assert_eq!(
+            snapshot.active_screen().lines,
+            vec![
+                "hello       ".to_string(),
+                "world       ".to_string(),
+                "            ".to_string(),
+                "            ".to_string(),
+            ]
         );
     }
 

@@ -1,6 +1,6 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.34`  
+Version: `v1.35`  
 Status: `Active`  
 Date: `2026-05-02`
 
@@ -35,7 +35,7 @@ Current phase:
 
 Current gate:
 
-- `task.t5-08c4d1` correct backend-scoped local session export semantics before detach or reattach and end-to-end cross-host validation resume
+- `task.t5-08c4d3b` add explicit session-scoped remote live-mirror control so opened remote sessions stop falling back to placeholder-only state
 
 Why this is the current gate:
 
@@ -48,8 +48,9 @@ Why this is the current gate:
 - the first production cross-host ingress path is now landed through the repo-owned gRPC transport and ingress boundary
 - shared live node-session ownership, disconnect-to-offline projection, and reconnect ownership are now centralized behind the node-session owner runtime
 - the file-backed remote sidebar source has now been removed from the accepted visible-catalog path
-- the latest review exposed the next architecture bug instead: one node connection is still not cleanly separated from the node's publishable local session set, so helper tmux sessions and same-machine unrelated backend sessions can leak into the remote catalog
-- that means the current gate is first to finish the business session boundary itself: publish only backend-owned local sessions, never publish workspace chrome, never republish remote projections, and only then move on to detach or reattach and explicit cross-host behavior on that corrected model
+- backend-scoped export and detach or reattach continuity work are now closed enough in substance to stop being the product blocker
+- the latest cross-host review exposed the remaining product gap instead: remote session rows and remote activation exist, but the opened remote surface still lacks an explicit session-scoped live-mirror lifecycle, so real cross-host opens can fall back to placeholder-only state instead of showing the client session's actual screen
+- that makes the current gate the missing live-mirror contract itself: explicit mirror open or close protocol, server-side per-session mirror ownership, PTY-owner mirror lifecycle, and visible first-screen parity on the accepted `--port` plus `--connect` path
 
 ## 3. Current Snapshot
 
@@ -90,6 +91,11 @@ Project status at a glance:
 - `task.t5-08c3` is now closed in substance: remote authority and observer traffic carry explicit `session_id` end to end, server fanout state keys off session identity, and `attachment_id` remains only the session-local observer handle
 - the earlier `task.t5-08c4` delivery also surfaced a correction: while stable remote labels, task-state projection, and pane-local ingress ownership are in place, the remaining remote catalog path still merges file-backed discovered-session state into the visible sidebar and is therefore not an accepted end state
 - a dedicated remote runtime-owner design is now locked too: one backend-scoped sidecar must outlive attached UI clients, own live node and remote-session state in memory, and expose that state through a clean local IPC boundary instead of `/tmp` caches
+- `task.t5-08c4d2` is now closed in substance: runtime-only detach or reattach continuity and owner-restart semantics now preserve one live remote row while the backend owner is alive and clear rows correctly when it is gone
+- the latest cross-host validation attempt also exposed that `task.t5-08c4d3` was too coarse: it mixed protocol gap, PTY-owner lifecycle gap, visible-bootstrap gap, and final acceptance into one umbrella even though the opened remote session still lacked a complete live-mirror design
+- that umbrella is now split as `task.t5-08c4d3a -> task.t5-08c4d3d`, with the design now explicit in `docs/remote-live-mirror-design.md`
+- `task.t5-08c4d3a` is now closed in substance: the accepted session-scoped live-mirror design, protocol additions, bootstrap rule, and bounded implementation split are explicit
+- `task.t5-08c4d3b` is now the active gate: the protocol and server runtime must gain explicit mirror open or close control plus per-session mirror-route ownership before further cross-host UI validation can be trusted
 - the dedicated server-console runtime now carries explicit focus and selection state while waiting attention stays visible through per-session state only
 - a dedicated `remote_main_slot_runtime` boundary now exists: the main-slot remote branch can derive console identity plus viewport size and turn remote activation into routed control-plane messages against an explicit transport sink, while remote render-path work remains the next gap
 - remote control-plane fanout is now resolved to concrete per-node deliveries before the sink boundary, so future transport code can send node-bound messages directly instead of reinterpreting internal broadcast destinations
@@ -182,7 +188,7 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- correct backend-scoped local session export boundaries on the runtime-only path so one node connection publishes only real backend-owned sessions
+- add explicit session-scoped live-mirror control on the accepted remote path so opening a remote session yields the client session's real visible screen rather than placeholder-only transport state
 
 Accepted local architecture direction:
 
@@ -208,9 +214,9 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.t5-08c4d1` Correct backend-scoped local session export semantics on the runtime-only path
-2. `task.t5-08c4d2` Close detach or reattach continuity plus owner restart semantics on the corrected runtime-only path
-3. `task.t5-08c4d3` Run explicit cross-host validation and acceptance-doc closeout on the corrected runtime-only path
+1. `task.t5-08c4d3b` Implement explicit remote mirror open or close protocol messages and server-side session-route ownership
+2. `task.t5-08c4d3c` Implement PTY-owner session mirror lifecycle and reuse on the connected client node
+3. `task.t5-08c4d3d` Bind bootstrap replay plus live output into visible parity and close cross-host acceptance
 4. `T3-07` Implement narrow-terminal compaction rules for the fixed-chrome workspace layout only if acceptance evidence proves compact layout is blocking
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.

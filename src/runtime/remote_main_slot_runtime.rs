@@ -175,6 +175,34 @@ impl RemoteMainSlotRuntime {
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.send_messages(&[message])
     }
+
+    pub fn send_mirror_bootstrap_chunk(
+        &self,
+        target: &ManagedSessionRecord,
+        chunk_seq: u64,
+        stream: &'static str,
+        bytes_base64: impl Into<String>,
+    ) -> Result<(), LifecycleError> {
+        let message = self
+            .control_plane
+            .borrow_mut()
+            .route_mirror_bootstrap_chunk(target, chunk_seq, stream, bytes_base64)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        self.send_messages(&[message])
+    }
+
+    pub fn send_mirror_bootstrap_complete(
+        &self,
+        target: &ManagedSessionRecord,
+        last_chunk_seq: u64,
+    ) -> Result<(), LifecycleError> {
+        let message = self
+            .control_plane
+            .borrow_mut()
+            .route_mirror_bootstrap_complete(target, last_chunk_seq)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        self.send_messages(&[message])
+    }
 }
 
 impl RemoteMainSlotRuntime {
@@ -249,9 +277,10 @@ mod tests {
 
         let sent_messages = sent_messages.borrow();
         assert_eq!(sent_messages.len(), 1);
-        assert_eq!(sent_messages[0].len(), 2);
+        assert_eq!(sent_messages[0].len(), 3);
         assert_eq!(sent_messages[0][0].node_id, "observer-a");
         assert_eq!(sent_messages[0][1].node_id, "observer-a");
+        assert_eq!(sent_messages[0][2].node_id, "peer-a");
         match &sent_messages[0][1].envelope.payload {
             ControlPlanePayload::ResizeAuthorityChanged(payload) => {
                 assert_eq!(payload.cols, None);
@@ -259,6 +288,7 @@ mod tests {
             }
             other => panic!("unexpected payload: {other:?}"),
         }
+        assert_eq!(sent_messages[0][2].envelope.message_type, "open_mirror_request");
     }
 
     #[test]
@@ -286,6 +316,7 @@ mod tests {
         let mailbox = runtime
             .ensure_local_observer_connection("observer-a")
             .expect("registry-backed runtime should expose local observer registration");
+        runtime.ensure_local_connection("peer-a");
 
         let binding = runtime
             .activate_target(
@@ -324,8 +355,9 @@ mod tests {
             .expect("console input should route to authority");
 
         let envelopes = authority_mailbox.snapshot();
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].message_type, "target_input");
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].message_type, "open_mirror_request");
+        assert_eq!(envelopes[1].message_type, "target_input");
     }
 
     #[test]
@@ -349,8 +381,9 @@ mod tests {
             .expect("PTY resize should route to authority");
 
         let envelopes = authority_mailbox.snapshot();
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].message_type, "apply_resize");
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].message_type, "open_mirror_request");
+        assert_eq!(envelopes[1].message_type, "apply_resize");
     }
 
     #[test]
@@ -379,6 +412,42 @@ mod tests {
         assert_eq!(
             envelopes.last().map(|envelope| envelope.message_type),
             Some("target_output")
+        );
+    }
+
+    #[test]
+    fn registry_backed_runtime_routes_bootstrap_messages_to_observer_mailbox() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let observer_mailbox = runtime
+            .ensure_local_connection("observer-a")
+            .expect("registry-backed runtime should expose observer registration");
+        runtime.ensure_local_connection("peer-a");
+
+        runtime
+            .activate_target(
+                &remote_target("peer-a", "shell-1"),
+                console("console-a", "observer-a"),
+                120,
+                40,
+            )
+            .expect("remote activation should succeed");
+        let already_seen = observer_mailbox.snapshot().len();
+        runtime
+            .send_mirror_bootstrap_chunk(&remote_target("peer-a", "shell-1"), 1, "pty", "YQ==")
+            .expect("bootstrap chunk should fan out to observers");
+        runtime
+            .send_mirror_bootstrap_complete(&remote_target("peer-a", "shell-1"), 1)
+            .expect("bootstrap complete should fan out to observers");
+
+        let envelopes = observer_mailbox.snapshot();
+        assert_eq!(envelopes.len(), already_seen + 2);
+        assert_eq!(
+            envelopes[already_seen].message_type,
+            "mirror_bootstrap_chunk"
+        );
+        assert_eq!(
+            envelopes[already_seen + 1].message_type,
+            "mirror_bootstrap_complete"
         );
     }
 

@@ -1,0 +1,248 @@
+kind: state
+version: 1
+summary:
+  purpose: cold archive for full task lifecycle history that should stay out of the default assistant prompt and out of hot near-term history
+archived_from:
+  file: .agents/state/task-history.yaml
+  reason: hot history now keeps only one latest-state snapshot per near-term task, so older lifecycle transitions and long-tail history move here
+history:
+  - task_id: task.t5-08c4d2
+    status: done
+    summary: backend-scoped remote lifecycle is now continuous on the runtime-only path: public ingress moved onto a detached socket-scoped sidecar, hidden pane target catalogs bind to their explicit workspace socket instead of ambient `TMUX`, and manual connect plus detach plus reattach validation now preserves one live remote row without duplicate replay
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4d2.yaml
+      reference: status
+  - task_id: task.t5-08c4d3a
+    status: done
+    summary: the missing session-scoped remote live-mirror design is now explicit: protocol additions, server-side per-session mirror ownership, PTY-owner lifecycle, bootstrap replay, and final implementation slices are all fixed in one governing design document
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4d3a.yaml
+      reference: status
+  - task_id: task.t5-08c4d3b
+    status: in_progress
+    summary: with backend-scoped export and lifecycle continuity now validated, active work moves first to explicit session-scoped remote mirror open or close protocol plus server-owned per-session mirror-route ownership, because opened remote sessions still fall back to placeholder state without that contract
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4d3
+    status: superseded
+    summary: the earlier cross-host validation umbrella was too coarse and is now replaced by bounded live-mirror design, protocol, PTY-owner lifecycle, and visible-parity slices
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.t5-08c4d1
+    status: done
+    summary: outbound remote session publication is now backend-scoped: `workspace` and `attach` start session sync only after resolving the active socket, session sync enumerates only that socket, and only target-host sessions are exported so workspace chrome and same-machine unrelated backends no longer leak into the remote catalog
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4d1.yaml
+      reference: status
+  - task_id: task.t5-08c4d1
+    status: in_progress
+    summary: the earlier runtime-only validation umbrella is now split again because the accepted model requires one node connection to publish only the current backend's local publishable sessions, so active work moves first to correcting that export boundary before lifecycle and cross-host acceptance continue
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4d
+    status: superseded
+    summary: the original runtime-only validation umbrella is now superseded by bounded slices for backend-scoped session export semantics, runtime-only lifecycle validation, and final cross-host acceptance
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.t5-08c4d
+    status: in_progress
+    summary: the live remote owner snapshot is now the only accepted user-visible remote catalog source, published-target TSV reads are removed from the visible catalog, and owner lifetime is now tied to backend socket liveness so active work can move to detach or reattach continuity and explicit cross-host validation
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4c
+    status: done
+    summary: sidebar-visible remote catalog reads now come from the backend-scoped remote owner snapshot only, and user-visible remote rows no longer merge file-backed discovered-session or published-target TSV state
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4c.yaml
+      reference: status
+  - task_id: task.t5-08c4b
+    status: done
+    summary: one backend-scoped remote owner sidecar plus local IPC snapshot boundary now exists, startup ensures it for workspace and attach flows, and connect or disconnect producers can publish live node-session ownership into that owner without making sidebar consumers read stale cache files
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4b.yaml
+      reference: status
+  - task_id: task.t5-08c4b
+    status: in_progress
+    summary: the earlier remote sidebar validation umbrella is now re-sliced because file-backed discovered-session state is not an acceptable runtime model; active work moves first to a backend-scoped remote owner sidecar that survives detach, owns live node and session state in memory, and exposes a clean local snapshot boundary to catalog consumers
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c4a
+    status: done
+    summary: the project now explicitly rejects TSV-backed remote sidebar state and accepts one backend-scoped remote runtime owner as the only source of truth for live node and remote-session state, with the remaining queue split into owner-runtime, catalog-migration, and validation slices
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c4a.yaml
+      reference: status
+  - task_id: task.t5-08c4
+    status: superseded
+    summary: the original sidebar-plus-validation umbrella was too broad and masked a real architecture bug, so it is superseded by bounded slices that first replace file-backed remote session state with a backend-scoped runtime owner
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.t5-08c4
+    status: in_progress
+    summary: session-scoped remote control-plane routing is now explicit across protocol, local control-plane state, grpc ingress, and authority bridges; sidebar selection now keys off stable target identity instead of bare `session_id`, remote rows show authority plus session in display labels, and activation ordering groups remote sessions by node while the remaining gap is still explicit cross-host validation
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c3
+    status: done
+    summary: remote authority and observer traffic now carry explicit `session_id` end to end, server fanout state is keyed by session instead of publication-centric target ownership, `attachment_id` remains only the session-local observer handle, and grpc plus local control-plane bridges preserve `target_id` only as the catalog-facing qualified remote target identity
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c3.yaml
+      reference: status
+  - task_id: task.t5-08c3
+    status: in_progress
+    summary: after fixing the remote shared catalog to synchronize node-owned sessions directly, active work now moves to tightening the routing contract so transport stays keyed by node while authority and observer messages route by session and attachment remains only a session-local observer handle
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c2
+    status: done
+    summary: connected nodes now synchronize local tmux sessions directly into the shared remote catalog through an always-on outbound session-sync runtime on the `--connect` path, session create or update or exit deltas replace the old publication-centric discovered-target flow, and the server continues to project disconnect as remote-session offline instead of silent removal
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c2.yaml
+      reference: status
+  - task_id: task.t5-08c2
+    status: in_progress
+    summary: the active remote correction slice now replaces publication-centric discovered-target thinking with a session-centric shared-catalog model where connected nodes synchronize remote sessions directly and attachment remains only a session-local observer handle
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08c1
+    status: superseded
+    summary: the earlier discovered-target catalog slice landed and tested cleanly, but it is no longer the accepted end state because the product model is `node -> sessions -> attachments` rather than publication-centric remote targets
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.t5-08c1
+    status: done
+    summary: inbound remote `target_published` and `target_exited` envelopes now land in a node-scoped discovered-target catalog instead of waiting for tmux publication bindings to exist first, workspace sidebar and remote activation consume that shared catalog immediately after connect, disconnect projects those discovered targets offline, and `waitagent ls` stays local-backend only
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08c1.yaml
+      reference: status
+  - task_id: task.t5-08a
+    status: in_progress
+    summary: the protocol, trust, and replay design gaps are now explicit and closed; the first ingress implementation slice has started by landing proto generation, tonic or prost transport scaffolding, and a repo-owned remote-node ingress facade so upper runtimes no longer bind local socket listeners directly
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a3
+    status: done
+    summary: the remote render path now has an accepted baseline: the server owns a bounded per-target replay window of ordered target output, new observers bootstrap by replaying that stream in-order before joining the live tail, reconnect recovery is reopen-based, and truncation is explicit rather than hidden behind fake snapshots
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a3.yaml
+      reference: status
+  - task_id: task.t5-08a3
+    status: in_progress
+    summary: the production dial direction, mTLS trust model, node identity binding, duplicate-session collapse, and canonical ownership rules are now explicit, so active work moves to render bootstrap, replay, and late-subscriber recovery before cross-host ingress implementation starts
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a2
+    status: done
+    summary: the remote node architecture now fixes hub-and-spoke dialing, rustls mTLS admission, SPIFFE-style node identity binding, server-side canonical session arbitration, duplicate-session containment, and reconnect ownership between node dialers and the server manager
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a2.yaml
+      reference: status
+  - task_id: task.t5-08a2
+    status: in_progress
+    summary: the node-session proto and gRPC contract are now explicit in the protocol doc, so active work moves to trust bootstrap, dial ownership, duplicate-session collapse, and reconnect authority before cross-host ingress implementation starts
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a1
+    status: done
+    summary: the accepted remote protocol is now frozen on `waitagent.remote.v1` plus `NodeSessionService.OpenNodeSession`, typed protobuf envelopes, gRPC status mapping, versioning rules, reconnect semantics, and app-agnostic terminal I/O parity instead of the old JSON frame contract
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a1.yaml
+      reference: status
+  - task_id: task.t5-08a1
+    status: in_progress
+    summary: before cross-host ingress implementation starts, active work now moves to freezing the gRPC proto and RPC contract so the remote transport surface, status semantics, and versioning rules stop drifting between the old protocol doc and the new architecture
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t5-08a
+    status: ready
+    summary: once the remaining trust or ownership and render-bootstrap design gaps are closed, the first implementation slice will replace local-only authority ingress assumptions with a real production cross-host source
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08a.yaml
+      reference: status
+  - task_id: task.t5-08
+    status: done
+    summary: the remote node connection architecture is now explicit: WaitAgent will use a tonic-based node-scoped long-connection model with protobuf messages, rustls-backed transport, bounded backpressure, and centralized reconnect ownership for the remaining cross-host queue
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-08.yaml
+      reference: status
+  - task_id: task.t6-01e
+    status: done
+    summary: active planning is now aligned on a manual-only attention model: server-console waiting state is surfaced through sidebar, picker, badges, counts, and related chrome cues while auto-switch work is explicitly retired
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01e.yaml
+      reference: status
+  - task_id: task.t6-01d
+    status: superseded
+    summary: the planned auto-switch slice was explicitly cancelled because automatic focus jumps are considered a poor user experience for this product, so later work must stay manual-only
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01d.yaml
+      reference: status
+  - task_id: task.t6-01c
+    status: done
+    summary: server-console scheduling now separates waiting membership from transition-driven FIFO queue state, preserving first observed wait-entry order across catalog reordering and re-adding returned waiters at the tail instead of rebuilding order from catalog snapshots
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01c.yaml
+      reference: status
+  - task_id: task.t6-01c
+    status: in_progress
+    summary: real submit and manual-switch signals now enter the server-console runtime through the unified interaction seam, so active work moves to replacing the current catalog-order waiting snapshot with honest transition-driven waiting membership and FIFO queue state
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01b
+    status: done
+    summary: remote server-console interaction now emits real `ConsoleInputStarted`, `ConsoleSubmit`, and `ManualReturnToPicker` signals through the shared seam, and console-local runtime state records submit plus manual-switch ownership without depending only on passive catalog refresh
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01b.yaml
+      reference: status
+  - task_id: task.t6-01b
+    status: in_progress
+    summary: with the unified interaction seam now landed, active work moves to capturing real submit and manual-switch signals through that seam so later scheduling state no longer depends on passive snapshot inference
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01a
+    status: done
+    summary: local attach and remote interact now route through one explicit server-console interaction seam plus shared trace model, so follow-on scheduling slices no longer need to branch directly on transport at the runtime boundary
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01a.yaml
+      reference: status
+  - task_id: task.t6-01a
+    status: in_progress
+    summary: the original server-console umbrella was split into bounded manual-only slices so later work could land on one console-owned event model without reviving automatic focus movement
+    source_of_truth:
+      file: .agents/tasks/current.yaml
+      reference: status
+  - task_id: task.t6-01
+    status: superseded
+    summary: the original server-console activation umbrella is now superseded by four bounded design-backed slices because the remaining work must no longer continue as patch-style scheduling additions inside one large task
+    source_of_truth:
+      file: .agents/tasks/queued/task.t6-01.yaml
+      reference: status
+  - task_id: task.t6-01
+    status: in_progress
+    summary: `waitagent server --socket-name <socket>` now exposes a public long-lived `picker -> target -> picker` lifecycle, resolves activation targets from the same shared catalog boundary, routes local targets through the existing local attach path, and routes remote targets through the shared remote interact surface with `Ctrl-]` returning to the picker, so the remaining gap is explicit server-console focus and scheduling state rather than more target-opening or transport glue
+    source_of_truth:
+      file: .agents/state/last-verified.yaml
+      reference: checks
+  - task_id: task.t5-07
+    status: done
+    summary: the remote routing and ownership batch is now closed: open, input, output fanout, viewport-versus-PTY resize, publication ownership, shared node-session framing, and authority-host ownership convergence are all in code and validated, so active work has moved to the server-console activation surface
+    source_of_truth:
+      file: .agents/tasks/queued/task.t5-07.yaml
+      reference: status

@@ -39,7 +39,6 @@ touched_paths:
   - .agents/tasks/queued/task.t5-08c4d.yaml
   - .agents/tasks/queued/task.t5-08c4d1.yaml
   - .agents/tasks/queued/task.t5-08c4d2.yaml
-  - .agents/tasks/queued/task.t5-08c4d3.yaml
   - .agents/state/task-history.yaml
 notes:
   - This slice corrects the business session export boundary before lifecycle and cross-host acceptance work continues.

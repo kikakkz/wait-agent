@@ -2,13 +2,13 @@ id: task.t5-08c4d3
 kind: task
 version: 1
 title: run end-to-end cross-host validation and acceptance closeout on the corrected runtime-only path
-status: ready
+status: superseded
 priority: high
 design_ref:
-  doc: docs/remote-network-completion-plan.md
+  doc: docs/remote-live-mirror-design.md
   why:
-    - after the export boundary and runtime-only lifecycle semantics are correct, the remaining accepted proof is explicit cross-host product validation on the public `--port` plus `--connect` contract
-    - this slice closes phase-2 human-facing acceptance state rather than mixing final validation into lower-level runtime refactors
+    - this umbrella is no longer the active execution unit because the latest review exposed a missing live-mirror lifecycle design rather than one validation-only gap
+    - it remains only as the superseded parent for `task.t5-08c4d3a -> task.t5-08c4d3d`
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
@@ -38,4 +38,4 @@ touched_paths:
   - .agents/state/task-history.yaml
   - .agents/state/last-verified.yaml
 notes:
-  - This slice is acceptance-first. It should not reopen session-model design drift.
+  - Superseded by `task.t5-08c4d3a -> task.t5-08c4d3d`.

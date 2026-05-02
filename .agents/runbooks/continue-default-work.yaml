@@ -8,7 +8,8 @@ trigger:
 sequence:
   - load primitive.read-current-task
   - load the active task from .agents/tasks/current.yaml
-  - inspect blockers and current verification state
+  - inspect blockers and compact prompt-context summaries first
+  - load verification or task history only if the current action actually needs them
   - if the active task is a local acceptance rerun or explicitly depends on terminal fidelity evidence, run primitive.acceptance-check-sync and primitive.local-workspace-validation
   - refresh verification state when meaningful validation changed
   - record blockers if a real stop condition was discovered

@@ -1,0 +1,41 @@
+id: task.t5-08c4d3c
+kind: task
+version: 1
+title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-live-mirror-design.md
+  why:
+    - once the server can ask for a live mirror, the PTY-owning node must start, reuse, and stop mirroring one publishable local session by `session_id`
+    - this slice isolates PTY-owner runtime ownership from visible render binding and final acceptance
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3b.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - the PTY-owning node can start mirroring one local publishable session after an explicit mirror-open request
+  - repeated opens for the same session reuse one mirror runtime rather than duplicating PTY output pipes
+  - mirror-close tears down only when no remaining route still needs that session mirror
+verification:
+  - cargo test
+  - targeted review of PTY-owner lifecycle and teardown semantics
+touched_paths:
+  - src/runtime/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_node_session_owner_runtime.rs
+  - src/runtime/remote_target_publication_runtime.rs
+  - src/runtime/remote_node_session_runtime.rs
+  - src/runtime/remote_transport_runtime.rs
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d3c.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice must stay session-scoped. It should not widen into replay policy redesign or final UI acceptance.
+

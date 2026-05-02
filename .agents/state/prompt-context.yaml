@@ -1,0 +1,88 @@
+kind: state
+version: 1
+summary:
+  purpose: keep the default assistant prompt minimal and load completed-task history only when it is materially relevant
+default_prompt_inputs:
+  - .agents/index.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/tasks/current.yaml
+  - .agents/state/open-blockers.yaml
+  - .agents/state/prompt-context.yaml
+always_include:
+  active_task:
+    include:
+      - task spec
+      - design_ref
+      - depends_on
+      - done_criteria
+      - touched_paths
+  active_state:
+    include:
+      - current focus
+      - open blockers
+      - prompt-context compact summaries
+completed_context_policy:
+  default: do_not_load_completed_tasks_by_default
+  load_only_when:
+    - the active task explicitly depends on a completed task and the dependency summary is needed to understand current invariants
+    - a regression or review question references a completed task by id
+    - verification evidence for the active task directly reuses a completed task's manual scenario or contract
+    - the active design_ref names a predecessor slice whose outcome is still normative for the current work
+  otherwise_prefer:
+    - active task design_ref
+    - current task file
+    - current focus state
+    - compact predecessor summaries from this file
+completed_task_compact_summaries:
+  - task_id: task.t5-08c4d2
+    why_it_matters_now: backend-scoped detach or reattach continuity is already validated, so current work must not reopen owner-lifecycle semantics while adding live-mirror control
+    load_full_history_only_if:
+      - remote mirror work appears to break detach or reattach continuity
+      - owner-side lifecycle ownership is being modified directly
+  - task_id: task.t5-08c4d1
+    why_it_matters_now: outbound remote publication is already constrained to backend-owned target-host sessions, so current mirror work can assume remote rows represent real publishable sessions rather than helper chrome
+    load_full_history_only_if:
+      - a new bug suggests helper sessions are leaking into remote mirror routing
+      - session identity assumptions become unclear
+  - task_id: task.t5-08c3
+    why_it_matters_now: routing is already session-scoped and attachment is observer scope only; current mirror work must preserve that contract
+    load_full_history_only_if:
+      - the implementation needs exact prior routing invariants
+      - a regression suggests attachment is accidentally being used as a session key again
+  - task_id: task.t5-08a3
+    why_it_matters_now: replay and reconnect policy is already designed; current work only needs to apply that policy on the real live-mirror path
+    load_full_history_only_if:
+      - bootstrap replay encoding or reconnect replay semantics are being changed
+  - task_id: task.t5-08a
+    why_it_matters_now: real cross-host ingress already exists, so current work should build on the accepted gRPC ingress rather than inventing a parallel transport path
+    load_full_history_only_if:
+      - ingress ownership or transport boundaries are being reconsidered
+load_heavy_state_only_when:
+  task_history:
+    file: .agents/state/task-history.yaml
+    when:
+      - switching current task
+      - generating a retrospective summary
+      - investigating how a completed task changed status over time
+  archived_task_history:
+    file: .agents/state/task-history-archive.yaml
+    when:
+      - only when hot task history is insufficient for a historical investigation
+      - never as part of the default prompt
+  verification:
+    file: .agents/state/last-verified.yaml
+    when:
+      - selecting which checks to rerun
+      - answering whether a specific scenario was previously validated
+      - updating verification after tests or manual checks
+  backlog:
+    file: .agents/tasks/backlog.yaml
+    when:
+      - switching tasks
+      - splitting or reordering tasks
+      - checking whether a newly discovered slice already exists
+state_update_rules:
+  - when the current task changes, refresh current-focus and this file together
+  - when a task is completed or superseded, update its compact summary entry here if future tasks may need it
+  - when a completed task stops being relevant to any active queue, remove or compress its summary here
+  - do not copy full historical narratives into this file; keep one or two high-signal sentences per completed task

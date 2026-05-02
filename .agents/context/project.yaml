@@ -15,11 +15,11 @@ current_phase:
   stage_id: remote-network-completion
   stage_title: close the remaining cross-host interaction gaps on top of the accepted shared catalog and routing boundary
 current_focus:
-  default_task_id: task.t5-08a
-  focus_statement: the remote protocol, trust, and replay baselines are now fixed; active work now lands the first production cross-host ingress slice behind a repo-owned gRPC transport facade
+  default_task_id: task.t5-08c4d3b
+  focus_statement: the remote transport, trust, replay, session export, and owner-lifecycle baselines are now fixed enough; active work now lands explicit session-scoped live-mirror control so opened remote sessions stop falling back to placeholder-only state
 upcoming_focus:
-  - keep `task.t5-08b` focused on steady-state ownership rather than reopening protocol, trust, or replay policy
-  - keep `task.t5-08c` focused on visible render binding and end-to-end validation once ingress exists
+  - keep `task.t5-08c4d3c` focused on PTY-owner mirror lifecycle rather than reopening protocol shape
+  - keep `task.t5-08c4d3d` focused on visible parity and final cross-host validation once mirror control exists
 source_of_truth:
   - docs/execution-status-board.md
   - docs/remote-network-completion-plan.md

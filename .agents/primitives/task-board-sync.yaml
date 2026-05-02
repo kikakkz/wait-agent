@@ -1,7 +1,7 @@
 id: primitive.task-board-sync
 kind: primitive
 version: 1
-purpose: Keep .agents state, the execution board, and the acceptance checklist aligned after meaningful execution changes.
+purpose: Keep .agents state, the execution board, and the compact prompt state aligned after meaningful execution changes.
 use_when:
   - task status changes
   - blocker or verification state changes
@@ -10,6 +10,7 @@ use_when:
 inputs:
   - .agents/tasks/current.yaml
   - .agents/state/current-focus.yaml
+  - .agents/state/prompt-context.yaml
   - .agents/state/open-blockers.yaml
   - .agents/state/last-verified.yaml
   - docs/execution-status-board.md
@@ -17,13 +18,16 @@ inputs:
 steps:
   - update machine task state first
   - treat task-source synchronization as part of the same implementation slice, not follow-up cleanup
-  - sync blocker and verification state next
+  - sync current-focus, blocker, and compact prompt state next
+  - load and refresh verification state only when validation actually changed
   - refresh human docs when project-level visibility changed
   - keep task wording and status names consistent across machine and human files
 verification:
   - task id, task status, and blocker state do not disagree between .agents and docs
   - queued task status in .agents does not lag behind implemented code reality
+  - default prompt inputs stay minimal after the sync
 failure_modes:
   - .agents says done while the execution board still says in_progress
   - checklist evidence exists but is not reflected in machine state
   - code implements lifecycle or UI behavior that the unified task source still claims is not_started or ready
+  - prompt-context keeps stale completed-task detail after task focus moved on

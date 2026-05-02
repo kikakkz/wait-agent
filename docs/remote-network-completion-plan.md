@@ -30,6 +30,7 @@ It complements:
 - [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
 - [server-console-scheduling-design.md](server-console-scheduling-design.md)
 - [protocol.md](protocol.md)
+- [remote-live-mirror-design.md](remote-live-mirror-design.md)
 
 ## 2. Product Outcome
 
@@ -103,6 +104,8 @@ Design baseline now fixed before implementation resumes:
 - production trust, dialing direction, duplicate-session handling, and
   canonical connection ownership are explicit
 - remote render bootstrap, replay, and late-subscriber recovery are explicit
+- session-scoped live-mirror open or close, PTY-owner lifecycle, and
+  visible first-screen parity are explicit
 
 ## 5. Remaining Queue
 
@@ -131,9 +134,18 @@ The accepted remaining order is:
 7. `task.t5-08c4d2`
    Validate detach or reattach continuity plus owner restart semantics on the
    corrected runtime-only path.
-8. `task.t5-08c4d3`
-   Validate end-to-end cross-host open, input, output, resize, and shutdown on
-   the corrected runtime-only path.
+8. `task.t5-08c4d3a`
+   Freeze the session-scoped live-mirror design and split the remaining
+   phase-2 slice.
+9. `task.t5-08c4d3b`
+   Add explicit mirror open or close protocol messages and server-side
+   session-route ownership.
+10. `task.t5-08c4d3c`
+    Add PTY-owner session mirror lifecycle and reuse on the connected client
+    node.
+11. `task.t5-08c4d3d`
+    Bind bootstrap replay plus live output into visible parity and close
+    end-to-end cross-host validation on the corrected runtime-only path.
 
 `task.t3-07` remains optional and deferred. It must not preempt this queue
 unless acceptance evidence proves compact-layout work is blocking the product.

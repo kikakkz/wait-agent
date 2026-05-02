@@ -1,20 +1,23 @@
 version: 1
 kind: agent_control_plane
 read_order:
+  - .agents/tasks/current.yaml
   - .agents/state/current-focus.yaml
+  - .agents/state/prompt-context.yaml
+  - .agents/state/open-blockers.yaml
   - .agents/context/project.yaml
   - .agents/context/constraints.yaml
   - .agents/context/repo-map.yaml
   - .agents/context/generated-artifacts.yaml
-  - .agents/tasks/current.yaml
+read_on_demand:
   - .agents/tasks/backlog.yaml
-  - .agents/tasks/templates/local-acceptance-cycle.yaml
-  - .agents/tasks/templates/network-implementation-slice.yaml
-  - .agents/state/open-blockers.yaml
   - .agents/state/last-verified.yaml
   - .agents/state/task-history.yaml
+  - .agents/state/task-history-archive.yaml
+  - .agents/tasks/templates/local-acceptance-cycle.yaml
+  - .agents/tasks/templates/network-implementation-slice.yaml
 entrypoints:
-  default_task: task.t5-08a
+  default_task: task.t5-08c4d3b
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -47,14 +50,12 @@ directories:
 active_context:
   project_phase: phase-2
   current_stage: remote-network-completion
-  current_focus: continue phase-2 remote work with task.t5-08a so the first production cross-host ingress source lands behind the accepted gRPC transport boundary
+  current_focus: continue phase-2 remote work with task.t5-08c4d3b so remote session open gains explicit live-mirror control on top of the accepted gRPC and session-routing baseline
 recommended_primitives:
   - primitive.read-current-task
-  - primitive.verification-refresh
-  - primitive.task-history-update
   - primitive.task-board-sync
+  - primitive.verification-refresh
   - primitive.task-switch-current
-  - primitive.agents-self-maintenance
 recommended_runbooks:
   - runbook.continue-default-work
   - runbook.select-next-task

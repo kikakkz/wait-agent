@@ -202,9 +202,21 @@ next:
     status: done
   - id: task.t5-08c4d2
     title: close detach or reattach continuity and owner restart semantics on the corrected runtime-only path
-    status: in_progress
+    status: done
   - id: task.t5-08c4d3
-    title: run end-to-end cross-host validation and acceptance closeout on the corrected runtime-only path
+    title: original cross-host validation umbrella superseded by bounded remote live-mirror slices
+    status: superseded
+  - id: task.t5-08c4d3a
+    title: freeze the session-scoped remote live-mirror design and split the remaining phase-2 slice
+    status: done
+  - id: task.t5-08c4d3b
+    title: implement explicit remote mirror open or close protocol messages and server-side session-route ownership
+    status: in_progress
+  - id: task.t5-08c4d3c
+    title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
+    status: ready
+  - id: task.t5-08c4d3d
+    title: bind bootstrap replay and live remote output into visible parity and close cross-host acceptance
     status: ready
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
@@ -251,6 +263,7 @@ notes:
   - 2026-04-30 refinement: `task.t5-07`, `task.t6-01e`, and `task.t5-08a1` closed the current control-plane, server-console-planning, and protocol-contract gaps; implementation remains deliberately paused behind the remaining design slices `task.t5-08a2 -> task.t5-08a3` before `task.t5-08a -> task.t5-08c` resumes.
   - 2026-04-30 correction: the previously landed `task.t5-08c1` discovered-target slice is no longer the accepted end state because the remote product model is `node -> sessions -> attachments`, so active work is now re-split into `task.t5-08c2 -> task.t5-08c4`.
   - 2026-05-02 refinement: the old `task.t5-08c4d` validation umbrella is now split again into `task.t5-08c4d1 -> task.t5-08c4d3` because correcting the backend-scoped local session export boundary must land before detach or reattach and cross-host acceptance can be trusted.
+  - 2026-05-02 refinement: the old `task.t5-08c4d3` cross-host validation umbrella is now split again into `task.t5-08c4d3a -> task.t5-08c4d3d` because the latest review exposed a missing session-scoped live-mirror design and runtime lifecycle rather than a single validation-only gap.
   - The old gutter-scroll direction remains retired.
   - The old custom fullscreen-history direction is now also retired as the primary architecture because Codex-like live TUIs do not reliably repaint under the mixed narrow-PTY then widened-fullscreen model.
   - `task.architecture-1` is intentionally parked as deferred cleanup so it stays visible without silently becoming the next in-progress delivery slice.

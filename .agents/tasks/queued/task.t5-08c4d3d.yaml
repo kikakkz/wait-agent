@@ -1,0 +1,42 @@
+id: task.t5-08c4d3d
+kind: task
+version: 1
+title: bind bootstrap replay and live remote output into visible parity and close cross-host acceptance
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-live-mirror-design.md
+  why:
+    - after protocol and PTY-owner mirror lifecycle are complete, the product still needs visible first-screen parity and explicit cross-host proof
+    - this slice closes the remaining placeholder gap and phase-2 acceptance state on the accepted `--port` plus `--connect` path
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d3c.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+  - primitive.agents-self-maintenance
+done_criteria:
+  - opening a remote session shows bootstrap replay or current screen state instead of placeholder-only waiting once the authority node is live
+  - server-side input, visible output, resize, disconnect, and reconnect behavior pass explicit cross-host validation on the session-scoped mirror model
+  - acceptance docs, status board, and verification state reflect the validated path
+verification:
+  - cargo test
+  - manual: real cross-host remote mirror validation
+touched_paths:
+  - src/runtime
+  - src/application
+  - src/ui
+  - docs/remote-live-mirror-design.md
+  - docs/execution-status-board.md
+  - docs/local-acceptance-checklist.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d3d.yaml
+  - .agents/state/task-history.yaml
+  - .agents/state/last-verified.yaml
+notes:
+  - This slice is the final visible-parity and acceptance closeout for the remote live-mirror path.

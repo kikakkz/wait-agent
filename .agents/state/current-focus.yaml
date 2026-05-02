@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c4d3
-focus_statement: the runtime-only remote path now survives connect, detach, and reattach on backend-scoped sidecars, so active work moves to explicit cross-host interaction validation and acceptance closeout on the public --port plus --connect contract
+current_task: task.t5-08c4d3b
+focus_statement: the runtime-only remote path now survives connect, detach, and reattach on backend-scoped sidecars, but opened remote sessions still lack explicit session-scoped live-mirror control, so active work moves first to protocol and server-side per-session mirror-route ownership on the public --port plus --connect contract
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

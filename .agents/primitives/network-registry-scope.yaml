@@ -2,6 +2,7 @@ id: primitive.network-registry-scope
 kind: primitive
 version: 1
 purpose: Keep the first post-acceptance network slice narrow and local-first.
+summary: historical primitive retained only for old T5-06 decomposition context; do not use it as a default primitive for the current remote live-mirror queue
 use_when:
   - selecting work after T4-10 closes
   - decomposing T5-06 or T5-07 into smaller implementation steps

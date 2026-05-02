@@ -1,7 +1,7 @@
 id: primitive.read-current-task
 kind: primitive
 version: 1
-purpose: Establish the next executable task before touching code or planning follow-up work.
+purpose: Establish the smallest correct default prompt state before touching code or planning follow-up work.
 use_when:
   - starting a new session
   - resuming work after a redirect, blocker, or finished task
@@ -9,14 +9,17 @@ inputs:
   - .agents/index.yaml
   - .agents/tasks/current.yaml
   - .agents/state/open-blockers.yaml
-  - .agents/state/last-verified.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/prompt-context.yaml
 steps:
-  - read default_task from .agents/index.yaml
-  - load the matching task file from .agents/tasks/current.yaml
-  - inspect blockers and current verification state
-  - choose the next action from linked_primitives, linked_runbooks, and done_criteria
+  - read the minimal default read_order from .agents/index.yaml
+  - load the active task from .agents/tasks/current.yaml rather than exploring backlog or history first
+  - inspect current focus, blockers, and compact predecessor summaries from .agents/state/prompt-context.yaml
+  - load backlog, verification, or task history only if the prompt-context policy says they are needed for the current action
+  - choose the next action from linked_primitives, linked_runbooks, done_criteria, and the active design_ref
 verification:
-  - current task id is known before repo-wide exploration continues
+  - current task id and minimal required context are known before repo-wide exploration continues
 failure_modes:
   - default task is missing or stale
+  - heavy history files are loaded by default even when the compact prompt state would be enough
   - blockers contradict the assumed task readiness

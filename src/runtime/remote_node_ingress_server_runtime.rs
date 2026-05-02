@@ -2,8 +2,9 @@ use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, NodeSessionEnvelope as GrpcNodeSessionEnvelope, RouteContext,
-    TargetExited as GrpcTargetExited, TargetInputDelivery, TargetPublished as GrpcTargetPublished,
+    ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
+    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
@@ -468,6 +469,37 @@ fn map_authority_command_to_grpc(
                 resize_authority_console_id: payload.resize_authority_console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                session_id: payload.session_id,
+            })),
+        ),
+        RemoteAuthorityCommand::OpenMirror(payload) => (
+            Some(RouteContext {
+                authority_node_id: Some(session.node_id().to_string()),
+                target_id: Some(payload.target_id.clone()),
+                attachment_id: None,
+                console_id: Some(payload.console_id.clone()),
+                console_host_id: None,
+                session_id: Some(payload.session_id.clone()),
+            }),
+            Some(Body::OpenMirrorRequest(OpenMirrorRequest {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+                console_id: payload.console_id,
+                cols: payload.cols as u32,
+                rows: payload.rows as u32,
+            })),
+        ),
+        RemoteAuthorityCommand::CloseMirror(payload) => (
+            Some(RouteContext {
+                authority_node_id: Some(session.node_id().to_string()),
+                target_id: Some(payload.target_id.clone()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some(payload.session_id.clone()),
+            }),
+            Some(Body::CloseMirrorRequest(CloseMirrorRequest {
+                target_id: payload.target_id,
                 session_id: payload.session_id,
             })),
         ),

@@ -1,7 +1,7 @@
 # WaitAgent Protocol
 
-Version: `v2.1`
-Status: `Accepted for task.t5-08a1`
+Version: `v2.2`
+Status: `Accepted for task.t5-08a1 and task.t5-08c4d3b`
 Date: `2026-05-02`
 
 ## 1. Purpose
@@ -43,12 +43,14 @@ This document intentionally does not define:
 
 - certificate issuance and trust bootstrap policy
 - canonical dialer and duplicate-session ownership policy
-- remote render bootstrap, replay, or late-subscriber snapshot policy
+- the exact terminal replay encoding internals used inside bootstrap chunks
 
 Those remaining design gaps belong to:
 
 - `task.t5-08a2` for trust and connection ownership
-- `task.t5-08a3` for render bootstrap and replay
+- `task.t5-08a3` for replay and late-subscriber recovery policy
+- `task.t5-08c4d3b -> task.t5-08c4d3d` for the session-scoped live-mirror
+  lifecycle that applies that policy on the accepted product path
 
 ## 3. Accepted Transport Model
 
@@ -153,10 +155,12 @@ message NodeSessionEnvelope {
     TargetPublished target_published = 20;
     TargetExited target_exited = 21;
 
-    OpenTargetRequest open_target_request = 30;
-    OpenTargetAccepted open_target_accepted = 31;
-    OpenTargetRejected open_target_rejected = 32;
-    CloseTargetRequest close_target_request = 33;
+    OpenMirrorRequest open_mirror_request = 30;
+    OpenMirrorAccepted open_mirror_accepted = 31;
+    OpenMirrorRejected open_mirror_rejected = 32;
+    CloseMirrorRequest close_mirror_request = 33;
+    MirrorBootstrapChunk mirror_bootstrap_chunk = 34;
+    MirrorBootstrapComplete mirror_bootstrap_complete = 35;
 
     ConsoleInput console_input = 40;
     TargetInputDelivery target_input_delivery = 41;
@@ -205,6 +209,13 @@ Identifier rule:
   not itself a routing identity
 - `console_id` identifies the observer or interaction surface
 
+Mirror-lifecycle rule:
+
+- mirror open or close messages are routed by `session_id`
+- `attachment_id` may appear for diagnostics or correlation, but it must not be
+  the identity that causes a PTY mirror to start or stop
+- multiple consoles may share one mirrored `session_id` over one node session
+
 Session-shape rule:
 
 - `session_id` must identify a user-visible publishable session
@@ -213,6 +224,24 @@ Session-shape rule:
   as this node's own published sessions
 
 ## 8. Handshake And Session Control
+
+### 8.0 Mirror Lifecycle Contract
+
+The accepted cross-host product path requires explicit mirror lifecycle
+messages.
+
+Rules:
+
+- opening a remote session in the workspace or server console must trigger one
+  explicit session-scoped mirror-open request when no live mirror exists yet
+- the PTY-owning node must answer with acceptance or rejection
+- bootstrap replay must arrive before the product treats the opened surface as
+  caught up
+- closing the last observer of that remote session must trigger one explicit
+  mirror-close request
+
+This contract is governed in detail by
+[remote-live-mirror-design.md](remote-live-mirror-design.md).
 
 ### 8.1 Hello Exchange
 

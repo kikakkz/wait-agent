@@ -28,10 +28,12 @@ message NodeSessionEnvelope {
     TargetPublished target_published = 20;
     TargetExited target_exited = 21;
 
-    OpenTargetRequest open_target_request = 30;
-    OpenTargetAccepted open_target_accepted = 31;
-    OpenTargetRejected open_target_rejected = 32;
-    CloseTargetRequest close_target_request = 33;
+    OpenMirrorRequest open_mirror_request = 30;
+    OpenMirrorAccepted open_mirror_accepted = 31;
+    OpenMirrorRejected open_mirror_rejected = 32;
+    CloseMirrorRequest close_mirror_request = 33;
+    MirrorBootstrapChunk mirror_bootstrap_chunk = 34;
+    MirrorBootstrapComplete mirror_bootstrap_complete = 35;
 
     ConsoleInput console_input = 40;
     TargetInputDelivery target_input_delivery = 41;
@@ -144,6 +146,46 @@ message TargetPublished {
 message TargetExited {
   string target_id = 1;
   string transport_session_id = 2;
+}
+
+message OpenMirrorRequest {
+  string target_id = 1;
+  string session_id = 2;
+  string console_id = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message OpenMirrorAccepted {
+  string target_id = 1;
+  string session_id = 2;
+  string availability = 3;
+}
+
+message OpenMirrorRejected {
+  string target_id = 1;
+  string session_id = 2;
+  string reason = 3;
+  google.rpc.Status status = 4;
+}
+
+message CloseMirrorRequest {
+  string target_id = 1;
+  string session_id = 2;
+}
+
+message MirrorBootstrapChunk {
+  string target_id = 1;
+  string session_id = 2;
+  uint64 chunk_seq = 3;
+  string stream = 4;
+  bytes output_bytes = 5;
+}
+
+message MirrorBootstrapComplete {
+  string target_id = 1;
+  string session_id = 2;
+  uint64 last_chunk_seq = 3;
 }
 
 message OpenTargetRequest {

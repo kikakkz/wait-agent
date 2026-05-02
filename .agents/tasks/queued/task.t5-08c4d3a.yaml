@@ -1,0 +1,42 @@
+id: task.t5-08c4d3a
+kind: task
+version: 1
+title: freeze the session-scoped remote live-mirror design and split the remaining phase-2 slice
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-live-mirror-design.md
+  why:
+    - the current cross-host placeholder failure is caused by a missing live-mirror lifecycle design rather than by one isolated transport bug
+    - this slice locks the protocol additions, lifecycle ownership, bootstrap rule, and bounded implementation queue before more runtime code lands
+target_task_reference: task.t5-08c4d3
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.t5-08c4d2.done
+linked_primitives:
+  - primitive.task-board-sync
+  - primitive.task-history-update
+done_criteria:
+  - a dedicated design doc defines session-scoped mirror open or close semantics
+  - the accepted protocol gap for live mirror lifecycle is explicit
+  - the former `task.t5-08c4d3` umbrella is re-split into bounded implementation slices
+verification:
+  - doc review
+touched_paths:
+  - docs/remote-live-mirror-design.md
+  - docs/remote-network-completion-plan.md
+  - docs/protocol.md
+  - docs/execution-status-board.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.t5-08c4d3a.yaml
+  - .agents/tasks/queued/task.t5-08c4d3b.yaml
+  - .agents/tasks/queued/task.t5-08c4d3c.yaml
+  - .agents/tasks/queued/task.t5-08c4d3d.yaml
+  - .agents/state/current-focus.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - This slice is design-only. It does not implement the mirror lifecycle itself.
+

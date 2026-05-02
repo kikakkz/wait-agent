@@ -4,7 +4,7 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
+    ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
@@ -555,6 +555,33 @@ fn ensure_live_session_route(
     live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
     authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
 ) -> Result<(), LifecycleError> {
+    if let Some(existing) = live_sessions.get(target_session_name) {
+        let transport_session_id = target_id
+            .strip_prefix(format!("remote-peer:{authority_id}:").as_str())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "live target id `{target_id}` does not match authority `{authority_id}`"
+                ))
+            })?;
+        if existing.authority_id == authority_id
+            && existing.target_id == target_id
+            && existing.transport_session_id == transport_session_id
+            && existing.socket_name == socket_name
+        {
+            ensure_shared_authority_session(
+                authority_id,
+                transport_socket_path,
+                network,
+                publication_runtime.clone(),
+                authority_sessions,
+            )?;
+            let shared_session = authority_sessions
+                .get(authority_id)
+                .expect("authority session should exist after ensure");
+            start_shared_authority_command_dispatcher(shared_session.clone());
+            return Ok(());
+        }
+    }
     stop_live_session_route(target_session_name, live_sessions, authority_sessions);
     ensure_shared_authority_session(
         authority_id,
@@ -827,6 +854,8 @@ fn dispatch_authority_command_to_live_route(
 
 fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
     match command {
+        RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::TargetInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
     }
@@ -976,6 +1005,50 @@ fn forward_host_output_to_session(
     while running.load(Ordering::Relaxed) {
         let envelope = read_control_plane_envelope(&mut host_reader)?;
         match envelope.payload {
+            ControlPlanePayload::OpenMirrorAccepted(payload) => {
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                session.send_payload(
+                    NodeSessionChannel::Authority,
+                    &session_id,
+                    &target_id,
+                    "authority-msg",
+                    ControlPlanePayload::OpenMirrorAccepted(payload),
+                )?;
+            }
+            ControlPlanePayload::OpenMirrorRejected(payload) => {
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                session.send_payload(
+                    NodeSessionChannel::Authority,
+                    &session_id,
+                    &target_id,
+                    "authority-msg",
+                    ControlPlanePayload::OpenMirrorRejected(payload),
+                )?;
+            }
+            ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                session.send_payload(
+                    NodeSessionChannel::Authority,
+                    &session_id,
+                    &target_id,
+                    "authority-msg",
+                    ControlPlanePayload::MirrorBootstrapChunk(payload),
+                )?;
+            }
+            ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                session.send_payload(
+                    NodeSessionChannel::Authority,
+                    &session_id,
+                    &target_id,
+                    "authority-msg",
+                    ControlPlanePayload::MirrorBootstrapComplete(payload),
+                )?;
+            }
             ControlPlanePayload::TargetOutput(payload) => {
                 session.send_target_output(
                     &payload.session_id,
@@ -1004,6 +1077,98 @@ fn forward_host_output_to_shared_session(
     while running.load(Ordering::Relaxed) {
         let envelope = read_control_plane_envelope(&mut host_reader)?;
         match envelope.payload {
+            ControlPlanePayload::OpenMirrorAccepted(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                if session
+                    .send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::OpenMirrorAccepted(payload),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::OpenMirrorRejected(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                if session
+                    .send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::OpenMirrorRejected(payload),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                if session
+                    .send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::MirrorBootstrapChunk(payload),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                if session
+                    .send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::MirrorBootstrapComplete(payload),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
             ControlPlanePayload::TargetOutput(payload) => {
                 let Some(session) = shared_session.current_session() else {
                     continue;
@@ -1040,10 +1205,18 @@ fn authority_command_envelope(
     command: RemoteAuthorityCommand,
 ) -> ProtocolEnvelope<ControlPlanePayload> {
     let session_id = match &command {
+        RemoteAuthorityCommand::OpenMirror(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::TargetInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
     };
     let payload = match command {
+        RemoteAuthorityCommand::OpenMirror(payload) => {
+            ControlPlanePayload::OpenMirrorRequest(payload)
+        }
+        RemoteAuthorityCommand::CloseMirror(payload) => {
+            ControlPlanePayload::CloseMirrorRequest(payload)
+        }
         RemoteAuthorityCommand::TargetInput(payload) => ControlPlanePayload::TargetInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
     };
@@ -1085,7 +1258,7 @@ fn now_rfc3339_like() -> String {
 mod tests {
     use super::{
         dispatch_publication_sender_command, ensure_live_session_route,
-        live_authority_session_socket_path, SharedAuthoritySession,
+        live_authority_session_socket_path, stop_live_session_route, SharedAuthoritySession,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
@@ -1385,6 +1558,63 @@ mod tests {
             server_running,
             server_thread,
         ));
+    }
+
+    #[test]
+    fn ensure_live_session_route_reuses_existing_session_route_for_same_target() {
+        let socket_name = "wa-reuse";
+        let target_session_name = "target-reuse";
+        let target_id = "remote-peer:peer-a:target-reuse";
+        let transport_socket_path = test_socket_path("shared-authority-reuse");
+        let mut live_sessions = HashMap::new();
+        let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
+
+        ensure_live_session_route(
+            socket_name,
+            target_session_name,
+            "peer-a",
+            target_id,
+            transport_socket_path.to_string_lossy().as_ref(),
+            &RemoteNetworkConfig::default(),
+            &publication_runtime,
+            &mut live_sessions,
+            &mut authority_sessions,
+        )
+        .expect("first live session route should register");
+
+        let first_route = live_sessions
+            .get(target_session_name)
+            .expect("route should exist after first register")
+            .clone();
+
+        ensure_live_session_route(
+            socket_name,
+            target_session_name,
+            "peer-a",
+            target_id,
+            transport_socket_path.to_string_lossy().as_ref(),
+            &RemoteNetworkConfig::default(),
+            &publication_runtime,
+            &mut live_sessions,
+            &mut authority_sessions,
+        )
+        .expect("second live session route should reuse existing route");
+
+        let second_route = live_sessions
+            .get(target_session_name)
+            .expect("route should still exist after second register")
+            .clone();
+
+        assert!(Arc::ptr_eq(&first_route, &second_route));
+        assert_eq!(authority_sessions.len(), 1);
+
+        stop_live_session_route(
+            target_session_name,
+            &mut live_sessions,
+            &mut authority_sessions,
+        );
     }
 
     #[test]

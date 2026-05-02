@@ -43,6 +43,12 @@ pub struct ProtocolEnvelope<P> {
 pub enum ControlPlanePayload {
     ClientHello(ClientHelloPayload),
     ServerHello(ServerHelloPayload),
+    OpenMirrorRequest(OpenMirrorRequestPayload),
+    OpenMirrorAccepted(OpenMirrorAcceptedPayload),
+    OpenMirrorRejected(OpenMirrorRejectedPayload),
+    CloseMirrorRequest(CloseMirrorRequestPayload),
+    MirrorBootstrapChunk(MirrorBootstrapChunkPayload),
+    MirrorBootstrapComplete(MirrorBootstrapCompletePayload),
     OpenTargetOk(OpenTargetOkPayload),
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
@@ -59,6 +65,12 @@ impl ControlPlanePayload {
         match self {
             Self::ClientHello(_) => "client_hello",
             Self::ServerHello(_) => "server_hello",
+            Self::OpenMirrorRequest(_) => "open_mirror_request",
+            Self::OpenMirrorAccepted(_) => "open_mirror_accepted",
+            Self::OpenMirrorRejected(_) => "open_mirror_rejected",
+            Self::CloseMirrorRequest(_) => "close_mirror_request",
+            Self::MirrorBootstrapChunk(_) => "mirror_bootstrap_chunk",
+            Self::MirrorBootstrapComplete(_) => "mirror_bootstrap_complete",
             Self::OpenTargetOk(_) => "open_target_ok",
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
@@ -85,6 +97,52 @@ pub struct ServerHelloPayload {
     pub accepted_protocol_version: String,
     pub heartbeat_interval_ms: u64,
     pub session_recovery_policy: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenMirrorRequestPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub console_id: String,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenMirrorAcceptedPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub availability: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenMirrorRejectedPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseMirrorRequestPayload {
+    pub session_id: String,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorBootstrapChunkPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub chunk_seq: u64,
+    pub stream: &'static str,
+    pub bytes_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorBootstrapCompletePayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub last_chunk_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

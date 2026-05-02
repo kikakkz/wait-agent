@@ -1,5 +1,7 @@
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ControlPlanePayload, ProtocolEnvelope, TargetInputPayload,
+    ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
+    MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
+    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
     TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
@@ -34,6 +36,8 @@ pub struct AuthorityTransportListenerGuard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteAuthorityCommand {
+    OpenMirror(OpenMirrorRequestPayload),
+    CloseMirror(CloseMirrorRequestPayload),
     TargetInput(TargetInputPayload),
     ApplyResize(ApplyResizePayload),
 }
@@ -68,6 +72,12 @@ impl RemoteAuthorityTransportRuntime {
             .expect("authority transport reader mutex should not be poisoned");
         let envelope = read_control_plane_envelope(&mut *reader)?;
         match envelope.payload {
+            ControlPlanePayload::OpenMirrorRequest(payload) => {
+                Ok(RemoteAuthorityCommand::OpenMirror(payload))
+            }
+            ControlPlanePayload::CloseMirrorRequest(payload) => {
+                Ok(RemoteAuthorityCommand::CloseMirror(payload))
+            }
             ControlPlanePayload::TargetInput(payload) => {
                 Ok(RemoteAuthorityCommand::TargetInput(payload))
             }
@@ -96,6 +106,111 @@ impl RemoteAuthorityTransportRuntime {
             stream,
             bytes_base64: bytes_base64.into(),
         });
+        let envelope = ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: format!(
+                "{}-authority-msg-{}",
+                self.node_id,
+                self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1
+            ),
+            message_type: payload.message_type(),
+            timestamp: now_rfc3339_like(),
+            sender_id: self.node_id.clone(),
+            correlation_id: None,
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload,
+        };
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("authority transport writer mutex should not be poisoned");
+        write_control_plane_envelope(&mut *writer, &envelope)?;
+        Ok(())
+    }
+
+    pub fn send_open_mirror_accepted(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        availability: &'static str,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                availability,
+            }),
+        )
+    }
+
+    pub fn send_open_mirror_rejected(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::OpenMirrorRejected(OpenMirrorRejectedPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                code,
+                message: message.into(),
+            }),
+        )
+    }
+
+    pub fn send_mirror_bootstrap_chunk(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        chunk_seq: u64,
+        stream: &'static str,
+        bytes_base64: impl Into<String>,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                chunk_seq,
+                stream,
+                bytes_base64: bytes_base64.into(),
+            }),
+        )
+    }
+
+    pub fn send_mirror_bootstrap_complete(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        last_chunk_seq: u64,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                last_chunk_seq,
+            }),
+        )
+    }
+
+    fn send_payload(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        payload: ControlPlanePayload,
+    ) -> Result<(), RemoteAuthorityTransportError> {
         let envelope = ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
             message_id: format!(

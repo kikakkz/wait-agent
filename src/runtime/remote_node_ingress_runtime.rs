@@ -1,7 +1,8 @@
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, NodeSessionEnvelope as GrpcNodeSessionEnvelope, RouteContext,
+    ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
+    OpenMirrorAccepted, OpenMirrorRejected, OpenMirrorRequest, RouteContext,
     TargetExited as GrpcTargetExited, TargetInputDelivery, TargetOutput as GrpcTargetOutput,
     TargetPublished as GrpcTargetPublished,
 };
@@ -10,8 +11,9 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetOutputPayload,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    CloseMirrorRequestPayload, ControlPlanePayload, OpenMirrorAcceptedPayload,
+    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetExitedPayload,
+    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
@@ -283,6 +285,117 @@ fn route_grpc_envelope(
             session
                 .write_authority_envelope(&map_target_output_envelope(node_id, &envelope, payload)?)
         }
+        Some(Body::OpenMirrorRequest(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: envelope.message_id.clone(),
+                message_type: "open_mirror_request",
+                timestamp: timestamp_string(&envelope),
+                sender_id: node_id.to_string(),
+                correlation_id: envelope.correlation_id.clone(),
+                session_id: route_session_id(&envelope)
+                    .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+                target_id: route_target_id(&envelope).or_else(|| Some(payload.target_id.clone())),
+                attachment_id: route_attachment_id(&envelope),
+                console_id: route_console_id(&envelope)
+                    .or_else(|| Some(payload.console_id.clone())),
+                payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                    session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                        .unwrap_or_else(|| payload.target_id.clone()),
+                    target_id: payload.target_id.clone(),
+                    console_id: payload.console_id.clone(),
+                    cols: payload.cols as usize,
+                    rows: payload.rows as usize,
+                }),
+            })
+        }
+        Some(Body::CloseMirrorRequest(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: envelope.message_id.clone(),
+                message_type: "close_mirror_request",
+                timestamp: timestamp_string(&envelope),
+                sender_id: node_id.to_string(),
+                correlation_id: envelope.correlation_id.clone(),
+                session_id: route_session_id(&envelope)
+                    .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+                target_id: route_target_id(&envelope).or_else(|| Some(payload.target_id.clone())),
+                attachment_id: route_attachment_id(&envelope),
+                console_id: route_console_id(&envelope),
+                payload: ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
+                    session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                        .unwrap_or_else(|| payload.target_id.clone()),
+                    target_id: payload.target_id.clone(),
+                }),
+            })
+        }
+        Some(Body::OpenMirrorAccepted(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: envelope.message_id.clone(),
+                message_type: "open_mirror_accepted",
+                timestamp: timestamp_string(&envelope),
+                sender_id: node_id.to_string(),
+                correlation_id: envelope.correlation_id.clone(),
+                session_id: route_session_id(&envelope)
+                    .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+                target_id: route_target_id(&envelope).or_else(|| Some(payload.target_id.clone())),
+                attachment_id: route_attachment_id(&envelope),
+                console_id: route_console_id(&envelope),
+                payload: ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
+                    session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                        .unwrap_or_else(|| payload.target_id.clone()),
+                    target_id: payload.target_id.clone(),
+                    availability: known_availability(&payload.availability)?,
+                }),
+            })
+        }
+        Some(Body::OpenMirrorRejected(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: envelope.message_id.clone(),
+                message_type: "open_mirror_rejected",
+                timestamp: timestamp_string(&envelope),
+                sender_id: node_id.to_string(),
+                correlation_id: envelope.correlation_id.clone(),
+                session_id: route_session_id(&envelope)
+                    .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+                target_id: route_target_id(&envelope).or_else(|| Some(payload.target_id.clone())),
+                attachment_id: route_attachment_id(&envelope),
+                console_id: route_console_id(&envelope),
+                payload: ControlPlanePayload::OpenMirrorRejected(OpenMirrorRejectedPayload {
+                    session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                        .unwrap_or_else(|| payload.target_id.clone()),
+                    target_id: payload.target_id.clone(),
+                    code: "mirror_not_available",
+                    message: payload.reason.clone(),
+                }),
+            })
+        }
         Some(Body::Heartbeat(_)) | Some(Body::ClientHello(_)) => Ok(()),
         _ => Ok(()),
     }
@@ -435,6 +548,36 @@ fn map_outbound_control_plane_envelope(
             rows: payload.rows as u32,
             session_id: payload.session_id,
         })),
+        ControlPlanePayload::OpenMirrorRequest(payload) => {
+            Some(Body::OpenMirrorRequest(OpenMirrorRequest {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+                console_id: payload.console_id,
+                cols: payload.cols as u32,
+                rows: payload.rows as u32,
+            }))
+        }
+        ControlPlanePayload::OpenMirrorAccepted(payload) => {
+            Some(Body::OpenMirrorAccepted(OpenMirrorAccepted {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+                availability: payload.availability.to_string(),
+            }))
+        }
+        ControlPlanePayload::OpenMirrorRejected(payload) => {
+            Some(Body::OpenMirrorRejected(OpenMirrorRejected {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+                reason: payload.message,
+                status: None,
+            }))
+        }
+        ControlPlanePayload::CloseMirrorRequest(payload) => {
+            Some(Body::CloseMirrorRequest(CloseMirrorRequest {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+            }))
+        }
         _ => None,
     };
     Ok(body.map(|body| GrpcNodeSessionEnvelope {

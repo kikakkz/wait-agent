@@ -1,6 +1,8 @@
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, ErrorPayload, NodeSessionChannel,
-    NodeSessionEnvelope, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
+    ApplyResizePayload, ClientHelloPayload, CloseMirrorRequestPayload, ControlPlanePayload,
+    ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, NodeSessionChannel,
+    NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
+    OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
     ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload, TargetInputPayload,
     TargetOutputPayload, TargetPublishedPayload,
 };
@@ -141,6 +143,46 @@ fn write_payload(
             write_u64(writer, payload.heartbeat_interval_ms)?;
             write_static_string(writer, payload.session_recovery_policy)?;
         }
+        ControlPlanePayload::OpenMirrorRequest(payload) => {
+            write_u8(writer, 12)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_string(writer, &payload.console_id)?;
+            write_usize(writer, payload.cols)?;
+            write_usize(writer, payload.rows)?;
+        }
+        ControlPlanePayload::OpenMirrorAccepted(payload) => {
+            write_u8(writer, 13)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_static_string(writer, payload.availability)?;
+        }
+        ControlPlanePayload::OpenMirrorRejected(payload) => {
+            write_u8(writer, 14)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_static_string(writer, payload.code)?;
+            write_string(writer, &payload.message)?;
+        }
+        ControlPlanePayload::CloseMirrorRequest(payload) => {
+            write_u8(writer, 15)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+        }
+        ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+            write_u8(writer, 16)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_u64(writer, payload.chunk_seq)?;
+            write_static_string(writer, payload.stream)?;
+            write_string(writer, &payload.bytes_base64)?;
+        }
+        ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+            write_u8(writer, 17)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_u64(writer, payload.last_chunk_seq)?;
+        }
         ControlPlanePayload::OpenTargetOk(payload) => {
             write_u8(writer, 3)?;
             write_string(writer, &payload.session_id)?;
@@ -239,6 +281,40 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             accepted_protocol_version: read_string(reader)?,
             heartbeat_interval_ms: read_u64(reader)?,
             session_recovery_policy: read_known_static_string(reader)?,
+        }),
+        12 => ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            console_id: read_string(reader)?,
+            cols: read_usize(reader)?,
+            rows: read_usize(reader)?,
+        }),
+        13 => ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            availability: read_known_static_string(reader)?,
+        }),
+        14 => ControlPlanePayload::OpenMirrorRejected(OpenMirrorRejectedPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            code: read_known_static_string(reader)?,
+            message: read_string(reader)?,
+        }),
+        15 => ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+        }),
+        16 => ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            chunk_seq: read_u64(reader)?,
+            stream: read_known_static_string(reader)?,
+            bytes_base64: read_string(reader)?,
+        }),
+        17 => ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            last_chunk_seq: read_u64(reader)?,
         }),
         3 => ControlPlanePayload::OpenTargetOk(OpenTargetOkPayload {
             session_id: read_string(reader)?,
@@ -380,8 +456,11 @@ fn read_known_static_string(
         "exited" => Ok("exited"),
         "unknown_target" => Ok("unknown_target"),
         "target_offline" => Ok("target_offline"),
+        "mirror_not_available" => Ok("mirror_not_available"),
         "unauthorized" => Ok("unauthorized"),
         "pty" => Ok("pty"),
+        "stdout" => Ok("stdout"),
+        "stderr" => Ok("stderr"),
         "test" => Ok("test"),
         "republish_live_targets" => Ok("republish_live_targets"),
         "resize_denied" => Ok("resize_denied"),
@@ -532,8 +611,9 @@ mod tests {
         write_control_plane_envelope, write_node_session_envelope, write_registration_frame,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, NodeSessionChannel, NodeSessionEnvelope, ProtocolEnvelope,
-        TargetOutputPayload, TargetPublishedPayload,
+        CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel, NodeSessionEnvelope,
+        OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetOutputPayload,
+        TargetPublishedPayload,
     };
 
     #[test]
@@ -611,6 +691,81 @@ mod tests {
             read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
 
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_open_mirror_request() {
+        let envelope = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-open-mirror".to_string(),
+            message_type: "open_mirror_request",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("corr-open-mirror".to_string()),
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: Some("console-1".to_string()),
+            payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-1".to_string(),
+                cols: 120,
+                rows: 40,
+            }),
+        };
+        let mut bytes = Vec::new();
+
+        write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+        let decoded =
+            read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_mirror_lifecycle_replies() {
+        let accepted = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-open-mirror-ok".to_string(),
+            message_type: "open_mirror_accepted",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("corr-open-mirror".to_string()),
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                availability: "online",
+            }),
+        };
+        let close = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-close-mirror".to_string(),
+            message_type: "close_mirror_request",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("corr-close-mirror".to_string()),
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+            }),
+        };
+
+        for envelope in [accepted, close] {
+            let mut bytes = Vec::new();
+            write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+            let decoded =
+                read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+            assert_eq!(decoded, envelope);
+        }
     }
 
     #[test]

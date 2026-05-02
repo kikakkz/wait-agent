@@ -5,6 +5,7 @@ required_fields:
   - kind
 optional_fields:
   - read_order
+  - read_on_demand
   - entrypoints
   - authoritative_sources
   - required_rules

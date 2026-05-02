@@ -4,6 +4,16 @@ required_fields:
   - kind
   - version
 optional_fields:
+  - summary
+  - archive_file
+  - archived_from
+  - hot_history_policy
+  - default_prompt_inputs
+  - always_include
+  - completed_context_policy
+  - completed_task_compact_summaries
+  - load_heavy_state_only_when
+  - state_update_rules
   - current_task
   - focus_statement
   - last_updated_from

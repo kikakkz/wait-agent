@@ -714,6 +714,13 @@ pub(crate) fn apply_authority_envelope(
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<(), RemoteSocketTransportError> {
     match &envelope.payload {
+        ControlPlanePayload::OpenMirrorAccepted(_) => Ok(()),
+        ControlPlanePayload::OpenMirrorRejected(payload) => {
+            Err(RemoteSocketTransportError::new(format!(
+                "remote mirror open rejected for `{}`: {}",
+                payload.target_id, payload.message
+            )))
+        }
         ControlPlanePayload::TargetOutput(payload) => {
             if envelope.sender_id != target.address.authority_id() {
                 return Err(RemoteSocketTransportError::new(format!(
@@ -731,6 +738,35 @@ pub(crate) fn apply_authority_envelope(
                 )
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
+        ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
+            }
+            remote_runtime
+                .send_mirror_bootstrap_chunk(
+                    target,
+                    payload.chunk_seq,
+                    payload.stream,
+                    payload.bytes_base64.clone(),
+                )
+                .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
+        }
+        ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
+            }
+            remote_runtime
+                .send_mirror_bootstrap_complete(target, payload.last_chunk_seq)
+                .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
+        }
         other => Err(RemoteSocketTransportError::new(format!(
             "unexpected authority envelope payload `{}`",
             other.message_type()
@@ -746,7 +782,7 @@ fn draw_remote_snapshot(
     authority_status: &AuthorityTransportStatus,
 ) -> Result<(), LifecycleError> {
     let viewport = terminal.current_size_or_default();
-    let screen_lines = if snapshot.last_output_seq.is_some()
+    let screen_lines = if snapshot.has_visible_output
         && matches!(authority_status, AuthorityTransportStatus::Connected)
     {
         snapshot.active_screen().styled_lines.clone()
@@ -763,7 +799,7 @@ fn draw_remote_snapshot(
         })?;
     }
 
-    if snapshot.last_output_seq.is_some() && active_screen.cursor_visible {
+    if snapshot.has_visible_output && active_screen.cursor_visible {
         write!(
             stdout,
             "\x1b[{};{}H\x1b[?25h",
@@ -1008,7 +1044,8 @@ mod tests {
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, RemoteConsoleDescriptor, TargetOutputPayload,
+        ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
+        ProtocolEnvelope, RemoteConsoleDescriptor, TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::write_registration_frame;
     use crate::runtime::remote_authority_connection_runtime::{
@@ -1346,6 +1383,45 @@ mod tests {
     }
 
     #[test]
+    fn authority_bootstrap_envelope_flows_back_into_observer_terminal_state() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+        let target = remote_target();
+
+        runtime
+            .activate_target(
+                &target,
+                crate::infra::remote_protocol::RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: crate::domain::session_catalog::ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should succeed");
+
+        apply_authority_envelope(&runtime, &target, &authority_bootstrap_chunk_envelope(1))
+            .expect("authority bootstrap chunk should apply");
+        apply_authority_envelope(&runtime, &target, &authority_bootstrap_complete_envelope(1))
+            .expect("authority bootstrap complete should apply");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        observer.sync().expect("observer sync should succeed");
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.last_output_seq, None);
+        assert!(snapshot.has_visible_output);
+        assert!(snapshot.bootstrap_complete);
+        assert_eq!(
+            snapshot.active_screen().lines[0],
+            "a           ".to_string()
+        );
+    }
+
+    #[test]
     fn authority_target_output_envelope_flows_back_into_server_console_observer_terminal_state() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         let mailbox = runtime
@@ -1393,6 +1469,9 @@ mod tests {
         let mailbox = runtime
             .ensure_local_observer_connection("observer-a")
             .expect("observer loopback registration should succeed");
+        let authority_mailbox = runtime
+            .ensure_local_connection("peer-a")
+            .expect("authority loopback registration should succeed");
         let target = remote_target();
         let binding = runtime
             .activate_target(
@@ -1406,6 +1485,9 @@ mod tests {
                 4,
             )
             .expect("remote activation should succeed");
+        let authority_open = authority_mailbox.snapshot();
+        assert_eq!(authority_open.len(), 1);
+        assert_eq!(authority_open[0].message_type, "open_mirror_request");
         let socket_path = authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1");
         let _ = fs::remove_file(&socket_path);
         let (pane_tx, pane_rx) = mpsc::channel();
@@ -1613,6 +1695,50 @@ mod tests {
                 output_seq,
                 stream: "pty",
                 bytes_base64: "YQ==".to_string(),
+            }),
+        }
+    }
+
+    fn authority_bootstrap_chunk_envelope(chunk_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: format!("bootstrap-{chunk_seq}"),
+            message_type: "mirror_bootstrap_chunk",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                chunk_seq,
+                stream: "pty",
+                bytes_base64: "YQ==".to_string(),
+            }),
+        }
+    }
+
+    fn authority_bootstrap_complete_envelope(
+        last_chunk_seq: u64,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: format!("bootstrap-complete-{last_chunk_seq}"),
+            message_type: "mirror_bootstrap_complete",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                last_chunk_seq,
             }),
         }
     }

@@ -1,7 +1,7 @@
 id: primitive.task-history-update
 kind: primitive
 version: 1
-purpose: Keep a concise machine-readable record of meaningful task lifecycle changes.
+purpose: Keep historical task changes available without forcing them into every default prompt.
 use_when:
   - a task changes status
   - task ownership materially shifts
@@ -9,11 +9,23 @@ use_when:
 inputs:
   - .agents/tasks/current.yaml
   - .agents/state/task-history.yaml
+  - .agents/state/task-history-archive.yaml
+  - .agents/state/prompt-context.yaml
 steps:
-  - append or refresh the relevant task entry
+  - keep hot history to one latest-state snapshot per near-term task rather than a full lifecycle log
+  - append or refresh the relevant task entry in hot history when it is still near active work
+  - move older lifecycle transitions and no-longer-near-term entries into task-history-archive before hot history grows large again
   - summarize the change in one sentence
   - point back to the human source of truth reference
+  - if the changed task will matter to future active work, refresh its compact summary in .agents/state/prompt-context.yaml
+  - if the changed task no longer matters to active or near-future work, avoid growing prompt-context with unnecessary history
 verification:
   - the latest active or completed task appears in .agents/state/task-history.yaml
+  - hot history contains only near-term latest-state snapshots
+  - older history remains available in .agents/state/task-history-archive.yaml
+  - prompt-context still contains only the smallest useful completed-task summaries
 failure_modes:
   - task state changes without a history trail
+  - hot history silently grows back into a long full-history file
+  - hot history keeps duplicate in_progress or done transitions for the same older task
+  - completed-task history is copied wholesale into default prompt state

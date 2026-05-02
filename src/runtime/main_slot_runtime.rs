@@ -660,8 +660,9 @@ mod tests {
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
     };
-    use crate::cli::RemoteNetworkConfig;
+    use crate::application::workspace_service::WorkspaceService;
     use crate::cli::ActivateTargetCommand;
+    use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
@@ -677,7 +678,6 @@ mod tests {
     use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
     use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
     use crate::runtime::workspace_runtime::WorkspaceRuntime;
-    use crate::application::workspace_service::WorkspaceService;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::thread;
@@ -812,12 +812,14 @@ mod tests {
             .bootstrap_workspace(&workspace_dir)
             .expect("workspace bootstrap should succeed");
         let target_host = backend
-            .ensure_workspace(&WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                &workspace_dir,
-                workspace.workspace_handle.socket_name.as_str(),
-                None,
-                None,
-            ))
+            .ensure_workspace(
+                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                    &workspace_dir,
+                    workspace.workspace_handle.socket_name.as_str(),
+                    None,
+                    None,
+                ),
+            )
             .expect("target host bootstrap should succeed");
 
         let runtime = MainSlotRuntime::new(
@@ -881,10 +883,7 @@ mod tests {
 
         wait_for_condition(|| {
             let active_target = backend
-                .show_session_option(
-                    &workspace.workspace_handle,
-                    WAITAGENT_ACTIVE_TARGET_OPTION,
-                )
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
                 .expect("active target should read");
             active_target.as_deref() == Some(remote_target.address.qualified_target().as_str())
         });
@@ -895,15 +894,11 @@ mod tests {
         });
 
         let target_host_handle = TmuxWorkspaceHandle {
-            workspace_id: WorkspaceInstanceId::new(
-                target_host.session_name.as_str().to_string(),
-            ),
+            workspace_id: WorkspaceInstanceId::new(target_host.session_name.as_str().to_string()),
             socket_name: TmuxSocketName::new(
                 workspace.workspace_handle.socket_name.as_str().to_string(),
             ),
-            session_name: TmuxSessionName::new(
-                target_host.session_name.as_str().to_string(),
-            ),
+            session_name: TmuxSessionName::new(target_host.session_name.as_str().to_string()),
         };
         let target_host_command =
             workspace_main_pane_command(&backend, &target_host_handle).expect("target host pane");
@@ -1003,7 +998,9 @@ mod tests {
         let panes = backend.list_panes(workspace, &window).ok()?;
         panes
             .into_iter()
-            .find(|pane| !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE)
+            .find(|pane| {
+                !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
+            })
             .and_then(|pane| pane.current_command)
     }
 

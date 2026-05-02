@@ -22,6 +22,12 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorState {
+    Inactive,
+    Active,
+}
+
 pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
     type Error: ToString;
 
@@ -45,6 +51,8 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         cols: usize,
         rows: usize,
     ) -> Result<(), Self::Error>;
+
+    fn capture_text(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<String, Self::Error>;
 
     fn clear_output_pipe(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<(), Self::Error>;
 
@@ -86,6 +94,10 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         self.resize_pane_on_socket(socket_name, pane, cols, rows)
     }
 
+    fn capture_text(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<String, Self::Error> {
+        self.capture_pane_text_on_socket(socket_name, pane.as_str())
+    }
+
     fn clear_output_pipe(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<(), Self::Error> {
         self.clear_pane_pipe_on_socket(socket_name, pane)
     }
@@ -111,18 +123,6 @@ pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
     ) -> Result<PathBuf, LifecycleError>;
 
     fn ensure_live_session_unregistered(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), LifecycleError>;
-
-    fn start_source_publication(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), LifecycleError>;
-
-    fn stop_source_publication(
         &self,
         socket_name: &str,
         target_session_name: &str,
@@ -158,23 +158,6 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
         target_session_name: &str,
     ) -> Result<(), LifecycleError> {
         signal_publication_sender_live_session_unregistered(socket_name, target_session_name)
-    }
-
-    fn start_source_publication(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        self.signal_source_session_refresh(socket_name, target_session_name)
-    }
-
-    fn stop_source_publication(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        self.signal_source_session_closed(socket_name, target_session_name)?;
-        Ok(())
     }
 }
 
@@ -259,16 +242,6 @@ where
             authority_output_ingest_socket_path(&command.transport_socket_path, &command.target_id);
         let listener =
             bind_output_ingest_listener(&ingest_socket_path).map_err(remote_authority_error)?;
-        let pipe_command = remote_authority_output_pump_shell_command(
-            self.current_executable.to_string_lossy().as_ref(),
-            &ingest_socket_path,
-        );
-        self.gateway
-            .clear_output_pipe(&command.socket_name, &pane)
-            .map_err(remote_authority_error)?;
-        self.gateway
-            .set_output_pipe(&command.socket_name, &pane, &pipe_command)
-            .map_err(remote_authority_error)?;
         let _output_guard = OutputPipeGuard {
             gateway: self.gateway.clone(),
             socket_name: command.socket_name.clone(),
@@ -277,9 +250,6 @@ where
         };
 
         let (event_tx, event_rx) = mpsc::channel();
-        let _ = self
-            .publication_gateway
-            .start_source_publication(&command.socket_name, &command.target_session_name);
         let reader_transport = transport.clone();
         let reader_tx = event_tx.clone();
         let command_thread = thread::spawn(move || {
@@ -297,9 +267,80 @@ where
         let running = Arc::new(AtomicBool::new(true));
         let output_thread = spawn_output_ingest_thread(listener, running.clone(), event_tx);
         let mut output_seq = 0_u64;
+        let mut mirror_state = MirrorState::Inactive;
 
         let loop_result = loop {
             match event_rx.recv() {
+                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
+                    payload,
+                ))) => {
+                    if mirror_state == MirrorState::Active {
+                        if let Err(error) = transport
+                            .send_open_mirror_accepted(
+                                &payload.session_id,
+                                &payload.target_id,
+                                "online",
+                            )
+                            .map_err(remote_authority_error)
+                        {
+                            break Err(error);
+                        }
+                        continue;
+                    }
+                    if payload.target_id != command.target_id
+                        || payload.session_id != command.target_session_name
+                    {
+                        if let Err(error) = transport
+                            .send_open_mirror_rejected(
+                                &payload.session_id,
+                                &payload.target_id,
+                                "mirror_not_available",
+                                "requested session does not match local target host",
+                            )
+                            .map_err(remote_authority_error)
+                        {
+                            break Err(error);
+                        }
+                        continue;
+                    }
+                    if let Err(error) =
+                        activate_mirror(self, &command, &pane, &ingest_socket_path, &payload)
+                    {
+                        if transport
+                            .send_open_mirror_rejected(
+                                &payload.session_id,
+                                &payload.target_id,
+                                "mirror_not_available",
+                                error.to_string(),
+                            )
+                            .is_err()
+                        {
+                            break Err(error);
+                        }
+                        continue;
+                    }
+                    mirror_state = MirrorState::Active;
+                    if let Err(error) = transport
+                        .send_open_mirror_accepted(
+                            &payload.session_id,
+                            &payload.target_id,
+                            "online",
+                        )
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
+                    }
+                    if let Err(error) = emit_bootstrap(
+                        self,
+                        &command.socket_name,
+                        &pane,
+                        &transport,
+                        &command.target_session_name,
+                        &command.target_id,
+                    ) {
+                        break Err(error);
+                    }
+                }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::TargetInput(
                     payload,
                 ))) => {
@@ -328,7 +369,20 @@ where
                         break Err(error);
                     }
                 }
+                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
+                    _payload,
+                ))) => {
+                    if mirror_state == MirrorState::Active {
+                        if let Err(error) = deactivate_mirror(self, &command, &pane) {
+                            break Err(error);
+                        }
+                        mirror_state = MirrorState::Inactive;
+                    }
+                }
                 Ok(AuthorityHostEvent::OutputChunk(bytes)) => {
+                    if mirror_state != MirrorState::Active {
+                        continue;
+                    }
                     output_seq += 1;
                     if let Err(error) = transport
                         .send_target_output(
@@ -344,12 +398,10 @@ where
                     }
                 }
                 Ok(AuthorityHostEvent::TransportClosed) => {
-                    if let Err(error) = self
-                        .publication_gateway
-                        .stop_source_publication(&command.socket_name, &command.target_session_name)
-                        .map_err(remote_authority_error)
-                    {
-                        break Err(error);
+                    if mirror_state == MirrorState::Active {
+                        if let Err(error) = deactivate_mirror(self, &command, &pane) {
+                            break Err(error);
+                        }
                     }
                     break Ok(());
                 }
@@ -357,6 +409,9 @@ where
             }
         };
 
+        if mirror_state == MirrorState::Active {
+            let _ = deactivate_mirror(self, &command, &pane);
+        }
         running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&ingest_socket_path);
         let _ = self
@@ -492,6 +547,89 @@ fn remote_authority_output_pump_shell_command(
     .join(" ")
 }
 
+fn activate_mirror<G, P>(
+    runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
+    command: &RemoteAuthorityTargetHostCommand,
+    pane: &TmuxPaneId,
+    ingest_socket_path: &Path,
+    payload: &crate::infra::remote_protocol::OpenMirrorRequestPayload,
+) -> Result<(), LifecycleError>
+where
+    G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
+{
+    let pipe_command = remote_authority_output_pump_shell_command(
+        runtime.current_executable.to_string_lossy().as_ref(),
+        ingest_socket_path,
+    );
+    runtime
+        .gateway
+        .clear_output_pipe(&command.socket_name, pane)
+        .map_err(remote_authority_error)?;
+    runtime
+        .gateway
+        .set_output_pipe(&command.socket_name, pane, &pipe_command)
+        .map_err(remote_authority_error)?;
+    runtime
+        .gateway
+        .resize_pty(&command.socket_name, pane, payload.cols, payload.rows)
+        .map_err(remote_authority_error)?;
+    Ok(())
+}
+
+fn emit_bootstrap<G, P>(
+    runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
+    socket_name: &str,
+    pane: &TmuxPaneId,
+    transport: &RemoteAuthorityTransportRuntime,
+    session_id: &str,
+    target_id: &str,
+) -> Result<(), LifecycleError>
+where
+    G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
+{
+    let screen = runtime
+        .gateway
+        .capture_text(socket_name, pane)
+        .map_err(remote_authority_error)?;
+    if !screen.is_empty() {
+        transport
+            .send_mirror_bootstrap_chunk(
+                session_id,
+                target_id,
+                1,
+                "pty",
+                encode_base64(screen.as_bytes()),
+            )
+            .map_err(remote_authority_error)?;
+    }
+    transport
+        .send_mirror_bootstrap_complete(
+            session_id,
+            target_id,
+            if screen.is_empty() { 0 } else { 1 },
+        )
+        .map_err(remote_authority_error)?;
+    Ok(())
+}
+
+fn deactivate_mirror<G, P>(
+    runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
+    command: &RemoteAuthorityTargetHostCommand,
+    pane: &TmuxPaneId,
+) -> Result<(), LifecycleError>
+where
+    G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
+{
+    runtime
+        .gateway
+        .clear_output_pipe(&command.socket_name, pane)
+        .map_err(remote_authority_error)?;
+    Ok(())
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -574,8 +712,8 @@ mod tests {
     use crate::cli::RemoteAuthorityTargetHostCommand;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, ProtocolEnvelope, TargetExitedPayload, TargetInputPayload,
-        TargetOutputPayload, TargetPublishedPayload,
+        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
+        TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
         read_control_plane_envelope, read_node_session_envelope, write_node_session_envelope,
@@ -586,7 +724,6 @@ mod tests {
     };
     use crate::runtime::remote_node_session_runtime::RemoteNodeSessionRuntime;
     use crate::runtime::remote_node_transport_runtime::write_server_hello;
-    use crate::runtime::remote_target_publication_runtime::PublicationSenderCommand;
     use std::fs;
     use std::io::Cursor;
     use std::net::Shutdown;
@@ -604,6 +741,7 @@ mod tests {
         resize_calls: Arc<Mutex<Vec<(usize, usize)>>>,
         pipe_calls: Arc<Mutex<Vec<String>>>,
         clear_calls: Arc<Mutex<usize>>,
+        capture_text: Arc<Mutex<String>>,
     }
 
     impl RemoteTargetPtyGateway for FakeGateway {
@@ -655,6 +793,18 @@ mod tests {
                 .expect("clear calls mutex should not be poisoned");
             *clear_calls += 1;
             Ok(())
+        }
+
+        fn capture_text(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<String, Self::Error> {
+            Ok(self
+                .capture_text
+                .lock()
+                .expect("capture text mutex should not be poisoned")
+                .clone())
         }
 
         fn set_output_pipe(
@@ -733,55 +883,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn start_source_publication(
-            &self,
-            socket_name: &str,
-            target_session_name: &str,
-        ) -> Result<(), LifecycleError> {
-            self.live_session
-                .lock()
-                .expect("live session mutex should not be poisoned")
-                .as_ref()
-                .expect("live session should be registered")
-                .session
-                .send_publication_sender_command(&PublicationSenderCommand::PublishTarget {
-                    authority_id: "peer-a".to_string(),
-                    transport_session_id: "target-1".to_string(),
-                    source_session_name: Some(target_session_name.to_string()),
-                    selector: Some(format!("{socket_name}:{target_session_name}")),
-                    availability: "online",
-                    session_role: Some("target-host"),
-                    workspace_key: Some("wk-1".to_string()),
-                    command_name: Some("codex".to_string()),
-                    current_path: Some("/tmp/demo".to_string()),
-                    attached_clients: 1,
-                    window_count: 1,
-                    task_state: "input",
-                })
-                .map_err(remote_authority_error)?;
-            Ok(())
-        }
-
-        fn stop_source_publication(
-            &self,
-            _socket_name: &str,
-            target_session_name: &str,
-        ) -> Result<(), LifecycleError> {
-            self.live_session
-                .lock()
-                .expect("live session mutex should not be poisoned")
-                .as_ref()
-                .expect("live session should be registered")
-                .session
-                .send_publication_sender_command(&PublicationSenderCommand::ExitTarget {
-                    authority_id: "peer-a".to_string(),
-                    transport_session_id: "target-1".to_string(),
-                    source_session_name: Some(target_session_name.to_string()),
-                })
-                .map_err(remote_authority_error)?;
-            Ok(())
-        }
     }
 
     #[test]
@@ -842,10 +943,15 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
-        let server = thread::spawn(move || {
+        let server_ingest_socket_path = ingest_socket_path.clone();
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
             let (mut stream, _) = transport_listener
                 .accept()
                 .expect("transport should accept");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .expect("transport stream should accept read timeout");
             let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
             let registered = match hello.payload {
                 ControlPlanePayload::ClientHello(ClientHelloPayload { node_id, .. }) => node_id,
@@ -854,6 +960,14 @@ mod tests {
             assert_eq!(registered, "peer-a");
             write_server_hello(&mut stream, "waitagent-remote-node-session")
                 .expect("server hello should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: open_mirror_envelope(),
+                },
+            )
+            .expect("open mirror should encode");
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -870,58 +984,82 @@ mod tests {
                 },
             )
             .expect("apply resize should encode");
-            let mut published_payload = None;
             let mut output_payload = None;
-            let mut exited_payload = None;
-            let mut write_shutdown = false;
-            while published_payload.is_none()
+            let mut accepted_payload = None;
+            let mut bootstrap_chunk_payload = None;
+            let mut bootstrap_complete_payload = None;
+            while accepted_payload.is_none()
+                || bootstrap_complete_payload.is_none()
                 || output_payload.is_none()
-                || exited_payload.is_none()
             {
-                let envelope =
-                    read_node_session_envelope(&mut stream).expect("node session should decode");
+                let envelope = read_node_session_envelope(&mut stream).unwrap_or_else(|error| {
+                    panic!(
+                        "node session should decode while waiting for accepted/bootstrap/output; accepted={} bootstrap_complete={} output={} error={error:?}",
+                        accepted_payload.is_some(),
+                        bootstrap_complete_payload.is_some(),
+                        output_payload.is_some(),
+                    )
+                });
                 match envelope.envelope.payload {
-                    payload @ ControlPlanePayload::TargetPublished(_) => {
-                        if published_payload.is_none() {
-                            published_payload = Some(payload);
+                    payload @ ControlPlanePayload::OpenMirrorAccepted(_) => {
+                        if accepted_payload.is_none() {
+                            accepted_payload = Some(payload);
+                            wait_for_socket(&server_ingest_socket_path);
+                            let mut output_stream = UnixStream::connect(&server_ingest_socket_path)
+                                .expect("ingest socket should accept");
+                            write_output_chunk_frame(&mut output_stream, b"hello")
+                                .expect("output chunk should encode");
+                            drop(output_stream);
+                        }
+                    }
+                    payload @ ControlPlanePayload::MirrorBootstrapChunk(_) => {
+                        if bootstrap_chunk_payload.is_none() {
+                            bootstrap_chunk_payload = Some(payload);
+                        }
+                    }
+                    payload @ ControlPlanePayload::MirrorBootstrapComplete(_) => {
+                        if bootstrap_complete_payload.is_none() {
+                            bootstrap_complete_payload = Some(payload);
                         }
                     }
                     payload @ ControlPlanePayload::TargetOutput(_) => {
                         if output_payload.is_none() {
                             output_payload = Some(payload);
+                            write_node_session_envelope(
+                                &mut stream,
+                                &NodeSessionEnvelope {
+                                    channel: NodeSessionChannel::Authority,
+                                    envelope: close_mirror_envelope(),
+                                },
+                            )
+                            .expect("close mirror should encode");
                         }
-                    }
-                    payload @ ControlPlanePayload::TargetExited(_) => {
-                        exited_payload = Some(payload);
                     }
                     other => panic!("unexpected node-session payload: {other:?}"),
                 }
-                if !write_shutdown && published_payload.is_some() && output_payload.is_some() {
-                    stream
-                        .shutdown(Shutdown::Write)
-                        .expect("server write shutdown should succeed");
-                    write_shutdown = true;
-                }
             }
-            (
-                published_payload.expect("published payload should be collected"),
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("server shutdown should succeed");
+            let _ = server_tx.send((
+                accepted_payload.expect("accepted payload should be collected"),
+                bootstrap_chunk_payload,
+                bootstrap_complete_payload.expect("bootstrap complete payload should be collected"),
                 output_payload.expect("output payload should be collected"),
-                exited_payload.expect("exit payload should be collected"),
-            )
+            ));
         });
 
-        let runtime_thread = thread::spawn(move || runtime.run_target_host(command));
+        let (runtime_tx, runtime_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = runtime_tx.send(runtime.run_target_host(command));
+        });
 
-        wait_for_socket(&ingest_socket_path);
-        let mut output_stream =
-            UnixStream::connect(&ingest_socket_path).expect("ingest socket should accept");
-        write_output_chunk_frame(&mut output_stream, b"hello").expect("output chunk should encode");
-        drop(output_stream);
-
-        let (published, output, exited) = server.join().expect("server should join cleanly");
-        runtime_thread
-            .join()
-            .expect("runtime thread should join cleanly")
+        let (accepted, bootstrap_chunk, bootstrap_complete, output) = server_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server harness should complete within timeout");
+        runtime_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("runtime should complete within timeout")
             .expect("runtime should finish cleanly");
 
         assert_eq!(
@@ -938,36 +1076,29 @@ mod tests {
                 .lock()
                 .expect("resize calls mutex should not be poisoned")
                 .clone(),
-            vec![(160, 50)]
+            vec![(80, 24), (160, 50)]
         );
-        match published {
-            ControlPlanePayload::TargetPublished(TargetPublishedPayload {
-                transport_session_id,
-                source_session_name,
-                selector,
-                availability,
-                session_role,
-                workspace_key,
-                command_name,
-                current_path,
-                attached_clients,
-                window_count,
-                task_state,
-            }) => {
-                assert_eq!(transport_session_id, "target-1");
-                assert_eq!(source_session_name.as_deref(), Some("target-1"));
-                assert_eq!(selector, Some(format!("{socket_name}:target-1")));
-                assert_eq!(availability, "online");
-                assert_eq!(session_role, Some("target-host"));
-                assert_eq!(workspace_key.as_deref(), Some("wk-1"));
-                assert_eq!(command_name.as_deref(), Some("codex"));
-                assert_eq!(current_path.as_deref(), Some("/tmp/demo"));
-                assert_eq!(attached_clients, 1);
-                assert_eq!(window_count, 1);
-                assert_eq!(task_state, "input");
-            }
-            other => panic!("unexpected publication payload: {other:?}"),
-        }
+        assert_eq!(
+            accepted,
+            ControlPlanePayload::OpenMirrorAccepted(
+                crate::infra::remote_protocol::OpenMirrorAcceptedPayload {
+                    session_id: "target-1".to_string(),
+                    target_id: "remote-peer:peer-a:target-1".to_string(),
+                    availability: "online",
+                }
+            )
+        );
+        assert_eq!(bootstrap_chunk, None);
+        assert_eq!(
+            bootstrap_complete,
+            ControlPlanePayload::MirrorBootstrapComplete(
+                crate::infra::remote_protocol::MirrorBootstrapCompletePayload {
+                    session_id: "target-1".to_string(),
+                    target_id: "remote-peer:peer-a:target-1".to_string(),
+                    last_chunk_seq: 0,
+                }
+            )
+        );
         match output {
             ControlPlanePayload::TargetOutput(TargetOutputPayload {
                 output_seq,
@@ -978,16 +1109,6 @@ mod tests {
                 assert_eq!(bytes_base64, "aGVsbG8=");
             }
             other => panic!("unexpected authority output payload: {other:?}"),
-        }
-        match exited {
-            ControlPlanePayload::TargetExited(TargetExitedPayload {
-                transport_session_id,
-                source_session_name,
-            }) => {
-                assert_eq!(transport_session_id, "target-1");
-                assert_eq!(source_session_name.as_deref(), Some("target-1"));
-            }
-            other => panic!("unexpected exit payload: {other:?}"),
         }
         assert!(fake_gateway
             .pipe_calls
@@ -1070,6 +1191,49 @@ mod tests {
                 input_seq: 1,
                 bytes_base64: "YQ==".to_string(),
             }),
+        }
+    }
+
+    fn open_mirror_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-open-mirror".to_string(),
+            message_type: "open_mirror_request",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "server".to_string(),
+            correlation_id: None,
+            session_id: Some("target-1".to_string()),
+            target_id: Some("remote-peer:peer-a:target-1".to_string()),
+            attachment_id: None,
+            console_id: Some("console-a".to_string()),
+            payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                session_id: "target-1".to_string(),
+                target_id: "remote-peer:peer-a:target-1".to_string(),
+                console_id: "console-a".to_string(),
+                cols: 80,
+                rows: 24,
+            }),
+        }
+    }
+
+    fn close_mirror_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-close-mirror".to_string(),
+            message_type: "close_mirror_request",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "server".to_string(),
+            correlation_id: None,
+            session_id: Some("target-1".to_string()),
+            target_id: Some("remote-peer:peer-a:target-1".to_string()),
+            attachment_id: None,
+            console_id: Some("console-a".to_string()),
+            payload: ControlPlanePayload::CloseMirrorRequest(
+                crate::infra::remote_protocol::CloseMirrorRequestPayload {
+                    session_id: "target-1".to_string(),
+                    target_id: "remote-peer:peer-a:target-1".to_string(),
+                },
+            ),
         }
     }
 
