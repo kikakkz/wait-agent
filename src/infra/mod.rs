@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 pub mod base64;
-pub mod discovered_remote_session_store;
 pub mod published_target_store;
 pub mod remote_grpc_proto;
 pub mod remote_grpc_transport;

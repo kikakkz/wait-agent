@@ -161,6 +161,7 @@ impl MainSlotRuntime {
         self.backend
             .swap_panes(workspace, &target_main_pane, &workspace_main_pane)
             .map_err(main_slot_error)?;
+        self.set_workspace_main_pane(workspace, &target_main_pane)?;
         self.set_active_target(workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(workspace, workspace_dir)?;
@@ -187,22 +188,19 @@ impl MainSlotRuntime {
             .list_targets_on_authority(&command.socket_name)
             .map_err(main_slot_error)?;
         let active_target = self.active_target(&workspace)?;
-        let exiting_target = self
-            .exiting_target_host_for_pane(&command.socket_name, &command.pane_id)?
-            .or(active_target.clone());
         let next_target =
-            next_target_host_session(&sessions, &command.socket_name, exiting_target.as_deref());
+            next_target_host_session(&sessions, &command.socket_name, active_target.as_deref());
 
         match next_target {
             Some(target) => {
                 self.activate_target_after_main_pane_exit(&current_workspace, &target)?;
-                self.close_target_session_identity(exiting_target.as_deref())?;
+                self.close_target_session_identity(active_target.as_deref())?;
                 self.layout_runtime
                     .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir)?;
                 Ok(())
             }
             None => {
-                self.close_target_session_identity(exiting_target.as_deref())?;
+                self.close_target_session_identity(active_target.as_deref())?;
                 self.layout_runtime
                     .run_close_session(crate::cli::CloseSessionCommand {
                         socket_name: command.socket_name,
@@ -287,6 +285,7 @@ impl MainSlotRuntime {
         self.backend
             .swap_panes(&workspace, &target_main_pane, &workspace_main_pane)
             .map_err(main_slot_error)?;
+        self.set_workspace_main_pane(&workspace, &target_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
@@ -336,6 +335,7 @@ impl MainSlotRuntime {
                 ),
             )
             .map_err(main_slot_error)?;
+        self.set_workspace_main_pane(&workspace, &workspace_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
@@ -364,6 +364,7 @@ impl MainSlotRuntime {
         self.backend
             .swap_panes(&workspace, &target_main_pane, &workspace_main_pane)
             .map_err(main_slot_error)?;
+        self.set_workspace_main_pane(&workspace, &target_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
@@ -409,10 +410,12 @@ impl MainSlotRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<TmuxPaneId, LifecycleError> {
-        let pane = self
+        let configured_pane = self
             .backend
             .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
             .map_err(main_slot_error)?
+            .filter(|pane| self.pane_is_live(workspace, pane));
+        let pane = configured_pane
             .or_else(|| self.infer_target_main_pane(workspace))
             .ok_or_else(|| {
                 LifecycleError::Protocol(format!(
@@ -420,7 +423,9 @@ impl MainSlotRuntime {
                     workspace.session_name.as_str()
                 ))
             })?;
-        Ok(TmuxPaneId::new(pane))
+        let pane = TmuxPaneId::new(pane);
+        self.set_workspace_main_pane(workspace, &pane)?;
+        Ok(pane)
     }
 
     fn active_target(
@@ -444,6 +449,16 @@ impl MainSlotRuntime {
                 WAITAGENT_ACTIVE_TARGET_OPTION,
                 target.unwrap_or(""),
             )
+            .map_err(main_slot_error)
+    }
+
+    fn set_workspace_main_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<(), LifecycleError> {
+        self.backend
+            .set_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION, pane.as_str())
             .map_err(main_slot_error)
     }
 
@@ -515,9 +530,23 @@ impl MainSlotRuntime {
         let panes = self.backend.list_panes(workspace, &window).ok()?;
         panes
             .iter()
-            .find(|pane| pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE)
-            .or_else(|| panes.first())
+            .find(|pane| {
+                !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
+            })
+            .or_else(|| panes.iter().find(|pane| !pane.is_dead))
             .map(|pane| pane.pane_id.as_str().to_string())
+    }
+
+    fn pane_is_live(&self, workspace: &TmuxWorkspaceHandle, pane_id: &str) -> bool {
+        let Ok(window) = self.backend.current_window(workspace) else {
+            return false;
+        };
+        let Ok(panes) = self.backend.list_panes(workspace, &window) else {
+            return false;
+        };
+        panes
+            .iter()
+            .any(|pane| pane.pane_id.as_str() == pane_id && !pane.is_dead)
     }
 
     fn find_session_matching_on_socket(
@@ -528,30 +557,6 @@ impl MainSlotRuntime {
         self.target_registry
             .find_target_on_authority(socket_name.as_str(), target)
             .map_err(main_slot_error)
-    }
-
-    fn exiting_target_host_for_pane(
-        &self,
-        socket_name: &str,
-        pane_id: &str,
-    ) -> Result<Option<String>, LifecycleError> {
-        let sessions = self
-            .target_registry
-            .list_targets_on_authority(socket_name)
-            .map_err(main_slot_error)?;
-
-        Ok(sessions
-            .into_iter()
-            .filter(|session| {
-                session.address.transport() == &SessionTransport::LocalTmux
-                    && session.is_target_host()
-                    && session.address.server_id() == socket_name
-            })
-            .find(|session| {
-                let workspace = workspace_handle(socket_name, session.address.session_id());
-                self.infer_target_main_pane(&workspace).as_deref() == Some(pane_id)
-            })
-            .map(|session| session.address.qualified_target()))
     }
 }
 
@@ -584,7 +589,7 @@ fn split_qualified_target(target: &str) -> Option<(&str, &str)> {
 fn next_target_host_session(
     sessions: &[ManagedSessionRecord],
     socket_name: &str,
-    excluded_target: Option<&str>,
+    active_target: Option<&str>,
 ) -> Option<ManagedSessionRecord> {
     let same_socket_targets = sessions
         .iter()
@@ -592,11 +597,11 @@ fn next_target_host_session(
         .cloned()
         .collect::<Vec<_>>();
 
-    let excluded_target = excluded_target.filter(|target| !target.is_empty());
-    if let Some(excluded_target) = excluded_target {
+    let active_target = active_target.filter(|target| !target.is_empty());
+    if let Some(active_target) = active_target {
         return same_socket_targets
             .into_iter()
-            .find(|session| session.address.qualified_target() != excluded_target);
+            .find(|session| session.address.qualified_target() != active_target);
     }
 
     same_socket_targets.into_iter().next()
@@ -704,20 +709,6 @@ mod tests {
 
         let next =
             next_target_host_session(&sessions, "wa-1", None).expect("a target should exist");
-
-        assert_eq!(next.address.qualified_target(), "wa-1:target-a");
-    }
-
-    #[test]
-    fn next_target_host_session_excludes_exiting_target_even_when_it_is_not_active() {
-        let sessions = vec![
-            session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
-            session("wa-1", "target-a", WorkspaceSessionRole::TargetHost),
-            session("wa-1", "target-b", WorkspaceSessionRole::TargetHost),
-        ];
-
-        let next = next_target_host_session(&sessions, "wa-1", Some("wa-1:target-b"))
-            .expect("fallback target should exist");
 
         assert_eq!(next.address.qualified_target(), "wa-1:target-a");
     }

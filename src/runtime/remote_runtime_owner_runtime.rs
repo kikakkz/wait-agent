@@ -8,6 +8,7 @@ use crate::lifecycle::LifecycleError;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -194,6 +195,9 @@ impl RemoteRuntimeOwnerRuntime {
             )
             .map_err(remote_runtime_owner_error)?;
         stream.flush().map_err(remote_runtime_owner_error)?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(remote_runtime_owner_error)?;
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
@@ -241,6 +245,9 @@ impl RemoteRuntimeOwnerRuntime {
             )
             .map_err(remote_runtime_owner_error)?;
         stream.flush().map_err(remote_runtime_owner_error)?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(remote_runtime_owner_error)?;
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
@@ -379,7 +386,10 @@ fn signal_remote_runtime_owner_command(
     stream
         .write_all(render_remote_runtime_owner_command(&command).as_bytes())
         .map_err(remote_runtime_owner_error)?;
-    stream.flush().map_err(remote_runtime_owner_error)
+    stream.flush().map_err(remote_runtime_owner_error)?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(remote_runtime_owner_error)
 }
 
 fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelope) -> String {

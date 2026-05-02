@@ -220,37 +220,25 @@ impl CommandDispatcher {
 }
 
 fn command_owns_process_listener(command: &Command) -> bool {
-    !matches!(
-        command,
-        Command::ChromeRefreshSocket(_)
-            | Command::UiSidebar(_)
-            | Command::UiFooter(_)
-            | Command::RemoteMainSlot(_)
-            | Command::RemoteServerConsole(_)
-            | Command::RemoteAuthorityTargetHost(_)
-            | Command::RemoteAuthorityOutputPump(_)
-            | Command::RemoteTargetPublicationServer(_)
-            | Command::RemoteTargetPublicationAgent(_)
-            | Command::RemoteTargetPublicationSender(_)
-            | Command::RemoteTargetPublicationOwner(_)
-            | Command::RemoteRuntimeOwner(_)
-            | Command::SocketLifecycleHook(_)
-            | Command::RemoteTargetBindPublication(_)
-            | Command::RemoteTargetUnbindPublication(_)
-            | Command::RemoteTargetReconcilePublications(_)
-            | Command::ActivateTarget(_)
-            | Command::NewTarget(_)
-            | Command::MainPaneDied(_)
-            | Command::FooterMenu(_)
-            | Command::ToggleFullscreen(_)
-            | Command::CloseSession(_)
-            | Command::LayoutReconcile(_)
-            | Command::ChromeRefresh(_)
-            | Command::ChromeRefreshSignal(_)
-            | Command::ChromeRefreshAll
-    )
+    matches!(command, Command::Workspace)
 }
 
 fn command_owns_remote_session_sync(command: &Command) -> bool {
     matches!(command, Command::Workspace | Command::Attach(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_owns_process_listener;
+    use crate::cli::{AttachCommand, Command};
+
+    #[test]
+    fn only_workspace_owns_process_listener() {
+        assert!(command_owns_process_listener(&Command::Workspace));
+        assert!(!command_owns_process_listener(&Command::List));
+        assert!(!command_owns_process_listener(&Command::Attach(
+            AttachCommand::default()
+        )));
+        assert!(!command_owns_process_listener(&Command::ChromeRefreshAll));
+    }
 }

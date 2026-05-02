@@ -10,7 +10,6 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::base64::{decode_base64, encode_base64};
-use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
 use crate::infra::published_target_store::{PublishedTargetSourceBinding, PublishedTargetStore};
 use crate::infra::remote_protocol::{
     ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, TargetPublishedPayload,
@@ -124,7 +123,6 @@ struct PublicationOwnerSnapshot {
 #[derive(Clone)]
 pub struct RemoteTargetPublicationRuntime {
     store: PublishedTargetStore,
-    discovered_store: DiscoveredRemoteSessionStore,
     remote_runtime_owner: RemoteRuntimeOwnerRuntime,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
@@ -141,7 +139,6 @@ impl RemoteTargetPublicationRuntime {
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
             store: PublishedTargetStore::default(),
-            discovered_store: DiscoveredRemoteSessionStore::default(),
             remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
@@ -221,35 +218,37 @@ impl RemoteTargetPublicationRuntime {
         node_id: &str,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
         let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
-        let changed =
-            apply_discovered_remote_session_envelope(&self.discovered_store, node_id, &envelope)?;
-        let mut owner_changed = false;
         if let Some(session) = remote_session.published_session {
-            owner_changed |=
-                signal_remote_runtime_owner_upsert_all(&self.remote_runtime_owner, node_id, &session)?;
+            self.signal_remote_runtime_owner_upsert_live_workspaces(
+                &live_workspace_sockets,
+                node_id,
+                &session,
+            )?;
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
-            owner_changed |= signal_remote_runtime_owner_remove_all(
-                &self.remote_runtime_owner,
+            self.signal_remote_runtime_owner_remove_live_workspaces(
+                &live_workspace_sockets,
                 node_id,
                 &authority_id,
                 &transport_session_id,
             )?;
         }
-        if should_refresh_discovered_remote_catalog(changed, owner_changed) {
-            spawn_chrome_refresh_all(&self.current_executable)?;
+        if !live_workspace_sockets.is_empty() {
+            self.refresh_live_workspaces(&live_workspace_sockets)?;
         }
         Ok(())
     }
 
     pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
-        let changed =
-            mark_discovered_remote_node_offline_in_store(&self.discovered_store, node_id)?;
-        let owner_changed =
-            signal_remote_runtime_owner_mark_offline_all(&self.remote_runtime_owner, node_id)?;
-        if should_refresh_discovered_remote_catalog(changed, owner_changed) {
-            spawn_chrome_refresh_all(&self.current_executable)?;
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
+        self.signal_remote_runtime_owner_mark_offline_live_workspaces(
+            &live_workspace_sockets,
+            node_id,
+        )?;
+        if !live_workspace_sockets.is_empty() {
+            self.refresh_live_workspaces(&live_workspace_sockets)?;
         }
         Ok(())
     }
@@ -290,6 +289,64 @@ impl RemoteTargetPublicationRuntime {
             for agent_command in commands {
                 self.process_publication_agent_command(&command.socket_name, agent_command)?;
             }
+        }
+        Ok(())
+    }
+
+    fn signal_remote_runtime_owner_upsert_live_workspaces(
+        &self,
+        socket_names: &[String],
+        node_id: &str,
+        session: &ManagedSessionRecord,
+    ) -> Result<(), LifecycleError> {
+        for socket_name in socket_names {
+            self.remote_runtime_owner
+                .upsert_session(socket_name, node_id, session)?;
+        }
+        Ok(())
+    }
+
+    fn signal_remote_runtime_owner_remove_live_workspaces(
+        &self,
+        socket_names: &[String],
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+    ) -> Result<(), LifecycleError> {
+        for socket_name in socket_names {
+            self.remote_runtime_owner.remove_session(
+                socket_name,
+                node_id,
+                authority_id,
+                transport_session_id,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn signal_remote_runtime_owner_mark_offline_live_workspaces(
+        &self,
+        socket_names: &[String],
+        node_id: &str,
+    ) -> Result<(), LifecycleError> {
+        for socket_name in socket_names {
+            self.remote_runtime_owner
+                .mark_node_offline(socket_name, node_id)?;
+        }
+        Ok(())
+    }
+
+    fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
+        let sessions = self
+            .local_tmux
+            .list_sessions()
+            .map_err(remote_target_publication_error)?;
+        Ok(live_workspace_socket_names_from_sessions(&sessions))
+    }
+
+    fn refresh_live_workspaces(&self, socket_names: &[String]) -> Result<(), LifecycleError> {
+        for socket_name in socket_names {
+            spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
         }
         Ok(())
     }
@@ -1831,29 +1888,6 @@ fn apply_publication_envelope(
     }
 }
 
-fn apply_discovered_remote_session_envelope(
-    store: &DiscoveredRemoteSessionStore,
-    node_id: &str,
-    envelope: &ProtocolEnvelope<ControlPlanePayload>,
-) -> Result<bool, LifecycleError> {
-    match &envelope.payload {
-        ControlPlanePayload::TargetPublished(payload) => {
-            let session =
-                published_remote_target_record_from_payload(&envelope.sender_id, payload)?;
-            store
-                .upsert_session_from_node(node_id, &session)
-                .map_err(remote_target_publication_error)
-        }
-        ControlPlanePayload::TargetExited(payload) => store
-            .remove_session_from_node(node_id, &envelope.sender_id, &payload.transport_session_id)
-            .map_err(remote_target_publication_error),
-        other => Err(LifecycleError::Protocol(format!(
-            "unexpected discovered remote session payload `{}`",
-            other.message_type()
-        ))),
-    }
-}
-
 struct DiscoveredRemoteSessionEnvelopeEffect {
     published_session: Option<ManagedSessionRecord>,
     exited_session: Option<(String, String)>,
@@ -1910,15 +1944,6 @@ fn mark_target_offline_in_store(
     Ok(changed)
 }
 
-fn mark_discovered_remote_node_offline_in_store(
-    store: &DiscoveredRemoteSessionStore,
-    node_id: &str,
-) -> Result<bool, LifecycleError> {
-    store
-        .mark_node_sessions_offline(node_id)
-        .map_err(remote_target_publication_error)
-}
-
 fn spawn_socket_chrome_refresh(
     current_executable: &std::path::Path,
     socket_name: &str,
@@ -1933,79 +1958,17 @@ fn spawn_socket_chrome_refresh(
         .map_err(remote_target_publication_error)
 }
 
-fn spawn_chrome_refresh_all(current_executable: &std::path::Path) -> Result<(), LifecycleError> {
-    Command::new(current_executable)
-        .arg("__chrome-refresh-all")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(remote_target_publication_error)
-}
-
-fn signal_remote_runtime_owner_upsert_all(
-    owner: &RemoteRuntimeOwnerRuntime,
-    node_id: &str,
-    session: &ManagedSessionRecord,
-) -> Result<bool, LifecycleError> {
-    let socket_names = list_remote_runtime_owner_socket_names()?;
-    for socket_name in &socket_names {
-        owner.upsert_session(&socket_name, node_id, session)?;
-    }
-    Ok(!socket_names.is_empty())
-}
-
-fn signal_remote_runtime_owner_remove_all(
-    owner: &RemoteRuntimeOwnerRuntime,
-    node_id: &str,
-    authority_id: &str,
-    transport_session_id: &str,
-) -> Result<bool, LifecycleError> {
-    let socket_names = list_remote_runtime_owner_socket_names()?;
-    for socket_name in &socket_names {
-        owner.remove_session(&socket_name, node_id, authority_id, transport_session_id)?;
-    }
-    Ok(!socket_names.is_empty())
-}
-
-fn signal_remote_runtime_owner_mark_offline_all(
-    owner: &RemoteRuntimeOwnerRuntime,
-    node_id: &str,
-) -> Result<bool, LifecycleError> {
-    let socket_names = list_remote_runtime_owner_socket_names()?;
-    for socket_name in &socket_names {
-        owner.mark_node_offline(&socket_name, node_id)?;
-    }
-    Ok(!socket_names.is_empty())
-}
-
-fn list_remote_runtime_owner_socket_names() -> Result<Vec<String>, LifecycleError> {
-    let mut socket_names = Vec::new();
-    for entry in fs::read_dir(std::env::temp_dir()).map_err(remote_target_publication_error)? {
-        let entry = entry.map_err(remote_target_publication_error)?;
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        let Some(socket_name) = parse_remote_runtime_owner_socket_name(&name) else {
+fn live_workspace_socket_names_from_sessions(sessions: &[ManagedSessionRecord]) -> Vec<String> {
+    let mut socket_names = BTreeSet::new();
+    for session in sessions {
+        if session.address.transport() != &SessionTransport::LocalTmux
+            || !session.is_workspace_chrome()
+        {
             continue;
-        };
-        socket_names.push(socket_name);
+        }
+        socket_names.insert(session.address.server_id().to_string());
     }
-    Ok(socket_names)
-}
-
-fn parse_remote_runtime_owner_socket_name(file_name: &str) -> Option<String> {
-    file_name
-        .strip_prefix("waitagent-remote-runtime-owner-")?
-        .strip_suffix(".sock")
-        .map(|value| value.to_string())
-}
-
-fn should_refresh_discovered_remote_catalog(
-    discovered_store_changed: bool,
-    owner_changed: bool,
-) -> bool {
-    discovered_store_changed || owner_changed
+    socket_names.into_iter().collect()
 }
 
 fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
@@ -2019,26 +1982,23 @@ fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_discovered_remote_session_envelope, chrome_refresh_socket_args,
-        mark_discovered_remote_node_offline_in_store, mark_target_offline_in_store,
-        parse_publication_agent_command, parse_publication_sender_command,
-        publication_socket_hook_tmux_command, published_remote_target_from_local,
-        published_remote_target_record_from_payload, remote_target_publication_agent_args,
-        remote_target_publication_agent_socket_path, remote_target_publication_sender_args,
-        remote_target_publication_sender_socket_path, remote_target_publication_server_args,
-        render_publication_agent_command, render_publication_sender_command,
-        should_refresh_discovered_remote_catalog, socket_lifecycle_publication_action,
-        spawn_chrome_refresh_all, PublicationAgentCommand, PublicationSenderCommand,
-        SocketLifecyclePublicationAction,
+        chrome_refresh_socket_args, live_workspace_socket_names_from_sessions,
+        mark_target_offline_in_store, parse_publication_agent_command,
+        parse_publication_sender_command, publication_socket_hook_tmux_command,
+        published_remote_target_from_local, published_remote_target_record_from_payload,
+        remote_target_publication_agent_args, remote_target_publication_agent_socket_path,
+        remote_target_publication_sender_args, remote_target_publication_sender_socket_path,
+        remote_target_publication_server_args, render_publication_agent_command,
+        render_publication_sender_command, socket_lifecycle_publication_action,
+        PublicationAgentCommand, PublicationSenderCommand, SocketLifecyclePublicationAction,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use crate::infra::discovered_remote_session_store::DiscoveredRemoteSessionStore;
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
+        TargetPublishedPayload,
     };
     use crate::infra::tmux::RemoteTargetPublicationBinding;
     use std::path::PathBuf;
@@ -2309,110 +2269,81 @@ mod tests {
     }
 
     #[test]
-    fn discovered_publication_envelope_upserts_remote_session_for_node() {
-        let store_path = std::env::temp_dir().join(format!(
-            "waitagent-discovered-publication-test-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after unix epoch")
-                .as_nanos()
-        ));
-        let store = DiscoveredRemoteSessionStore::new(&store_path);
-
-        let changed = apply_discovered_remote_session_envelope(
-            &store,
-            "peer-a",
-            &ProtocolEnvelope {
-                protocol_version: "1".to_string(),
-                message_id: "msg-1".to_string(),
-                message_type: "target_published",
-                timestamp: "0Z".to_string(),
-                sender_id: "peer-a".to_string(),
-                correlation_id: None,
-                session_id: Some("shell-1".to_string()),
-                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
-                attachment_id: None,
-                console_id: None,
-                payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
-                    transport_session_id: "shell-1".to_string(),
-                    source_session_name: None,
-                    selector: Some("wa-peer-a:shell-1".to_string()),
-                    availability: "online",
-                    session_role: Some("target-host"),
-                    workspace_key: Some("wk-1".to_string()),
-                    command_name: Some("codex".to_string()),
-                    current_path: Some("/tmp/demo".to_string()),
-                    attached_clients: 2,
-                    window_count: 1,
-                    task_state: "input",
-                }),
+    fn live_workspace_socket_names_only_include_local_workspace_sessions() {
+        let sockets = live_workspace_socket_names_from_sessions(&[
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-2", "workspace-2"),
+                selector: Some("wa-2:workspace-2".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/tmp/workspace-2")),
+                workspace_key: Some("wk-2".to_string()),
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
+                attached_clients: 1,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Running,
             },
-        )
-        .expect("discovered publication should apply");
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
+                selector: Some("wa-1:target-1".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/tmp/target-1")),
+                workspace_key: Some("wk-1".to_string()),
+                session_role: Some(WorkspaceSessionRole::TargetHost),
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Input,
+            },
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer("10.1.1.8", "pty1"),
+                selector: Some("wa-remote:pty1".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: Some("wk-r".to_string()),
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
+                attached_clients: 1,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Running,
+            },
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "workspace-1"),
+                selector: Some("wa-1:workspace-1".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/tmp/workspace-1")),
+                workspace_key: Some("wk-1".to_string()),
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
+                attached_clients: 1,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Running,
+            },
+            ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux("wa-1", "workspace-1b"),
+                selector: Some("wa-1:workspace-1b".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/tmp/workspace-1b")),
+                workspace_key: Some("wk-1b".to_string()),
+                session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: None,
+                task_state: ManagedSessionTaskState::Running,
+            },
+        ]);
 
-        assert!(changed);
-        let record = store
-            .list_records_for_node("peer-a")
-            .expect("records should load")
-            .into_iter()
-            .next()
-            .expect("record should exist");
-        assert_eq!(record.session.address.qualified_target(), "peer-a:shell-1");
-        assert_eq!(record.session.command_name.as_deref(), Some("codex"));
-
-        let _ = std::fs::remove_file(store_path);
-    }
-
-    #[test]
-    fn discovered_node_offline_keeps_record_and_updates_availability() {
-        let store_path = std::env::temp_dir().join(format!(
-            "waitagent-discovered-offline-test-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after unix epoch")
-                .as_nanos()
-        ));
-        let store = DiscoveredRemoteSessionStore::new(&store_path);
-        let session = ManagedSessionRecord {
-            address: ManagedSessionAddress::remote_peer("peer-a", "shell-1"),
-            selector: Some("wa-peer-a:shell-1".to_string()),
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: Some("wk-1".to_string()),
-            session_role: Some(WorkspaceSessionRole::TargetHost),
-            opened_by: Vec::new(),
-            attached_clients: 1,
-            window_count: 1,
-            command_name: Some("bash".to_string()),
-            current_path: Some(PathBuf::from("/tmp/demo")),
-            task_state: ManagedSessionTaskState::Unknown,
-        };
-        store
-            .upsert_session_from_node("peer-a", &session)
-            .expect("session should store");
-
-        let changed = mark_discovered_remote_node_offline_in_store(&store, "peer-a")
-            .expect("offline should apply");
-
-        assert!(changed);
-        let record = store
-            .list_records_for_node("peer-a")
-            .expect("records should load")
-            .into_iter()
-            .next()
-            .expect("record should remain");
-        assert_eq!(record.session.availability, SessionAvailability::Offline);
-
-        let _ = std::fs::remove_file(store_path);
-    }
-
-    #[test]
-    fn discovered_remote_catalog_refreshes_when_owner_state_changes() {
-        assert!(should_refresh_discovered_remote_catalog(false, true));
-        assert!(should_refresh_discovered_remote_catalog(true, false));
-        assert!(!should_refresh_discovered_remote_catalog(false, false));
+        assert_eq!(sockets, vec!["wa-1".to_string(), "wa-2".to_string()]);
     }
 
     #[test]
@@ -2431,17 +2362,6 @@ mod tests {
             chrome_refresh_socket_args("wa-local"),
             vec!["__chrome-refresh-socket", "--socket-name", "wa-local"]
         );
-    }
-
-    #[test]
-    fn chrome_refresh_all_spawn_returns_hidden_all_refresh_command() {
-        let temp = std::env::temp_dir().join("waitagent-nonexistent-refresh-all-bin");
-        let error =
-            spawn_chrome_refresh_all(&temp).expect_err("missing executable should return an error");
-
-        assert!(error
-            .to_string()
-            .contains("failed to update published remote target catalog"));
     }
 
     #[test]

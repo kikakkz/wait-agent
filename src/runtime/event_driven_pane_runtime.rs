@@ -31,6 +31,8 @@ extern "C" {
 const FULLSCREEN_FOOTER_OPTION: &str = "@waitagent_fullscreen_footer_line";
 const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
 const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
+const ENTER_ALT_SCREEN_ESCAPE: &str = "\x1b[?1049h";
+const EXIT_ALT_SCREEN_ESCAPE: &str = "\x1b[?1049l";
 
 pub struct EventDrivenPaneRuntime {
     backend: EmbeddedTmuxBackend,
@@ -53,6 +55,9 @@ impl EventDrivenPaneRuntime {
         let pane_target = current_tmux_pane_target();
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
+        let _screen_guard = PaneScreenGuard::enter_alt_screen().map_err(|error| {
+            LifecycleError::Io("failed to enter sidebar alt screen".to_string(), error)
+        })?;
         let _cursor_guard = PaneCursorGuard::hide().map_err(|error| {
             LifecycleError::Io("failed to hide sidebar cursor".to_string(), error)
         })?;
@@ -260,6 +265,10 @@ struct PaneCursorGuard {
     visible_on_drop: bool,
 }
 
+struct PaneScreenGuard {
+    restore_on_drop: bool,
+}
+
 impl PaneCursorGuard {
     fn hide() -> io::Result<Self> {
         write_escape(HIDE_CURSOR_ESCAPE)?;
@@ -269,10 +278,27 @@ impl PaneCursorGuard {
     }
 }
 
+impl PaneScreenGuard {
+    fn enter_alt_screen() -> io::Result<Self> {
+        write_escape(ENTER_ALT_SCREEN_ESCAPE)?;
+        Ok(Self {
+            restore_on_drop: true,
+        })
+    }
+}
+
 impl Drop for PaneCursorGuard {
     fn drop(&mut self) {
         if self.visible_on_drop {
             let _ = write_escape(SHOW_CURSOR_ESCAPE);
+        }
+    }
+}
+
+impl Drop for PaneScreenGuard {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = write_escape(EXIT_ALT_SCREEN_ESCAPE);
         }
     }
 }
@@ -459,7 +485,10 @@ extern "C" fn pane_sigwinch_handler(_signal: c_int) {
 
 #[cfg(test)]
 mod tests {
-    use super::{activate_target_run_shell_args, write_buffer};
+    use super::{
+        activate_target_run_shell_args, write_buffer, ENTER_ALT_SCREEN_ESCAPE,
+        EXIT_ALT_SCREEN_ESCAPE,
+    };
 
     #[test]
     fn single_line_pane_render_clears_screen_then_draws_first_row() {
@@ -502,5 +531,11 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn sidebar_uses_alt_screen_sequences() {
+        assert_eq!(ENTER_ALT_SCREEN_ESCAPE, "\x1b[?1049h");
+        assert_eq!(EXIT_ALT_SCREEN_ESCAPE, "\x1b[?1049l");
     }
 }
