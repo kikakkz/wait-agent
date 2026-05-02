@@ -68,6 +68,24 @@ impl WorkspaceLayoutRuntime {
         })
     }
 
+    #[cfg(test)]
+    pub fn new_for_tests(
+        backend: EmbeddedTmuxBackend,
+        current_executable: PathBuf,
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            control_service: ControlService::new(backend.clone()),
+            layout_service: LayoutService::new(backend.clone()),
+            target_registry: TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env().map_err(tmux_layout_error)?,
+            ),
+            backend,
+            current_executable,
+            network,
+        })
+    }
+
     pub fn ensure_layout(
         &self,
         workspace: &TmuxWorkspaceHandle,

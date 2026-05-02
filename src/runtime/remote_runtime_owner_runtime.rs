@@ -80,6 +80,14 @@ impl RemoteRuntimeOwnerRuntime {
         })
     }
 
+    #[cfg(test)]
+    pub fn new_for_tests(current_executable: PathBuf, network: RemoteNetworkConfig) -> Self {
+        Self {
+            current_executable,
+            network,
+        }
+    }
+
     pub fn run_owner(&self, command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
         let socket_path = remote_runtime_owner_socket_path(&command.socket_name);
         if socket_path.exists() {
