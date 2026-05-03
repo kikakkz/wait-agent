@@ -401,9 +401,7 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
         if !name.starts_with("waitagent-remote-") || !name.ends_with(".sock") {
             continue;
         }
-        if !name.contains(&target_prefix)
-            && !name.ends_with(&format!("-{target_prefix}.sock"))
-        {
+        if !name.contains(&target_prefix) && !name.ends_with(&format!("-{target_prefix}.sock")) {
             continue;
         }
         paths.push(entry.path());
@@ -743,7 +741,11 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec![matching_a.clone(), matching_b.clone(), matching_scoped.clone()]
+            vec![
+                matching_a.clone(),
+                matching_b.clone(),
+                matching_scoped.clone()
+            ]
         );
 
         let _ = fs::remove_file(matching_a);

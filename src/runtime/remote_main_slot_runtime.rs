@@ -288,7 +288,10 @@ mod tests {
             }
             other => panic!("unexpected payload: {other:?}"),
         }
-        assert_eq!(sent_messages[0][2].envelope.message_type, "open_mirror_request");
+        assert_eq!(
+            sent_messages[0][2].envelope.message_type,
+            "open_mirror_request"
+        );
     }
 
     #[test]

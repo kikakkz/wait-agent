@@ -1,7 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::{prepend_global_network_args, RemoteMainSlotCommand, RemoteNetworkConfig};
+use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
@@ -23,8 +23,7 @@ use std::io::{self, Read, Write};
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -47,8 +46,6 @@ pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     authority_connections: Box<dyn AuthorityConnectionStarter>,
     external_authority_streams: Option<QueuedAuthorityStreamSink>,
-    current_executable: PathBuf,
-    network: RemoteNetworkConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +68,6 @@ pub(crate) struct RemoteInteractSurfaceSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuthorityTransportStatus {
     WaitingForRemoteAuthority,
-    WaitingForLocalBridge,
     Connected,
     Disconnected,
     Failed(String),
@@ -107,14 +103,13 @@ impl RemoteMainSlotPaneRuntime {
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         current_executable: PathBuf,
-        network: RemoteNetworkConfig,
+        _network: RemoteNetworkConfig,
     ) -> Self {
         Self::new_with_optional_external_authority_streams(
             target_registry,
             authority_connections,
             None,
             current_executable,
-            network,
         )
     }
 
@@ -122,15 +117,12 @@ impl RemoteMainSlotPaneRuntime {
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         external_authority_streams: Option<QueuedAuthorityStreamSink>,
-        current_executable: PathBuf,
-        network: RemoteNetworkConfig,
+        _current_executable: PathBuf,
     ) -> Self {
         Self {
             target_registry,
             authority_connections,
             external_authority_streams,
-            current_executable,
-            network,
         }
     }
 
@@ -148,7 +140,7 @@ impl RemoteMainSlotPaneRuntime {
     pub fn new_with_external_authority_streams_and_network(
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
         current_executable: PathBuf,
-        network: RemoteNetworkConfig,
+        _network: RemoteNetworkConfig,
     ) -> Self {
         let (starter, sink) = QueuedAuthorityStreamStarter::channel();
         Self::new_with_optional_external_authority_streams(
@@ -156,7 +148,6 @@ impl RemoteMainSlotPaneRuntime {
             Box::new(starter),
             Some(sink),
             current_executable,
-            network,
         )
     }
 
@@ -262,8 +253,7 @@ impl RemoteMainSlotPaneRuntime {
                 authority_tx,
             )
             .map_err(remote_pane_error)?;
-        let waiting_authority_status =
-            self.start_authority_transport_source(&target, &authority_transport_socket_path);
+        let waiting_authority_status = AuthorityTransportStatus::WaitingForRemoteAuthority;
         thread::spawn(move || {
             let _keep_resize_watcher_alive = resize_watcher;
             thread::park();
@@ -451,42 +441,6 @@ impl RemoteMainSlotPaneRuntime {
         }
         Ok(session)
     }
-
-    fn start_authority_transport_source(
-        &self,
-        target: &ManagedSessionRecord,
-        transport_socket_path: &Path,
-    ) -> AuthorityTransportStatus {
-        let available_targets = self
-            .target_registry
-            .list_targets()
-            .map_err(|error| RemoteSocketTransportError::new(error.to_string()));
-        let Ok(available_targets) = available_targets else {
-            return AuthorityTransportStatus::Failed(
-                "failed to inspect local authority bridge candidates".to_string(),
-            );
-        };
-        let Some(resolved) = resolve_local_authority_target_host(target, &available_targets) else {
-            return AuthorityTransportStatus::WaitingForRemoteAuthority;
-        };
-        let mut command = Command::new(&self.current_executable);
-        command
-            .args(remote_authority_target_host_args(
-                &resolved,
-                target,
-                transport_socket_path,
-                &self.network,
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        match command.spawn() {
-            Ok(_) => AuthorityTransportStatus::WaitingForLocalBridge,
-            Err(error) => AuthorityTransportStatus::Failed(format!(
-                "failed to start local authority bridge: {error}"
-            )),
-        }
-    }
 }
 
 fn activate_surface_target(
@@ -600,12 +554,6 @@ fn is_partial_remote_submit_sequence(pending: &[u8]) -> bool {
     ]
     .iter()
     .any(|pattern| pattern.starts_with(pending))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedLocalAuthorityTargetHost {
-    socket_name: String,
-    target_session_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -876,11 +824,6 @@ fn placeholder_lines(
             "waiting for remote authority",
             "waiting for a live authority node to register this target transport".to_string(),
         ),
-        AuthorityTransportStatus::WaitingForLocalBridge => (
-            "waiting for local bridge",
-            "selector resolved locally; waiting for the authority target-host bridge to connect"
-                .to_string(),
-        ),
         AuthorityTransportStatus::Connected => (
             "connected",
             "authority transport is live; waiting for remote target output".to_string(),
@@ -947,46 +890,6 @@ fn authority_transport_event_sender(
         }
     });
     authority_tx
-}
-
-fn resolve_local_authority_target_host(
-    target: &ManagedSessionRecord,
-    available_targets: &[ManagedSessionRecord],
-) -> Option<ResolvedLocalAuthorityTargetHost> {
-    let selector = target.selector.as_deref()?;
-    let local_target_host = available_targets.iter().find(|candidate| {
-        candidate.address.transport() == &SessionTransport::LocalTmux
-            && candidate.is_target_host()
-            && candidate.matches_target(selector)
-    })?;
-    Some(ResolvedLocalAuthorityTargetHost {
-        socket_name: local_target_host.address.server_id().to_string(),
-        target_session_name: local_target_host.address.session_id().to_string(),
-    })
-}
-
-fn remote_authority_target_host_args(
-    resolved: &ResolvedLocalAuthorityTargetHost,
-    target: &ManagedSessionRecord,
-    transport_socket_path: &Path,
-    network: &RemoteNetworkConfig,
-) -> Vec<String> {
-    prepend_global_network_args(
-        vec![
-            "__remote-authority-target-host".to_string(),
-            "--socket-name".to_string(),
-            resolved.socket_name.clone(),
-            "--target-session-name".to_string(),
-            resolved.target_session_name.clone(),
-            "--authority-id".to_string(),
-            target.address.authority_id().to_string(),
-            "--target-id".to_string(),
-            target.address.id().as_str().to_string(),
-            "--transport-socket-path".to_string(),
-            transport_socket_path.display().to_string(),
-        ],
-        network,
-    )
 }
 
 pub(crate) fn main_slot_surface_spec(command: &RemoteMainSlotCommand) -> RemoteInteractSurfaceSpec {
@@ -1077,11 +980,9 @@ mod tests {
     use super::{
         activate_surface_target, apply_authority_envelope, authority_status_from_runtime,
         authority_transport_event_sender, encode_base64, main_slot_console_id,
-        main_slot_surface_spec, placeholder_lines, remote_authority_target_host_args,
-        resolve_local_authority_target_host, should_exit_surface_locally,
+        main_slot_surface_spec, placeholder_lines, should_exit_surface_locally,
         AuthorityTransportStatus, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
         RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
-        ResolvedLocalAuthorityTargetHost,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1091,7 +992,6 @@ mod tests {
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
     };
-    use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::{
         ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
         ProtocolEnvelope, RemoteConsoleDescriptor, TargetOutputPayload,
@@ -1110,7 +1010,7 @@ mod tests {
     use crate::terminal::TerminalSize;
     use std::fs;
     use std::os::unix::net::UnixStream;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process;
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1367,7 +1267,7 @@ mod tests {
         let lines = placeholder_lines(
             &remote_target(),
             None,
-            &AuthorityTransportStatus::WaitingForLocalBridge,
+            &AuthorityTransportStatus::WaitingForRemoteAuthority,
             TerminalSize {
                 rows: 5,
                 cols: 80,
@@ -1448,7 +1348,10 @@ mod tests {
         .expect("activation should succeed after authority connection exists");
 
         assert_eq!(binding.attachment_id, "attach-1");
-        assert_eq!(observer.snapshot().attachment_id.as_deref(), Some("attach-1"));
+        assert_eq!(
+            observer.snapshot().attachment_id.as_deref(),
+            Some("attach-1")
+        );
     }
 
     #[test]
@@ -1747,74 +1650,6 @@ mod tests {
         let _ = fs::remove_file(&socket_path);
     }
 
-    #[test]
-    fn resolve_local_authority_target_host_uses_selector_to_find_local_target_host() {
-        let resolved = resolve_local_authority_target_host(
-            &remote_target_with_selector("wa-local:shell-host"),
-            &[local_target_host("wa-local", "shell-host")],
-        )
-        .expect("selector should resolve local authority target host");
-
-        assert_eq!(
-            resolved,
-            ResolvedLocalAuthorityTargetHost {
-                socket_name: "wa-local".to_string(),
-                target_session_name: "shell-host".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_local_authority_target_host_ignores_missing_or_non_host_selector_targets() {
-        assert!(resolve_local_authority_target_host(
-            &remote_target(),
-            &[local_target_host("wa-1", "shell-1")]
-        )
-        .is_none());
-        assert!(resolve_local_authority_target_host(
-            &remote_target_with_selector("wa-local:workspace"),
-            &[local_workspace_chrome("wa-local", "workspace")],
-        )
-        .is_none());
-        assert!(resolve_local_authority_target_host(
-            &remote_target_with_selector("peer-a:shell-1"),
-            &[remote_target_with_selector("wa-local:shell-host")],
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn remote_authority_target_host_args_bind_local_target_host_to_remote_target_id() {
-        let args = remote_authority_target_host_args(
-            &ResolvedLocalAuthorityTargetHost {
-                socket_name: "wa-local".to_string(),
-                target_session_name: "shell-host".to_string(),
-            },
-            &remote_target_with_selector("wa-local:shell-host"),
-            Path::new("/tmp/authority.sock"),
-            &RemoteNetworkConfig::default(),
-        );
-
-        assert_eq!(
-            args,
-            vec![
-                "--port",
-                "7474",
-                "__remote-authority-target-host",
-                "--socket-name",
-                "wa-local",
-                "--target-session-name",
-                "shell-host",
-                "--authority-id",
-                "peer-a",
-                "--target-id",
-                "remote-peer:peer-a:shell-1",
-                "--transport-socket-path",
-                "/tmp/authority.sock",
-            ]
-        );
-    }
-
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
@@ -1895,46 +1730,6 @@ mod tests {
             command_name: Some("bash".to_string()),
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
-        }
-    }
-
-    fn remote_target_with_selector(selector: &str) -> ManagedSessionRecord {
-        let mut target = remote_target();
-        target.selector = Some(selector.to_string());
-        target
-    }
-
-    fn local_target_host(socket_name: &str, session_name: &str) -> ManagedSessionRecord {
-        ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket_name, session_name),
-            selector: Some(format!("{socket_name}:{session_name}")),
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: None,
-            session_role: Some(WorkspaceSessionRole::TargetHost),
-            opened_by: Vec::new(),
-            attached_clients: 0,
-            window_count: 1,
-            command_name: Some("bash".to_string()),
-            current_path: None,
-            task_state: ManagedSessionTaskState::Running,
-        }
-    }
-
-    fn local_workspace_chrome(socket_name: &str, session_name: &str) -> ManagedSessionRecord {
-        ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket_name, session_name),
-            selector: Some(format!("{socket_name}:{session_name}")),
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: None,
-            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
-            opened_by: Vec::new(),
-            attached_clients: 1,
-            window_count: 1,
-            command_name: Some("bash".to_string()),
-            current_path: None,
-            task_state: ManagedSessionTaskState::Input,
         }
     }
 

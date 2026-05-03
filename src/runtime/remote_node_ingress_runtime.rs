@@ -131,7 +131,8 @@ impl RemoteNodeIngressSource for LocalSocketRemoteNodeIngressSource {
 }
 
 impl RemoteNodeIngressSource for AuthoritySocketRemoteNodeIngressSource {
-    type Guard = crate::runtime::remote_authority_transport_runtime::AuthorityTransportListenerGuard;
+    type Guard =
+        crate::runtime::remote_authority_transport_runtime::AuthorityTransportListenerGuard;
 
     fn start(
         &self,
@@ -901,28 +902,30 @@ mod tests {
         assert!(registry.has_connection("peer-a"));
 
         RegistryRemoteControlPlaneSink::new(registry.clone())
-            .send(&[crate::infra::remote_protocol::NodeBoundControlPlaneMessage {
-                node_id: "peer-a".to_string(),
-                envelope: ProtocolEnvelope {
-                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-                    message_id: "open-mirror-1".to_string(),
-                    message_type: "open_mirror_request",
-                    timestamp: "1Z".to_string(),
-                    sender_id: "server".to_string(),
-                    correlation_id: None,
-                    session_id: Some("shell-1".to_string()),
-                    target_id: Some("remote-peer:peer-a:shell-1".to_string()),
-                    attachment_id: None,
-                    console_id: Some("console-1".to_string()),
-                    payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
-                        session_id: "shell-1".to_string(),
-                        target_id: "remote-peer:peer-a:shell-1".to_string(),
-                        console_id: "console-1".to_string(),
-                        cols: 120,
-                        rows: 40,
-                    }),
+            .send(&[
+                crate::infra::remote_protocol::NodeBoundControlPlaneMessage {
+                    node_id: "peer-a".to_string(),
+                    envelope: ProtocolEnvelope {
+                        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                        message_id: "open-mirror-1".to_string(),
+                        message_type: "open_mirror_request",
+                        timestamp: "1Z".to_string(),
+                        sender_id: "server".to_string(),
+                        correlation_id: None,
+                        session_id: Some("shell-1".to_string()),
+                        target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                        attachment_id: None,
+                        console_id: Some("console-1".to_string()),
+                        payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                            session_id: "shell-1".to_string(),
+                            target_id: "remote-peer:peer-a:shell-1".to_string(),
+                            console_id: "console-1".to_string(),
+                            cols: 120,
+                            rows: 40,
+                        }),
+                    },
                 },
-            }])
+            ])
             .expect("open mirror request should route through authority transport");
 
         match transport
