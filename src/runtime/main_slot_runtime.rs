@@ -330,7 +330,7 @@ impl MainSlotRuntime {
                 &remote_main_slot_program(
                     &self.current_executable,
                     current_workspace,
-                    &target.address.qualified_target(),
+                    target.address.id().as_str(),
                     &self.network,
                 ),
             )
@@ -770,7 +770,7 @@ mod tests {
         let program = remote_main_slot_program(
             std::path::Path::new("/tmp/waitagent"),
             &workspace,
-            "peer-a:shell-1",
+            "remote-peer:peer-a:shell-1",
             &RemoteNetworkConfig::default(),
         );
 
@@ -786,7 +786,7 @@ mod tests {
                 "--session-name".to_string(),
                 "workspace-1".to_string(),
                 "--target".to_string(),
-                "peer-a:shell-1".to_string(),
+                "remote-peer:peer-a:shell-1".to_string(),
             ]
         );
         assert_eq!(program.start_directory, Some(PathBuf::from("/tmp/demo")));
