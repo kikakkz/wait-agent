@@ -3,10 +3,10 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
-    OpenMirrorAccepted, OpenMirrorRejected, OpenMirrorRequest, RouteContext,
-    TargetExited as GrpcTargetExited, TargetInputDelivery, TargetOutput as GrpcTargetOutput,
-    TargetPublished as GrpcTargetPublished,
+    ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
+    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
@@ -687,6 +687,23 @@ fn map_outbound_grpc_envelope(
                 status: None,
             }))
         }
+        (NodeSessionChannel::Authority, ControlPlanePayload::MirrorBootstrapChunk(payload)) => {
+            Some(GrpcBody::MirrorBootstrapChunk(MirrorBootstrapChunk {
+                target_id: payload.target_id.clone(),
+                session_id: payload.session_id.clone(),
+                chunk_seq: payload.chunk_seq,
+                stream: payload.stream.to_string(),
+                output_bytes: decode_base64(&payload.bytes_base64)
+                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::MirrorBootstrapComplete(payload)) => {
+            Some(GrpcBody::MirrorBootstrapComplete(MirrorBootstrapComplete {
+                target_id: payload.target_id.clone(),
+                session_id: payload.session_id.clone(),
+                last_chunk_seq: payload.last_chunk_seq,
+            }))
+        }
         (NodeSessionChannel::Publication, ControlPlanePayload::TargetPublished(payload)) => {
             Some(GrpcBody::TargetPublished(GrpcTargetPublished {
                 target_id: envelope.target_id.clone().unwrap_or_else(|| {
@@ -930,8 +947,9 @@ mod tests {
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::{
-        CloseMirrorRequestPayload, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-        TargetInputPayload, TargetPublishedPayload,
+        CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
+        MirrorBootstrapCompletePayload, NodeSessionChannel, OpenMirrorRequestPayload,
+        ProtocolEnvelope, TargetInputPayload, TargetPublishedPayload,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityConnectionStarter, AuthorityTransportEvent,
@@ -1159,6 +1177,76 @@ mod tests {
                     assert_eq!(console_id, "console-1");
                     assert_eq!(cols, 120);
                     assert_eq!(rows, 40);
+                }
+                other => panic!("unexpected authority envelope payload: {other:?}"),
+            },
+            other => panic!("unexpected authority transport event: {other:?}"),
+        }
+
+        session
+            .send_payload(
+                NodeSessionChannel::Authority,
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                "authority-msg",
+                ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                    session_id: "shell-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    chunk_seq: 1,
+                    stream: "pty",
+                    bytes_base64: "Ym9vdHN0cmFw".to_string(),
+                }),
+            )
+            .expect("mirror bootstrap chunk should send through grpc node session");
+        let authority_event = event_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("mirror bootstrap chunk should arrive");
+        match authority_event {
+            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                    session_id,
+                    target_id,
+                    chunk_seq,
+                    stream,
+                    bytes_base64,
+                }) => {
+                    assert_eq!(session_id, "shell-1");
+                    assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                    assert_eq!(chunk_seq, 1);
+                    assert_eq!(stream, "pty");
+                    assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                }
+                other => panic!("unexpected authority envelope payload: {other:?}"),
+            },
+            other => panic!("unexpected authority transport event: {other:?}"),
+        }
+
+        session
+            .send_payload(
+                NodeSessionChannel::Authority,
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                "authority-msg",
+                ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+                    session_id: "shell-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    last_chunk_seq: 1,
+                }),
+            )
+            .expect("mirror bootstrap complete should send through grpc node session");
+        let authority_event = event_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("mirror bootstrap complete should arrive");
+        match authority_event {
+            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+                    session_id,
+                    target_id,
+                    last_chunk_seq,
+                }) => {
+                    assert_eq!(session_id, "shell-1");
+                    assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                    assert_eq!(last_chunk_seq, 1);
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },

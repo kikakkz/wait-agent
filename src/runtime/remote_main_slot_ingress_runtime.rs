@@ -125,7 +125,8 @@ mod tests {
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
     use crate::infra::remote_grpc_proto::v1::{
-        ClientHello, NodeSessionEnvelope, ProtocolVersion, RouteContext, TargetOutput,
+        ClientHello, MirrorBootstrapChunk, MirrorBootstrapComplete, NodeSessionEnvelope,
+        ProtocolVersion, RouteContext, TargetOutput,
     };
     use crate::infra::remote_protocol::RemoteConsoleDescriptor;
     use crate::runtime::remote_authority_connection_runtime::{
@@ -275,6 +276,125 @@ mod tests {
         assert_eq!(snapshot.active_screen().lines[0], "a           ");
     }
 
+    #[test]
+    fn grpc_ingress_bridges_authority_bootstrap_into_visible_observer_render_path() {
+        let bind_addr = unused_local_addr();
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env()
+                .expect("build env target catalog should exist"),
+        );
+        let pane_runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
+            target_registry,
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let runtime = RemoteMainSlotIngressRuntime::new(
+            pane_runtime,
+            RemoteTargetPublicationRuntime::from_build_env()
+                .expect("publication runtime should build from env"),
+            Box::new(RemoteNodeIngressRuntime::with_grpc_source(bind_addr)),
+        );
+        let target = remote_target();
+        let remote_runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = remote_runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        remote_runtime.ensure_local_connection("peer-a");
+        remote_runtime
+            .activate_target(
+                &target,
+                RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should succeed");
+
+        let (tx, rx) = mpsc::channel();
+        let _connection_guard = runtime
+            .pane_runtime
+            .start_authority_connection(
+                AuthorityConnectionRequest {
+                    socket_path: std::env::temp_dir().join("unused-main-slot-ingress.sock"),
+                    authority_id: "peer-a".to_string(),
+                },
+                RemoteConnectionRegistry::new(),
+                tx,
+            )
+            .expect("pane runtime should start queued authority connection");
+        let _ingress_guard = runtime
+            .start_ingress_for_command(&RemoteMainSlotCommand {
+                socket_name: "wa-1".to_string(),
+                session_name: "workspace-1".to_string(),
+                target: "peer-a:shell-1".to_string(),
+            })
+            .expect("grpc ingress should start");
+
+        let async_runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        async_runtime.block_on(async {
+            let mut client = NodeSessionServiceClient::connect(format!("http://{bind_addr}"))
+                .await
+                .expect("grpc client should connect");
+            let (tx, rx_stream) = tokio_mpsc::channel(8);
+            tx.send(client_hello_envelope("peer-a"))
+                .await
+                .expect("client hello should send");
+            let response = client
+                .open_node_session(Request::new(ReceiverStream::new(rx_stream)))
+                .await
+                .expect("node session should open");
+            let mut inbound = response.into_inner();
+            let _server_hello = inbound
+                .message()
+                .await
+                .expect("server hello should decode")
+                .expect("server hello should exist");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(1))
+                    .expect("connected event should arrive"),
+                AuthorityTransportEvent::Connected
+            );
+
+            tx.send(mirror_bootstrap_chunk_envelope())
+                .await
+                .expect("mirror bootstrap chunk should send");
+            tx.send(mirror_bootstrap_complete_envelope())
+                .await
+                .expect("mirror bootstrap complete should send");
+        });
+
+        let authority_event = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authority bootstrap chunk should arrive");
+        let AuthorityTransportEvent::Envelope(envelope) = authority_event else {
+            panic!("unexpected authority event: {authority_event:?}");
+        };
+        apply_authority_envelope(&remote_runtime, &target, &envelope)
+            .expect("authority bootstrap chunk should apply through main-slot runtime");
+
+        let authority_event = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authority bootstrap complete should arrive");
+        let AuthorityTransportEvent::Envelope(envelope) = authority_event else {
+            panic!("unexpected authority event: {authority_event:?}");
+        };
+        apply_authority_envelope(&remote_runtime, &target, &envelope)
+            .expect("authority bootstrap complete should apply through main-slot runtime");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        observer.sync().expect("observer sync should succeed");
+        let snapshot = observer.snapshot();
+        assert!(snapshot.has_visible_output);
+        assert!(snapshot.bootstrap_complete);
+        assert_eq!(snapshot.active_screen().lines[0], "bootstrap   ");
+    }
+
     fn client_hello_envelope(node_id: &str) -> NodeSessionEnvelope {
         NodeSessionEnvelope {
             message_id: "client-hello-1".to_string(),
@@ -313,6 +433,52 @@ mod tests {
                 stream: "pty".to_string(),
                 session_id: "shell-1".to_string(),
                 output_bytes: b"a".to_vec(),
+            })),
+        }
+    }
+
+    fn mirror_bootstrap_chunk_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-chunk-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapChunk(MirrorBootstrapChunk {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_bytes: b"bootstrap".to_vec(),
+                chunk_seq: 1,
+                stream: "pty".to_string(),
+                session_id: "shell-1".to_string(),
+            })),
+        }
+    }
+
+    fn mirror_bootstrap_complete_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-complete-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapComplete(MirrorBootstrapComplete {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                last_chunk_seq: 1,
+                session_id: "shell-1".to_string(),
             })),
         }
     }
