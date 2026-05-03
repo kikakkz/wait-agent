@@ -1,19 +1,20 @@
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
-    OpenMirrorAccepted, OpenMirrorRejected, OpenMirrorRequest, RouteContext,
-    TargetExited as GrpcTargetExited, TargetInputDelivery, TargetOutput as GrpcTargetOutput,
-    TargetPublished as GrpcTargetPublished,
+    ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
+    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    CloseMirrorRequestPayload, ControlPlanePayload, OpenMirrorAcceptedPayload,
-    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetExitedPayload,
-    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
+    MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
+    OpenMirrorRequestPayload, ProtocolEnvelope, TargetExitedPayload, TargetOutputPayload,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
@@ -303,6 +304,28 @@ fn route_grpc_envelope(
             session
                 .write_authority_envelope(&map_target_output_envelope(node_id, &envelope, payload)?)
         }
+        Some(Body::MirrorBootstrapChunk(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&map_mirror_bootstrap_chunk_envelope(
+                node_id, &envelope, payload,
+            )?)
+        }
+        Some(Body::MirrorBootstrapComplete(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&map_mirror_bootstrap_complete_envelope(
+                node_id, &envelope, payload,
+            )?)
+        }
         Some(Body::OpenMirrorRequest(payload)) => {
             let session = session.ok_or_else(|| {
                 io::Error::new(
@@ -514,6 +537,60 @@ fn map_target_output_envelope(
     })
 }
 
+fn map_mirror_bootstrap_chunk_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &MirrorBootstrapChunk,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "mirror_bootstrap_chunk",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+        target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+            session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                .unwrap_or_else(|| payload.target_id.clone()),
+            target_id: payload.target_id.clone(),
+            chunk_seq: payload.chunk_seq,
+            stream: known_output_stream(&payload.stream)?,
+            bytes_base64: encode_base64(&payload.output_bytes),
+        }),
+    })
+}
+
+fn map_mirror_bootstrap_complete_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &MirrorBootstrapComplete,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "mirror_bootstrap_complete",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope)
+            .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+        target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
+            session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                .unwrap_or_else(|| payload.target_id.clone()),
+            target_id: payload.target_id.clone(),
+            last_chunk_seq: payload.last_chunk_seq,
+        }),
+    })
+}
+
 fn forward_local_authority_outbound(
     mut local_stream: UnixStream,
     session: RemoteNodeSessionHandle,
@@ -718,11 +795,12 @@ mod tests {
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
     use crate::infra::remote_grpc_proto::v1::{
-        ClientHello, NodeSessionEnvelope, ProtocolVersion, TargetOutput,
+        ClientHello, MirrorBootstrapChunk, MirrorBootstrapComplete, NodeSessionEnvelope,
+        ProtocolVersion, TargetOutput,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
-        REMOTE_PROTOCOL_VERSION,
+        ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
+        OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent, QueuedAuthorityStreamSource,
@@ -813,6 +891,52 @@ mod tests {
                         assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(payload.output_seq, 7);
                         assert_eq!(payload.bytes_base64, "YQ==");
+                    }
+                    other => panic!("unexpected authority envelope payload: {other:?}"),
+                },
+                other => panic!("unexpected authority transport event: {other:?}"),
+            }
+
+            tx.send(mirror_bootstrap_chunk_envelope())
+                .await
+                .expect("mirror bootstrap chunk should send");
+            let inbound_event = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("mirror bootstrap chunk should arrive");
+            match inbound_event {
+                AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                    ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
+                        target_id,
+                        chunk_seq,
+                        bytes_base64,
+                        ..
+                    }) => {
+                        assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                        assert_eq!(chunk_seq, 1);
+                        assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                    }
+                    other => panic!("unexpected authority envelope payload: {other:?}"),
+                },
+                other => panic!("unexpected authority transport event: {other:?}"),
+            }
+
+            tx.send(mirror_bootstrap_complete_envelope())
+                .await
+                .expect("mirror bootstrap complete should send");
+            let inbound_event = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("mirror bootstrap complete should arrive");
+            match inbound_event {
+                AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                    ControlPlanePayload::MirrorBootstrapComplete(
+                        MirrorBootstrapCompletePayload {
+                            target_id,
+                            last_chunk_seq,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                        assert_eq!(last_chunk_seq, 1);
                     }
                     other => panic!("unexpected authority envelope payload: {other:?}"),
                 },
@@ -1011,6 +1135,52 @@ mod tests {
                 stream: "pty".to_string(),
                 session_id: "shell-1".to_string(),
                 output_bytes: b"a".to_vec(),
+            })),
+        }
+    }
+
+    fn mirror_bootstrap_chunk_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-chunk-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapChunk(MirrorBootstrapChunk {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: "shell-1".to_string(),
+                chunk_seq: 1,
+                stream: "pty".to_string(),
+                output_bytes: b"bootstrap".to_vec(),
+            })),
+        }
+    }
+
+    fn mirror_bootstrap_complete_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-complete-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapComplete(MirrorBootstrapComplete {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: "shell-1".to_string(),
+                last_chunk_seq: 1,
             })),
         }
     }
