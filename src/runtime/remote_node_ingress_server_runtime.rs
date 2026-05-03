@@ -401,7 +401,9 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
         if !name.starts_with("waitagent-remote-") || !name.ends_with(".sock") {
             continue;
         }
-        if !name.contains(&target_prefix) {
+        if !name.contains(&target_prefix)
+            && !name.ends_with(&format!("-{target_prefix}.sock"))
+        {
             continue;
         }
         paths.push(entry.path());
@@ -411,8 +413,19 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
 
 fn extract_target_component(file_name: &str, authority_id: &str) -> Option<String> {
     let prefix = sanitize_socket_component(&format!("remote-peer:{authority_id}:"));
-    let start = file_name.find(&prefix)?;
-    Some(file_name[start..].trim_end_matches(".sock").to_string())
+    let trimmed = file_name.trim_end_matches(".sock");
+    if let Some(start) = trimmed.find(&prefix) {
+        return Some(trimmed[start..].to_string());
+    }
+
+    // Remote main-slot authority sockets are scoped as:
+    // waitagent-remote-<socket>-<surface_scope>-<target_component>.sock
+    // The global ingress bridge only needs the trailing target component to
+    // route authority traffic back into the matching live session.
+    trimmed
+        .rsplit_once('-')
+        .map(|(_, suffix)| suffix.to_string())
+        .filter(|suffix| suffix == &prefix || suffix.ends_with(&prefix))
 }
 
 fn sanitize_socket_component(value: &str) -> String {
@@ -700,25 +713,42 @@ mod tests {
     }
 
     #[test]
+    fn extracts_target_component_for_scoped_remote_main_slot_socket_file() {
+        let component = extract_target_component(
+            "waitagent-remote-wa-1-workspace-1-remote-peer_peer-a_target-1.sock",
+            "peer-a",
+        );
+
+        assert_eq!(component.as_deref(), Some("remote-peer_peer-a_target-1"));
+    }
+
+    #[test]
     fn authority_socket_discovery_filters_to_authority() {
         let matching_a =
             temp_dir_path("waitagent-remote-wa-a-workspace-remote-peer_peer-a_target-1");
         let matching_b =
             temp_dir_path("waitagent-remote-wa-b-server-console-remote-peer_peer-a_target-2");
+        let matching_scoped =
+            temp_dir_path("waitagent-remote-wa-c-workspace-1-remote-peer_peer-a_target-3");
         let different_authority =
             temp_dir_path("waitagent-remote-wa-c-workspace-remote-peer_peer-b_target-1");
         fs::write(&matching_a, b"").expect("matching file should write");
         fs::write(&matching_b, b"").expect("second matching file should write");
+        fs::write(&matching_scoped, b"").expect("scoped matching file should write");
         fs::write(&different_authority, b"").expect("other authority file should write");
 
         let mut paths = discover_authority_socket_paths("peer-a")
             .expect("authority socket discovery should succeed");
         paths.sort();
 
-        assert_eq!(paths, vec![matching_a.clone(), matching_b.clone()]);
+        assert_eq!(
+            paths,
+            vec![matching_a.clone(), matching_b.clone(), matching_scoped.clone()]
+        );
 
         let _ = fs::remove_file(matching_a);
         let _ = fs::remove_file(matching_b);
+        let _ = fs::remove_file(matching_scoped);
         let _ = fs::remove_file(different_authority);
     }
 

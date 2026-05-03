@@ -19,6 +19,7 @@ use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
 };
 use crate::runtime::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
+use crate::runtime::remote_authority_transport_runtime::spawn_authority_transport_listener;
 use crate::runtime::remote_node_session_runtime::{
     spawn_remote_node_session_listener, RemoteNodePublicationSink, RemoteNodeSessionListenerGuard,
 };
@@ -58,6 +59,9 @@ pub trait RemoteNodeIngressStarter: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct LocalSocketRemoteNodeIngressSource;
+
+#[derive(Clone, Default)]
+pub struct AuthoritySocketRemoteNodeIngressSource;
 
 #[derive(Clone)]
 pub struct GrpcRemoteNodeIngressSource {
@@ -123,6 +127,19 @@ impl RemoteNodeIngressSource for LocalSocketRemoteNodeIngressSource {
         publication_sink: Arc<dyn RemoteNodePublicationSink>,
     ) -> io::Result<Self::Guard> {
         spawn_remote_node_session_listener(socket_path, authority_sink, publication_sink)
+    }
+}
+
+impl RemoteNodeIngressSource for AuthoritySocketRemoteNodeIngressSource {
+    type Guard = crate::runtime::remote_authority_transport_runtime::AuthorityTransportListenerGuard;
+
+    fn start(
+        &self,
+        socket_path: PathBuf,
+        authority_sink: QueuedAuthorityStreamSink,
+        _publication_sink: Arc<dyn RemoteNodePublicationSink>,
+    ) -> io::Result<Self::Guard> {
+        spawn_authority_transport_listener(socket_path, authority_sink)
     }
 }
 
@@ -693,18 +710,25 @@ fn timestamp_string(envelope: &GrpcNodeSessionEnvelope) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GrpcRemoteNodeIngressSource, RemoteNodeIngressSource, RouteContext};
+    use super::{
+        AuthoritySocketRemoteNodeIngressSource, GrpcRemoteNodeIngressSource,
+        RemoteNodeIngressSource, RouteContext,
+    };
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
     use crate::infra::remote_grpc_proto::v1::{
         ClientHello, NodeSessionEnvelope, ProtocolVersion, TargetOutput,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, TargetInputPayload, REMOTE_PROTOCOL_VERSION,
+        ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
+        REMOTE_PROTOCOL_VERSION,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent, QueuedAuthorityStreamSource,
         RemoteAuthorityConnectionRuntime,
+    };
+    use crate::runtime::remote_authority_transport_runtime::{
+        RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
     };
     use crate::runtime::remote_main_slot_runtime::RemoteControlPlaneSink;
     use crate::runtime::remote_node_session_runtime::RemoteNodePublicationSink;
@@ -838,6 +862,83 @@ mod tests {
         });
 
         publication_sink.assert_empty();
+    }
+
+    #[test]
+    fn authority_socket_source_accepts_authority_transport_clients() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "waitagent-authority-source-test-{}-{}.sock",
+            std::process::id(),
+            unused_local_addr().port()
+        ));
+        let source = AuthoritySocketRemoteNodeIngressSource;
+        let (authority_source, authority_sink) = QueuedAuthorityStreamSource::channel();
+        let runtime = RemoteAuthorityConnectionRuntime::new(authority_source);
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let _connection_guard = runtime
+            .start_connection_source(
+                AuthorityConnectionRequest {
+                    socket_path: std::env::temp_dir().join("unused-authority-source.sock"),
+                    authority_id: "peer-a".to_string(),
+                },
+                registry.clone(),
+                tx,
+            )
+            .expect("queued authority runtime should start");
+        let publication_sink = Arc::new(RecordingPublicationSink::default());
+        let _guard = source
+            .start(socket_path.clone(), authority_sink, publication_sink)
+            .expect("authority socket ingress source should start");
+
+        let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+            .expect("authority transport should connect");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("connected event should arrive"),
+            AuthorityTransportEvent::Connected
+        );
+        assert!(registry.has_connection("peer-a"));
+
+        RegistryRemoteControlPlaneSink::new(registry.clone())
+            .send(&[crate::infra::remote_protocol::NodeBoundControlPlaneMessage {
+                node_id: "peer-a".to_string(),
+                envelope: ProtocolEnvelope {
+                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                    message_id: "open-mirror-1".to_string(),
+                    message_type: "open_mirror_request",
+                    timestamp: "1Z".to_string(),
+                    sender_id: "server".to_string(),
+                    correlation_id: None,
+                    session_id: Some("shell-1".to_string()),
+                    target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                    attachment_id: None,
+                    console_id: Some("console-1".to_string()),
+                    payload: ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                        session_id: "shell-1".to_string(),
+                        target_id: "remote-peer:peer-a:shell-1".to_string(),
+                        console_id: "console-1".to_string(),
+                        cols: 120,
+                        rows: 40,
+                    }),
+                },
+            }])
+            .expect("open mirror request should route through authority transport");
+
+        match transport
+            .recv_command()
+            .expect("authority command should arrive")
+        {
+            RemoteAuthorityCommand::OpenMirror(payload) => {
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.console_id, "console-1");
+                assert_eq!(payload.cols, 120);
+                assert_eq!(payload.rows, 40);
+            }
+            other => panic!("unexpected authority command: {other:?}"),
+        }
+
+        std::fs::remove_file(socket_path).ok();
     }
 
     #[derive(Default)]
