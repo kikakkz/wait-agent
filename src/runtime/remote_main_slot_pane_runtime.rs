@@ -232,22 +232,11 @@ impl RemoteMainSlotPaneRuntime {
                     "remote observer connection registry is not available".to_string(),
                 )
             })?;
-        let binding = remote_runtime.activate_target(
-            &target,
-            RemoteConsoleDescriptor {
-                console_id: spec.console_id.clone(),
-                console_host_id: spec.console_host_id.clone(),
-                location: spec.console_location,
-            },
-            usize::from(initial_size.cols),
-            usize::from(initial_size.rows),
-        )?;
         let mut observer = RemoteObserverRuntime::new(
             mailbox.clone(),
             usize::from(initial_size.cols),
             usize::from(initial_size.rows),
         );
-        observer.sync().map_err(remote_protocol_error)?;
 
         let (event_tx, event_rx) = mpsc::channel();
         spawn_input_thread(event_tx.clone());
@@ -281,15 +270,26 @@ impl RemoteMainSlotPaneRuntime {
         });
         let mut console_seq = 0u64;
         let mut input_signal_decoder = RemoteInteractInputSignalDecoder::default();
+        let mut binding = None;
         let mut authority_status = if remote_runtime.has_connection(target.address.authority_id()) {
             AuthorityTransportStatus::Connected
         } else {
             waiting_authority_status.clone()
         };
+        if matches!(authority_status, AuthorityTransportStatus::Connected) {
+            binding = activate_surface_target(
+                &remote_runtime,
+                &target,
+                &spec,
+                &initial_size,
+                &mut observer,
+            )
+            .map(Some)?;
+        }
         draw_remote_snapshot(
             &terminal,
             &target,
-            &binding,
+            binding.as_ref(),
             &observer.snapshot(),
             &authority_status,
         )?;
@@ -301,24 +301,26 @@ impl RemoteMainSlotPaneRuntime {
                     draw_remote_snapshot(
                         &terminal,
                         &target,
-                        &binding,
+                        binding.as_ref(),
                         &observer.snapshot(),
                         &authority_status,
                     )?;
                 }
                 Ok(RemotePaneEvent::Resize) => {
                     if let Ok(Some(size)) = terminal.capture_resize() {
-                        remote_runtime.send_pty_resize(
-                            &target,
-                            &binding,
-                            usize::from(size.cols),
-                            usize::from(size.rows),
-                        )?;
+                        if let Some(binding) = binding.as_ref() {
+                            remote_runtime.send_pty_resize(
+                                &target,
+                                binding,
+                                usize::from(size.cols),
+                                usize::from(size.rows),
+                            )?;
+                        }
                     }
                     draw_remote_snapshot(
                         &terminal,
                         &target,
-                        &binding,
+                        binding.as_ref(),
                         &observer.snapshot(),
                         &authority_status,
                     )?;
@@ -331,10 +333,29 @@ impl RemoteMainSlotPaneRuntime {
                             target_is_present(&target_presence),
                             &waiting_authority_status,
                         );
+                        if binding.is_none()
+                            && matches!(authority_status, AuthorityTransportStatus::Connected)
+                        {
+                            match activate_surface_target(
+                                &remote_runtime,
+                                &target,
+                                &spec,
+                                &terminal.current_size_or_default(),
+                                &mut observer,
+                            ) {
+                                Ok(activated) => {
+                                    binding = Some(activated);
+                                }
+                                Err(error) => {
+                                    authority_status =
+                                        AuthorityTransportStatus::Failed(error.to_string());
+                                }
+                            }
+                        }
                         draw_remote_snapshot(
                             &terminal,
                             &target,
-                            &binding,
+                            binding.as_ref(),
                             &observer.snapshot(),
                             &authority_status,
                         )?;
@@ -346,10 +367,11 @@ impl RemoteMainSlotPaneRuntime {
                             target_is_present(&target_presence),
                             &waiting_authority_status,
                         );
+                        binding = None;
                         draw_remote_snapshot(
                             &terminal,
                             &target,
-                            &binding,
+                            binding.as_ref(),
                             &observer.snapshot(),
                             &authority_status,
                         )?;
@@ -359,7 +381,7 @@ impl RemoteMainSlotPaneRuntime {
                         draw_remote_snapshot(
                             &terminal,
                             &target,
-                            &binding,
+                            binding.as_ref(),
                             &observer.snapshot(),
                             &authority_status,
                         )?;
@@ -379,7 +401,7 @@ impl RemoteMainSlotPaneRuntime {
                     draw_remote_snapshot(
                         &terminal,
                         &target,
-                        &binding,
+                        binding.as_ref(),
                         &observer.snapshot(),
                         &authority_status,
                     )?;
@@ -391,11 +413,11 @@ impl RemoteMainSlotPaneRuntime {
                     if should_exit_surface_locally(&spec, &bytes) {
                         return Ok(());
                     }
-                    if remote_runtime.has_connection(target.address.authority_id()) {
+                    if let Some(binding) = binding.as_ref() {
                         console_seq += 1;
                         remote_runtime.send_console_input(
                             &target,
-                            &binding,
+                            binding,
                             console_seq,
                             encode_base64(&bytes),
                         )?;
@@ -465,6 +487,27 @@ impl RemoteMainSlotPaneRuntime {
             )),
         }
     }
+}
+
+fn activate_surface_target(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    spec: &RemoteInteractSurfaceSpec,
+    size: &TerminalSize,
+    observer: &mut RemoteObserverRuntime,
+) -> Result<RemoteAttachmentBinding, LifecycleError> {
+    let binding = remote_runtime.activate_target(
+        target,
+        RemoteConsoleDescriptor {
+            console_id: spec.console_id.clone(),
+            console_host_id: spec.console_host_id.clone(),
+            location: spec.console_location,
+        },
+        usize::from(size.cols),
+        usize::from(size.rows),
+    )?;
+    observer.sync().map_err(remote_protocol_error)?;
+    Ok(binding)
 }
 
 fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, bytes: &[u8]) -> bool {
@@ -777,7 +820,7 @@ pub(crate) fn apply_authority_envelope(
 fn draw_remote_snapshot(
     terminal: &TerminalRuntime,
     target: &ManagedSessionRecord,
-    binding: &RemoteAttachmentBinding,
+    binding: Option<&RemoteAttachmentBinding>,
     snapshot: &RemoteObserverSnapshot,
     authority_status: &AuthorityTransportStatus,
 ) -> Result<(), LifecycleError> {
@@ -824,7 +867,7 @@ fn draw_remote_snapshot(
 
 fn placeholder_lines(
     target: &ManagedSessionRecord,
-    binding: &RemoteAttachmentBinding,
+    binding: Option<&RemoteAttachmentBinding>,
     authority_status: &AuthorityTransportStatus,
     viewport: TerminalSize,
 ) -> Vec<String> {
@@ -860,7 +903,12 @@ fn placeholder_lines(
                 .unwrap_or(target.address.session_id())
         ),
         format!("target-id: {}", target.address.id().as_str()),
-        format!("attachment: {}", binding.attachment_id),
+        format!(
+            "attachment: {}",
+            binding
+                .map(|binding| binding.attachment_id.as_str())
+                .unwrap_or("pending")
+        ),
         format!("authority transport: {status_label}"),
     ];
     lines.push(detail_line);
@@ -1027,12 +1075,13 @@ extern "C" fn remote_pane_sigwinch_handler(_signal: c_int) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_authority_envelope, authority_status_from_runtime, authority_transport_event_sender,
-        encode_base64, main_slot_console_id, main_slot_surface_spec, placeholder_lines,
-        remote_authority_target_host_args, resolve_local_authority_target_host,
-        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractInputSignalDecoder,
-        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
-        RemotePaneEvent, ResolvedLocalAuthorityTargetHost,
+        activate_surface_target, apply_authority_envelope, authority_status_from_runtime,
+        authority_transport_event_sender, encode_base64, main_slot_console_id,
+        main_slot_surface_spec, placeholder_lines, remote_authority_target_host_args,
+        resolve_local_authority_target_host, should_exit_surface_locally,
+        AuthorityTransportStatus, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
+        RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
+        ResolvedLocalAuthorityTargetHost,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1246,12 +1295,12 @@ mod tests {
     fn placeholder_lines_explain_transport_gap_before_output_arrives() {
         let lines = placeholder_lines(
             &remote_target(),
-            &RemoteAttachmentBinding {
+            Some(&RemoteAttachmentBinding {
                 session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
-            },
+            }),
             &AuthorityTransportStatus::WaitingForRemoteAuthority,
             TerminalSize {
                 rows: 5,
@@ -1271,12 +1320,12 @@ mod tests {
     fn placeholder_lines_surface_authority_transport_failures() {
         let lines = placeholder_lines(
             &remote_target(),
-            &RemoteAttachmentBinding {
+            Some(&RemoteAttachmentBinding {
                 session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
-            },
+            }),
             &AuthorityTransportStatus::Failed("unexpected authority node".to_string()),
             TerminalSize {
                 rows: 5,
@@ -1294,12 +1343,12 @@ mod tests {
     fn placeholder_lines_surface_authority_disconnect() {
         let lines = placeholder_lines(
             &remote_target(),
-            &RemoteAttachmentBinding {
+            Some(&RemoteAttachmentBinding {
                 session_id: "shell-1".to_string(),
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 attachment_id: "attach-1".to_string(),
                 console_id: "console-a".to_string(),
-            },
+            }),
             &AuthorityTransportStatus::Disconnected,
             TerminalSize {
                 rows: 5,
@@ -1311,6 +1360,95 @@ mod tests {
 
         assert!(lines[3].contains("disconnected"));
         assert!(lines[4].contains("waiting for the remote authority"));
+    }
+
+    #[test]
+    fn placeholder_lines_show_pending_attachment_before_remote_activation_begins() {
+        let lines = placeholder_lines(
+            &remote_target(),
+            None,
+            &AuthorityTransportStatus::WaitingForLocalBridge,
+            TerminalSize {
+                rows: 5,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        );
+
+        assert_eq!(lines[2], "attachment: pending");
+    }
+
+    #[test]
+    fn activate_surface_target_requires_registered_authority_connection() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        let mut observer = RemoteObserverRuntime::new(mailbox, 80, 24);
+        let target = remote_target();
+        let spec = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: target.address.qualified_target(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "observer-a".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+
+        let error = activate_surface_target(
+            &runtime,
+            &target,
+            &spec,
+            &TerminalSize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &mut observer,
+        )
+        .expect_err("activation should fail before authority connection exists");
+
+        assert!(error
+            .to_string()
+            .contains("remote control-plane connection for node `peer-a` is not registered"));
+    }
+
+    #[test]
+    fn activate_surface_target_succeeds_after_authority_connection_registration() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+        let mut observer = RemoteObserverRuntime::new(mailbox, 80, 24);
+        let target = remote_target();
+        let spec = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: target.address.qualified_target(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "observer-a".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+
+        let binding = activate_surface_target(
+            &runtime,
+            &target,
+            &spec,
+            &TerminalSize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &mut observer,
+        )
+        .expect("activation should succeed after authority connection exists");
+
+        assert_eq!(binding.attachment_id, "attach-1");
+        assert_eq!(observer.snapshot().attachment_id.as_deref(), Some("attach-1"));
     }
 
     #[test]
