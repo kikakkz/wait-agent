@@ -56,12 +56,18 @@ impl MainSlotRuntime {
     ) -> Result<(), LifecycleError> {
         let current_workspace = self.current_workspace(&command)?;
         let current_socket = TmuxSocketName::new(&command.current_socket_name);
+        let socket_scoped_registry =
+            self.target_registry_for_socket(command.current_socket_name.as_str())?;
         let session = if target_socket_name(&command.target)
             == Some(command.current_socket_name.as_str())
         {
-            self.find_session_matching_on_socket(&current_socket, &command.target)?
+            self.find_session_matching_on_socket(
+                &socket_scoped_registry,
+                &current_socket,
+                &command.target,
+            )?
         } else {
-            self.target_registry
+            socket_scoped_registry
                 .find_target(&command.target)
                 .map_err(main_slot_error)?
         }
@@ -260,9 +266,11 @@ impl MainSlotRuntime {
         let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
 
         if let Some(active_target) = self.active_target(&workspace)? {
-            if let Some(active_session) =
-                self.find_session_matching_on_socket(&workspace.socket_name, &active_target)?
-            {
+            if let Some(active_session) = self.find_session_matching_on_socket(
+                &self.target_registry_for_socket(workspace.socket_name.as_str())?,
+                &workspace.socket_name,
+                &active_target,
+            )? {
                 // tmux moves the source pane into the destination slot, so the visible
                 // workspace main-pane identity becomes `active_host_pane` after restore.
                 workspace_main_pane = self.restore_active_target_to_host(
@@ -270,7 +278,10 @@ impl MainSlotRuntime {
                     &active_session,
                     &workspace_main_pane,
                 )?;
-            } else if self.remote_target_record(&active_target)?.is_some() {
+            } else if self
+                .remote_target_record(workspace.socket_name.as_str(), &active_target)?
+                .is_some()
+            {
                 self.backend
                     .respawn_pane(
                         &workspace,
@@ -312,9 +323,11 @@ impl MainSlotRuntime {
 
         let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
         if let Some(active_target) = self.active_target(&workspace)? {
-            if let Some(active_session) =
-                self.find_session_matching_on_socket(&workspace.socket_name, &active_target)?
-            {
+            if let Some(active_session) = self.find_session_matching_on_socket(
+                &self.target_registry_for_socket(workspace.socket_name.as_str())?,
+                &workspace.socket_name,
+                &active_target,
+            )? {
                 workspace_main_pane = self.restore_active_target_to_host(
                     &workspace,
                     &active_session,
@@ -467,7 +480,7 @@ impl MainSlotRuntime {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
-        self.target_registry
+        self.target_registry_for_socket(socket_name.as_str())?
             .resolve_target_on_authority_session(socket_name.as_str(), session_name)
             .map_err(main_slot_error)?
             .ok_or_else(|| {
@@ -516,10 +529,11 @@ impl MainSlotRuntime {
 
     fn remote_target_record(
         &self,
+        socket_name: &str,
         target: &str,
     ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
         Ok(self
-            .target_registry
+            .target_registry_for_socket(socket_name)?
             .find_target(target)
             .map_err(main_slot_error)?
             .filter(|session| session.address.transport() == &SessionTransport::RemotePeer))
@@ -551,12 +565,23 @@ impl MainSlotRuntime {
 
     fn find_session_matching_on_socket(
         &self,
+        target_registry: &TargetRegistryService<DefaultTargetCatalogGateway>,
         socket_name: &TmuxSocketName,
         target: &str,
     ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
-        self.target_registry
+        target_registry
             .find_target_on_authority(socket_name.as_str(), target)
             .map_err(main_slot_error)
+    }
+
+    fn target_registry_for_socket(
+        &self,
+        socket_name: &str,
+    ) -> Result<TargetRegistryService<DefaultTargetCatalogGateway>, LifecycleError> {
+        Ok(TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name)
+                .map_err(main_slot_error)?,
+        ))
     }
 }
 

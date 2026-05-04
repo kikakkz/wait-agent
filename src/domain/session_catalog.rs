@@ -98,6 +98,13 @@ impl ManagedSessionAddress {
         }
     }
 
+    pub fn display_authority_id(&self) -> &str {
+        self.authority_id
+            .split_once('#')
+            .map(|(host, _)| host)
+            .unwrap_or(self.authority_id())
+    }
+
     pub fn display_session_id(&self) -> &str {
         self.session_id
             .strip_prefix("waitagent-")
@@ -267,14 +274,34 @@ impl ManagedSessionRecord {
         self.session_role == Some(WorkspaceSessionRole::TargetHost)
     }
 
+    pub fn is_workspace_session(&self) -> bool {
+        matches!(
+            self.session_role,
+            Some(WorkspaceSessionRole::WorkspaceChrome | WorkspaceSessionRole::TargetHost)
+        )
+    }
+
     pub fn matches_target(&self, value: &str) -> bool {
         value == self.address.id().as_str()
             || self.selector.as_deref() == Some(value)
             || value == self.address.display_session_id()
             || value == self.address.session_id()
             || value == self.address.authority_id()
+            || value == self.address.display_authority_id()
             || value == self.address.server_id()
             || value == self.address.qualified_target()
+            || value
+                == format!(
+                    "{}:{}",
+                    self.address.display_authority_id(),
+                    self.address.session_id()
+                )
+            || value
+                == format!(
+                    "{}:{}",
+                    self.address.display_authority_id(),
+                    self.address.display_session_id()
+                )
             || value
                 == format!(
                     "{}:{}",
@@ -309,7 +336,7 @@ impl ManagedSessionRecord {
             SessionTransport::LocalTmux => "local".to_string(),
             SessionTransport::RemotePeer => format!(
                 "{}:{}",
-                self.address.authority_id(),
+                self.address.display_authority_id(),
                 self.address.display_session_id()
             ),
         }
@@ -411,6 +438,28 @@ mod tests {
         };
 
         assert_eq!(record.display_label(), "codex@local");
+    }
+
+    #[test]
+    fn remote_display_label_hides_internal_node_port_suffix() {
+        let record = ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("10.1.29.165#7721", "pty1"),
+            selector: Some("10.1.29.165#7721:pty1".to_string()),
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("codex".to_string()),
+            current_path: None,
+            task_state: ManagedSessionTaskState::Running,
+        };
+
+        assert_eq!(record.display_label(), "codex@10.1.29.165:pty1");
+        assert!(record.matches_target("10.1.29.165:pty1"));
+        assert!(record.matches_target("10.1.29.165#7721:pty1"));
     }
 
     #[test]

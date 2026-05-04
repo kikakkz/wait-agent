@@ -17,7 +17,7 @@ use crate::infra::remote_protocol::{
 use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
-    RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
+    authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
@@ -153,7 +153,7 @@ impl RemoteNodeIngressServerRuntime {
     }
 }
 
-fn remote_node_ingress_owner_socket_path(socket_name: &str) -> PathBuf {
+pub(crate) fn remote_node_ingress_owner_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("waitagent-remote-node-ingress-{socket_name}.sock"))
 }
 
@@ -303,39 +303,107 @@ fn route_transport_envelope(
             let Some(session) = session else {
                 return Ok(());
             };
-            let bytes_base64 = encode_base64(&payload.output_bytes);
-            let session_id = route_session_id(&envelope)
-                .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
-                .unwrap_or_else(|| payload.target_id.clone());
-            let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
-            let target_component =
-                sanitize_socket_component(&format!("remote-peer:{node_id}:{session_id}"));
-            let mut stale = Vec::new();
-            for (path, bridge) in &session.bridges {
-                if bridge.target_component != target_component {
-                    continue;
-                }
-                if let Err(error) = bridge.transport.send_target_output(
-                    &session_id,
-                    &target_id,
-                    payload.output_seq,
-                    known_output_stream(&payload.stream).map_err(remote_node_ingress_error)?,
-                    bytes_base64.clone(),
-                ) {
-                    let _ = error;
-                    stale.push(path.clone());
-                }
-            }
-            for path in stale {
-                session.bridges.remove(&path);
-            }
-            Ok(())
+            let stream = known_output_stream(&payload.stream).map_err(remote_node_ingress_error)?;
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_target_output(
+                        session_id,
+                        target_id,
+                        payload.output_seq,
+                        stream,
+                        encode_base64(&payload.output_bytes),
+                    )
+                },
+            )
+        }
+        Some(Body::MirrorBootstrapChunk(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            let stream = known_output_stream(&payload.stream).map_err(remote_node_ingress_error)?;
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_mirror_bootstrap_chunk(
+                        session_id,
+                        target_id,
+                        payload.chunk_seq,
+                        stream,
+                        encode_base64(&payload.output_bytes),
+                    )
+                },
+            )
+        }
+        Some(Body::MirrorBootstrapComplete(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_mirror_bootstrap_complete(
+                        session_id,
+                        target_id,
+                        payload.last_chunk_seq,
+                    )
+                },
+            )
         }
         Some(Body::Heartbeat(_)) | Some(Body::ClientHello(_)) | Some(Body::ServerHello(_)) => {
             Ok(())
         }
         _ => Ok(()),
     }
+}
+
+fn bridge_output_to_authority_transports<F>(
+    node_id: &str,
+    session: &mut ActiveNodeIngressSession,
+    session_id: String,
+    target_id: String,
+    mut deliver: F,
+) -> Result<(), LifecycleError>
+where
+    F: FnMut(
+        &RemoteAuthorityTransportRuntime,
+        &str,
+        &str,
+    ) -> Result<
+        (),
+        crate::runtime::remote_authority_transport_runtime::RemoteAuthorityTransportError,
+    >,
+{
+    let target_component = authority_target_component(node_id, &session_id);
+    let mut stale = Vec::new();
+    for (path, bridge) in &session.bridges {
+        if bridge.target_component != target_component {
+            continue;
+        }
+        if let Err(error) = deliver(&bridge.transport, &session_id, &target_id) {
+            let _ = error;
+            stale.push(path.clone());
+        }
+    }
+    for path in stale {
+        session.bridges.remove(&path);
+    }
+    Ok(())
 }
 
 fn refresh_authority_bridges(
@@ -357,8 +425,9 @@ fn refresh_authority_bridges(
         else {
             continue;
         };
-        let Ok(transport) = RemoteAuthorityTransportRuntime::connect(&socket_path, node_id) else {
-            continue;
+        let transport = match RemoteAuthorityTransportRuntime::connect(&socket_path, node_id) {
+            Ok(transport) => transport,
+            Err(_) => continue,
         };
         let transport = Arc::new(transport);
         let reader = transport.clone();
@@ -367,7 +436,11 @@ fn refresh_authority_bridges(
         let socket_path_owned = socket_path.clone();
         let internal_tx_owned = internal_tx.clone();
         thread::spawn(move || {
-            while let Ok(command) = reader.recv_command() {
+            loop {
+                let command = match reader.recv_command() {
+                    Ok(command) => command,
+                    Err(_) => break,
+                };
                 let Ok(envelope) = map_authority_command_to_grpc(&transport_session, command)
                 else {
                     break;
@@ -392,7 +465,7 @@ fn refresh_authority_bridges(
 }
 
 fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf>> {
-    let target_prefix = sanitize_socket_component(&format!("remote-peer:{authority_id}:"));
+    let authority_hash = stable_socket_hash(&[authority_id]);
     let mut paths = Vec::new();
     for entry in fs::read_dir(std::env::temp_dir())? {
         let entry = entry?;
@@ -401,7 +474,7 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
         if !name.starts_with("waitagent-remote-") || !name.ends_with(".sock") {
             continue;
         }
-        if !name.contains(&target_prefix) && !name.ends_with(&format!("-{target_prefix}.sock")) {
+        if !name.contains(&format!("-{authority_hash}-")) {
             continue;
         }
         paths.push(entry.path());
@@ -410,33 +483,27 @@ fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf
 }
 
 fn extract_target_component(file_name: &str, authority_id: &str) -> Option<String> {
-    let prefix = sanitize_socket_component(&format!("remote-peer:{authority_id}:"));
     let trimmed = file_name.trim_end_matches(".sock");
-    if let Some(start) = trimmed.find(&prefix) {
-        return Some(trimmed[start..].to_string());
+    let authority_hash = stable_socket_hash(&[authority_id]);
+    let mut parts = trimmed.rsplitn(3, '-');
+    let target_hash = parts.next()?;
+    let encoded_authority_hash = parts.next()?;
+    let _prefix = parts.next()?;
+    if encoded_authority_hash != authority_hash {
+        return None;
     }
-
-    // Remote main-slot authority sockets are scoped as:
-    // waitagent-remote-<socket>-<surface_scope>-<target_component>.sock
-    // The global ingress bridge only needs the trailing target component to
-    // route authority traffic back into the matching live session.
-    trimmed
-        .rsplit_once('-')
-        .map(|(_, suffix)| suffix.to_string())
-        .filter(|suffix| suffix == &prefix || suffix.ends_with(&prefix))
+    Some(target_hash.to_string())
 }
 
-fn sanitize_socket_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn stable_socket_hash(values: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for value in values {
+        for byte in value.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 fn map_authority_command_to_grpc(
@@ -692,12 +759,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_authority_socket_paths, extract_target_component, RemoteNodeIngressServerRuntime,
+        discover_authority_socket_paths, extract_target_component, route_transport_envelope,
+        ActiveAuthoritySocketBridge, ActiveNodeIngressSession, RemoteNodeIngressServerRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
+    use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
+    use crate::infra::remote_grpc_proto::v1::{
+        MirrorBootstrapChunk, MirrorBootstrapComplete, NodeSessionEnvelope, RouteContext,
+        TargetOutput,
+    };
+    use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
+    use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityTransportRuntime;
+    use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
     use std::fs;
+    use std::net::Shutdown;
     use std::path::PathBuf;
     use std::process;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -765,11 +843,196 @@ mod tests {
         let _ = runtime;
     }
 
+    #[test]
+    fn ingress_server_bridges_bootstrap_and_output_into_live_authority_socket() {
+        let node_id = "peer-a";
+        let socket_path =
+            temp_dir_path("waitagent-remote-wa-test-workspace-remote-peer_peer-a_shell-1");
+        let socket_path_for_accept = socket_path.clone();
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .expect("authority socket should bind");
+        let accept_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("authority client should connect");
+            crate::runtime::remote_node_transport_runtime::read_client_hello(&mut stream)
+                .expect("client hello should decode");
+            crate::runtime::remote_node_transport_runtime::write_server_hello(
+                &mut stream,
+                "waitagent-test",
+            )
+            .expect("server hello should encode");
+            let reader = stream.try_clone().expect("stream clone should succeed");
+            (reader, stream)
+        });
+
+        let transport = Arc::new(
+            RemoteAuthorityTransportRuntime::connect(&socket_path, node_id)
+                .expect("bridge transport should connect"),
+        );
+        let active_session_handle = RemoteNodeSessionHandle::new_for_tests(node_id, "session-1").0;
+        let mut active = ActiveNodeIngressSession {
+            session: active_session_handle,
+            bridges: std::collections::HashMap::from([(
+                socket_path.clone(),
+                ActiveAuthoritySocketBridge {
+                    target_component: "remote-peer_peer-a_shell-1".to_string(),
+                    transport: transport.clone(),
+                },
+            )]),
+        };
+        let publication_runtime = RemoteTargetPublicationRuntime::from_build_env()
+            .expect("publication runtime should build");
+
+        route_transport_envelope(
+            &publication_runtime,
+            "wa-test",
+            node_id,
+            mirror_bootstrap_chunk_envelope(),
+            Some(&mut active),
+        )
+        .expect("bootstrap chunk should route");
+        route_transport_envelope(
+            &publication_runtime,
+            "wa-test",
+            node_id,
+            mirror_bootstrap_complete_envelope(),
+            Some(&mut active),
+        )
+        .expect("bootstrap complete should route");
+        route_transport_envelope(
+            &publication_runtime,
+            "wa-test",
+            node_id,
+            target_output_envelope(),
+            Some(&mut active),
+        )
+        .expect("target output should route");
+
+        let (mut authority_stream, authority_writer) =
+            accept_thread.join().expect("accept thread should join");
+        let bootstrap_chunk = crate::infra::remote_transport_codec::read_control_plane_envelope(
+            &mut authority_stream,
+        )
+        .expect("bootstrap chunk should arrive");
+        match bootstrap_chunk.payload {
+            crate::infra::remote_protocol::ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                assert_eq!(payload.session_id, "shell-1");
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.chunk_seq, 1);
+                assert_eq!(payload.bytes_base64, "Ym9vdHN0cmFw");
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let bootstrap_complete = crate::infra::remote_transport_codec::read_control_plane_envelope(
+            &mut authority_stream,
+        )
+        .expect("bootstrap complete should arrive");
+        match bootstrap_complete.payload {
+            crate::infra::remote_protocol::ControlPlanePayload::MirrorBootstrapComplete(
+                payload,
+            ) => {
+                assert_eq!(payload.session_id, "shell-1");
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.last_chunk_seq, 1);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let target_output = crate::infra::remote_transport_codec::read_control_plane_envelope(
+            &mut authority_stream,
+        )
+        .expect("target output should arrive");
+        match target_output.payload {
+            crate::infra::remote_protocol::ControlPlanePayload::TargetOutput(payload) => {
+                assert_eq!(payload.session_id, "shell-1");
+                assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.output_seq, 7);
+                assert_eq!(payload.bytes_base64, "YQ==");
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let _ = authority_stream.shutdown(Shutdown::Both);
+        let _ = authority_writer.shutdown(Shutdown::Both);
+        let _ = fs::remove_file(socket_path_for_accept);
+        let _ = fs::remove_file(socket_path);
+    }
+
     fn temp_dir_path(file_name: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("{file_name}-{}-{unique}.sock", process::id()))
+    }
+
+    fn mirror_bootstrap_chunk_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-chunk-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapChunk(MirrorBootstrapChunk {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: "shell-1".to_string(),
+                chunk_seq: 1,
+                stream: "pty".to_string(),
+                output_bytes: b"bootstrap".to_vec(),
+            })),
+        }
+    }
+
+    fn mirror_bootstrap_complete_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "mirror-bootstrap-complete-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::MirrorBootstrapComplete(MirrorBootstrapComplete {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: "shell-1".to_string(),
+                last_chunk_seq: 1,
+            })),
+        }
+    }
+
+    fn target_output_envelope() -> NodeSessionEnvelope {
+        NodeSessionEnvelope {
+            message_id: "target-output-1".to_string(),
+            sent_at: None,
+            session_instance_id: "client-session-1".to_string(),
+            correlation_id: None,
+            route: Some(RouteContext {
+                authority_node_id: Some("peer-a".to_string()),
+                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some("shell-1".to_string()),
+            }),
+            body: Some(Body::TargetOutput(TargetOutput {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 7,
+                stream: "pty".to_string(),
+                session_id: "shell-1".to_string(),
+                output_bytes: b"a".to_vec(),
+            })),
+        }
     }
 }

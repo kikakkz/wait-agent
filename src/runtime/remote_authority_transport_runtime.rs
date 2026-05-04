@@ -298,25 +298,56 @@ pub fn authority_transport_socket_path(
     session_name: &str,
     target: &str,
 ) -> PathBuf {
+    let scope_hash = stable_socket_hash(&[socket_name, session_name]);
+    let authority_hash = stable_socket_hash(&[target_authority_id(target)]);
+    let target_hash = target_session_component(target);
     std::env::temp_dir().join(format!(
-        "waitagent-remote-{}-{}-{}.sock",
-        remote_transport_path_component(socket_name),
-        remote_transport_path_component(session_name),
-        remote_transport_path_component(target)
+        "waitagent-remote-{scope_hash}-{authority_hash}-{target_hash}.sock",
     ))
 }
 
-fn remote_transport_path_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+pub(crate) fn authority_target_component(authority_id: &str, session_id: &str) -> String {
+    stable_socket_hash(&[authority_id, ":", session_id])
+}
+
+fn target_authority_id(target: &str) -> &str {
+    split_target_identity(target)
+        .map(|(authority_id, _)| authority_id)
+        .unwrap_or(target)
+}
+
+fn target_session_component(target: &str) -> String {
+    split_target_identity(target)
+        .map(|(authority_id, session_id)| authority_target_component(authority_id, session_id))
+        .unwrap_or_else(|| stable_socket_hash(&[target]))
+}
+
+fn split_target_identity(target: &str) -> Option<(&str, &str)> {
+    let mut parts = target.splitn(3, ':');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next();
+
+    match third {
+        Some(session_id)
+            if first == "remote-peer" || first == "local-tmux" || first == "remote" =>
+        {
+            Some((second, session_id))
+        }
+        Some(session_id) => Some((second, session_id)),
+        None => Some((first, second)),
+    }
+}
+
+fn stable_socket_hash(values: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for value in values {
+        for byte in value.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 fn now_rfc3339_like() -> String {
@@ -398,7 +429,9 @@ mod tests {
         let path = authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1");
         let rendered = path.to_string_lossy();
 
-        assert!(rendered.contains("waitagent-remote-wa-1-workspace-1-peer-a_shell-1.sock"));
+        assert!(rendered.contains("waitagent-remote-"));
+        assert!(rendered.ends_with(".sock"));
+        assert!(rendered.len() < 108);
     }
 
     #[test]

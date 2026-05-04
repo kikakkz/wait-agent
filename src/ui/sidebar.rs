@@ -1,9 +1,11 @@
 use crate::domain::chrome::SidebarViewModel;
-use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
+use crate::domain::session_catalog::{
+    ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
+};
 use crate::ui::chrome::{
-    right_align, sidebar_row_prefix, style_sidebar_badge, style_sidebar_detail_line,
+    display_width, right_align, sidebar_row_prefix, style_sidebar_badge, style_sidebar_detail_line,
     style_sidebar_header_line, style_sidebar_hint_line, style_sidebar_item_line,
-    style_sidebar_separator_line, SidebarBadgeState, SidebarRowStyle,
+    style_sidebar_separator_line, truncate_display_width, SidebarBadgeState, SidebarRowStyle,
 };
 
 pub struct SidebarUi;
@@ -155,25 +157,13 @@ fn render_session_row(
     let (badge, badge_width) = style_sidebar_badge(badge_state, row_style, now_millis);
     let reserved = marker.len() + 1 + 1 + badge_width;
     let label_width = width.saturating_sub(reserved);
-    let label = pad_right(
-        &truncate_left(&session.display_label(), label_width),
-        label_width,
-    );
+    let label = session_row_label(session, label_width);
     let prefix = sidebar_row_prefix(row_style);
     format!("{prefix}{marker} {label} {badge}\x1b[0m")
 }
 
 fn selected_detail_line(session: &ManagedSessionRecord, width: usize) -> String {
-    let detail =
-        if session.availability != crate::domain::session_catalog::SessionAvailability::Online {
-            format!(
-                "{} {}",
-                session.display_label(),
-                session.availability.as_str().to_ascii_uppercase()
-            )
-        } else {
-            format!("{} {}", session.display_label(), session.task_state.label())
-        };
+    let detail = selected_detail_text(session, width);
     style_sidebar_detail_line(&right_align(&detail, width), width)
 }
 
@@ -197,18 +187,79 @@ fn push_line(lines: &mut Vec<String>, line: String, height: usize) {
 }
 
 fn pad_right(text: &str, width: usize) -> String {
-    format!("{text:<width$}")
+    let text = truncate_display_width(text, width);
+    let padding = width.saturating_sub(display_width(&text));
+    format!("{text}{}", " ".repeat(padding))
 }
 
-fn truncate_left(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
+fn session_row_label(session: &ManagedSessionRecord, width: usize) -> String {
+    let full_label = session.display_label();
+    if display_width(&full_label) <= width {
+        return pad_right(&full_label, width);
+    }
+
+    if session.address.transport() == &SessionTransport::RemotePeer {
+        let host_only_label = format!(
+            "{}@{}",
+            session.command_name.as_deref().unwrap_or("bash"),
+            session.address.display_authority_id()
+        );
+        if display_width(&host_only_label) <= width {
+            return pad_right(&host_only_label, width);
+        }
+        let authority_only_label = session.address.display_authority_id();
+        if display_width(authority_only_label) <= width {
+            return pad_right(authority_only_label, width);
+        }
+        return pad_right(&truncate_display_width(authority_only_label, width), width);
+    }
+
+    pad_right(&truncate_display_width(&full_label, width), width)
+}
+
+fn selected_detail_text(session: &ManagedSessionRecord, width: usize) -> String {
+    let suffix =
+        if session.availability != crate::domain::session_catalog::SessionAvailability::Online {
+            session.availability.as_str().to_ascii_uppercase()
+        } else {
+            session.task_state.label().to_string()
+        };
+    let full_label = session.display_label();
+    let full_detail = format!("{full_label} {suffix}");
+    if display_width(&full_detail) <= width {
+        return full_detail;
+    }
+
+    if session.address.transport() == &SessionTransport::RemotePeer {
+        let command_host_label = format!(
+            "{}@{}",
+            session.command_name.as_deref().unwrap_or("bash"),
+            session.address.display_authority_id()
+        );
+        let command_host_detail = format!("{command_host_label} {suffix}");
+        if display_width(&command_host_detail) <= width {
+            return command_host_detail;
+        }
+
+        let host_only_detail = format!("{} {suffix}", session.address.display_authority_id());
+        if display_width(&host_only_detail) <= width {
+            return host_only_detail;
+        }
+
+        let authority_only_label = session.address.display_authority_id();
+        if display_width(authority_only_label) <= width {
+            return authority_only_label.to_string();
+        }
+    }
+
+    truncate_display_width(&full_detail, width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::SidebarUi;
     use crate::domain::session_catalog::{
-        ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
+        ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use std::path::PathBuf;
 
@@ -272,5 +323,71 @@ mod tests {
         let output = SidebarUi::render("wa-1", "waitagent-1", None, None, &[], 1, 3, 0);
 
         assert!(output.contains("<"));
+    }
+
+    #[test]
+    fn sidebar_ui_preserves_remote_host_when_session_id_is_too_long() {
+        let output = SidebarUi::render(
+            "wa-1",
+            "waitagent-1",
+            None,
+            Some("192.168.31.182#7513:372645a93b9cd222"),
+            &[ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer(
+                    "192.168.31.182#7513",
+                    "372645a93b9cd222",
+                ),
+                selector: Some("192.168.31.182#7513:372645a93b9cd222".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/home/kk/wait-agent")),
+                workspace_key: Some("372645a93b9cd222".to_string()),
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: Some(PathBuf::from("/home/kk/wait-agent")),
+                task_state: ManagedSessionTaskState::Input,
+            }],
+            24,
+            6,
+            0,
+        );
+
+        assert!(output.contains("192.168.31.182"));
+        assert!(!output.contains("192.168.31.18 "));
+    }
+
+    #[test]
+    fn sidebar_ui_preserves_remote_host_in_detail_line_when_width_is_tight() {
+        let output = SidebarUi::render(
+            "wa-1",
+            "waitagent-1",
+            None,
+            Some("192.168.31.182#7513:372645a93b9cd222"),
+            &[ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer(
+                    "192.168.31.182#7513",
+                    "372645a93b9cd222",
+                ),
+                selector: Some("192.168.31.182#7513:372645a93b9cd222".to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: Some(PathBuf::from("/home/kk/wait-agent")),
+                workspace_key: Some("372645a93b9cd222".to_string()),
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                current_path: Some(PathBuf::from("/home/kk/wait-agent")),
+                task_state: ManagedSessionTaskState::Input,
+            }],
+            24,
+            6,
+            0,
+        );
+
+        assert!(output.contains("192.168.31.182 INPUT"));
+        assert!(!output.contains("bash@192.168.31.182:3726"));
     }
 }

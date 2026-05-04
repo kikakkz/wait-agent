@@ -10,7 +10,9 @@ use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_authority_target_host_runtime::remote_authority_target_host_args;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
+use crate::runtime::remote_node_ingress_server_runtime::remote_node_ingress_owner_socket_path;
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodeSessionError, RemoteNodeSessionRuntime,
 };
@@ -21,6 +23,7 @@ use crate::runtime::remote_target_publication_runtime::{
     RemoteTargetPublicationRuntime,
 };
 use crate::runtime::remote_target_publication_transport_runtime::RemoteTargetPublicationTransportRuntime;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -45,6 +48,7 @@ struct LiveSessionRoute {
     socket_path: PathBuf,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
+    pending_commands: Arc<Mutex<Vec<RemoteAuthorityCommand>>>,
 }
 
 #[derive(Clone)]
@@ -186,6 +190,7 @@ impl SharedAuthoritySession {
 pub struct RemoteNodeSessionOwnerRuntime {
     publication_runtime: RemoteTargetPublicationRuntime,
     network: RemoteNetworkConfig,
+    current_executable: PathBuf,
 }
 
 impl RemoteNodeSessionOwnerRuntime {
@@ -201,6 +206,12 @@ impl RemoteNodeSessionOwnerRuntime {
                 network.clone(),
             )?,
             network,
+            current_executable: std::env::current_exe().map_err(|error| {
+                LifecycleError::Io(
+                    "failed to locate current waitagent executable".to_string(),
+                    error,
+                )
+            })?,
         })
     }
 
@@ -246,6 +257,7 @@ impl RemoteNodeSessionOwnerRuntime {
                         transport_socket_path,
                     } => {
                         ensure_live_session_route(
+                            &self.current_executable,
                             &command.socket_name,
                             &target_session_name,
                             &authority_id,
@@ -281,6 +293,24 @@ impl RemoteNodeSessionOwnerRuntime {
                         task_state,
                     } => {
                         if let Some(source_session_name) = source_session_name.as_deref() {
+                            let target_id =
+                                format!("remote-peer:{authority_id}:{transport_session_id}");
+                            let transport_socket_path =
+                                remote_node_ingress_owner_socket_path(&command.socket_name)
+                                    .to_string_lossy()
+                                    .into_owned();
+                            ensure_live_session_route(
+                                &self.current_executable,
+                                &command.socket_name,
+                                source_session_name,
+                                &authority_id,
+                                &target_id,
+                                &transport_socket_path,
+                                &self.network,
+                                &self.publication_runtime,
+                                &mut live_sessions,
+                                &mut authority_sessions,
+                            )?;
                             let live_command = PublicationSenderCommand::PublishTarget {
                                 authority_id: authority_id.clone(),
                                 transport_session_id: transport_session_id.clone(),
@@ -545,6 +575,7 @@ pub(crate) fn spawn_live_authority_session_bridge(
 }
 
 fn ensure_live_session_route(
+    current_executable: &Path,
     socket_name: &str,
     target_session_name: &str,
     authority_id: &str,
@@ -610,8 +641,10 @@ fn ensure_live_session_route(
         socket_path: live_authority_session_socket_path(socket_name, target_session_name),
         running: Arc::new(AtomicBool::new(true)),
         writer: Arc::new(Mutex::new(None)),
+        pending_commands: Arc::new(Mutex::new(Vec::new())),
     });
     spawn_live_authority_route_listener(shared_session.clone(), route.clone());
+    spawn_remote_authority_target_host(current_executable, &route, transport_socket_path, network)?;
     shared_session
         .routes
         .lock()
@@ -840,6 +873,11 @@ fn dispatch_authority_command_to_live_route(
         .lock()
         .expect("live session writer mutex should not be poisoned");
     let Some(writer) = writer_guard.as_mut() else {
+        route
+            .pending_commands
+            .lock()
+            .expect("live session pending commands mutex should not be poisoned")
+            .push(command.clone());
         return Ok(());
     };
     if let Err(error) =
@@ -847,9 +885,40 @@ fn dispatch_authority_command_to_live_route(
     {
         let _ = writer.shutdown(Shutdown::Both);
         *writer_guard = None;
+        route
+            .pending_commands
+            .lock()
+            .expect("live session pending commands mutex should not be poisoned")
+            .push(command.clone());
         return Err(RemoteNodeSessionError::new(error.to_string()));
     }
     Ok(())
+}
+
+fn spawn_remote_authority_target_host(
+    current_executable: &Path,
+    route: &Arc<LiveSessionRoute>,
+    transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
+) -> Result<(), LifecycleError> {
+    spawn_waitagent_sidecar(
+        current_executable,
+        remote_authority_target_host_args(
+            &route.socket_name,
+            &route.target_session_name,
+            &route.transport_session_id,
+            &route.authority_id,
+            &route.target_id,
+            transport_socket_path,
+            network,
+        ),
+    )
+    .map_err(|error| {
+        LifecycleError::Io(
+            "failed to start remote authority target host".to_string(),
+            error,
+        )
+    })
 }
 
 fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
@@ -948,6 +1017,7 @@ fn bridge_shared_live_authority_stream(
         }
         *writer_guard = Some(host_stream.try_clone()?);
     }
+    flush_pending_live_route_commands(&route)?;
     let forward_result =
         forward_host_output_to_shared_session(host_reader, shared_session, route.running.clone());
     let _ = host_stream.shutdown(Shutdown::Both);
@@ -1064,6 +1134,48 @@ fn forward_host_output_to_session(
                     other.message_type()
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn flush_pending_live_route_commands(
+    route: &Arc<LiveSessionRoute>,
+) -> Result<(), RemoteNodeSessionError> {
+    let pending = {
+        let mut guard = route
+            .pending_commands
+            .lock()
+            .expect("live session pending commands mutex should not be poisoned");
+        std::mem::take(&mut *guard)
+    };
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let mut writer_guard = route
+        .writer
+        .lock()
+        .expect("live session writer mutex should not be poisoned");
+    let Some(writer) = writer_guard.as_mut() else {
+        let mut guard = route
+            .pending_commands
+            .lock()
+            .expect("live session pending commands mutex should not be poisoned");
+        guard.extend(pending);
+        return Ok(());
+    };
+    for command in pending {
+        if let Err(error) =
+            write_control_plane_envelope(writer, &authority_command_envelope(command.clone()))
+        {
+            let _ = writer.shutdown(Shutdown::Both);
+            *writer_guard = None;
+            let mut guard = route
+                .pending_commands
+                .lock()
+                .expect("live session pending commands mutex should not be poisoned");
+            guard.push(command);
+            return Err(RemoteNodeSessionError::new(error.to_string()));
         }
     }
     Ok(())
@@ -1257,8 +1369,10 @@ fn now_rfc3339_like() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_publication_sender_command, ensure_live_session_route,
-        live_authority_session_socket_path, stop_live_session_route, SharedAuthoritySession,
+        authority_command_envelope, bridge_shared_live_authority_stream,
+        dispatch_authority_command_to_live_route, dispatch_publication_sender_command,
+        ensure_live_session_route, live_authority_session_socket_path, stop_live_session_route,
+        LiveSessionRoute, SharedAuthoritySession,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
@@ -1267,7 +1381,8 @@ mod tests {
         TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::infra::remote_transport_codec::{
-        read_control_plane_envelope, read_node_session_envelope, write_node_session_envelope,
+        read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
+        write_node_session_envelope,
     };
     use crate::runtime::remote_authority_transport_runtime::{
         RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
@@ -1281,12 +1396,106 @@ mod tests {
     use crate::runtime::remote_target_publication_transport_runtime::RemoteTargetPublicationTransportRuntime;
     use std::collections::HashMap;
     use std::fs;
+    use std::net::Shutdown;
     use std::os::unix::net::UnixListener;
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn live_route_buffers_authority_commands_until_host_connects() {
+        let route = Arc::new(LiveSessionRoute {
+            socket_name: "wa-1".to_string(),
+            target_session_name: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            socket_path: test_socket_path("buffered-live-route"),
+            running: Arc::new(AtomicBool::new(true)),
+            writer: Arc::new(Mutex::new(None)),
+            pending_commands: Arc::new(Mutex::new(Vec::new())),
+        });
+        let routes = Arc::new(Mutex::new(HashMap::from([(
+            "target-1".to_string(),
+            route.clone(),
+        )])));
+        let command = RemoteAuthorityCommand::OpenMirror(
+            crate::infra::remote_protocol::OpenMirrorRequestPayload {
+                session_id: "target-1".to_string(),
+                target_id: "remote-peer:peer-a:target-1".to_string(),
+                console_id: "console-a".to_string(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+
+        dispatch_authority_command_to_live_route(&routes, &command)
+            .expect("buffering open-mirror should succeed without a live writer");
+
+        assert_eq!(
+            route
+                .pending_commands
+                .lock()
+                .expect("pending commands mutex should not be poisoned")
+                .len(),
+            1
+        );
+
+        let (mut host_client, host_server) =
+            UnixStream::pair().expect("live authority stream pair should open");
+        write_control_plane_envelope(
+            &mut host_client,
+            &ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: "hello-1".to_string(),
+                message_type: "client_hello",
+                timestamp: "0Z".to_string(),
+                sender_id: "peer-a".to_string(),
+                correlation_id: None,
+                session_id: None,
+                target_id: None,
+                attachment_id: None,
+                console_id: None,
+                payload: ControlPlanePayload::ClientHello(ClientHelloPayload {
+                    node_id: "peer-a".to_string(),
+                    client_version: "test".to_string(),
+                }),
+            },
+        )
+        .expect("client hello should encode");
+
+        let shared_session = SharedAuthoritySession {
+            authority_id: "peer-a".to_string(),
+            transport_socket_path: "/tmp/unused.sock".to_string(),
+            publication_runtime: RemoteTargetPublicationRuntime::from_build_env()
+                .expect("publication runtime should build from env"),
+            network: RemoteNetworkConfig::default(),
+            running: Arc::new(AtomicBool::new(true)),
+            owner_started: Arc::new(AtomicBool::new(true)),
+            session: Arc::new(Mutex::new(None)),
+            routes: Arc::new(Mutex::new(HashMap::new())),
+            pending_exits: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let bridge = thread::spawn({
+            let route = route.clone();
+            let shared_session = shared_session.clone();
+            move || bridge_shared_live_authority_stream(host_server, shared_session, route)
+        });
+
+        let _server_hello =
+            read_control_plane_envelope(&mut host_client).expect("server hello should decode");
+        let envelope = read_control_plane_envelope(&mut host_client)
+            .expect("buffered authority command should flush after host connects");
+        assert_eq!(envelope, authority_command_envelope(command));
+
+        route.running.store(false, Ordering::Relaxed);
+        let _ = host_client.shutdown(Shutdown::Both);
+        let _ = bridge.join();
+    }
 
     #[test]
     fn owner_runtime_reuses_cached_publication_transport_for_publish_and_exit() {
@@ -1443,11 +1652,14 @@ mod tests {
             })
         };
 
-        let mut live_sessions = HashMap::new();
+        let mut live_sessions = HashMap::<String, Arc<LiveSessionRoute>>::new();
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
+        let current_executable =
+            std::env::current_exe().expect("current test executable should exist");
         ensure_live_session_route(
+            &current_executable,
             socket_name,
             target_session_a,
             "peer-a",
@@ -1460,6 +1672,7 @@ mod tests {
         )
         .expect("first live session route should register");
         ensure_live_session_route(
+            &current_executable,
             socket_name,
             target_session_b,
             "peer-a",
@@ -1570,8 +1783,11 @@ mod tests {
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
+        let current_executable =
+            std::env::current_exe().expect("current test executable should exist");
 
         ensure_live_session_route(
+            &current_executable,
             socket_name,
             target_session_name,
             "peer-a",
@@ -1590,6 +1806,7 @@ mod tests {
             .clone();
 
         ensure_live_session_route(
+            &current_executable,
             socket_name,
             target_session_name,
             "peer-a",
@@ -1666,7 +1883,10 @@ mod tests {
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
+        let current_executable =
+            std::env::current_exe().expect("current test executable should exist");
         ensure_live_session_route(
+            &current_executable,
             socket_name,
             target_session_name,
             "peer-a",

@@ -165,9 +165,10 @@ mod tests {
     fn ingress_runtime_uses_scoped_authority_transport_socket_path() {
         let socket_path = authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1");
 
-        assert!(socket_path
-            .to_string_lossy()
-            .contains("waitagent-remote-wa-1-workspace-1-peer-a_shell-1.sock"));
+        let rendered = socket_path.to_string_lossy();
+        assert!(rendered.contains("waitagent-remote-"));
+        assert!(rendered.ends_with(".sock"));
+        assert!(rendered.len() < 108);
     }
 
     #[test]

@@ -1385,7 +1385,9 @@ mod tests {
         );
         let rendered = path.to_string_lossy();
 
-        assert!(rendered.contains("waitagent-remote-wa-1-workspace-1-peer-a_shell-1.sock"));
+        assert!(rendered.contains("waitagent-remote-"));
+        assert!(rendered.ends_with(".sock"));
+        assert!(rendered.len() < 108);
     }
 
     #[test]

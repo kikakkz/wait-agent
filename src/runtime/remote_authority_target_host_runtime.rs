@@ -1,5 +1,6 @@
 use crate::cli::{
-    RemoteAuthorityOutputPumpCommand, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
+    prepend_global_network_args, RemoteAuthorityOutputPumpCommand,
+    RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
 use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
@@ -31,7 +32,7 @@ enum MirrorState {
 pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
     type Error: ToString;
 
-    fn target_main_pane(
+    fn target_presentation_pane(
         &self,
         socket_name: &str,
         target_session_name: &str,
@@ -67,12 +68,12 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
 impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
     type Error = TmuxError;
 
-    fn target_main_pane(
+    fn target_presentation_pane(
         &self,
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<TmuxPaneId, Self::Error> {
-        self.target_main_pane_on_socket(socket_name, target_session_name)
+        self.target_presentation_pane_on_socket(socket_name, target_session_name)
     }
 
     fn send_input(
@@ -222,7 +223,7 @@ where
     ) -> Result<(), LifecycleError> {
         let pane = self
             .gateway
-            .target_main_pane(&command.socket_name, &command.target_session_name)
+            .target_presentation_pane(&command.socket_name, &command.target_session_name)
             .map_err(remote_authority_error)?;
         let authority_socket_path = self
             .publication_gateway
@@ -288,7 +289,7 @@ where
                         continue;
                     }
                     if payload.target_id != command.target_id
-                        || payload.session_id != command.target_session_name
+                        || payload.session_id != command.transport_session_id
                     {
                         if let Err(error) = transport
                             .send_open_mirror_rejected(
@@ -335,7 +336,7 @@ where
                         &command.socket_name,
                         &pane,
                         &transport,
-                        &command.target_session_name,
+                        &command.transport_session_id,
                         &command.target_id,
                     ) {
                         break Err(error);
@@ -386,7 +387,7 @@ where
                     output_seq += 1;
                     if let Err(error) = transport
                         .send_target_output(
-                            &command.target_session_name,
+                            &command.transport_session_id,
                             &command.target_id,
                             output_seq,
                             "pty",
@@ -428,6 +429,35 @@ where
     ) -> Result<(), LifecycleError> {
         RemoteAuthorityOutputPumpRuntime::run(command)
     }
+}
+
+pub(crate) fn remote_authority_target_host_args(
+    socket_name: &str,
+    target_session_name: &str,
+    transport_session_id: &str,
+    authority_id: &str,
+    target_id: &str,
+    transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-authority-target-host".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+            "--target-session-name".to_string(),
+            target_session_name.to_string(),
+            "--transport-session-id".to_string(),
+            transport_session_id.to_string(),
+            "--authority-id".to_string(),
+            authority_id.to_string(),
+            "--target-id".to_string(),
+            target_id.to_string(),
+            "--transport-socket-path".to_string(),
+            transport_socket_path.to_string(),
+        ],
+        network,
+    )
 }
 
 impl RemoteAuthorityOutputPumpRuntime {
@@ -706,10 +736,12 @@ mod tests {
     use super::{
         authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
         remote_authority_error, remote_authority_output_pump_shell_command,
-        write_output_chunk_frame, LifecycleError, RemoteAuthorityPublicationGateway,
-        RemoteAuthorityTargetHostRuntime, RemoteTargetPtyGateway,
+        remote_authority_target_host_args, write_output_chunk_frame, LifecycleError,
+        RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
+        RemoteTargetPtyGateway,
     };
     use crate::cli::RemoteAuthorityTargetHostCommand;
+    use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
         NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
@@ -747,7 +779,7 @@ mod tests {
     impl RemoteTargetPtyGateway for FakeGateway {
         type Error = &'static str;
 
-        fn target_main_pane(
+        fn target_presentation_pane(
             &self,
             _socket_name: &str,
             _target_session_name: &str,
@@ -899,6 +931,45 @@ mod tests {
     }
 
     #[test]
+    fn authority_target_host_args_include_network_and_route_metadata() {
+        let args = remote_authority_target_host_args(
+            "wa-1",
+            "target-1",
+            "shell-1",
+            "peer-a",
+            "remote-peer:peer-a:target-1",
+            "/tmp/transport.sock",
+            &RemoteNetworkConfig {
+                port: 9001,
+                connect: Some("10.0.0.8:7474".to_string()),
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--port",
+                "9001",
+                "--connect",
+                "10.0.0.8:7474",
+                "__remote-authority-target-host",
+                "--socket-name",
+                "wa-1",
+                "--target-session-name",
+                "target-1",
+                "--transport-session-id",
+                "shell-1",
+                "--authority-id",
+                "peer-a",
+                "--target-id",
+                "remote-peer:peer-a:target-1",
+                "--transport-socket-path",
+                "/tmp/transport.sock",
+            ]
+        );
+    }
+
+    #[test]
     fn output_pump_reader_forwards_framed_chunks() {
         let socket_path = ingest_socket_path("pump");
         let listener = UnixListener::bind(&socket_path).expect("listener should bind");
@@ -935,6 +1006,7 @@ mod tests {
         let command = RemoteAuthorityTargetHostCommand {
             socket_name: socket_name.clone(),
             target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),

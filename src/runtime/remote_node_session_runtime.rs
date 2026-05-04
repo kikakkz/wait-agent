@@ -70,7 +70,7 @@ struct GrpcRemoteNodeSessionTransport {
     guard: Mutex<Option<GrpcRemoteNodeTransportGuard>>,
 }
 
-enum GrpcAuthorityEvent {
+pub(crate) enum GrpcAuthorityEvent {
     Command(RemoteAuthorityCommand),
     MirrorAccepted,
     MirrorRejected(OpenMirrorRejectedPayload),
@@ -525,7 +525,7 @@ fn recv_local_authority_command(
     }
 }
 
-fn map_inbound_grpc_authority_event(
+pub(crate) fn map_inbound_grpc_authority_event(
     envelope: GrpcNodeSessionEnvelope,
 ) -> Option<GrpcAuthorityEvent> {
     let route_session_id = route_session_id(&envelope);
@@ -608,7 +608,7 @@ fn map_inbound_grpc_authority_event(
     }
 }
 
-fn map_outbound_grpc_envelope(
+pub(crate) fn map_outbound_grpc_envelope(
     node_id: &str,
     channel: NodeSessionChannel,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,

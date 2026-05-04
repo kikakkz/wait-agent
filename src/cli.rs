@@ -42,8 +42,12 @@ impl RemoteNetworkConfig {
         self.advertised_listener_addr().to_string()
     }
 
-    pub fn advertised_node_id(&self) -> String {
+    pub fn advertised_host_id(&self) -> String {
         self.advertised_listener_addr().ip().to_string()
+    }
+
+    pub fn advertised_node_id(&self) -> String {
+        format!("{}#{}", self.advertised_host_id(), self.port)
     }
 
     pub fn connect_endpoint_uri(&self) -> Option<String> {
@@ -183,6 +187,7 @@ pub struct RemoteServerConsoleCommand {
 pub struct RemoteAuthorityTargetHostCommand {
     pub socket_name: String,
     pub target_session_name: String,
+    pub transport_session_id: String,
     pub authority_id: String,
     pub target_id: String,
     pub transport_socket_path: String,
@@ -665,6 +670,7 @@ fn parse_remote_authority_target_host(
     let mut iter = args.into_iter();
     let mut socket_name = None;
     let mut target_session_name = None;
+    let mut transport_session_id = None;
     let mut authority_id = None;
     let mut target_id = None;
     let mut transport_socket_path = None;
@@ -674,6 +680,9 @@ fn parse_remote_authority_target_host(
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
             "--target-session-name" => {
                 target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--transport-session-id" => {
+                transport_session_id = Some(expect_value("--transport-session-id", &mut iter)?)
             }
             "--authority-id" => authority_id = Some(expect_value("--authority-id", &mut iter)?),
             "--target-id" => target_id = Some(expect_value("--target-id", &mut iter)?),
@@ -690,6 +699,8 @@ fn parse_remote_authority_target_host(
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
         target_session_name: target_session_name
             .ok_or_else(|| CliError::MissingValue("--target-session-name".to_string()))?,
+        transport_session_id: transport_session_id
+            .ok_or_else(|| CliError::MissingValue("--transport-session-id".to_string()))?,
         authority_id: authority_id
             .ok_or_else(|| CliError::MissingValue("--authority-id".to_string()))?,
         target_id: target_id.ok_or_else(|| CliError::MissingValue("--target-id".to_string()))?,
