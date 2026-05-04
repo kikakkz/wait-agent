@@ -649,7 +649,7 @@ fn main_pane_died_hook_shell_command(
         shell_escape("--session-name"),
         shell_escape(session_name),
         shell_escape("--pane-id"),
-        shell_escape("#{hook_pane}"),
+        "#{hook_pane}".to_string(),
     ]
     .join(" ")
 }
@@ -766,7 +766,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}'"
+            "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' #{hook_pane}"
         );
     }
 

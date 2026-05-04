@@ -53,6 +53,20 @@ pub fn style_sidebar_item_line(line: &str, width: usize, style: SidebarRowStyle)
     format!("{prefix}{}{ANSI_RESET}", pad_right(line, width))
 }
 
+pub fn style_sidebar_item_secondary_line(
+    line: &str,
+    width: usize,
+    style: SidebarRowStyle,
+) -> String {
+    let prefix = sidebar_row_prefix(style);
+    let secondary = match style {
+        SidebarRowStyle::Selected => "\x1b[38;5;254m",
+        SidebarRowStyle::Current => "\x1b[38;5;246m",
+        SidebarRowStyle::Normal => "\x1b[38;5;244m",
+    };
+    format!("{prefix}{secondary}{}{ANSI_RESET}", pad_right(line, width))
+}
+
 pub fn style_sidebar_detail_line(line: &str, width: usize) -> String {
     format!(
         "{ANSI_BG_SIDEBAR_DETAIL}{}{ANSI_RESET}",

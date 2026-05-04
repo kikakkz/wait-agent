@@ -382,6 +382,9 @@ impl RemoteMainSlotPaneRuntime {
                     }
                 },
                 Ok(RemotePaneEvent::TargetPresenceChanged(is_present)) => {
+                    if should_exit_surface_for_target_presence(&spec, is_present) {
+                        return Ok(());
+                    }
                     authority_status = authority_status_from_runtime(
                         &remote_runtime,
                         &target,
@@ -466,6 +469,13 @@ fn activate_surface_target(
 
 fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, bytes: &[u8]) -> bool {
     spec.console_location == ConsoleLocation::ServerConsole && bytes.contains(&0x1d)
+}
+
+fn should_exit_surface_for_target_presence(
+    _spec: &RemoteInteractSurfaceSpec,
+    is_present: bool,
+) -> bool {
+    !is_present
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -980,9 +990,10 @@ mod tests {
     use super::{
         activate_surface_target, apply_authority_envelope, authority_status_from_runtime,
         authority_transport_event_sender, encode_base64, main_slot_console_id,
-        main_slot_surface_spec, placeholder_lines, should_exit_surface_locally,
-        AuthorityTransportStatus, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
-        RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
+        main_slot_surface_spec, placeholder_lines, should_exit_surface_for_target_presence,
+        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractInputSignalDecoder,
+        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
+        RemotePaneEvent,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1368,6 +1379,29 @@ mod tests {
             ),
             AuthorityTransportStatus::Disconnected
         );
+    }
+
+    #[test]
+    fn surfaces_exit_when_remote_target_disappears() {
+        let main_slot = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: "peer-a:shell-1".to_string(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "wa-1".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+        let server_console = RemoteInteractSurfaceSpec {
+            console_location: ConsoleLocation::ServerConsole,
+            ..main_slot.clone()
+        };
+
+        assert!(should_exit_surface_for_target_presence(&main_slot, false));
+        assert!(should_exit_surface_for_target_presence(
+            &server_console,
+            false
+        ));
+        assert!(!should_exit_surface_for_target_presence(&main_slot, true));
     }
 
     #[test]
