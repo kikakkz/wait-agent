@@ -276,70 +276,36 @@ impl RemoteMainSlotPaneRuntime {
             )
             .map(Some)?;
         }
-        draw_remote_snapshot(
-            &terminal,
-            &target,
-            binding.as_ref(),
-            &observer.snapshot(),
-            &authority_status,
-        )?;
+        let run_result = (|| -> Result<(), LifecycleError> {
+            draw_remote_snapshot(
+                &terminal,
+                &target,
+                binding.as_ref(),
+                &observer.snapshot(),
+                &authority_status,
+            )?;
 
-        loop {
-            match event_rx.recv() {
-                Ok(RemotePaneEvent::MailboxUpdated) => {
-                    observer.sync().map_err(remote_protocol_error)?;
-                    draw_remote_snapshot(
-                        &terminal,
-                        &target,
-                        binding.as_ref(),
-                        &observer.snapshot(),
-                        &authority_status,
-                    )?;
-                }
-                Ok(RemotePaneEvent::Resize) => {
-                    if let Ok(Some(size)) = terminal.capture_resize() {
-                        if let Some(binding) = binding.as_ref() {
-                            remote_runtime.send_pty_resize(
-                                &target,
-                                binding,
-                                usize::from(size.cols),
-                                usize::from(size.rows),
-                            )?;
-                        }
-                    }
-                    draw_remote_snapshot(
-                        &terminal,
-                        &target,
-                        binding.as_ref(),
-                        &observer.snapshot(),
-                        &authority_status,
-                    )?;
-                }
-                Ok(RemotePaneEvent::AuthorityTransport(event)) => match event {
-                    AuthorityTransportEvent::Connected => {
-                        authority_status = authority_status_from_runtime(
-                            &remote_runtime,
+            loop {
+                match event_rx.recv() {
+                    Ok(RemotePaneEvent::MailboxUpdated) => {
+                        observer.sync().map_err(remote_protocol_error)?;
+                        draw_remote_snapshot(
+                            &terminal,
                             &target,
-                            target_is_present(&target_presence),
-                            &waiting_authority_status,
-                        );
-                        if binding.is_none()
-                            && matches!(authority_status, AuthorityTransportStatus::Connected)
-                        {
-                            match activate_surface_target(
-                                &remote_runtime,
-                                &target,
-                                &spec,
-                                &terminal.current_size_or_default(),
-                                &mut observer,
-                            ) {
-                                Ok(activated) => {
-                                    binding = Some(activated);
-                                }
-                                Err(error) => {
-                                    authority_status =
-                                        AuthorityTransportStatus::Failed(error.to_string());
-                                }
+                            binding.as_ref(),
+                            &observer.snapshot(),
+                            &authority_status,
+                        )?;
+                    }
+                    Ok(RemotePaneEvent::Resize) => {
+                        if let Ok(Some(size)) = terminal.capture_resize() {
+                            if let Some(binding) = binding.as_ref() {
+                                remote_runtime.send_pty_resize(
+                                    &target,
+                                    binding,
+                                    usize::from(size.cols),
+                                    usize::from(size.rows),
+                                )?;
                             }
                         }
                         draw_remote_snapshot(
@@ -350,14 +316,82 @@ impl RemoteMainSlotPaneRuntime {
                             &authority_status,
                         )?;
                     }
-                    AuthorityTransportEvent::Disconnected => {
+                    Ok(RemotePaneEvent::AuthorityTransport(event)) => match event {
+                        AuthorityTransportEvent::Connected => {
+                            authority_status = authority_status_from_runtime(
+                                &remote_runtime,
+                                &target,
+                                target_is_present(&target_presence),
+                                &waiting_authority_status,
+                            );
+                            if binding.is_none()
+                                && matches!(authority_status, AuthorityTransportStatus::Connected)
+                            {
+                                match activate_surface_target(
+                                    &remote_runtime,
+                                    &target,
+                                    &spec,
+                                    &terminal.current_size_or_default(),
+                                    &mut observer,
+                                ) {
+                                    Ok(activated) => {
+                                        binding = Some(activated);
+                                    }
+                                    Err(error) => {
+                                        authority_status =
+                                            AuthorityTransportStatus::Failed(error.to_string());
+                                    }
+                                }
+                            }
+                            draw_remote_snapshot(
+                                &terminal,
+                                &target,
+                                binding.as_ref(),
+                                &observer.snapshot(),
+                                &authority_status,
+                            )?;
+                        }
+                        AuthorityTransportEvent::Disconnected => {
+                            authority_status = authority_status_from_runtime(
+                                &remote_runtime,
+                                &target,
+                                target_is_present(&target_presence),
+                                &waiting_authority_status,
+                            );
+                            binding = None;
+                            draw_remote_snapshot(
+                                &terminal,
+                                &target,
+                                binding.as_ref(),
+                                &observer.snapshot(),
+                                &authority_status,
+                            )?;
+                        }
+                        AuthorityTransportEvent::Failed(message) => {
+                            authority_status = AuthorityTransportStatus::Failed(message);
+                            draw_remote_snapshot(
+                                &terminal,
+                                &target,
+                                binding.as_ref(),
+                                &observer.snapshot(),
+                                &authority_status,
+                            )?;
+                        }
+                        AuthorityTransportEvent::Envelope(envelope) => {
+                            apply_authority_envelope(&remote_runtime, &target, &envelope)
+                                .map_err(remote_protocol_error)?;
+                        }
+                    },
+                    Ok(RemotePaneEvent::TargetPresenceChanged(is_present)) => {
+                        if should_exit_surface_for_target_presence(&spec, is_present) {
+                            return Ok(());
+                        }
                         authority_status = authority_status_from_runtime(
                             &remote_runtime,
                             &target,
-                            target_is_present(&target_presence),
+                            is_present,
                             &waiting_authority_status,
                         );
-                        binding = None;
                         draw_remote_snapshot(
                             &terminal,
                             &target,
@@ -366,59 +400,31 @@ impl RemoteMainSlotPaneRuntime {
                             &authority_status,
                         )?;
                     }
-                    AuthorityTransportEvent::Failed(message) => {
-                        authority_status = AuthorityTransportStatus::Failed(message);
-                        draw_remote_snapshot(
-                            &terminal,
-                            &target,
-                            binding.as_ref(),
-                            &observer.snapshot(),
-                            &authority_status,
-                        )?;
+                    Ok(RemotePaneEvent::Input(bytes)) => {
+                        for signal in input_signal_decoder.feed(&spec, &bytes) {
+                            on_signal(signal);
+                        }
+                        if should_exit_surface_locally(&spec, &bytes) {
+                            return Ok(());
+                        }
+                        if let Some(binding) = binding.as_ref() {
+                            console_seq += 1;
+                            remote_runtime.send_console_input(
+                                &target,
+                                binding,
+                                console_seq,
+                                encode_base64(&bytes),
+                            )?;
+                        }
                     }
-                    AuthorityTransportEvent::Envelope(envelope) => {
-                        apply_authority_envelope(&remote_runtime, &target, &envelope)
-                            .map_err(remote_protocol_error)?;
-                    }
-                },
-                Ok(RemotePaneEvent::TargetPresenceChanged(is_present)) => {
-                    if should_exit_surface_for_target_presence(&spec, is_present) {
-                        return Ok(());
-                    }
-                    authority_status = authority_status_from_runtime(
-                        &remote_runtime,
-                        &target,
-                        is_present,
-                        &waiting_authority_status,
-                    );
-                    draw_remote_snapshot(
-                        &terminal,
-                        &target,
-                        binding.as_ref(),
-                        &observer.snapshot(),
-                        &authority_status,
-                    )?;
+                    Err(_) => return Ok(()),
                 }
-                Ok(RemotePaneEvent::Input(bytes)) => {
-                    for signal in input_signal_decoder.feed(&spec, &bytes) {
-                        on_signal(signal);
-                    }
-                    if should_exit_surface_locally(&spec, &bytes) {
-                        return Ok(());
-                    }
-                    if let Some(binding) = binding.as_ref() {
-                        console_seq += 1;
-                        remote_runtime.send_console_input(
-                            &target,
-                            binding,
-                            console_seq,
-                            encode_base64(&bytes),
-                        )?;
-                    }
-                }
-                Err(_) => return Ok(()),
             }
+        })();
+        if let Some(binding) = binding.as_ref() {
+            let _ = remote_runtime.close_target(&target, binding);
         }
+        run_result
     }
 
     fn resolve_remote_target(
@@ -654,7 +660,9 @@ fn spawn_resize_watcher(tx: mpsc::Sender<RemotePaneEvent>) -> io::Result<RemoteP
 
 fn spawn_mailbox_watcher(mailbox: LocalNodeMailbox, tx: mpsc::Sender<RemotePaneEvent>) {
     thread::spawn(move || {
-        let mut seen = mailbox.snapshot().len();
+        // Start from zero so a bootstrap or initial open-state batch that lands
+        // before this watcher thread gets scheduled still triggers a redraw.
+        let mut seen = 0usize;
         loop {
             mailbox.wait_for_growth(seen);
             let current = mailbox.snapshot().len();
@@ -793,6 +801,12 @@ fn draw_remote_snapshot(
     let active_screen = snapshot.active_screen();
 
     let mut stdout = io::stdout().lock();
+    write!(stdout, "\x1b[?25l").map_err(|error| {
+        LifecycleError::Io(
+            "failed to hide remote main-slot cursor before redraw".to_string(),
+            error,
+        )
+    })?;
     for row in 0..usize::from(viewport.rows.max(1)) {
         let line = screen_lines.get(row).map(String::as_str).unwrap_or("");
         write!(stdout, "\x1b[{};1H{}\x1b[K", row + 1, line).map_err(|error| {
@@ -991,9 +1005,9 @@ mod tests {
         activate_surface_target, apply_authority_envelope, authority_status_from_runtime,
         authority_transport_event_sender, encode_base64, main_slot_console_id,
         main_slot_surface_spec, placeholder_lines, should_exit_surface_for_target_presence,
-        should_exit_surface_locally, AuthorityTransportStatus, RemoteInteractInputSignalDecoder,
-        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
-        RemotePaneEvent,
+        should_exit_surface_locally, spawn_mailbox_watcher, AuthorityTransportStatus,
+        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
+        RemoteMainSlotPaneRuntime, RemotePaneEvent,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1684,6 +1698,36 @@ mod tests {
             "b           ".to_string()
         );
         let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn mailbox_watcher_emits_update_for_messages_that_arrive_before_thread_starts() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+        runtime
+            .activate_target(
+                &remote_target(),
+                RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should succeed");
+
+        let (tx, rx) = mpsc::channel();
+        spawn_mailbox_watcher(mailbox, tx);
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("watcher should emit for already-buffered mailbox messages"),
+            RemotePaneEvent::MailboxUpdated
+        );
     }
 
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {

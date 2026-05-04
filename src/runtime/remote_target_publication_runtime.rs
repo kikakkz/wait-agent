@@ -261,6 +261,33 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
+    pub(crate) fn apply_discovered_remote_session_envelope_on_live_workspaces(
+        &self,
+        node_id: &str,
+        envelope: ProtocolEnvelope<ControlPlanePayload>,
+    ) -> Result<(), LifecycleError> {
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
+        for socket_name in &live_workspace_sockets {
+            self.apply_discovered_remote_session_envelope_on_socket(
+                socket_name,
+                node_id,
+                envelope.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_discovered_remote_node_on_live_workspaces(
+        &self,
+        node_id: &str,
+    ) -> Result<(), LifecycleError> {
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
+        for socket_name in &live_workspace_sockets {
+            self.remove_discovered_remote_node_on_socket(socket_name, node_id)?;
+        }
+        Ok(())
+    }
+
     pub fn mark_source_target_offline(
         &self,
         socket_name: &str,
@@ -344,8 +371,7 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
+    pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
         let sessions = self
             .local_tmux
             .list_sessions()

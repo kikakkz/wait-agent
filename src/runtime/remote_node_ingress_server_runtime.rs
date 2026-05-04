@@ -14,7 +14,6 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
     REMOTE_PROTOCOL_VERSION,
 };
-use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
@@ -37,7 +36,6 @@ const REMOTE_NODE_INGRESS_OWNER_READY_SLEEP: Duration = Duration::from_millis(25
 pub struct RemoteNodeIngressServerRuntime {
     publication_runtime: RemoteTargetPublicationRuntime,
     network: RemoteNetworkConfig,
-    socket_name: String,
 }
 
 pub struct RemoteNodeIngressServerGuard {
@@ -65,19 +63,18 @@ enum InternalEvent {
 impl RemoteNodeIngressServerRuntime {
     pub fn from_build_env_with_network_and_socket(
         network: RemoteNetworkConfig,
-        socket_name: impl Into<String>,
+        _socket_name: impl Into<String>,
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
             publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
             network,
-            socket_name: socket_name.into(),
         })
     }
 
     pub fn run_owner(&self) -> Result<(), LifecycleError> {
-        let socket_path = remote_node_ingress_owner_socket_path(&self.socket_name);
+        let socket_path = remote_node_ingress_owner_socket_path(&self.network);
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
@@ -87,7 +84,7 @@ impl RemoteNodeIngressServerRuntime {
             .set_nonblocking(true)
             .map_err(remote_node_ingress_error)?;
         let _guard = self.start()?;
-        while backend_socket_still_exists(&self.socket_name) {
+        while any_live_workspace_exists(&self.publication_runtime)? {
             let _ = drain_owner_ping(&listener);
             thread::sleep(BRIDGE_REFRESH_INTERVAL);
         }
@@ -96,10 +93,10 @@ impl RemoteNodeIngressServerRuntime {
     }
 
     pub fn ensure_owner_running(
-        socket_name: &str,
+        _socket_name: &str,
         network: &RemoteNetworkConfig,
     ) -> Result<(), LifecycleError> {
-        let socket_path = remote_node_ingress_owner_socket_path(socket_name);
+        let socket_path = remote_node_ingress_owner_socket_path(network);
         if remote_node_ingress_owner_available(&socket_path) {
             return Ok(());
         }
@@ -114,7 +111,7 @@ impl RemoteNodeIngressServerRuntime {
         })?;
         spawn_waitagent_sidecar(
             &current_executable,
-            remote_node_ingress_owner_args(socket_name, network),
+            remote_node_ingress_owner_args(network),
         )
         .map_err(remote_node_ingress_error)?;
         for _ in 0..REMOTE_NODE_INGRESS_OWNER_READY_RETRIES {
@@ -124,7 +121,8 @@ impl RemoteNodeIngressServerRuntime {
             thread::sleep(REMOTE_NODE_INGRESS_OWNER_READY_SLEEP);
         }
         Err(LifecycleError::Protocol(format!(
-            "remote node ingress owner for socket `{socket_name}` did not become ready"
+            "remote node ingress owner for listener `{}` did not become ready",
+            network.listener_addr()
         )))
     }
 
@@ -136,15 +134,8 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
-        let socket_name = self.socket_name.clone();
         let worker = thread::spawn(move || {
-            let _ = run_node_ingress_server_loop(
-                publication_runtime,
-                socket_name,
-                transport_rx,
-                internal_rx,
-                internal_tx,
-            );
+            let _ = run_node_ingress_server_loop(publication_runtime, transport_rx, internal_rx, internal_tx);
         });
         Ok(RemoteNodeIngressServerGuard {
             transport_guard: Some(transport_guard),
@@ -153,16 +144,19 @@ impl RemoteNodeIngressServerRuntime {
     }
 }
 
-pub(crate) fn remote_node_ingress_owner_socket_path(socket_name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("waitagent-remote-node-ingress-{socket_name}.sock"))
+pub(crate) fn remote_node_ingress_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-node-ingress-{}.sock",
+        sanitize_socket_component(&network.listener_addr().to_string())
+    ))
 }
 
-fn remote_node_ingress_owner_args(socket_name: &str, network: &RemoteNetworkConfig) -> Vec<String> {
+fn remote_node_ingress_owner_args(network: &RemoteNetworkConfig) -> Vec<String> {
     prepend_global_network_args(
         vec![
             "__remote-node-ingress-server".to_string(),
             "--socket-name".to_string(),
-            socket_name.to_string(),
+            "__shared__".to_string(),
         ],
         network,
     )
@@ -185,15 +179,10 @@ fn drain_owner_ping(listener: &std::os::unix::net::UnixListener) -> io::Result<(
     }
 }
 
-fn backend_socket_still_exists(socket_name: &str) -> bool {
-    let socket_path = tmux_socket_dir().join(socket_name);
-    if !socket_path.exists() {
-        return false;
-    }
-    let Ok(backend) = EmbeddedTmuxBackend::from_build_env() else {
-        return false;
-    };
-    backend.socket_is_live(&TmuxSocketName::new(socket_name))
+fn any_live_workspace_exists(
+    publication_runtime: &RemoteTargetPublicationRuntime,
+) -> Result<bool, LifecycleError> {
+    Ok(!publication_runtime.live_workspace_socket_names()?.is_empty())
 }
 
 impl Drop for RemoteNodeIngressServerGuard {
@@ -207,7 +196,6 @@ impl Drop for RemoteNodeIngressServerGuard {
 
 fn run_node_ingress_server_loop(
     publication_runtime: RemoteTargetPublicationRuntime,
-    socket_name: String,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
@@ -232,7 +220,6 @@ fn run_node_ingress_server_loop(
                     }
                     let _ = route_transport_envelope(
                         &publication_runtime,
-                        &socket_name,
                         &node_id,
                         envelope,
                         sessions.get_mut(&node_id),
@@ -240,13 +227,13 @@ fn run_node_ingress_server_loop(
                 }
                 RemoteNodeTransportEvent::SessionClosed { node_id } => {
                     let _ = publication_runtime
-                        .remove_discovered_remote_node_on_socket(&socket_name, &node_id);
+                        .remove_discovered_remote_node_on_live_workspaces(&node_id);
                     sessions.remove(&node_id);
                 }
                 RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
                     if let Some(node_id) = node_id {
                         let _ = publication_runtime
-                            .remove_discovered_remote_node_on_socket(&socket_name, &node_id);
+                            .remove_discovered_remote_node_on_live_workspaces(&node_id);
                         sessions.remove(&node_id);
                     }
                 }
@@ -276,7 +263,6 @@ fn run_node_ingress_server_loop(
 
 fn route_transport_envelope(
     publication_runtime: &RemoteTargetPublicationRuntime,
-    socket_name: &str,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,
     session: Option<&mut ActiveNodeIngressSession>,
@@ -285,16 +271,14 @@ fn route_transport_envelope(
         Some(Body::TargetPublished(payload)) => {
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
-            publication_runtime.apply_discovered_remote_session_envelope_on_socket(
-                socket_name,
+            publication_runtime.apply_discovered_remote_session_envelope_on_live_workspaces(
                 node_id,
                 mapped,
             )
         }
         Some(Body::TargetExited(payload)) => {
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
-            publication_runtime.apply_discovered_remote_session_envelope_on_socket(
-                socket_name,
+            publication_runtime.apply_discovered_remote_session_envelope_on_live_workspaces(
                 node_id,
                 mapped,
             )
@@ -504,6 +488,16 @@ fn stable_socket_hash(values: &[&str]) -> String {
         }
     }
     format!("{hash:016x}")
+}
+
+fn sanitize_socket_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn map_authority_command_to_grpc(
@@ -884,7 +878,6 @@ mod tests {
 
         route_transport_envelope(
             &publication_runtime,
-            "wa-test",
             node_id,
             mirror_bootstrap_chunk_envelope(),
             Some(&mut active),
@@ -892,7 +885,6 @@ mod tests {
         .expect("bootstrap chunk should route");
         route_transport_envelope(
             &publication_runtime,
-            "wa-test",
             node_id,
             mirror_bootstrap_complete_envelope(),
             Some(&mut active),
@@ -900,7 +892,6 @@ mod tests {
         .expect("bootstrap complete should route");
         route_transport_envelope(
             &publication_runtime,
-            "wa-test",
             node_id,
             target_output_envelope(),
             Some(&mut active),

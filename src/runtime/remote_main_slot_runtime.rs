@@ -161,6 +161,22 @@ impl RemoteMainSlotRuntime {
         self.send_messages(&[message])
     }
 
+    pub fn close_target(
+        &self,
+        target: &ManagedSessionRecord,
+        binding: &RemoteAttachmentBinding,
+    ) -> Result<(), LifecycleError> {
+        let messages = self
+            .control_plane
+            .borrow_mut()
+            .close_target(target, &binding.attachment_id)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        if messages.is_empty() {
+            return Ok(());
+        }
+        self.send_messages(&messages)
+    }
+
     pub fn send_target_output(
         &self,
         target: &ManagedSessionRecord,
@@ -387,6 +403,28 @@ mod tests {
         assert_eq!(envelopes.len(), 2);
         assert_eq!(envelopes[0].message_type, "open_mirror_request");
         assert_eq!(envelopes[1].message_type, "apply_resize");
+    }
+
+    #[test]
+    fn close_target_routes_close_mirror_for_last_attachment() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        runtime.ensure_local_connection("observer-a");
+        let authority_mailbox = runtime
+            .ensure_local_connection("peer-a")
+            .expect("registry-backed runtime should expose authority registration");
+
+        let target = remote_target("peer-a", "shell-1");
+        let binding = runtime
+            .activate_target(&target, console("console-a", "observer-a"), 120, 40)
+            .expect("remote activation should succeed");
+        runtime
+            .close_target(&target, &binding)
+            .expect("closing the last attachment should succeed");
+
+        let envelopes = authority_mailbox.snapshot();
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].message_type, "open_mirror_request");
+        assert_eq!(envelopes[1].message_type, "close_mirror_request");
     }
 
     #[test]

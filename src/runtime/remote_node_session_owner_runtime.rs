@@ -296,7 +296,7 @@ impl RemoteNodeSessionOwnerRuntime {
                             let target_id =
                                 format!("remote-peer:{authority_id}:{transport_session_id}");
                             let transport_socket_path =
-                                remote_node_ingress_owner_socket_path(&command.socket_name)
+                                remote_node_ingress_owner_socket_path(&self.network)
                                     .to_string_lossy()
                                     .into_owned();
                             ensure_live_session_route(

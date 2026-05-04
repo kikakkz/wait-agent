@@ -797,8 +797,8 @@ mod tests {
     use super::{
         authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
         remote_authority_error, remote_authority_output_pump_shell_command,
-        remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame, LifecycleError,
-        RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
+        remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame,
+        LifecycleError, RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
         RemoteTargetPtyGateway,
     };
     use crate::cli::RemoteAuthorityTargetHostCommand;
