@@ -745,6 +745,7 @@ impl EmbeddedTmuxBackend {
             "capture-pane".to_string(),
             "-p".to_string(),
             "-e".to_string(),
+            "-N".to_string(),
             "-t".to_string(),
             pane_target.to_string(),
             "-S".to_string(),
@@ -752,6 +753,25 @@ impl EmbeddedTmuxBackend {
         ];
         let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
         Ok(output.stdout)
+    }
+
+    pub fn pane_cursor_position_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<(usize, usize), TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+            "#{cursor_x}\t#{cursor_y}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        let mut parts = output.stdout.trim().split('\t');
+        let cursor_x = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+        let cursor_y = parts.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+        Ok((cursor_x, cursor_y))
     }
 
     fn wait_for_workspace_channel_on_socket(

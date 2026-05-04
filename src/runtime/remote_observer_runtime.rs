@@ -256,6 +256,7 @@ mod tests {
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
     };
+    use crate::infra::base64::encode_base64;
     use crate::infra::remote_protocol::RemoteConsoleDescriptor;
     use crate::runtime::remote_main_slot_runtime::RemoteMainSlotRuntime;
     use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
@@ -420,6 +421,96 @@ mod tests {
                 "            ".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn sync_bootstrap_replay_preserves_prompt_space_and_cursor_position() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+
+        runtime
+            .activate_target(
+                &remote_target("peer-a", "shell-1"),
+                console("console-a", "observer-a"),
+                32,
+                4,
+            )
+            .expect("remote activation should succeed");
+        runtime
+            .send_mirror_bootstrap_chunk(
+                &remote_target("peer-a", "shell-1"),
+                1,
+                "pty",
+                encode_base64(b"\x1b[2J\x1b[H\x1b[1;1Hkk@lenovo:~/wait-agent$ \x1b[1;25H"),
+            )
+            .expect("bootstrap replay should fan out");
+        runtime
+            .send_mirror_bootstrap_complete(&remote_target("peer-a", "shell-1"), 1)
+            .expect("bootstrap complete should fan out");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 32, 4);
+        observer.sync().expect("sync should succeed");
+
+        let snapshot = observer.snapshot();
+        assert!(snapshot.active_screen().lines[0].starts_with("kk@lenovo:~/wait-agent$ "));
+        assert_eq!(snapshot.active_screen().cursor_row, 0);
+        assert_eq!(snapshot.active_screen().cursor_col, 24);
+        assert!(snapshot.has_visible_output);
+        assert!(snapshot.bootstrap_complete);
+    }
+
+    #[test]
+    fn repeated_bootstrap_replay_replaces_screen_without_corrupting_prompt() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+
+        runtime
+            .activate_target(
+                &remote_target("peer-a", "shell-1"),
+                console("console-a", "observer-a"),
+                32,
+                4,
+            )
+            .expect("remote activation should succeed");
+        let replay = b"\x1b[2J\x1b[H\x1b[1;1Hkk@lenovo:~/wait-agent$ \x1b[1;25H";
+        runtime
+            .send_mirror_bootstrap_chunk(
+                &remote_target("peer-a", "shell-1"),
+                1,
+                "pty",
+                encode_base64(replay),
+            )
+            .expect("first bootstrap replay should fan out");
+        runtime
+            .send_mirror_bootstrap_complete(&remote_target("peer-a", "shell-1"), 1)
+            .expect("first bootstrap complete should fan out");
+        runtime
+            .send_mirror_bootstrap_chunk(
+                &remote_target("peer-a", "shell-1"),
+                2,
+                "pty",
+                encode_base64(replay),
+            )
+            .expect("second bootstrap replay should fan out");
+        runtime
+            .send_mirror_bootstrap_complete(&remote_target("peer-a", "shell-1"), 2)
+            .expect("second bootstrap complete should fan out");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 32, 4);
+        observer.sync().expect("sync should succeed");
+
+        let snapshot = observer.snapshot();
+        assert!(snapshot.active_screen().lines[0].starts_with("kk@lenovo:~/wait-agent$ "));
+        assert_eq!(snapshot.active_screen().cursor_row, 0);
+        assert_eq!(snapshot.active_screen().cursor_col, 24);
+        assert!(snapshot.has_visible_output);
+        assert!(snapshot.bootstrap_complete);
     }
 
     fn console(console_id: &str, host_id: &str) -> RemoteConsoleDescriptor {

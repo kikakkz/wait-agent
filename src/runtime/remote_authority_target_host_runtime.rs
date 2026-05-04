@@ -59,6 +59,12 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         pane: &TmuxPaneId,
     ) -> Result<String, Self::Error>;
 
+    fn capture_cursor_position(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(usize, usize), Self::Error>;
+
     fn clear_output_pipe(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<(), Self::Error>;
 
     fn set_output_pipe(
@@ -105,6 +111,14 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         pane: &TmuxPaneId,
     ) -> Result<String, Self::Error> {
         self.capture_pane_ansi_on_socket(socket_name, pane.as_str())
+    }
+
+    fn capture_cursor_position(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(usize, usize), Self::Error> {
+        self.pane_cursor_position_on_socket(socket_name, pane.as_str())
     }
 
     fn clear_output_pipe(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<(), Self::Error> {
@@ -648,14 +662,19 @@ where
         .gateway
         .capture_bootstrap_screen(socket_name, pane)
         .map_err(remote_authority_error)?;
-    if !screen.is_empty() {
+    let (cursor_x, cursor_y) = runtime
+        .gateway
+        .capture_cursor_position(socket_name, pane)
+        .map_err(remote_authority_error)?;
+    let replay = render_bootstrap_replay(&screen, cursor_x, cursor_y);
+    if !replay.is_empty() {
         transport
             .send_mirror_bootstrap_chunk(
                 session_id,
                 target_id,
                 1,
                 "pty",
-                encode_base64(screen.as_bytes()),
+                encode_base64(replay.as_bytes()),
             )
             .map_err(remote_authority_error)?;
     }
@@ -663,10 +682,27 @@ where
         .send_mirror_bootstrap_complete(
             session_id,
             target_id,
-            if screen.is_empty() { 0 } else { 1 },
+            if replay.is_empty() { 0 } else { 1 },
         )
         .map_err(remote_authority_error)?;
     Ok(())
+}
+
+fn render_bootstrap_replay(screen: &str, cursor_x: usize, cursor_y: usize) -> String {
+    if screen.is_empty() {
+        return String::new();
+    }
+
+    let mut replay = String::from("\x1b[2J\x1b[H");
+    for (index, line) in screen.lines().enumerate() {
+        replay.push_str(&format!("\x1b[{};1H{}", index + 1, line));
+    }
+    replay.push_str(&format!(
+        "\x1b[{};{}H",
+        cursor_y.saturating_add(1),
+        cursor_x.saturating_add(1)
+    ));
+    replay
 }
 
 fn deactivate_mirror<G, P>(
@@ -761,7 +797,7 @@ mod tests {
     use super::{
         authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
         remote_authority_error, remote_authority_output_pump_shell_command,
-        remote_authority_target_host_args, write_output_chunk_frame, LifecycleError,
+        remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame, LifecycleError,
         RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
         RemoteTargetPtyGateway,
     };
@@ -800,6 +836,7 @@ mod tests {
         pipe_calls: Arc<Mutex<Vec<String>>>,
         clear_calls: Arc<Mutex<usize>>,
         capture_bootstrap_screen: Arc<Mutex<String>>,
+        cursor_position: Arc<Mutex<(usize, usize)>>,
     }
 
     impl RemoteTargetPtyGateway for FakeGateway {
@@ -863,6 +900,17 @@ mod tests {
                 .lock()
                 .expect("capture bootstrap screen mutex should not be poisoned")
                 .clone())
+        }
+
+        fn capture_cursor_position(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<(usize, usize), Self::Error> {
+            Ok(*self
+                .cursor_position
+                .lock()
+                .expect("cursor position mutex should not be poisoned"))
         }
 
         fn set_output_pipe(
@@ -1224,6 +1272,7 @@ mod tests {
             UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
         let fake_gateway = FakeGateway {
             capture_bootstrap_screen: Arc::new(Mutex::new("\u{1b}[32mbash\u{1b}[0m".to_string())),
+            cursor_position: Arc::new(Mutex::new((4, 0))),
             ..FakeGateway::default()
         };
         let runtime = RemoteAuthorityTargetHostRuntime::new(
@@ -1310,7 +1359,7 @@ mod tests {
             ControlPlanePayload::MirrorBootstrapChunk(payload) => {
                 assert_eq!(
                     decode_base64(&payload.bytes_base64).expect("bootstrap payload should decode"),
-                    b"\x1b[32mbash\x1b[0m"
+                    b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                 );
             }
             other => panic!("unexpected bootstrap payload: {other:?}"),
@@ -1336,6 +1385,7 @@ mod tests {
             UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
         let fake_gateway = FakeGateway {
             capture_bootstrap_screen: Arc::new(Mutex::new("\u{1b}[32mbash\u{1b}[0m".to_string())),
+            cursor_position: Arc::new(Mutex::new((4, 0))),
             ..FakeGateway::default()
         };
         let runtime = RemoteAuthorityTargetHostRuntime::new(
@@ -1398,7 +1448,7 @@ mod tests {
                         assert_eq!(
                             decode_base64(&payload.bytes_base64)
                                 .expect("bootstrap payload should decode"),
-                            b"\x1b[32mbash\x1b[0m"
+                            b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                         );
                     }
                     ControlPlanePayload::MirrorBootstrapComplete(payload) => {
@@ -1450,6 +1500,16 @@ mod tests {
             vec![(80, 24), (80, 24)]
         );
         let _ = fs::remove_file(&transport_socket_path);
+    }
+
+    #[test]
+    fn bootstrap_replay_preserves_trailing_prompt_space_and_cursor() {
+        let replay = render_bootstrap_replay("kk@lenovo:~/wait-agent$ ", 24, 0);
+
+        assert_eq!(
+            replay,
+            "\x1b[2J\x1b[H\x1b[1;1Hkk@lenovo:~/wait-agent$ \x1b[1;25H"
+        );
     }
 
     #[test]
