@@ -548,7 +548,7 @@ mod tests {
             main_pane: TmuxPaneId::new("%1"),
             sidebar_pane: TmuxPaneId::new("%2"),
             footer_pane: TmuxPaneId::new("%3"),
-            sidebar_width: 24,
+            sidebar_width: 32,
         };
 
         service
@@ -593,7 +593,7 @@ mod tests {
                     "Right".to_string(),
                     "%1".to_string(),
                     "%2".to_string(),
-                    24,
+                    32,
                 ),
                 Call::BindWaitagentFocusMain("Left".to_string(), "%1".to_string()),
                 Call::BindWaitagentSidebarBack(

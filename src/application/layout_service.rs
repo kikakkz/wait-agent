@@ -30,7 +30,7 @@ where
     pub fn new(tmux: G) -> Self {
         Self {
             tmux,
-            sidebar_width: TmuxSplitSize::Cells(24),
+            sidebar_width: TmuxSplitSize::Cells(32),
             footer_height: TmuxSplitSize::Cells(1),
         }
     }
@@ -546,7 +546,7 @@ mod tests {
                 Call::SplitRight,
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
-                Call::SetWidth("%2".to_string(), 24),
+                Call::SetWidth("%2".to_string(), 32),
                 Call::SetPaneOption(
                     "%1".to_string(),
                     "remain-on-exit".to_string(),
@@ -606,7 +606,7 @@ mod tests {
                 Call::Respawn("%2".to_string()),
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
-                Call::SetWidth("%2".to_string(), 24),
+                Call::SetWidth("%2".to_string(), 32),
                 Call::SetPaneOption(
                     "%1".to_string(),
                     "remain-on-exit".to_string(),
@@ -666,7 +666,7 @@ mod tests {
             vec![
                 Call::SetTitle("%2".to_string()),
                 Call::SetPaneStyle("%2".to_string(), "fg=colour250,bg=colour234".to_string()),
-                Call::SetWidth("%2".to_string(), 24),
+                Call::SetWidth("%2".to_string(), 32),
                 Call::SetPaneOption(
                     "%1".to_string(),
                     "remain-on-exit".to_string(),
