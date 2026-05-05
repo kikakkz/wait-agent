@@ -90,6 +90,71 @@ To preview the detected package-manager command without executing it, run:
 ./scripts/install-build-deps.sh --print
 ```
 
+### Build
+
+```bash
+git clone --recursive https://github.com/kikakkz/wait-agent
+cd wait-agent
+./scripts/install-build-deps.sh
+cargo build --release
+```
+
+The binary is written to `target/release/waitagent`.
+
+## Single-Machine Usage
+
+```bash
+# Start a workspace (creates a tmux-backed workspace on this machine)
+waitagent
+
+# List available sessions
+waitagent ls
+
+# Attach to a session
+waitagent attach <target>
+
+# Detach from current session
+waitagent detach
+```
+
+## Multi-Machine Usage
+
+WaitAgent supports remote session aggregation across machines through a gRPC-based node protocol. One machine runs as the server (listener), the other connects as a remote node.
+
+### On the server machine (listener)
+
+```bash
+# Start waitagent with the public port enabled
+waitagent --port 7474
+```
+
+This starts the workspace and opens a listener on `0.0.0.0:7474`. Remote nodes can connect, discover the server's sessions, and interact through the shared catalog.
+
+### On the remote machine (connecting node)
+
+```bash
+# Connect to the server and attach
+waitagent --connect <server-ip>:7474 attach <target>
+```
+
+Remote sessions are surfaced in the same unified session catalog as local sessions. The remote node sends input and receives output over an authenticated transport with session-scoped routing, reconnect support, and replay on reconnect.
+
+### Current remote protocol status
+
+The remote networking layer is under active development. The current implementation covers:
+
+| Feature | Status |
+|---|---|
+| gRPC node session protocol (`waitagent.remote.v1.NodeSessionService`) | ✅ Implemented |
+| `--port` / `--connect` CLI contract | ✅ Implemented |
+| Session-scoped routing and authority transport | ✅ Implemented |
+| Reconnect with bounded replay | ✅ Implemented |
+| Publication ownership and target discovery | ✅ Implemented |
+| Remote terminal bootstrap and replay | ✅ Implemented |
+| Live-mirror open/close protocol | 🔄 In progress |
+| PTY-owner mirror lifecycle | ⏳ Queued |
+| Cross-host visible parity validation | ⏳ Queued |
+
 ## Recommended Next Step
 
 - Close the current phase-2 gate: implement explicit session-scoped mirror open/close protocol and server-side per-session mirror-route ownership on the public `--port` + `--connect` path
