@@ -1283,7 +1283,10 @@ mod tests {
         assert_eq!(exported.address, remote_target.address);
         assert_eq!(exported.selector, remote_target.selector);
         assert_eq!(exported.command_name.as_deref(), Some("codex"));
-        assert_eq!(exported.current_path.as_deref(), Some(Path::new("/tmp/live")));
+        assert_eq!(
+            exported.current_path.as_deref(),
+            Some(Path::new("/tmp/live"))
+        );
         assert_eq!(exported.task_state, ManagedSessionTaskState::Input);
         assert_eq!(exported.attached_clients, 2);
         assert_eq!(exported.window_count, 3);
@@ -1349,7 +1352,10 @@ mod tests {
             .find(|session| session.address.session_id() == "shell-1")
             .expect("target-host session should exist");
         assert_eq!(projected.command_name.as_deref(), Some("codex"));
-        assert_eq!(projected.current_path.as_deref(), Some(Path::new("/tmp/target")));
+        assert_eq!(
+            projected.current_path.as_deref(),
+            Some(Path::new("/tmp/target"))
+        );
         assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
     }
 

@@ -1044,11 +1044,13 @@ fn next_ansi_escape_len(input: &str) -> usize {
     }
 
     match bytes[1] {
-        b'[' => 2 + bytes[2..]
-            .iter()
-            .position(|byte| (0x40..=0x7e).contains(byte))
-            .map(|offset| offset + 1)
-            .unwrap_or(bytes.len().saturating_sub(2)),
+        b'[' => {
+            2 + bytes[2..]
+                .iter()
+                .position(|byte| (0x40..=0x7e).contains(byte))
+                .map(|offset| offset + 1)
+                .unwrap_or(bytes.len().saturating_sub(2))
+        }
         b']' => {
             for index in 2..bytes.len() {
                 if bytes[index] == 0x07 {
@@ -1715,7 +1717,12 @@ mod tests {
         let redraw = b"\x1b[?2026h\x1b[1;2H\x1b[0m\x1b[m\x1b[K\x1b[2;42H\x1b[0m\x1b[m\x1b[K\x1b[3;2H\x1b[0m\x1b[m\x1b[K\x1b[5;2H\x1b[0m\x1b[m\x1b[K\x1b[6;38H\x1b[0m\x1b[m\x1b[K\x1b[7;21H\x1b[0m\x1b[m\x1b[K\x1b[8;10H\x1b[0m\x1b[m\x1b[K\x1b[9;29H\x1b[0m\x1b[m\x1b[K\x1b[10;2H\x1b[0m\x1b[m\x1b[K\x1b[11;26H\x1b[0m\x1b[m\x1b[K\x1b[12;2H\x1b[0m\x1b[m\x1b[K\x1b[13;2H\x1b[0m\x1b[m\x1b[K\x1b[14;2H\x1b[0m\x1b[m\x1b[K\x1b[15;2H\x1b[0m\x1b[m\x1b[K\x1b[16;2H\x1b[0m\x1b[m\x1b[K\x1b[17;2H\x1b[0m\x1b[m\x1b[K\x1b[18;2H\x1b[0m\x1b[m\x1b[K\x1b[19;2H\x1b[0m\x1b[m\x1b[K\x1b[20;2H\x1b[0m\x1b[m\x1b[K\x1b[21;2H\x1b[0m\x1b[m\x1b[K\x1b[6;1H  1. Update now (runs `npm install -g\x1b[7;6H@openai/codex`)\x1b[8;1H\x1b[;m\xe2\x80\xba 2. Skip\x1b[m\x1b[m\x1b[0m\x1b[?25l\x1b[?2026l";
 
         runtime
-            .send_mirror_bootstrap_chunk(&remote_target(), 1, "pty", encode_base64(bootstrap.as_bytes()))
+            .send_mirror_bootstrap_chunk(
+                &remote_target(),
+                1,
+                "pty",
+                encode_base64(bootstrap.as_bytes()),
+            )
             .expect("bootstrap replay should fan out");
         runtime
             .send_mirror_bootstrap_complete(&remote_target(), 1, false, false, false)

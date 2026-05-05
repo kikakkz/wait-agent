@@ -1,8 +1,8 @@
 use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
 use crate::runtime::remote_transport_runtime::LocalNodeMailbox;
 use crate::terminal::{ScreenSnapshot, ScreenState, TerminalEngine, TerminalSize};
-use std::fs::OpenOptions;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io::Write;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,10 +217,7 @@ fn debug_log_observer_state(stage: &str, target_id: &str, output_seq: u64, lines
         return;
     };
 
-    let _ = writeln!(
-        file,
-        "[{stage}] target={target_id} output_seq={output_seq}"
-    );
+    let _ = writeln!(file, "[{stage}] target={target_id} output_seq={output_seq}");
     for (index, line) in lines.iter().take(12).enumerate() {
         let _ = writeln!(file, "L{:02}: {:?}", index + 1, line);
     }
@@ -666,7 +663,11 @@ mod tests {
         eprintln!("observer line7={:?}", snapshot.active_screen().lines[6]);
         eprintln!("observer line8={:?}", snapshot.active_screen().lines[7]);
         eprintln!("observer line9={:?}", snapshot.active_screen().lines[8]);
-        eprintln!("observer cursor=({}, {})", snapshot.active_screen().cursor_row, snapshot.active_screen().cursor_col);
+        eprintln!(
+            "observer cursor=({}, {})",
+            snapshot.active_screen().cursor_row,
+            snapshot.active_screen().cursor_col
+        );
 
         assert!(
             snapshot.active_screen().lines[1]
