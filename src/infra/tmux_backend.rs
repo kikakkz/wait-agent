@@ -1735,7 +1735,7 @@ mod tests {
         let (_, height) = backend
             .pane_dimensions_on_socket(workspace.socket_name.as_str(), main.as_str())
             .expect("pane dimensions should resolve");
-        let scroll_lines = height.max(2) + 4;
+        let scroll_lines = (height.max(2) * 3) + 10;
 
         backend
             .run_on_socket(
@@ -1751,7 +1751,7 @@ mod tests {
                 ],
             )
             .expect("pane should receive scripted output");
-        thread::sleep(Duration::from_millis(350));
+        thread::sleep(Duration::from_millis(500));
 
         let captured = backend
             .capture_pane_ansi_on_socket(workspace.socket_name.as_str(), main.as_str())

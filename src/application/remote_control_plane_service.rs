@@ -1036,7 +1036,7 @@ mod tests {
         let mut service = RemoteControlPlaneService::new();
         let target = remote_target("peer-a", "shell-1");
 
-        let first_open = service
+        let _first_open = service
             .open_target(
                 &target,
                 console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
