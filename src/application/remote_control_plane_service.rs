@@ -9,6 +9,28 @@ use crate::infra::remote_protocol::{
 use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirrorRouteState {
+    /// Mirror not yet requested for this session.
+    None,
+    /// OpenMirrorRequest has been sent; awaiting response.
+    Pending,
+    /// OpenMirrorAccepted received; mirror is active on the authority side.
+    Active,
+    /// OpenMirrorRejected received; mirror is not available.
+    Rejected(String),
+}
+
+impl MirrorRouteState {
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    fn should_send_mirror_request(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RemoteControlPlaneService {
     next_message_id: u64,
@@ -19,6 +41,37 @@ pub struct RemoteControlPlaneService {
 impl RemoteControlPlaneService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn record_mirror_accepted(&mut self, session_id: &str) {
+        if let Some(state) = self.session_states.get_mut(session_id) {
+            if state.mirror_route == MirrorRouteState::Pending {
+                state.mirror_route = MirrorRouteState::Active;
+            }
+        }
+    }
+
+    pub fn record_mirror_rejected(&mut self, session_id: &str, reason: String) {
+        if let Some(state) = self.session_states.get_mut(session_id) {
+            state.mirror_route = MirrorRouteState::Rejected(reason);
+        }
+    }
+
+    pub fn handle_authority_disconnect(&mut self, authority_node_id: &str) {
+        let mut sessions_to_remove = Vec::new();
+        for (session_id, state) in &self.session_states {
+            if state.mirror_route.is_active()
+                && state.authority_node_id.as_deref() == Some(authority_node_id)
+            {
+                sessions_to_remove.push(session_id.clone());
+            }
+        }
+        for session_id in sessions_to_remove {
+            if let Some(state) = self.session_states.get_mut(&session_id) {
+                state.mirror_route = MirrorRouteState::None;
+                state.authority_node_id = None;
+            }
+        }
     }
 
     pub fn open_target(
@@ -53,9 +106,6 @@ impl RemoteControlPlaneService {
                 .session_states
                 .get_mut(&session_id)
                 .ok_or(RemoteControlPlaneError::MissingAuthorityState)?;
-            if !state.mirror_open {
-                state.mirror_open = true;
-            }
             state.last_open_ordinal += 1;
             state.pty_resize_epoch += 1;
             state.attachments.push(RemoteAttachment {
@@ -123,7 +173,9 @@ impl RemoteControlPlaneService {
         if self
             .session_states
             .get(&session_id)
-            .map(|state| state.mirror_open && state.attachments.len() == 1)
+            .map(|state| {
+                state.mirror_route.should_send_mirror_request() && state.attachments.len() == 1
+            })
             .unwrap_or(false)
         {
             messages.push(RoutedControlPlaneMessage {
@@ -136,14 +188,18 @@ impl RemoteControlPlaneService {
                     None,
                     Some(console.console_id.clone()),
                     ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
-                        session_id,
-                        target_id,
-                        console_id: console.console_id,
+                        session_id: session_id.clone(),
+                        target_id: target_id.clone(),
+                        console_id: console.console_id.clone(),
                         cols,
                         rows,
                     }),
                 ),
             });
+            if let Some(state) = self.session_states.get_mut(&session_id) {
+                state.mirror_route = MirrorRouteState::Pending;
+                state.authority_node_id = Some(target.address.authority_id().to_string());
+            }
         }
         Ok(messages)
     }
@@ -588,7 +644,8 @@ impl std::error::Error for RemoteControlPlaneError {}
 
 #[derive(Debug, Clone)]
 struct RemoteSessionState {
-    mirror_open: bool,
+    mirror_route: MirrorRouteState,
+    authority_node_id: Option<String>,
     input_seq: u64,
     pty_resize_epoch: u64,
     last_open_ordinal: u64,
@@ -600,7 +657,8 @@ struct RemoteSessionState {
 impl RemoteSessionState {
     fn new() -> Self {
         Self {
-            mirror_open: false,
+            mirror_route: MirrorRouteState::None,
+            authority_node_id: None,
             input_seq: 0,
             pty_resize_epoch: 0,
             last_open_ordinal: 0,
@@ -672,7 +730,7 @@ fn now_rfc3339_like() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteControlPlaneService;
+    use super::{MirrorRouteState, RemoteControlPlaneService};
     use crate::domain::session_catalog::{
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
@@ -944,6 +1002,114 @@ mod tests {
 
         assert_eq!(second_open.len(), 2);
         assert!(!second_open.iter().any(|message| matches!(
+            message.envelope.payload,
+            ControlPlanePayload::OpenMirrorRequest(_)
+        )));
+    }
+
+    #[test]
+    fn record_mirror_accepted_transitions_from_pending_to_active() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("open should succeed");
+
+        // After open_target, mirror_route should be Pending
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(state.mirror_route, MirrorRouteState::Pending);
+        assert_eq!(state.authority_node_id.as_deref(), Some("peer-a"));
+
+        service.record_mirror_accepted("shell-1");
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(state.mirror_route, MirrorRouteState::Active);
+    }
+
+    #[test]
+    fn record_mirror_rejected_does_not_affect_existing_attachments() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        let first_open = service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+
+        service.record_mirror_rejected("shell-1", "target offline".to_string());
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(
+            state.mirror_route,
+            MirrorRouteState::Rejected("target offline".to_string())
+        );
+
+        // Second open should NOT trigger another mirror request
+        let second_open = service
+            .open_target(
+                &target,
+                console("console-b", "observer-b", ConsoleLocation::ServerConsole),
+                140,
+                50,
+            )
+            .expect("second open should succeed");
+        assert_eq!(second_open.len(), 2);
+        assert!(!second_open.iter().any(|message| matches!(
+            message.envelope.payload,
+            ControlPlanePayload::OpenMirrorRequest(_)
+        )));
+    }
+
+    #[test]
+    fn authority_disconnect_resets_mirror_route_for_reconnect() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("open should succeed");
+
+        // Simulate mirror accepted
+        service.record_mirror_accepted("shell-1");
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(state.mirror_route, MirrorRouteState::Active);
+        assert_eq!(state.authority_node_id.as_deref(), Some("peer-a"));
+
+        // Authority disconnects
+        service.handle_authority_disconnect("peer-a");
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(state.mirror_route, MirrorRouteState::None);
+        assert_eq!(state.authority_node_id, None);
+
+        // After disconnect, a new close+open should be able to request mirror again
+        let attachment = "attach-1";
+        service
+            .close_target(&target, attachment)
+            .expect("close should succeed");
+
+        let reopen = service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("reopen should succeed");
+
+        assert!(reopen.iter().any(|message| matches!(
             message.envelope.payload,
             ControlPlanePayload::OpenMirrorRequest(_)
         )));

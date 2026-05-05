@@ -151,7 +151,7 @@ The remote networking layer is under active development. The current implementat
 | Reconnect with bounded replay | ✅ Implemented |
 | Publication ownership and target discovery | ✅ Implemented |
 | Remote terminal bootstrap and replay | ✅ Implemented |
-| Live-mirror open/close protocol | 🔄 In progress |
+| Live-mirror open/close protocol | ✅ Implemented |
 | PTY-owner mirror lifecycle | ✅ Basic (needs hardening) |
 | Cross-host visible parity validation | ✅ Basic (manual validation passed, needs hardening) |
 

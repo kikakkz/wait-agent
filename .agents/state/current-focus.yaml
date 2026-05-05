@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c4d3b
-focus_statement: the runtime-only remote path now survives connect, detach, and reattach on backend-scoped sidecars, but opened remote sessions still lack explicit session-scoped live-mirror control, so active work moves first to protocol and server-side per-session mirror-route ownership on the public --port plus --connect contract
+current_task: task.t5-08c4d3c
+focus_statement: the live-mirror open/close protocol and server-side per-session mirror-route ownership are now explicit in code and tests, so active work moves to PTY-owner session mirror lifecycle and reuse on the connected client node
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: current_task

@@ -1,45 +1,40 @@
-id: task.t5-08c4d3b
+id: task.t5-08c4d3c
 kind: task
 version: 1
-title: implement explicit remote mirror open or close protocol messages and server-side session-route ownership
+title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
 status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-live-mirror-design.md
   why:
-    - the current cross-host placeholder failure is caused by the missing session-scoped live-mirror control path rather than by one isolated rendering bug
-    - this slice establishes the protocol and server-owned mirror route that every later PTY-owner and visible-parity step depends on
+    - once the server can ask for a live mirror, the PTY-owning node must start, reuse, and stop mirroring one publishable local session by `session_id`
+    - this slice isolates PTY-owner runtime ownership from visible render binding and final acceptance
 source_of_truth:
-  file: .agents/tasks/queued/task.t5-08c4d3b.yaml
-  reference: current
+  file: .agents/tasks/queued/task.t5-08c4d3c.yaml
+  reference: next
 depends_on:
-  - task.t5-08c4d3a.done
+  - task.t5-08c4d3b.done
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-history-update
   - primitive.task-board-sync
-  - primitive.agents-self-maintenance
 done_criteria:
-  - the protocol and transport facade expose explicit mirror open or close messages for one remote `session_id`
-  - server-side remote open attaches observers to one per-session mirror route instead of relying on placeholder state alone
-  - opening the same remote session from more than one console reuses the same server-side mirror route
+  - the PTY-owning node can start mirroring one local publishable session after an explicit mirror-open request
+  - repeated opens for the same session reuse one mirror runtime rather than duplicating PTY output pipes
+  - mirror-close tears down only when no remaining route still needs that session mirror
 verification:
   - cargo test
-  - targeted review of protocol and server mirror-route ownership
+  - targeted review of PTY-owner lifecycle and teardown semantics
 touched_paths:
-  - proto/waitagent/remote/v1/node_session.proto
-  - src/infra/remote_grpc_proto.rs
-  - src/infra/remote_grpc_transport.rs
-  - src/infra/remote_protocol.rs
-  - src/runtime
-  - src/application
-  - docs/remote-live-mirror-design.md
-  - docs/protocol.md
+  - src/runtime/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_node_session_owner_runtime.rs
+  - src/runtime/remote_target_publication_runtime.rs
+  - src/runtime/remote_node_session_runtime.rs
+  - src/runtime/remote_transport_runtime.rs
   - docs/execution-status-board.md
   - .agents/tasks/backlog.yaml
   - .agents/tasks/current.yaml
-  - .agents/tasks/queued/task.t5-08c4d3b.yaml
+  - .agents/tasks/queued/task.t5-08c4d3c.yaml
   - .agents/state/task-history.yaml
-  - .agents/state/current-focus.yaml
 notes:
-  - This slice owns the protocol and server route boundary only. It should not yet finish PTY-owner mirror reuse or final acceptance.
+  - This slice must stay session-scoped. It should not widen into replay policy redesign or final UI acceptance.
