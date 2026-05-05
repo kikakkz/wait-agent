@@ -21,7 +21,7 @@ The target UX is workspace-first:
 
 - On a single machine, the user starts one `waitagent`
 - Inside that WaitAgent workspace, the user creates and manages multiple background sessions
-- Remote session aggregation is a future product area and is not part of the current command surface
+- Remote session aggregation is under active development: nodes can connect, discover sessions, and interact through a unified catalog
 
 ## Current Positioning
 
@@ -51,10 +51,10 @@ This repository contains product documentation and an active Rust implementation
 
 Current implementation status:
 
-- Local workspace-first interaction is now the primary local UX: one `waitagent` can create and manage multiple shell-backed sessions inside the same terminal
-- Terminal fidelity has been hardened for Codex-like TUIs, including terminal capability replies, application cursor keys, managed viewport sizing, UTF-8 handling, cursor visibility, and wide-character rendering
-- The current local phase is centered on stabilization and cleanup of the tmux-native workspace path
-- Remote session connection and management will be redesigned on top of the tmux-native local architecture rather than carried forward from the deleted legacy runtime
+- **Local workspace** is stable: one `waitagent` creates and manages multiple shell-backed sessions inside a tmux-native workspace with fixed sidebar, main slot, and footer
+- **Terminal fidelity** hardened for Codex-like TUIs: application cursor keys, managed viewport sizing, UTF-8, cursor visibility, wide-character rendering
+- **Remote networking** is the active phase: gRPC-based node session protocol, authority transport with mTLS-style handshake, session-scoped routing, reconnect and replay, publication ownership
+- **Current gate**: explicit session-scoped live-mirror control (`task.t5-08c4d3b`) so opened remote sessions show the client's real screen instead of placeholder state
 
 Current documents:
 
@@ -70,6 +70,9 @@ Current documents:
 - [MVP Plan](docs/mvp-plan.md)
 - [Local Acceptance Checklist](docs/local-acceptance-checklist.md)
 - [Execution Status Board](docs/execution-status-board.md)
+- [Remote Node Connection Architecture](docs/remote-node-connection-architecture.md)
+- [Remote Network Completion Plan](docs/remote-network-completion-plan.md)
+- [Remote Live Mirror Design](docs/remote-live-mirror-design.md)
 
 ## Build Prerequisites
 
@@ -89,7 +92,7 @@ To preview the detected package-manager command without executing it, run:
 
 ## Recommended Next Step
 
-- Continue refining the local tmux-native workspace path, then design remote session connection and management on top of that unified architecture
+- Close the current phase-2 gate: implement explicit session-scoped mirror open/close protocol and server-side per-session mirror-route ownership on the public `--port` + `--connect` path
 
 ## Why This Exists
 
