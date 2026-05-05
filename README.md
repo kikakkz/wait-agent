@@ -152,8 +152,8 @@ The remote networking layer is under active development. The current implementat
 | Publication ownership and target discovery | ✅ Implemented |
 | Remote terminal bootstrap and replay | ✅ Implemented |
 | Live-mirror open/close protocol | 🔄 In progress |
-| PTY-owner mirror lifecycle | ⏳ Queued |
-| Cross-host visible parity validation | ⏳ Queued |
+| PTY-owner mirror lifecycle | ✅ Basic (needs hardening) |
+| Cross-host visible parity validation | ✅ Basic (manual validation passed, needs hardening) |
 
 ## Recommended Next Step
 
