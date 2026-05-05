@@ -2,8 +2,23 @@
 name = "waitagent"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal-native interaction scheduler for multi-agent workflows"
+homepage = "https://github.com/kikakkz/wait-agent"
+repository = "https://github.com/kikakkz/wait-agent"
+license = "MIT"
+keywords = ["tmux", "terminal", "multiplexer", "workspace", "agent"]
+categories = ["command-line-utilities"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[package.metadata.deb]
+maintainer = "kikakkz <kikakkz@users.noreply.github.com>"
+depends = "libevent-2.1-7 | libevent-2.1-6, libncurses6 | libncurses5"
+section = "utils"
+priority = "optional"
+
+[package.metadata.generate-rpm]
+vendor = "WaitAgent"
+summary = "Terminal-native interaction scheduler for multi-agent workflows"
+requires = "libevent, ncurses-libs"
 
 [dependencies]
 libc = "0.2"

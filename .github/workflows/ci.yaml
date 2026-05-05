@@ -73,6 +73,9 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: cargo build (debug binary for tests)
+        run: cargo build
+
       - name: cargo test
         run: cargo test --bin waitagent -- --test-threads=1
 

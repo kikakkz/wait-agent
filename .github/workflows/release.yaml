@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison pkg-config libevent-dev libncurses-dev \
+            build-essential automake autoconf \
+            rpm
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo deb --output "waitagent_${VERSION}_amd64.deb"
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p rpm-home
+          cargo generate-rpm --output "waitagent-${VERSION}-1.x86_64.rpm"
+
+      - name: Build .tar.gz archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar czf "waitagent-${VERSION}-x86_64-linux.tar.gz" \
+            -C target/release waitagent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            waitagent_*.deb
+            waitagent-*.rpm
+            waitagent-*-x86_64-linux.tar.gz
+
+  release-macos-x86_64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          brew install bison pkg-config libevent ncurses automake autoconf
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo build --release
+        run: cargo build --release
+        env:
+          PKG_CONFIG_PATH: /usr/local/opt/ncurses/lib/pkgconfig:/usr/local/opt/libevent/lib/pkgconfig
+          LDFLAGS: -L/usr/local/opt/ncurses/lib -L/usr/local/opt/libevent/lib
+          CPPFLAGS: -I/usr/local/opt/ncurses/include -I/usr/local/opt/libevent/include
+
+      - name: Build .tar.gz archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar czf "waitagent-${VERSION}-x86_64-macos.tar.gz" \
+            -C target/release waitagent
+
+      - name: Build .dmg package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          chmod +x scripts/package-dmg.sh
+          ./scripts/package-dmg.sh \
+            target/release/waitagent \
+            "waitagent-${VERSION}-x86_64-macos.dmg" \
+            "${VERSION}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: |
+            waitagent-*-x86_64-macos.tar.gz
+            waitagent-*-x86_64-macos.dmg
+
+  release-macos-aarch64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system deps
+        run: |
+          brew install bison pkg-config libevent ncurses automake autoconf
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo build --release
+        run: cargo build --release
+        env:
+          PKG_CONFIG_PATH: /opt/homebrew/opt/ncurses/lib/pkgconfig:/opt/homebrew/opt/libevent/lib/pkgconfig
+          LDFLAGS: -L/opt/homebrew/opt/ncurses/lib -L/opt/homebrew/opt/libevent/lib
+          CPPFLAGS: -I/opt/homebrew/opt/ncurses/include -I/opt/homebrew/opt/libevent/include
+
+      - name: Build .tar.gz archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar czf "waitagent-${VERSION}-aarch64-macos.tar.gz" \
+            -C target/release waitagent
+
+      - name: Build .dmg package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          chmod +x scripts/package-dmg.sh
+          ./scripts/package-dmg.sh \
+            target/release/waitagent \
+            "waitagent-${VERSION}-aarch64-macos.dmg" \
+            "${VERSION}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-aarch64
+          path: |
+            waitagent-*-aarch64-macos.tar.gz
+            waitagent-*-aarch64-macos.dmg
+
+  create-release:
+    needs:
+      - release-linux-x86_64
+      - release-macos-x86_64
+      - release-macos-aarch64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List all artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false

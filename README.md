@@ -90,7 +90,36 @@ To preview the detected package-manager command without executing it, run:
 ./scripts/install-build-deps.sh --print
 ```
 
-### Build
+### Download & Install
+
+Pre-built packages are available from the [GitHub Releases](https://github.com/kikakkz/wait-agent/releases) page.
+
+#### Linux
+
+| Format | Architecture | Command |
+|--------|-------------|---------|
+| `.deb` | x86_64 | `sudo dpkg -i waitagent_<version>_amd64.deb` |
+| `.rpm` | x86_64 | `sudo rpm -i waitagent-<version>-1.x86_64.rpm` |
+| `.tar.gz` | x86_64 | `tar xzf waitagent-<version>-x86_64-linux.tar.gz` |
+
+After installing via `.deb` or `.rpm`, the `waitagent` binary is available system-wide.
+
+#### macOS
+
+| Format | Architecture | Command |
+|--------|-------------|---------|
+| `.tar.gz` | x86_64 / aarch64 | `tar xzf waitagent-<version>-<arch>-macos.tar.gz` |
+| `.dmg` | x86_64 / aarch64 | Open the `.dmg` and drag **WaitAgent.app** to Applications |
+
+The `.dmg` contains a bundled `.app` with the CLI binary inside (`WaitAgent.app/Contents/MacOS/waitagent`). You can symlink it:
+
+```bash
+ln -s /Applications/WaitAgent.app/Contents/MacOS/waitagent /usr/local/bin/waitagent
+```
+
+### Build from Source
+
+Build prerequisites are listed above. To build from source instead of using a pre-built package:
 
 ```bash
 git clone --recursive https://github.com/kikakkz/wait-agent
