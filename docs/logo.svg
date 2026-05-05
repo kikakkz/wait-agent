@@ -1,29 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" fill="none">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#666666"/>
-    </linearGradient>
-  </defs>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">WaitAgent logo</title>
+  <desc id="desc">Three agent sessions converging through a multiplexer into one active terminal cursor, framed by app corners.</desc>
 
-  <!-- Background -->
-  <rect width="400" height="400" rx="48" fill="#0a0a0a"/>
+  <!-- Background rounded rect -->
+  <rect x="48" y="48" width="416" height="416" rx="112" fill="#FCF7F4"/>
 
-  <!-- Workspace boundary (subtle) -->
-  <rect x="52" y="52" width="296" height="296" rx="20"
-        stroke="#ffffff" stroke-width="4" opacity="0.06"/>
+  <!-- App corners (frame) -->
+  <path d="M176 132H144C117.49 132 96 153.49 96 180V202" stroke="#5A2A2A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M336 132H368C394.51 132 416 153.49 416 180V202" stroke="#5A2A2A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M176 380H144C117.49 380 96 358.51 96 332V310" stroke="#5A2A2A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M336 380H368C394.51 380 416 358.51 416 332V310" stroke="#5A2A2A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Converging connection lines (top agents → center → output) -->
-  <line x1="110" y1="120" x2="200" y2="190" stroke="#ffffff" stroke-width="4" opacity="0.12"/>
-  <line x1="200" y1="100" x2="200" y2="190" stroke="#ffffff" stroke-width="4" opacity="0.12"/>
-  <line x1="290" y1="120" x2="200" y2="190" stroke="#ffffff" stroke-width="4" opacity="0.12"/>
-  <line x1="200" y1="190" x2="200" y2="270" stroke="url(#g)" stroke-width="5"/>
+  <!-- Agent session nodes (inactive, top) -->
+  <circle cx="160" cy="175" r="18" stroke="#ECD8D3" stroke-width="6"/>
+  <circle cx="256" cy="155" r="18" stroke="#ECD8D3" stroke-width="6"/>
+  <circle cx="352" cy="175" r="18" stroke="#ECD8D3" stroke-width="6"/>
 
-  <!-- Agent session nodes (inactive) -->
-  <circle cx="110" cy="120" r="15" stroke="#ffffff" stroke-width="4" opacity="0.25"/>
-  <circle cx="200" cy="100" r="15" stroke="#ffffff" stroke-width="4" opacity="0.25"/>
-  <circle cx="290" cy="120" r="15" stroke="#ffffff" stroke-width="4" opacity="0.25"/>
+  <!-- Node center dots -->
+  <circle cx="160" cy="175" r="5" fill="#ECD8D3"/>
+  <circle cx="256" cy="155" r="5" fill="#ECD8D3"/>
+  <circle cx="352" cy="175" r="5" fill="#ECD8D3"/>
 
-  <!-- Active focused session -->
-  <circle cx="200" cy="270" r="15" fill="#00ffc8" opacity="0.9"/>
+  <!-- Converging flow lines (bezier curves) -->
+  <path d="M160 193C160 210 180 250 220 270" stroke="#C98A5A" stroke-width="7" stroke-linecap="round"/>
+  <path d="M256 173C256 195 245 250 245 270" stroke="#C98A5A" stroke-width="7" stroke-linecap="round"/>
+  <path d="M352 193C352 210 332 250 292 270" stroke="#C98A5A" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- Scanning ring (wait state) -->
+  <circle cx="256" cy="290" r="74" stroke="#ECD8D3" stroke-width="6"/>
+  <circle cx="256" cy="290" r="74" stroke="#C91F24" stroke-width="7" stroke-linecap="round" stroke-dasharray="140 100 60 165"/>
+
+  <!-- Active terminal cursor element -->
+  <path d="M231 320L256 340L281 320" stroke="#C91F24" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Focus diamond (multiplexing center) -->
+  <path d="M256 262C266 280 272 284 288 290C272 296 266 300 256 318C246 300 240 296 224 290C240 284 246 280 256 262Z" stroke="#5A2A2A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Coral center point -->
+  <circle cx="256" cy="290" r="6" fill="#D96C63"/>
 </svg>
