@@ -338,6 +338,24 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
+    fn unset_pane_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+    ) -> Result<(), Self::Error> {
+        let args = vec![
+            "set-hook".to_string(),
+            "-u".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            hook_name.to_string(),
+        ];
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
     fn set_global_hook(
         &self,
         workspace: &TmuxWorkspaceHandle,

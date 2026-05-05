@@ -394,6 +394,15 @@ mod tests {
             unreachable!("not used")
         }
 
+        fn unset_pane_hook(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            _pane: &TmuxPaneId,
+            _hook_name: &str,
+        ) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
+
         fn set_session_option(
             &self,
             _workspace: &TmuxWorkspaceHandle,

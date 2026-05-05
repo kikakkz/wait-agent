@@ -2,7 +2,8 @@ use crate::cli::{
     prepend_global_network_args, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
     RemoteSessionSyncOwnerCommand,
 };
-use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
+use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, RouteContext, TargetExited, TargetPublished,
@@ -15,7 +16,9 @@ use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, Pro
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName};
+use crate::infra::tmux::{
+    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_target_host_runtime::{
     RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
@@ -44,6 +47,7 @@ const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
 const REMOTE_SESSION_SYNC_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
 const LIVE_AUTHORITY_SERVER_ID: &str = "waitagent-live-authority-owner";
+const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub trait LocalSessionCatalog: Send + 'static {
     type Error: ToString;
@@ -55,6 +59,7 @@ pub trait LocalSessionCatalog: Send + 'static {
 pub struct SocketScopedLocalSessionCatalog<G> {
     gateway: G,
     socket_name: TmuxSocketName,
+    published_target_store: PublishedTargetStore,
 }
 
 impl<G> SocketScopedLocalSessionCatalog<G> {
@@ -62,22 +67,30 @@ impl<G> SocketScopedLocalSessionCatalog<G> {
         Self {
             gateway,
             socket_name,
+            published_target_store: PublishedTargetStore::default(),
         }
     }
 }
 
 impl<G> LocalSessionCatalog for SocketScopedLocalSessionCatalog<G>
 where
-    G: TmuxSessionGateway + Send + 'static,
+    G: TmuxChromeGateway + Send + 'static,
     G::Error: ToString,
 {
     type Error = G::Error;
 
     fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
         let sessions = self.gateway.list_sessions_on_socket(&self.socket_name)?;
+        let active_targets =
+            active_workspace_targets_on_socket(&self.gateway, &self.socket_name, &sessions)?;
         Ok(exportable_local_sessions_for_socket(
-            sessions,
+            overlay_workspace_runtime_onto_active_local_target_hosts(
+                sessions,
+                self.socket_name.as_str(),
+                &active_targets,
+            ),
             self.socket_name.as_str(),
+            &self.published_target_store,
         ))
     }
 }
@@ -120,7 +133,6 @@ pub struct RemoteNodeSessionSyncGuard {
 }
 
 struct SessionSyncAuthorityManager {
-    network: RemoteNetworkConfig,
     running_hosts: HashMap<String, SessionSyncAuthorityHost>,
 }
 
@@ -244,9 +256,8 @@ where
 }
 
 impl SessionSyncAuthorityManager {
-    fn new(network: RemoteNetworkConfig) -> Self {
+    fn new() -> Self {
         Self {
-            network,
             running_hosts: HashMap::new(),
         }
     }
@@ -392,7 +403,7 @@ impl Drop for RemoteNodeSessionSyncGuard {
 fn run_remote_session_sync_loop<G, T>(
     gateway: G,
     transport: T,
-    network: RemoteNetworkConfig,
+    _network: RemoteNetworkConfig,
     node_id: String,
     endpoint_uri: String,
     poll_interval: Duration,
@@ -427,7 +438,7 @@ fn run_remote_session_sync_loop<G, T>(
 
         let mut active_session = None;
         let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
-        let mut authority_manager = SessionSyncAuthorityManager::new(network.clone());
+        let mut authority_manager = SessionSyncAuthorityManager::new();
         let mut should_reconnect = false;
 
         while !should_reconnect {
@@ -559,12 +570,125 @@ fn local_sessions_by_local_id(
 fn exportable_local_sessions_for_socket(
     sessions: Vec<ManagedSessionRecord>,
     socket_name: &str,
+    published_target_store: &PublishedTargetStore,
 ) -> Vec<ManagedSessionRecord> {
     sessions
         .into_iter()
-        .filter(|session| session.address.server_id() == socket_name)
-        .filter(|session| session.is_workspace_session())
+        .filter(|session| {
+            session.address.server_id() == socket_name && session.is_workspace_session()
+        })
+        .map(|session| {
+            exported_session_record_for_socket(session, socket_name, published_target_store)
+        })
         .collect()
+}
+
+fn active_workspace_targets_on_socket<G>(
+    gateway: &G,
+    socket_name: &TmuxSocketName,
+    sessions: &[ManagedSessionRecord],
+) -> Result<HashMap<String, String>, G::Error>
+where
+    G: TmuxChromeGateway,
+{
+    let mut active_targets = HashMap::new();
+    for session in sessions
+        .iter()
+        .filter(|session| session.is_workspace_chrome())
+    {
+        let workspace = TmuxWorkspaceHandle {
+            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
+                session.address.session_id(),
+            ),
+            socket_name: socket_name.clone(),
+            session_name: TmuxSessionName::new(session.address.session_id()),
+        };
+        if let Some(active_target) = gateway
+            .show_session_option(&workspace, WAITAGENT_ACTIVE_TARGET_OPTION)?
+            .filter(|target| !target.is_empty())
+        {
+            active_targets.insert(session.address.session_id().to_string(), active_target);
+        }
+    }
+    Ok(active_targets)
+}
+
+fn overlay_workspace_runtime_onto_active_local_target_hosts(
+    sessions: Vec<ManagedSessionRecord>,
+    socket_name: &str,
+    active_targets: &HashMap<String, String>,
+) -> Vec<ManagedSessionRecord> {
+    let workspace_runtimes = sessions
+        .iter()
+        .filter(|session| session.is_workspace_chrome())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut sessions = sessions;
+    for workspace_runtime in workspace_runtimes {
+        let Some(active_target) = active_targets.get(workspace_runtime.address.session_id()) else {
+            continue;
+        };
+        let Some(active_target) = sessions.iter_mut().find(|session| {
+            session.address.server_id() == socket_name
+                && session.is_target_host()
+                && session.address.qualified_target() == *active_target
+        }) else {
+            continue;
+        };
+        if should_overlay_active_target_runtime(active_target) {
+            active_target.command_name = workspace_runtime.command_name.clone();
+            active_target.current_path = workspace_runtime.current_path.clone();
+            active_target.task_state = workspace_runtime.task_state;
+        }
+    }
+    sessions
+}
+
+fn should_overlay_active_target_runtime(session: &ManagedSessionRecord) -> bool {
+    matches!(
+        session.command_name.as_deref(),
+        None | Some("bash" | "zsh" | "fish" | "sh")
+    ) && matches!(
+        session.task_state,
+        ManagedSessionTaskState::Unknown | ManagedSessionTaskState::Running
+    )
+}
+
+fn exported_session_record_for_socket(
+    session: ManagedSessionRecord,
+    socket_name: &str,
+    published_target_store: &PublishedTargetStore,
+) -> ManagedSessionRecord {
+    if !session.is_target_host() {
+        return session;
+    }
+    let Ok(records) = published_target_store
+        .list_records_for_source_binding(socket_name, session.address.session_id())
+    else {
+        return session;
+    };
+    records
+        .into_iter()
+        .find(|record| record.target.is_target_host())
+        .map(|record| {
+            merge_cached_remote_identity_with_live_target_runtime(record.target, &session)
+        })
+        .unwrap_or(session)
+}
+
+fn merge_cached_remote_identity_with_live_target_runtime(
+    mut cached_remote_target: ManagedSessionRecord,
+    live_target: &ManagedSessionRecord,
+) -> ManagedSessionRecord {
+    cached_remote_target.availability = live_target.availability;
+    cached_remote_target.workspace_key = live_target.workspace_key.clone();
+    cached_remote_target.session_role = live_target.session_role;
+    cached_remote_target.attached_clients = live_target.attached_clients;
+    cached_remote_target.window_count = live_target.window_count;
+    cached_remote_target.command_name = live_target.command_name.clone();
+    cached_remote_target.current_path = live_target.current_path.clone();
+    cached_remote_target.task_state = live_target.task_state;
+    cached_remote_target
 }
 
 #[derive(Debug)]
@@ -606,15 +730,6 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::TargetInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
-    }
-}
-
-fn authority_command_kind(command: &RemoteAuthorityCommand) -> &'static str {
-    match command {
-        RemoteAuthorityCommand::OpenMirror(_) => "open_mirror",
-        RemoteAuthorityCommand::CloseMirror(_) => "close_mirror",
-        RemoteAuthorityCommand::TargetInput(_) => "target_input",
-        RemoteAuthorityCommand::ApplyResize(_) => "apply_resize",
     }
 }
 
@@ -1002,16 +1117,17 @@ fn sanitize_path_component(value: &str) -> String {
 mod tests {
     use super::{
         compute_session_sync_delta, exportable_local_sessions_for_socket,
-        local_sessions_by_local_id, remote_session_exited_envelope,
-        remote_session_published_envelope, remote_session_sync_owner_available,
-        remote_session_sync_owner_socket_path, LocalSessionCatalog, OutboundRemoteNodeTransport,
-        RemoteNodeSessionSyncRuntime,
+        local_sessions_by_local_id, overlay_workspace_runtime_onto_active_local_target_hosts,
+        remote_session_exited_envelope, remote_session_published_envelope,
+        remote_session_sync_owner_available, remote_session_sync_owner_socket_path,
+        LocalSessionCatalog, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
+    use crate::infra::published_target_store::PublishedTargetStore;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_transport::{
         OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
@@ -1019,10 +1135,10 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::os::unix::net::UnixListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn session_sync_delta_publishes_new_and_removed_sessions() {
@@ -1108,6 +1224,7 @@ mod tests {
 
     #[test]
     fn exportable_local_sessions_for_socket_keeps_workspace_sessions_on_current_socket() {
+        let store = PublishedTargetStore::new(test_store_path("export-current-socket"));
         let sessions = exportable_local_sessions_for_socket(
             vec![
                 session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
@@ -1115,6 +1232,7 @@ mod tests {
                 session_with_role("wa-2", "shell-2", WorkspaceSessionRole::TargetHost),
             ],
             "wa-1",
+            &store,
         );
 
         assert_eq!(sessions.len(), 2);
@@ -1124,6 +1242,113 @@ mod tests {
         assert_eq!(sessions[1].address.server_id(), "wa-1");
         assert_eq!(sessions[1].address.session_id(), "shell-1");
         assert!(sessions[1].is_target_host());
+    }
+
+    #[test]
+    fn exportable_local_target_host_keeps_cached_remote_identity_but_uses_live_runtime_metadata() {
+        let store = PublishedTargetStore::new(test_store_path("export-target-host-remote"));
+        let local_target = ManagedSessionRecord {
+            availability: SessionAvailability::Online,
+            attached_clients: 2,
+            window_count: 3,
+            command_name: Some("codex".to_string()),
+            current_path: Some(PathBuf::from("/tmp/live")),
+            task_state: ManagedSessionTaskState::Input,
+            ..session("wa-1", "shell-1")
+        };
+        let remote_target = ManagedSessionRecord {
+            address: ManagedSessionAddress::remote_peer("peer-a", "shell-1"),
+            selector: Some("wa-1:shell-1".to_string()),
+            availability: SessionAvailability::Offline,
+            workspace_dir: None,
+            workspace_key: Some("shell-1".to_string()),
+            session_role: Some(WorkspaceSessionRole::TargetHost),
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            current_path: Some(PathBuf::from("/tmp/cached")),
+            task_state: ManagedSessionTaskState::Running,
+        };
+        store
+            .upsert_target_from_source("wa-1", Some("shell-1"), &remote_target)
+            .expect("published target should upsert");
+
+        let sessions = exportable_local_sessions_for_socket(vec![local_target], "wa-1", &store);
+
+        assert_eq!(sessions.len(), 1);
+        let exported = &sessions[0];
+        assert_eq!(exported.address, remote_target.address);
+        assert_eq!(exported.selector, remote_target.selector);
+        assert_eq!(exported.command_name.as_deref(), Some("codex"));
+        assert_eq!(exported.current_path.as_deref(), Some(Path::new("/tmp/live")));
+        assert_eq!(exported.task_state, ManagedSessionTaskState::Input);
+        assert_eq!(exported.attached_clients, 2);
+        assert_eq!(exported.window_count, 3);
+        assert_eq!(exported.availability, SessionAvailability::Online);
+    }
+
+    #[test]
+    fn overlay_workspace_runtime_projects_active_target_host_runtime() {
+        let sessions = overlay_workspace_runtime_onto_active_local_target_hosts(
+            vec![
+                ManagedSessionRecord {
+                    command_name: Some("codex".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/workspace")),
+                    task_state: ManagedSessionTaskState::Input,
+                    ..session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome)
+                },
+                ManagedSessionRecord {
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/host")),
+                    task_state: ManagedSessionTaskState::Running,
+                    ..session("wa-1", "shell-1")
+                },
+            ],
+            "wa-1",
+            &HashMap::from([("workspace".to_string(), "wa-1:shell-1".to_string())]),
+        );
+
+        let projected = sessions
+            .into_iter()
+            .find(|session| session.address.session_id() == "shell-1")
+            .expect("target-host session should exist");
+        assert_eq!(projected.command_name.as_deref(), Some("codex"));
+        assert_eq!(
+            projected.current_path.as_deref(),
+            Some(Path::new("/tmp/workspace"))
+        );
+        assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
+    fn overlay_workspace_runtime_preserves_live_agent_runtime_on_active_target_host() {
+        let sessions = overlay_workspace_runtime_onto_active_local_target_hosts(
+            vec![
+                ManagedSessionRecord {
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/workspace")),
+                    task_state: ManagedSessionTaskState::Input,
+                    ..session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome)
+                },
+                ManagedSessionRecord {
+                    command_name: Some("codex".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/target")),
+                    task_state: ManagedSessionTaskState::Input,
+                    ..session("wa-1", "shell-1")
+                },
+            ],
+            "wa-1",
+            &HashMap::from([("workspace".to_string(), "wa-1:shell-1".to_string())]),
+        );
+
+        let projected = sessions
+            .into_iter()
+            .find(|session| session.address.session_id() == "shell-1")
+            .expect("target-host session should exist");
+        assert_eq!(projected.command_name.as_deref(), Some("codex"));
+        assert_eq!(projected.current_path.as_deref(), Some(Path::new("/tmp/target")));
+        assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
     }
 
     #[test]
@@ -1231,5 +1456,16 @@ mod tests {
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Running,
         }
+    }
+
+    fn test_store_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "waitagent-session-sync-{name}-{}-{nanos}.tsv",
+            std::process::id()
+        ))
     }
 }

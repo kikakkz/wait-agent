@@ -41,6 +41,7 @@ pub struct WorkspaceLayoutRuntime {
 }
 
 impl WorkspaceLayoutRuntime {
+    #[cfg(test)]
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         Self::from_build_env_with_network(RemoteNetworkConfig::default())
     }
@@ -300,6 +301,11 @@ impl WorkspaceLayoutRuntime {
         let main_pane_pipe_command =
             self.main_pane_output_bridge_shell_command(workspace, workspace_dir);
         let pane_died_command = self.main_pane_died_hook_command(workspace);
+        let previous_main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .map(TmuxPaneId::new);
         let layout = self
             .layout_service
             .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
@@ -326,6 +332,7 @@ impl WorkspaceLayoutRuntime {
             .ensure_layout_hooks(
                 workspace,
                 &layout.main_pane,
+                previous_main_pane.as_ref(),
                 &reconcile_command,
                 &pane_died_command,
             )
@@ -686,6 +693,7 @@ fn tmux_layout_error(error: TmuxError) -> LifecycleError {
     )
 }
 
+#[cfg(test)]
 fn should_refresh_workspace_chrome(
     session: &crate::domain::session_catalog::ManagedSessionRecord,
 ) -> bool {

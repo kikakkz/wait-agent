@@ -322,6 +322,13 @@ pub trait TmuxLayoutGateway: TmuxGateway {
         command: &str,
     ) -> Result<(), Self::Error>;
 
+    fn unset_pane_hook(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+    ) -> Result<(), Self::Error>;
+
     fn set_global_hook(
         &self,
         workspace: &TmuxWorkspaceHandle,
