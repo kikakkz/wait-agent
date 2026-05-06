@@ -6,10 +6,10 @@ use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DetachCommand, MainPaneDiedCommand, NewTargetCommand,
-    RemoteNetworkConfig, RemoteNodeIngressServerCommand, ToggleFullscreenCommand,
+    RemoteNetworkConfig, RemoteNodeIngressServerCommand, StopCommand, ToggleFullscreenCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
@@ -223,6 +223,39 @@ impl WorkspaceCommandRuntime {
         println!(
             "detached clients from {}",
             session.address.qualified_target()
+        );
+        Ok(())
+    }
+
+    pub fn run_stop(&self, command: StopCommand) -> Result<(), LifecycleError> {
+        let socket_name = if let Some(target) = command.target.clone() {
+            let session = self.attachable_session(target)?;
+            TmuxSocketName::new(session.address.server_id())
+        } else if std::env::var_os("TMUX").is_some() {
+            let session = self
+                .session_service
+                .current_client_session()
+                .map_err(tmux_runtime_error)?
+                .ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "could not determine current session from TMUX environment".to_string(),
+                    )
+                })?;
+            TmuxSocketName::new(session.address.server_id())
+        } else {
+            let session = self
+                .session_service
+                .resolve_default_attach_session()
+                .map_err(tmux_runtime_error)?;
+            TmuxSocketName::new(session.address.server_id())
+        };
+
+        self.session_service
+            .kill_server(&socket_name)
+            .map_err(tmux_runtime_error)?;
+        println!(
+            "stopped waitagent server on socket `{}`",
+            socket_name.as_str()
         );
         Ok(())
     }

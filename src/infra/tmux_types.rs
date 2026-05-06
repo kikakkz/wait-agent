@@ -211,6 +211,8 @@ pub trait TmuxSessionGateway: TmuxGateway {
     fn detach_current_client(&self) -> Result<(), Self::Error>;
 
     fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error>;
+
+    fn kill_server(&self, socket_name: &TmuxSocketName) -> Result<(), Self::Error>;
 }
 
 pub trait TmuxChromeGateway: TmuxSessionGateway {

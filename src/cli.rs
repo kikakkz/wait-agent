@@ -138,6 +138,7 @@ pub enum Command {
     Attach(AttachCommand),
     List,
     Detach(DetachCommand),
+    Stop(StopCommand),
     Help(String),
 }
 
@@ -148,6 +149,11 @@ pub struct AttachCommand {
 
 #[derive(Debug, Clone, Default)]
 pub struct DetachCommand {
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StopCommand {
     pub target: Option<String>,
 }
 
@@ -464,6 +470,10 @@ impl Cli {
                 args.remove(0);
                 Command::Detach(parse_detach(args)?)
             }
+            "stop" => {
+                args.remove(0);
+                Command::Stop(parse_stop(args)?)
+            }
             "help" => Command::Help(help_text()),
             "--help" | "-h" => Command::Help(help_text()),
             other => {
@@ -537,6 +547,22 @@ fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
 fn parse_detach(args: Vec<String>) -> Result<DetachCommand, CliError> {
     let mut iter = args.into_iter();
     let mut command = DetachCommand::default();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(command),
+            _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
+            _ if command.target.is_none() => command.target = Some(arg),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_stop(args: Vec<String>) -> Result<StopCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = StopCommand::default();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1177,6 +1203,7 @@ fn help_text() -> String {
         "  waitagent [--port <port>] [--connect <host:port>] attach [<target>]",
         "  waitagent [--port <port>] [--connect <host:port>] ls",
         "  waitagent [--port <port>] [--connect <host:port>] detach [<target>]",
+        "  waitagent [--port <port>] [--connect <host:port>] stop [<target>]",
     ]
     .join("\n")
 }

@@ -1309,6 +1309,10 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
             .run_from_current_client(&["detach-client".to_string()])
     }
 
+    fn kill_server(&self, socket_name: &TmuxSocketName) -> Result<(), Self::Error> {
+        self.run_socket_command(socket_name, &["kill-server".to_string()])
+    }
+
     fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
         let socket_name = current_client_socket_name()?;
         let output = self.command_runner().capture_from_current_client(&[

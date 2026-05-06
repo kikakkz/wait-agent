@@ -321,6 +321,10 @@ mod tests {
         fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
             Ok(self.sessions.first().cloned())
         }
+
+        fn kill_server(&self, _socket_name: &TmuxSocketName) -> Result<(), Self::Error> {
+            unreachable!("not used")
+        }
     }
 
     impl TmuxChromeGateway for FakeGateway {

@@ -193,6 +193,10 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_detach(command)
                 .map_err(AppError::from),
+            Command::Stop(command) => self
+                .workspace_runtime
+                .run_stop(command)
+                .map_err(AppError::from),
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");

@@ -1,5 +1,5 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::infra::tmux::{TmuxSessionGateway, TmuxWorkspaceHandle};
+use crate::infra::tmux::{TmuxSessionGateway, TmuxSocketName, TmuxWorkspaceHandle};
 
 pub struct SessionService<G> {
     gateway: G,
@@ -53,6 +53,10 @@ where
 
     pub fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, G::Error> {
         self.gateway.current_client_session()
+    }
+
+    pub fn kill_server(&self, socket_name: &TmuxSocketName) -> Result<(), G::Error> {
+        self.gateway.kill_server(socket_name)
     }
 }
 
@@ -264,6 +268,10 @@ mod tests {
 
         fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {
             Ok(self.sessions.borrow().first().cloned())
+        }
+
+        fn kill_server(&self, _socket_name: &TmuxSocketName) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 
