@@ -306,10 +306,17 @@ impl TmuxGlueBuildPlan {
                     kind: TmuxGlueBuildStepKind::Configure,
                     command: TmuxGlueCommand::new(
                         self.layout.source_path.join("configure"),
-                        vec![
-                            format!("--prefix={}", self.layout.stage_dir_path().display()),
-                            "--enable-static".to_string(),
-                        ],
+                        {
+                            let mut args = vec![format!(
+                                "--prefix={}",
+                                self.layout.stage_dir_path().display()
+                            )];
+                            // macOS does not support static linking for tmux.
+                            if !cfg!(target_os = "macos") {
+                                args.push("--enable-static".to_string());
+                            }
+                            args
+                        },
                         self.layout.build_root.clone(),
                     ),
                 },
