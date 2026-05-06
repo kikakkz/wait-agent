@@ -92,7 +92,19 @@ To preview the detected package-manager command without executing it, run:
 
 ### Download & Install
 
-Pre-built packages are available from the [GitHub Releases](https://github.com/kikakkz/wait-agent/releases) page.
+**One-line install (Linux x86_64 / macOS Apple Silicon):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
+```
+
+To install to a different directory or pin a specific version:
+
+```bash
+INSTALL_DIR=~/.local/bin VERSION=0.0.1 curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
+```
+
+Pre-built packages are also available from the [GitHub Releases](https://github.com/kikakkz/wait-agent/releases) page.
 
 #### Linux
 
