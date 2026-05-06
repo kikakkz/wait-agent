@@ -6,6 +6,7 @@ set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 VERSION="${VERSION:-latest}"
+tmpdir=""
 
 REPO="kikakkz/wait-agent"
 
@@ -86,7 +87,6 @@ main() {
   echo ">>> Downloading ${url}"
 
   # Download to a temp directory
-  local tmpdir
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
 
