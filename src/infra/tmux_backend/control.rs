@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn sidebar_focus_binding_restores_width_before_selecting_sidebar() {
         let args = bind_waitagent_focus_sidebar_args(
-            "Right",
+            "C-Right",
             &TmuxPaneId::new("%1"),
             &TmuxPaneId::new("%2"),
             24,
@@ -234,12 +234,12 @@ mod tests {
             vec![
                 "bind-key",
                 "-n",
-                "Right",
+                "C-Right",
                 "if-shell",
                 "-F",
                 "#{==:#{pane_id},%1}",
                 "resize-pane -t %2 -x 24 ; select-pane -t %2",
-                "send-keys Right",
+                "send-keys C-Right",
             ]
         );
     }

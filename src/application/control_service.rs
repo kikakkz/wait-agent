@@ -4,7 +4,7 @@ use crate::ui::chrome::{TMUX_MENU_BORDER_STYLE, TMUX_MENU_SELECTED_STYLE, TMUX_M
 
 const FULLSCREEN_TOGGLE_KEY: &str = "C-o";
 const FULLSCREEN_TOGGLE_PREFIX_KEY: &str = "z";
-const SIDEBAR_FOCUS_KEY: &str = "Right";
+const SIDEBAR_FOCUS_KEY: &str = "C-Right";
 const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
 const CREATE_SESSION_KEY: &str = "C-n";
@@ -595,7 +595,7 @@ mod tests {
                     "run-shell -b \"waitagent __toggle-fullscreen\"".to_string(),
                 ),
                 Call::BindWaitagentFocusSidebar(
-                    "Right".to_string(),
+                    "C-Right".to_string(),
                     "%1".to_string(),
                     "%2".to_string(),
                     32,
