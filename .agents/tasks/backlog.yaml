@@ -190,10 +190,10 @@ next:
     status: done
   - id: task.t5-08c4b
     title: introduce the backend-scoped remote owner sidecar and local IPC snapshot boundary
-    status: in_progress
+    status: superseded
   - id: task.t5-08c4c
     title: route shared-catalog and sidebar remote state through the live owner snapshot and retire file-backed remote sidebar sources
-    status: ready
+    status: superseded
   - id: task.t5-08c4d
     title: original runtime-only validation umbrella superseded by bounded export-boundary and validation slices
     status: superseded
@@ -211,13 +211,13 @@ next:
     status: done
   - id: task.t5-08c4d3b
     title: implement explicit remote mirror open or close protocol messages and server-side session-route ownership
-    status: in_progress
+    status: done
   - id: task.t5-08c4d3c
     title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
-    status: ready
+    status: done
   - id: task.t5-08c4d3d
     title: bind bootstrap replay and live remote output into visible parity and close cross-host acceptance
-    status: ready
+    status: done
   - id: task.t3-07
     title: implement narrow-terminal compaction rules for the fixed-chrome workspace layout
     status: deferred

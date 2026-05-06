@@ -2,7 +2,7 @@ id: task.t5-08c4d3c
 kind: task
 version: 1
 title: implement PTY-owner session mirror lifecycle and reuse on the connected client node
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-live-mirror-design.md

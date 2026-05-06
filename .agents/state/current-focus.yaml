@@ -1,7 +1,7 @@
 kind: state
 version: 1
-current_task: task.t5-08c4d3c
-focus_statement: the live-mirror open/close protocol and server-side per-session mirror-route ownership are now explicit in code and tests, so active work moves to PTY-owner session mirror lifecycle and reuse on the connected client node
+current_task: null
+focus_statement: the full remote session foundation phase (t5-08) is now complete — protocol, server-side mirror-route ownership, PTY-owner mirror lifecycle, bootstrap replay, live output binding, and cross-host acceptance are all implemented and verified. No remaining queued tasks in backlog.
 last_updated_from:
-  file: .agents/tasks/current.yaml
-  reference: current_task
+  file: .agents/tasks/backlog.yaml
+  reference: active

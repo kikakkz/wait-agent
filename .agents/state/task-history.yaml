@@ -37,14 +37,14 @@ history:
       file: .agents/tasks/queued/task.t5-08c4d1.yaml
       reference: status
   - task_id: task.t5-08c4d3c
-    status: ready
-    summary: once protocol-level mirror open or close and server-side session-route ownership are complete, the next slice is PTY-owner session mirror lifecycle and reuse on the connected client node
+    status: done
+    summary: PTY-owner session mirror lifecycle and reuse is fully implemented and verified — MirrorState tracks active/inactive, repeated opens reuse the active mirror, close tears down cleanly, all tests pass
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
   - task_id: task.t5-08c4d3d
-    status: ready
-    summary: after PTY-owner mirror lifecycle is in place, the final queued slice binds bootstrap replay and live remote output into visible parity and closes cross-host acceptance
+    status: done
+    summary: bootstrap replay and live remote output are bound into visible parity — RemoteObserverRuntime handles begin_bootstrap/apply_bootstrap_chunk/apply_bootstrap_complete/apply_target_output, emit_bootstrap captures and sends screen chunks, cross-host acceptance is code-complete with full test coverage
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next

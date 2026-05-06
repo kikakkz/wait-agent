@@ -2,7 +2,7 @@ id: task.t5-08c4d3d
 kind: task
 version: 1
 title: bind bootstrap replay and live remote output into visible parity and close cross-host acceptance
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-live-mirror-design.md

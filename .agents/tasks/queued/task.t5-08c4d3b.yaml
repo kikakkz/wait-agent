@@ -2,7 +2,7 @@ id: task.t5-08c4d3b
 kind: task
 version: 1
 title: implement explicit remote mirror open or close protocol messages and server-side session-route ownership
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-live-mirror-design.md
