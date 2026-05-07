@@ -944,34 +944,44 @@ fn draw_remote_snapshot(
         })?;
     }
 
-    if snapshot.has_visible_output && active_screen.cursor_visible {
+    if connected_visible_output {
+        // Always render a visual cursor indicator at the cursor position.
+        // Many terminal programs (e.g. Claude) hide the cursor via DECTCEM
+        // \x1b[?25l after startup and never re-show it, leaving cursor_visible
+        // false in the observer. However, the user still needs to see where
+        // input goes. The reverse-video overlay is part of the rendered text
+        // and visible regardless of pane focus or DECTCEM state.
         let display_row = usize::from(active_screen.cursor_row.saturating_add(1));
         let display_col = usize::from(active_screen.cursor_col.saturating_add(1));
-        // Visual cursor: render a reverse-video overlay at cursor position.
-        // tmux only shows the cursor in the focused (active) pane. When the
-        // sidebar is focused, the remote main-slot pane is inactive and tmux
-        // silently ignores CSI cursor show (\x1b[?25h). This overlay renders
-        // directly into the text buffer so the cursor position is always visible.
         let cursor_char = active_screen
             .lines
             .get(active_screen.cursor_row as usize)
             .and_then(|line| {
                 let target = active_screen.cursor_col as usize;
-                let mut display_col = 0usize;
+                let mut col = 0usize;
                 for ch in line.chars() {
                     let w = terminal_char_display_width(ch);
-                    if display_col + w > target || display_col == target {
+                    if col + w > target || col == target {
                         return Some(ch);
                     }
-                    display_col += w;
+                    col += w;
                 }
                 None
             })
             .unwrap_or(' ');
         write!(
             stdout,
-            "\x1b[?7h\x1b[{};{}H\x1b[7m{}\x1b[27m\x1b[{};{}H\x1b[?25h",
-            display_row, display_col, cursor_char, display_row, display_col
+            "\x1b[?7h\x1b[{};{}H\x1b[7m{}\x1b[27m\x1b[{};{}H{}",
+            display_row,
+            display_col,
+            cursor_char,
+            display_row,
+            display_col,
+            if active_screen.cursor_visible {
+                "\x1b[?25h"
+            } else {
+                "\x1b[?25l"
+            },
         )
         .map_err(|error| {
             LifecycleError::Io(
