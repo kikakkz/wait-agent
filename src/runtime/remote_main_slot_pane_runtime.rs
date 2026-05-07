@@ -303,8 +303,7 @@ impl RemoteMainSlotPaneRuntime {
                 match event_rx.recv() {
                     Ok(RemotePaneEvent::MailboxUpdated) => {
                         observer.sync().map_err(remote_protocol_error)?;
-                        let now = Instant::now();
-                        if now - last_redraw >= REDRAW_INTERVAL {
+                        if last_redraw.elapsed() >= REDRAW_INTERVAL {
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -312,7 +311,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &observer.snapshot(),
                                 &authority_status,
                             )?;
-                            last_redraw = now;
+                            last_redraw = Instant::now();
                         }
                     }
                     Ok(RemotePaneEvent::Resize) => {
