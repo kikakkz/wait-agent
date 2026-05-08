@@ -100,6 +100,22 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    pub(crate) fn pane_tty_path_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "#{pane_tty}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout.trim().to_string())
+    }
+
     pub(crate) fn resize_pane_on_socket(
         &self,
         socket_name: &str,

@@ -62,6 +62,8 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         bytes: &[u8],
     ) -> Result<(), Self::Error>;
 
+    fn pane_tty_path(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<String, Self::Error>;
+
     fn resize_pty(
         &self,
         socket_name: &str,
@@ -116,6 +118,10 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         bytes: &[u8],
     ) -> Result<(), Self::Error> {
         self.send_input_to_pane_on_socket(socket_name, pane, bytes)
+    }
+
+    fn pane_tty_path(&self, socket_name: &str, pane: &TmuxPaneId) -> Result<String, Self::Error> {
+        self.pane_tty_path_on_socket(socket_name, pane)
     }
 
     fn resize_pty(
@@ -323,6 +329,14 @@ where
         let mut output_seq = 0_u64;
         let mut mirror_state = MirrorState::Inactive;
 
+        // Open pty for direct write (bypassing tmux send-keys subprocess)
+        let mut pty_file = self
+            .gateway
+            .pane_tty_path(&command.socket_name, &pane)
+            .ok()
+            .and_then(|path| std::fs::OpenOptions::new().write(true).open(&path).ok());
+        let _has_fast_input = pty_file.is_some();
+
         let loop_result = loop {
             match event_rx.recv() {
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
@@ -421,12 +435,18 @@ where
                         Ok(bytes) => bytes,
                         Err(error) => break Err(error),
                     };
-                    if let Err(error) = self
-                        .gateway
-                        .send_input(&command.socket_name, &pane, &bytes)
-                        .map_err(remote_authority_error)
-                    {
-                        break Err(error);
+                    // Write directly to pty when possible (bypasses tmux send-keys subprocess)
+                    let direct_ok = pty_file
+                        .as_mut()
+                        .map_or(false, |f| f.write_all(&bytes).is_ok());
+                    if !direct_ok {
+                        if let Err(error) = self
+                            .gateway
+                            .send_input(&command.socket_name, &pane, &bytes)
+                            .map_err(remote_authority_error)
+                        {
+                            break Err(error);
+                        }
                     }
                 }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
@@ -901,6 +921,14 @@ mod tests {
                 .expect("input calls mutex should not be poisoned")
                 .push(bytes.to_vec());
             Ok(())
+        }
+
+        fn pane_tty_path(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<String, Self::Error> {
+            Ok("/dev/pts/99".to_string())
         }
 
         fn resize_pty(
