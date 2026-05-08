@@ -1,4 +1,4 @@
-use crate::infra::base64::{decode_base64, encode_base64};
+use crate::infra::base64::decode_base64;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
@@ -534,7 +534,7 @@ fn map_target_output_envelope(
             target_id: payload.target_id.clone(),
             output_seq: payload.output_seq,
             stream: known_output_stream(&payload.stream)?,
-            bytes_base64: encode_base64(&payload.output_bytes),
+            output_bytes: payload.output_bytes.clone(),
         }),
     })
 }
@@ -562,7 +562,7 @@ fn map_mirror_bootstrap_chunk_envelope(
             target_id: payload.target_id.clone(),
             chunk_seq: payload.chunk_seq,
             stream: known_output_stream(&payload.stream)?,
-            bytes_base64: encode_base64(&payload.output_bytes),
+            output_bytes: payload.output_bytes.clone(),
         }),
     })
 }
@@ -895,7 +895,7 @@ mod tests {
                     ControlPlanePayload::TargetOutput(payload) => {
                         assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(payload.output_seq, 7);
-                        assert_eq!(payload.bytes_base64, "YQ==");
+                        assert_eq!(payload.output_bytes, b"a");
                     }
                     other => panic!("unexpected authority envelope payload: {other:?}"),
                 },
@@ -913,12 +913,12 @@ mod tests {
                     ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
                         target_id,
                         chunk_seq,
-                        bytes_base64,
+                        ref output_bytes,
                         ..
                     }) => {
                         assert_eq!(target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(chunk_seq, 1);
-                        assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                        assert_eq!(output_bytes, b"bootstrap");
                     }
                     other => panic!("unexpected authority envelope payload: {other:?}"),
                 },

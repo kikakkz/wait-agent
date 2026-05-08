@@ -843,7 +843,7 @@ pub(crate) fn apply_authority_envelope(
                     target,
                     payload.output_seq,
                     payload.stream,
-                    payload.bytes_base64.clone(),
+                    payload.output_bytes.clone(),
                 )
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
@@ -860,7 +860,7 @@ pub(crate) fn apply_authority_envelope(
                     target,
                     payload.chunk_seq,
                     payload.stream,
-                    payload.bytes_base64.clone(),
+                    payload.output_bytes.clone(),
                 )
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
@@ -1780,18 +1780,13 @@ mod tests {
         let redraw = b"\x1b[?2026h\x1b[1;2H\x1b[0m\x1b[m\x1b[K\x1b[2;42H\x1b[0m\x1b[m\x1b[K\x1b[3;2H\x1b[0m\x1b[m\x1b[K\x1b[5;2H\x1b[0m\x1b[m\x1b[K\x1b[6;38H\x1b[0m\x1b[m\x1b[K\x1b[7;21H\x1b[0m\x1b[m\x1b[K\x1b[8;10H\x1b[0m\x1b[m\x1b[K\x1b[9;29H\x1b[0m\x1b[m\x1b[K\x1b[10;2H\x1b[0m\x1b[m\x1b[K\x1b[11;26H\x1b[0m\x1b[m\x1b[K\x1b[12;2H\x1b[0m\x1b[m\x1b[K\x1b[13;2H\x1b[0m\x1b[m\x1b[K\x1b[14;2H\x1b[0m\x1b[m\x1b[K\x1b[15;2H\x1b[0m\x1b[m\x1b[K\x1b[16;2H\x1b[0m\x1b[m\x1b[K\x1b[17;2H\x1b[0m\x1b[m\x1b[K\x1b[18;2H\x1b[0m\x1b[m\x1b[K\x1b[19;2H\x1b[0m\x1b[m\x1b[K\x1b[20;2H\x1b[0m\x1b[m\x1b[K\x1b[21;2H\x1b[0m\x1b[m\x1b[K\x1b[6;1H  1. Update now (runs `npm install -g\x1b[7;6H@openai/codex`)\x1b[8;1H\x1b[;m\xe2\x80\xba 2. Skip\x1b[m\x1b[m\x1b[0m\x1b[?25l\x1b[?2026l";
 
         runtime
-            .send_mirror_bootstrap_chunk(
-                &remote_target(),
-                1,
-                "pty",
-                encode_base64(bootstrap.as_bytes()),
-            )
+            .send_mirror_bootstrap_chunk(&remote_target(), 1, "pty", bootstrap.into_bytes())
             .expect("bootstrap replay should fan out");
         runtime
             .send_mirror_bootstrap_complete(&remote_target(), 1, false, false, false)
             .expect("bootstrap complete should fan out");
         runtime
-            .send_target_output(&remote_target(), 1, "pty", encode_base64(redraw))
+            .send_target_output(&remote_target(), 1, "pty", redraw.to_vec())
             .expect("redraw should fan out");
 
         let mut observer = RemoteObserverRuntime::new(mailbox, 47, 21);
@@ -1849,12 +1844,7 @@ mod tests {
         // Step 2: Send a simple bootstrap chunk (just clear screen + home)
         let bootstrap = String::from("\x1b[2J\x1b[H");
         runtime
-            .send_mirror_bootstrap_chunk(
-                &remote_target(),
-                1,
-                "pty",
-                encode_base64(bootstrap.as_bytes()),
-            )
+            .send_mirror_bootstrap_chunk(&remote_target(), 1, "pty", bootstrap.into_bytes())
             .expect("bootstrap chunk should fan out");
 
         // Step 3: Send bootstrap complete with cursor_visible=false
@@ -1876,7 +1866,7 @@ mod tests {
 
         // Step 5: Send TargetOutput with \x1b[?25h (cursor show)
         runtime
-            .send_target_output(&remote_target(), 1, "pty", encode_base64(b"\x1b[?25h"))
+            .send_target_output(&remote_target(), 1, "pty", b"\x1b[?25h".to_vec())
             .expect("target output should fan out");
 
         observer.sync().expect("observer sync should succeed");
@@ -1892,7 +1882,7 @@ mod tests {
 
         // Step 6: Send TargetOutput with \x1b[?25l (cursor hide)
         runtime
-            .send_target_output(&remote_target(), 2, "pty", encode_base64(b"\x1b[?25l"))
+            .send_target_output(&remote_target(), 2, "pty", b"\x1b[?25l".to_vec())
             .expect("target output should fan out");
 
         observer.sync().expect("observer sync should succeed");
@@ -1908,7 +1898,7 @@ mod tests {
 
         // Step 7: Send TargetOutput with \x1b[?25h AGAIN (cursor show)
         runtime
-            .send_target_output(&remote_target(), 3, "pty", encode_base64(b"\x1b[?25h"))
+            .send_target_output(&remote_target(), 3, "pty", b"\x1b[?25h".to_vec())
             .expect("target output should fan out");
 
         observer.sync().expect("observer sync should succeed");
@@ -2317,7 +2307,7 @@ mod tests {
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     output_seq: 1,
                     stream: "pty",
-                    bytes_base64: "Yg==".to_string(),
+                    output_bytes: b"b".to_vec(),
                 }),
             },
         )
@@ -2427,7 +2417,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         }
     }
@@ -2449,7 +2439,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 chunk_seq,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         }
     }

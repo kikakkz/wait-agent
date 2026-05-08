@@ -324,7 +324,7 @@ impl RemoteControlPlaneService {
         target: &ManagedSessionRecord,
         output_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
         validate_remote_target(target)?;
         let session_id = target.address.session_id().to_string();
@@ -350,7 +350,7 @@ impl RemoteControlPlaneService {
                     target_id: target.address.id().as_str().to_string(),
                     output_seq,
                     stream,
-                    bytes_base64: bytes_base64.into(),
+                    output_bytes,
                 }),
             ),
         })
@@ -361,7 +361,7 @@ impl RemoteControlPlaneService {
         target: &ManagedSessionRecord,
         chunk_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
         validate_remote_target(target)?;
         let session_id = target.address.session_id().to_string();
@@ -384,7 +384,7 @@ impl RemoteControlPlaneService {
                     target_id: target.address.id().as_str().to_string(),
                     chunk_seq,
                     stream,
-                    bytes_base64: bytes_base64.into(),
+                    output_bytes,
                 }),
             ),
         })
@@ -1179,7 +1179,7 @@ mod tests {
             .expect("second open should succeed");
 
         let routed = service
-            .route_target_output(&target, 7, "pty", "YQ==")
+            .route_target_output(&target, 7, "pty", b"a".to_vec())
             .expect("output should route");
         let deliveries = service
             .resolve_node_deliveries(&[routed])

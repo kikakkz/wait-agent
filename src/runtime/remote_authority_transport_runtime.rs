@@ -97,14 +97,14 @@ impl RemoteAuthorityTransportRuntime {
         target_id: &str,
         output_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), RemoteAuthorityTransportError> {
         let payload = ControlPlanePayload::TargetOutput(TargetOutputPayload {
             session_id: session_id.to_string(),
             target_id: target_id.to_string(),
             output_seq,
             stream,
-            bytes_base64: bytes_base64.into(),
+            output_bytes,
         });
         let envelope = ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
@@ -173,7 +173,7 @@ impl RemoteAuthorityTransportRuntime {
         target_id: &str,
         chunk_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), RemoteAuthorityTransportError> {
         self.send_payload(
             session_id,
@@ -183,7 +183,7 @@ impl RemoteAuthorityTransportRuntime {
                 target_id: target_id.to_string(),
                 chunk_seq,
                 stream,
-                bytes_base64: bytes_base64.into(),
+                output_bytes,
             }),
         )
     }
@@ -526,7 +526,13 @@ mod tests {
         );
 
         transport
-            .send_target_output("shell-1", "remote-peer:peer-a:shell-1", 11, "pty", "Yg==")
+            .send_target_output(
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                11,
+                "pty",
+                b"b".to_vec(),
+            )
             .expect("target output should send");
         match rx
             .recv_timeout(Duration::from_secs(1))
@@ -535,7 +541,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 11);
-                    assert_eq!(payload.bytes_base64, "Yg==");
+                    assert_eq!(payload.output_bytes, b"b");
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },

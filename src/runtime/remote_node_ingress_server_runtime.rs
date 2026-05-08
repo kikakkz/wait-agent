@@ -1,5 +1,5 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
-use crate::infra::base64::{decode_base64, encode_base64};
+use crate::infra::base64::decode_base64;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
@@ -301,7 +301,7 @@ fn route_transport_envelope(
                         target_id,
                         payload.output_seq,
                         stream,
-                        encode_base64(&payload.output_bytes),
+                        payload.output_bytes.clone(),
                     )
                 },
             )
@@ -324,7 +324,7 @@ fn route_transport_envelope(
                         target_id,
                         payload.chunk_seq,
                         stream,
-                        encode_base64(&payload.output_bytes),
+                        payload.output_bytes.clone(),
                     )
                 },
             )
@@ -922,7 +922,7 @@ mod tests {
                 assert_eq!(payload.session_id, "shell-1");
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.chunk_seq, 1);
-                assert_eq!(payload.bytes_base64, "Ym9vdHN0cmFw");
+                assert_eq!(payload.output_bytes, b"bootstrap");
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -951,7 +951,7 @@ mod tests {
                 assert_eq!(payload.session_id, "shell-1");
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.output_seq, 7);
-                assert_eq!(payload.bytes_base64, "YQ==");
+                assert_eq!(payload.output_bytes, b"a");
             }
             other => panic!("unexpected payload: {other:?}"),
         }

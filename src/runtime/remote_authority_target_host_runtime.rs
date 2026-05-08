@@ -2,7 +2,7 @@ use crate::cli::{
     prepend_global_network_args, RemoteAuthorityOutputPumpCommand,
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
-use crate::infra::base64::{decode_base64, encode_base64};
+use crate::infra::base64::decode_base64;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -461,7 +461,7 @@ where
                             &command.target_id,
                             output_seq,
                             "pty",
-                            encode_base64(&bytes),
+                            bytes,
                         )
                         .map_err(remote_authority_error)
                     {
@@ -702,6 +702,7 @@ where
         .capture_terminal_flags(socket_name, pane)
         .map_err(remote_authority_error)?;
     let replay = render_bootstrap_replay(&screen, cursor_x, cursor_y);
+    let last_chunk_seq = if replay.is_empty() { 0 } else { 1 };
     if !replay.is_empty() {
         transport
             .send_mirror_bootstrap_chunk(
@@ -709,7 +710,7 @@ where
                 target_id,
                 1,
                 "pty",
-                encode_base64(replay.as_bytes()),
+                replay.as_bytes().to_vec(),
             )
             .map_err(remote_authority_error)?;
     }
@@ -717,7 +718,7 @@ where
         .send_mirror_bootstrap_complete(
             session_id,
             target_id,
-            if replay.is_empty() { 0 } else { 1 },
+            last_chunk_seq,
             flags.alternate_screen_active,
             flags.application_cursor_keys,
             flags.cursor_visible,
@@ -1308,11 +1309,11 @@ mod tests {
         match output {
             ControlPlanePayload::TargetOutput(TargetOutputPayload {
                 output_seq,
-                bytes_base64,
+                ref output_bytes,
                 ..
             }) => {
                 assert_eq!(output_seq, 1);
-                assert_eq!(bytes_base64, "aGVsbG8=");
+                assert_eq!(output_bytes, b"hello");
             }
             other => panic!("unexpected authority output payload: {other:?}"),
         }
@@ -1423,7 +1424,7 @@ mod tests {
         match bootstrap_chunk {
             ControlPlanePayload::MirrorBootstrapChunk(payload) => {
                 assert_eq!(
-                    decode_base64(&payload.bytes_base64).expect("bootstrap payload should decode"),
+                    &payload.output_bytes,
                     b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                 );
             }
@@ -1519,8 +1520,7 @@ mod tests {
                     ControlPlanePayload::MirrorBootstrapChunk(payload) => {
                         bootstrap_chunk_count += 1;
                         assert_eq!(
-                            decode_base64(&payload.bytes_base64)
-                                .expect("bootstrap payload should decode"),
+                            &payload.output_bytes,
                             b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                         );
                     }

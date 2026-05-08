@@ -135,7 +135,7 @@ pub struct MirrorBootstrapChunkPayload {
     pub target_id: String,
     pub chunk_seq: u64,
     pub stream: &'static str,
-    pub bytes_base64: String,
+    pub output_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +198,7 @@ pub struct TargetOutputPayload {
     pub target_id: String,
     pub output_seq: u64,
     pub stream: &'static str,
-    pub bytes_base64: String,
+    pub output_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

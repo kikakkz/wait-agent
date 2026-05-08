@@ -152,7 +152,7 @@ impl RemoteNodeSessionRuntime {
         target_id: &str,
         output_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), RemoteNodeSessionError> {
         self.send_payload(
             NodeSessionChannel::Authority,
@@ -164,7 +164,7 @@ impl RemoteNodeSessionRuntime {
                 target_id: target_id.to_string(),
                 output_seq,
                 stream,
-                bytes_base64: bytes_base64.into(),
+                output_bytes,
             }),
         )
     }
@@ -633,8 +633,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 output_seq: payload.output_seq,
                 stream: payload.stream.to_string(),
                 session_id: payload.session_id.clone(),
-                output_bytes: decode_base64(&payload.bytes_base64)
-                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+                output_bytes: payload.output_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::TargetInput(payload)) => {
@@ -695,8 +694,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 session_id: payload.session_id.clone(),
                 chunk_seq: payload.chunk_seq,
                 stream: payload.stream.to_string(),
-                output_bytes: decode_base64(&payload.bytes_base64)
-                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+                output_bytes: payload.output_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::MirrorBootstrapComplete(payload)) => {
@@ -1139,7 +1137,13 @@ mod tests {
         }
 
         session
-            .send_target_output("shell-1", "remote-peer:peer-a:shell-1", 7, "pty", "YQ==")
+            .send_target_output(
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                7,
+                "pty",
+                b"a".to_vec(),
+            )
             .expect("target output should send through grpc node session");
         let authority_event = event_rx
             .recv_timeout(TEST_TIMEOUT)
@@ -1149,7 +1153,7 @@ mod tests {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(payload.output_seq, 7);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a");
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },
@@ -1199,7 +1203,7 @@ mod tests {
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     chunk_seq: 1,
                     stream: "pty",
-                    bytes_base64: "Ym9vdHN0cmFw".to_string(),
+                    output_bytes: b"bootstrap".to_vec(),
                 }),
             )
             .expect("mirror bootstrap chunk should send through grpc node session");
@@ -1213,13 +1217,13 @@ mod tests {
                     target_id,
                     chunk_seq,
                     stream,
-                    bytes_base64,
+                    ref output_bytes,
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(chunk_seq, 1);
                     assert_eq!(stream, "pty");
-                    assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                    assert_eq!(output_bytes, b"bootstrap");
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },

@@ -1135,7 +1135,7 @@ fn forward_host_output_to_session(
                     &payload.target_id,
                     payload.output_seq,
                     payload.stream,
-                    payload.bytes_base64,
+                    payload.output_bytes,
                 )?;
             }
             other => {
@@ -1301,7 +1301,7 @@ fn forward_host_output_to_shared_session(
                         &payload.target_id,
                         payload.output_seq,
                         payload.stream,
-                        payload.bytes_base64,
+                        payload.output_bytes,
                     )
                     .is_err()
                 {

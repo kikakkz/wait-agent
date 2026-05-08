@@ -184,12 +184,12 @@ impl RemoteMainSlotRuntime {
         target: &ManagedSessionRecord,
         output_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), LifecycleError> {
         let message = self
             .control_plane
             .borrow_mut()
-            .route_target_output(target, output_seq, stream, bytes_base64)
+            .route_target_output(target, output_seq, stream, output_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.send_messages(&[message])
     }
@@ -199,12 +199,12 @@ impl RemoteMainSlotRuntime {
         target: &ManagedSessionRecord,
         chunk_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), LifecycleError> {
         let message = self
             .control_plane
             .borrow_mut()
-            .route_mirror_bootstrap_chunk(target, chunk_seq, stream, bytes_base64)
+            .route_mirror_bootstrap_chunk(target, chunk_seq, stream, output_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.send_messages(&[message])
     }
@@ -456,7 +456,7 @@ mod tests {
             .expect("remote activation should succeed");
         let already_seen = observer_mailbox.snapshot().len();
         runtime
-            .send_target_output(&remote_target("peer-a", "shell-1"), 7, "pty", "YQ==")
+            .send_target_output(&remote_target("peer-a", "shell-1"), 7, "pty", b"a".to_vec())
             .expect("target output should fan out to observers");
 
         let envelopes = observer_mailbox.snapshot();
@@ -485,7 +485,12 @@ mod tests {
             .expect("remote activation should succeed");
         let already_seen = observer_mailbox.snapshot().len();
         runtime
-            .send_mirror_bootstrap_chunk(&remote_target("peer-a", "shell-1"), 1, "pty", "YQ==")
+            .send_mirror_bootstrap_chunk(
+                &remote_target("peer-a", "shell-1"),
+                1,
+                "pty",
+                b"a".to_vec(),
+            )
             .expect("bootstrap chunk should fan out to observers");
         runtime
             .send_mirror_bootstrap_complete(

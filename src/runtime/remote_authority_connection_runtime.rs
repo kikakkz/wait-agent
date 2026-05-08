@@ -482,7 +482,7 @@ mod tests {
                 match envelope.payload {
                     ControlPlanePayload::TargetOutput(payload) => {
                         assert_eq!(payload.output_seq, 1);
-                        assert_eq!(payload.bytes_base64, "YQ==");
+                        assert_eq!(payload.output_bytes, b"a".to_vec());
                     }
                     other => panic!("unexpected payload: {other:?}"),
                 }
@@ -633,7 +633,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 7);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -710,7 +710,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 9);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -756,7 +756,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 13);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -781,7 +781,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         }
     }

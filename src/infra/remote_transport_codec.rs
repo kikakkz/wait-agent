@@ -175,7 +175,7 @@ fn write_payload(
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.chunk_seq)?;
             write_static_string(writer, payload.stream)?;
-            write_string(writer, &payload.bytes_base64)?;
+            write_bytes(writer, &payload.output_bytes)?;
         }
         ControlPlanePayload::MirrorBootstrapComplete(payload) => {
             write_u8(writer, 17)?;
@@ -232,7 +232,7 @@ fn write_payload(
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.output_seq)?;
             write_static_string(writer, payload.stream)?;
-            write_string(writer, &payload.bytes_base64)?;
+            write_bytes(writer, &payload.output_bytes)?;
         }
         ControlPlanePayload::ApplyResize(payload) => {
             write_u8(writer, 8)?;
@@ -312,7 +312,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             target_id: read_string(reader)?,
             chunk_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
-            bytes_base64: read_string(reader)?,
+            output_bytes: read_bytes(reader)?,
         }),
         17 => ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
             session_id: read_string(reader)?,
@@ -363,7 +363,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             target_id: read_string(reader)?,
             output_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
-            bytes_base64: read_string(reader)?,
+            output_bytes: read_bytes(reader)?,
         }),
         8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
             session_id: read_string(reader)?,
@@ -428,13 +428,23 @@ fn read_node_session_channel(
     }
 }
 
-fn write_string(writer: &mut impl Write, value: &str) -> Result<(), RemoteTransportCodecError> {
-    let bytes = value.as_bytes();
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| RemoteTransportCodecError::new("string too long for transport frame"))?;
+fn write_bytes(writer: &mut impl Write, value: &[u8]) -> Result<(), RemoteTransportCodecError> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| RemoteTransportCodecError::new("bytes too long for transport frame"))?;
     writer.write_all(&len.to_le_bytes())?;
-    writer.write_all(bytes)?;
+    writer.write_all(value)?;
     Ok(())
+}
+
+fn read_bytes(reader: &mut impl Read) -> Result<Vec<u8>, RemoteTransportCodecError> {
+    let len = read_u32(reader)? as usize;
+    let mut bytes = vec![0u8; len];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn write_string(writer: &mut impl Write, value: &str) -> Result<(), RemoteTransportCodecError> {
+    write_bytes(writer, value.as_bytes())
 }
 
 fn read_string(reader: &mut impl Read) -> Result<String, RemoteTransportCodecError> {
@@ -665,7 +675,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq: 7,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         };
         let mut bytes = Vec::new();
