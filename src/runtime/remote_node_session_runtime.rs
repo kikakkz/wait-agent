@@ -5,8 +5,8 @@ use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
-    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
+    OpenMirrorRequest, RawPtyInput, RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited,
+    TargetInputDelivery, TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
@@ -15,8 +15,8 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
     NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-    TargetExitedPayload, TargetInputPayload, TargetOutputPayload, TargetPublishedPayload,
-    REMOTE_PROTOCOL_VERSION,
+    RawPtyInputPayload, TargetExitedPayload, TargetInputPayload, TargetOutputPayload,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -189,6 +189,7 @@ impl RemoteNodeSessionRuntime {
                 console_id: console_id.to_string(),
                 cols,
                 rows,
+                raw_pty_passthrough: false,
             }),
         )
     }
@@ -517,6 +518,9 @@ fn recv_local_authority_command(
         ControlPlanePayload::TargetInput(payload) => {
             Ok(RemoteAuthorityCommand::TargetInput(payload))
         }
+        ControlPlanePayload::RawPtyInput(payload) => {
+            Ok(RemoteAuthorityCommand::RawPtyInput(payload))
+        }
         ControlPlanePayload::ApplyResize(payload) => {
             Ok(RemoteAuthorityCommand::ApplyResize(payload))
         }
@@ -547,6 +551,21 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 bytes_base64: encode_base64(&payload.input_bytes),
             }),
         )),
+        Some(GrpcBody::RawPtyInput(payload)) => Some(GrpcAuthorityEvent::Command(
+            RemoteAuthorityCommand::RawPtyInput(RawPtyInputPayload {
+                attachment_id: payload.attachment_id,
+                session_id: grpc_session_id(
+                    route_session_id,
+                    &payload.session_id,
+                    &payload.target_id,
+                ),
+                target_id: payload.target_id,
+                console_id: payload.console_id,
+                console_host_id: payload.console_host_id,
+                input_seq: payload.input_seq,
+                input_bytes: payload.input_bytes,
+            }),
+        )),
         Some(GrpcBody::ApplyPtyResize(payload)) => Some(GrpcAuthorityEvent::Command(
             RemoteAuthorityCommand::ApplyResize(ApplyResizePayload {
                 session_id: grpc_session_id(
@@ -572,6 +591,7 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 console_id: payload.console_id,
                 cols: payload.cols as usize,
                 rows: payload.rows as usize,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }),
         )),
         Some(GrpcBody::CloseMirrorRequest(payload)) => Some(GrpcAuthorityEvent::Command(
@@ -622,6 +642,7 @@ pub(crate) fn map_outbound_grpc_envelope(
         console_id: envelope.console_id.clone(),
         console_host_id: match &envelope.payload {
             ControlPlanePayload::TargetInput(payload) => Some(payload.console_host_id.clone()),
+            ControlPlanePayload::RawPtyInput(payload) => Some(payload.console_host_id.clone()),
             _ => None,
         },
         session_id: envelope.session_id.clone(),
@@ -636,6 +657,14 @@ pub(crate) fn map_outbound_grpc_envelope(
                 output_bytes: payload.output_bytes.clone(),
             }))
         }
+        (NodeSessionChannel::Authority, ControlPlanePayload::RawPtyOutput(payload)) => {
+            Some(GrpcBody::RawPtyOutput(RawPtyOutput {
+                target_id: payload.target_id.clone(),
+                output_seq: payload.output_seq,
+                session_id: payload.session_id.clone(),
+                output_bytes: payload.output_bytes.clone(),
+            }))
+        }
         (NodeSessionChannel::Authority, ControlPlanePayload::TargetInput(payload)) => {
             Some(GrpcBody::TargetInputDelivery(TargetInputDelivery {
                 attachment_id: payload.attachment_id.clone(),
@@ -646,6 +675,17 @@ pub(crate) fn map_outbound_grpc_envelope(
                 session_id: payload.session_id.clone(),
                 input_bytes: decode_base64(&payload.bytes_base64)
                     .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::RawPtyInput(payload)) => {
+            Some(GrpcBody::RawPtyInput(RawPtyInput {
+                attachment_id: payload.attachment_id.clone(),
+                target_id: payload.target_id.clone(),
+                console_id: payload.console_id.clone(),
+                console_host_id: payload.console_host_id.clone(),
+                input_seq: payload.input_seq,
+                session_id: payload.session_id.clone(),
+                input_bytes: payload.input_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::ApplyResize(payload)) => {
@@ -665,6 +705,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 console_id: payload.console_id.clone(),
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::CloseMirrorRequest(payload)) => {
@@ -1180,6 +1221,7 @@ mod tests {
                     console_id,
                     cols,
                     rows,
+                    raw_pty_passthrough: _,
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");

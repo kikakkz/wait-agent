@@ -3,8 +3,8 @@ use crate::infra::base64::decode_base64;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
-    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
-    TargetPublished as GrpcTargetPublished,
+    OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
+    TargetInputDelivery, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
@@ -306,6 +306,27 @@ fn route_transport_envelope(
                 },
             )
         }
+        Some(Body::RawPtyOutput(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_raw_pty_output(
+                        session_id,
+                        target_id,
+                        payload.output_seq,
+                        payload.output_bytes.clone(),
+                    )
+                },
+            )
+        }
         Some(Body::MirrorBootstrapChunk(payload)) => {
             let Some(session) = session else {
                 return Ok(());
@@ -529,6 +550,25 @@ fn map_authority_command_to_grpc(
                 })?,
             })),
         ),
+        RemoteAuthorityCommand::RawPtyInput(payload) => (
+            Some(RouteContext {
+                authority_node_id: Some(session.node_id().to_string()),
+                target_id: Some(payload.target_id.clone()),
+                attachment_id: Some(payload.attachment_id.clone()),
+                console_id: Some(payload.console_id.clone()),
+                console_host_id: Some(payload.console_host_id.clone()),
+                session_id: Some(payload.session_id.clone()),
+            }),
+            Some(Body::RawPtyInput(RawPtyInput {
+                attachment_id: payload.attachment_id,
+                target_id: payload.target_id,
+                console_id: payload.console_id,
+                console_host_id: payload.console_host_id,
+                input_seq: payload.input_seq,
+                session_id: payload.session_id,
+                input_bytes: payload.input_bytes,
+            })),
+        ),
         RemoteAuthorityCommand::ApplyResize(payload) => (
             Some(RouteContext {
                 authority_node_id: Some(session.node_id().to_string()),
@@ -562,6 +602,7 @@ fn map_authority_command_to_grpc(
                 console_id: payload.console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             })),
         ),
         RemoteAuthorityCommand::CloseMirror(payload) => (

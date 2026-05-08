@@ -2,9 +2,9 @@ use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, 
 use crate::infra::remote_protocol::{
     ApplyResizePayload, ControlPlaneDestination, ControlPlanePayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, NodeBoundControlPlaneMessage, OpenMirrorRequestPayload,
-    OpenTargetOkPayload, ProtocolEnvelope, RemoteConsoleDescriptor, ResizeAuthorityChangedPayload,
-    RoutedControlPlaneMessage, TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
-    SERVER_SENDER_ID,
+    OpenTargetOkPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    RemoteConsoleDescriptor, ResizeAuthorityChangedPayload, RoutedControlPlaneMessage,
+    TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,12 +79,24 @@ impl RemoteControlPlaneService {
         }
     }
 
+    #[cfg(test)]
     pub fn open_target(
         &mut self,
         target: &ManagedSessionRecord,
         console: RemoteConsoleDescriptor,
         cols: usize,
         rows: usize,
+    ) -> Result<Vec<RoutedControlPlaneMessage>, RemoteControlPlaneError> {
+        self.open_target_with_raw_pty_mode(target, console, cols, rows, false)
+    }
+
+    pub fn open_target_with_raw_pty_mode(
+        &mut self,
+        target: &ManagedSessionRecord,
+        console: RemoteConsoleDescriptor,
+        cols: usize,
+        rows: usize,
+        raw_pty_passthrough: bool,
     ) -> Result<Vec<RoutedControlPlaneMessage>, RemoteControlPlaneError> {
         validate_remote_target(target)?;
         let session_id = target.address.session_id().to_string();
@@ -198,6 +210,7 @@ impl RemoteControlPlaneService {
                         console_id: console.console_id.clone(),
                         cols,
                         rows,
+                        raw_pty_passthrough,
                     }),
                 ),
             });
@@ -259,6 +272,61 @@ impl RemoteControlPlaneService {
                     console_host_id,
                     input_seq,
                     bytes_base64: bytes_base64.into(),
+                }),
+            ),
+        })
+    }
+
+    pub fn route_raw_pty_input(
+        &mut self,
+        target: &ManagedSessionRecord,
+        attachment_id: &str,
+        console_seq: u64,
+        input_bytes: Vec<u8>,
+    ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
+        validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
+        let target_id = target.address.id().as_str().to_string();
+        if console_seq == 0 {
+            return Err(RemoteControlPlaneError::InvalidConsoleSequence);
+        }
+
+        let (input_seq, console_id, console_host_id) = {
+            let state = self
+                .session_states
+                .get_mut(&session_id)
+                .ok_or(RemoteControlPlaneError::TargetNotOpened(target_id.clone()))?;
+            let attachment = state
+                .attachments
+                .iter()
+                .find(|attachment| attachment.attachment_id == attachment_id)
+                .ok_or_else(|| {
+                    RemoteControlPlaneError::AttachmentNotOpen(attachment_id.to_string())
+                })?;
+            state.input_seq += 1;
+            (
+                state.input_seq,
+                attachment.console.console_id.clone(),
+                attachment.console.console_host_id.clone(),
+            )
+        };
+        Ok(RoutedControlPlaneMessage {
+            destination: ControlPlaneDestination::AuthorityNode(
+                target.address.authority_id().to_string(),
+            ),
+            envelope: self.server_message(
+                Some(session_id.clone()),
+                Some(target_id.clone()),
+                Some(attachment_id.to_string()),
+                Some(console_id.clone()),
+                ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
+                    attachment_id: attachment_id.to_string(),
+                    session_id,
+                    target_id,
+                    console_id,
+                    console_host_id,
+                    input_seq,
+                    input_bytes,
                 }),
             ),
         })
@@ -350,6 +418,41 @@ impl RemoteControlPlaneService {
                     target_id: target.address.id().as_str().to_string(),
                     output_seq,
                     stream,
+                    output_bytes,
+                }),
+            ),
+        })
+    }
+
+    pub fn route_raw_pty_output(
+        &mut self,
+        target: &ManagedSessionRecord,
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
+        validate_remote_target(target)?;
+        let session_id = target.address.session_id().to_string();
+        let target_id = target.address.id().as_str().to_string();
+        if output_seq == 0 {
+            return Err(RemoteControlPlaneError::InvalidOutputSequence);
+        }
+        if !self.session_states.contains_key(&session_id) {
+            return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
+        }
+
+        Ok(RoutedControlPlaneMessage {
+            destination: ControlPlaneDestination::AllOpenedObservers {
+                session_id: session_id.clone(),
+            },
+            envelope: self.server_message(
+                Some(session_id.clone()),
+                Some(target.address.id().as_str().to_string()),
+                None,
+                None,
+                ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+                    session_id,
+                    target_id: target.address.id().as_str().to_string(),
+                    output_seq,
                     output_bytes,
                 }),
             ),
@@ -1192,6 +1295,82 @@ mod tests {
             ControlPlanePayload::TargetOutput(payload) => {
                 assert_eq!(payload.output_seq, 7);
                 assert_eq!(payload.stream, "pty");
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_pty_input_routes_bytes_without_base64() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+        let first_open = service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+        let attachment = match &first_open[0].envelope.payload {
+            ControlPlanePayload::OpenTargetOk(payload) => payload.attachment_id.clone(),
+            other => panic!("unexpected payload: {other:?}"),
+        };
+
+        let routed = service
+            .route_raw_pty_input(&target, &attachment, 1, b"\x1b[A".to_vec())
+            .expect("raw PTY input should route");
+
+        assert!(matches!(
+            routed.destination,
+            ControlPlaneDestination::AuthorityNode(ref node) if node == "peer-a"
+        ));
+        match routed.envelope.payload {
+            ControlPlanePayload::RawPtyInput(payload) => {
+                assert_eq!(payload.input_seq, 1);
+                assert_eq!(payload.input_bytes, b"\x1b[A");
+                assert_eq!(payload.console_host_id, "observer-a");
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_pty_output_is_fanned_out_to_all_opened_observers() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+        service
+            .open_target(
+                &target,
+                console("console-b", "observer-b", ConsoleLocation::ServerConsole),
+                140,
+                50,
+            )
+            .expect("second open should succeed");
+
+        let routed = service
+            .route_raw_pty_output(&target, 7, b"a".to_vec())
+            .expect("raw output should route");
+        let deliveries = service
+            .resolve_node_deliveries(&[routed])
+            .expect("deliveries should resolve");
+
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(deliveries[0].node_id, "observer-a");
+        assert_eq!(deliveries[1].node_id, "observer-b");
+        match &deliveries[0].envelope.payload {
+            ControlPlanePayload::RawPtyOutput(payload) => {
+                assert_eq!(payload.output_seq, 7);
+                assert_eq!(payload.output_bytes, b"a");
             }
             other => panic!("unexpected payload: {other:?}"),
         }

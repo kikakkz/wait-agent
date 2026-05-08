@@ -53,7 +53,9 @@ pub enum ControlPlanePayload {
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
     TargetInput(TargetInputPayload),
+    RawPtyInput(RawPtyInputPayload),
     TargetOutput(TargetOutputPayload),
+    RawPtyOutput(RawPtyOutputPayload),
     ApplyResize(ApplyResizePayload),
     TargetPublished(TargetPublishedPayload),
     TargetExited(TargetExitedPayload),
@@ -75,7 +77,9 @@ impl ControlPlanePayload {
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
             Self::TargetInput(_) => "target_input",
+            Self::RawPtyInput(_) => "raw_pty_input",
             Self::TargetOutput(_) => "target_output",
+            Self::RawPtyOutput(_) => "raw_pty_output",
             Self::ApplyResize(_) => "apply_resize",
             Self::TargetPublished(_) => "target_published",
             Self::TargetExited(_) => "target_exited",
@@ -106,6 +110,7 @@ pub struct OpenMirrorRequestPayload {
     pub console_id: String,
     pub cols: usize,
     pub rows: usize,
+    pub raw_pty_passthrough: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,11 +198,30 @@ pub struct TargetInputPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPtyInputPayload {
+    pub attachment_id: String,
+    pub session_id: String,
+    pub target_id: String,
+    pub console_id: String,
+    pub console_host_id: String,
+    pub input_seq: u64,
+    pub input_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetOutputPayload {
     pub session_id: String,
     pub target_id: String,
     pub output_seq: u64,
     pub stream: &'static str,
+    pub output_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPtyOutputPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub output_seq: u64,
     pub output_bytes: Vec<u8>,
 }
 

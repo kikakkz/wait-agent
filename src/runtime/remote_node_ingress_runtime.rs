@@ -355,6 +355,7 @@ fn route_grpc_envelope(
                     console_id: payload.console_id.clone(),
                     cols: payload.cols as usize,
                     rows: payload.rows as usize,
+                    raw_pty_passthrough: payload.raw_pty_passthrough,
                 }),
             })
         }
@@ -655,6 +656,7 @@ fn map_outbound_control_plane_envelope(
                 console_id: payload.console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }))
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
@@ -1051,6 +1053,7 @@ mod tests {
                             console_id: "console-1".to_string(),
                             cols: 120,
                             rows: 40,
+                            raw_pty_passthrough: false,
                         }),
                     },
                 },

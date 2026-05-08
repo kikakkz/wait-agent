@@ -1,8 +1,8 @@
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
-    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
-    TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
+    RawPtyOutputPayload, TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
@@ -39,6 +39,7 @@ pub enum RemoteAuthorityCommand {
     OpenMirror(OpenMirrorRequestPayload),
     CloseMirror(CloseMirrorRequestPayload),
     TargetInput(TargetInputPayload),
+    RawPtyInput(RawPtyInputPayload),
     ApplyResize(ApplyResizePayload),
 }
 
@@ -81,6 +82,9 @@ impl RemoteAuthorityTransportRuntime {
             ControlPlanePayload::TargetInput(payload) => {
                 Ok(RemoteAuthorityCommand::TargetInput(payload))
             }
+            ControlPlanePayload::RawPtyInput(payload) => {
+                Ok(RemoteAuthorityCommand::RawPtyInput(payload))
+            }
             ControlPlanePayload::ApplyResize(payload) => {
                 Ok(RemoteAuthorityCommand::ApplyResize(payload))
             }
@@ -104,6 +108,44 @@ impl RemoteAuthorityTransportRuntime {
             target_id: target_id.to_string(),
             output_seq,
             stream,
+            output_bytes,
+        });
+        let envelope = ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: format!(
+                "{}-authority-msg-{}",
+                self.node_id,
+                self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1
+            ),
+            message_type: payload.message_type(),
+            timestamp: now_rfc3339_like(),
+            sender_id: self.node_id.clone(),
+            correlation_id: None,
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload,
+        };
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("authority transport writer mutex should not be poisoned");
+        write_control_plane_envelope(&mut *writer, &envelope)?;
+        Ok(())
+    }
+
+    pub fn send_raw_pty_output(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        let payload = ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+            session_id: session_id.to_string(),
+            target_id: target_id.to_string(),
+            output_seq,
             output_bytes,
         });
         let envelope = ProtocolEnvelope {
@@ -409,7 +451,8 @@ mod tests {
         RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
     };
     use crate::infra::remote_protocol::{
-        ClientHelloPayload, ControlPlanePayload, ProtocolEnvelope, TargetInputPayload,
+        ClientHelloPayload, ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload,
+        TargetInputPayload,
     };
     use crate::infra::remote_transport_codec::read_control_plane_envelope;
     use crate::runtime::remote_authority_connection_runtime::{
@@ -525,6 +568,27 @@ mod tests {
             })
         );
 
+        RegistryRemoteControlPlaneSink::new(registry.clone())
+            .send(&[
+                crate::infra::remote_protocol::NodeBoundControlPlaneMessage {
+                    node_id: "peer-a".to_string(),
+                    envelope: raw_pty_input_envelope(),
+                },
+            ])
+            .expect("raw PTY input should route to bridged authority transport");
+        assert_eq!(
+            transport.recv_command().expect("raw input should decode"),
+            RemoteAuthorityCommand::RawPtyInput(RawPtyInputPayload {
+                attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-a".to_string(),
+                console_host_id: "observer-a".to_string(),
+                input_seq: 8,
+                input_bytes: b"\x1b[A".to_vec(),
+            })
+        );
+
         transport
             .send_target_output(
                 "shell-1",
@@ -542,6 +606,22 @@ mod tests {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 11);
                     assert_eq!(payload.output_bytes, b"b");
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        transport
+            .send_raw_pty_output("shell-1", "remote-peer:peer-a:shell-1", 12, b"c".to_vec())
+            .expect("raw output should send");
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("raw output envelope should arrive")
+        {
+            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                ControlPlanePayload::RawPtyOutput(payload) => {
+                    assert_eq!(payload.output_seq, 12);
+                    assert_eq!(payload.output_bytes, b"c");
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -581,6 +661,30 @@ mod tests {
                 console_host_id: "observer-a".to_string(),
                 input_seq: 7,
                 bytes_base64: "YQ==".to_string(),
+            }),
+        }
+    }
+
+    fn raw_pty_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-raw-pty-input".to_string(),
+            message_type: "raw_pty_input",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "server".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: Some("attach-1".to_string()),
+            console_id: Some("console-a".to_string()),
+            payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
+                attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-a".to_string(),
+                console_host_id: "observer-a".to_string(),
+                input_seq: 8,
+                input_bytes: b"\x1b[A".to_vec(),
             }),
         }
     }

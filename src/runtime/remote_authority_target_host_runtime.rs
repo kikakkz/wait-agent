@@ -27,7 +27,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirrorState {
     Inactive,
-    Active,
+    Active { raw_pty_passthrough: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,7 +332,7 @@ where
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
                     payload,
                 ))) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         eprintln!("[target-host] re-mirror request (mirror already active)");
                         if let Err(error) = self
                             .gateway
@@ -406,7 +406,9 @@ where
                         }
                         continue;
                     }
-                    mirror_state = MirrorState::Active;
+                    mirror_state = MirrorState::Active {
+                        raw_pty_passthrough: payload.raw_pty_passthrough,
+                    };
                     eprintln!("[target-host] mirror activated, sending emit_bootstrap");
                     if let Err(error) = transport
                         .send_open_mirror_accepted(
@@ -445,6 +447,16 @@ where
                         break Err(remote_authority_error(error));
                     }
                 }
+                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
+                    payload,
+                ))) => {
+                    if let Err(error) = input_fifo
+                        .write_all(&payload.input_bytes)
+                        .and_then(|_| input_fifo.flush())
+                    {
+                        break Err(remote_authority_error(error));
+                    }
+                }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
                 ))) => {
@@ -459,7 +471,7 @@ where
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
                     _payload,
                 ))) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
                             break Err(error);
                         }
@@ -467,25 +479,39 @@ where
                     }
                 }
                 Ok(AuthorityHostEvent::OutputChunk(bytes)) => {
-                    if mirror_state != MirrorState::Active {
-                        continue;
-                    }
+                    let raw_pty_passthrough = match mirror_state {
+                        MirrorState::Inactive => continue,
+                        MirrorState::Active {
+                            raw_pty_passthrough,
+                        } => raw_pty_passthrough,
+                    };
                     output_seq += 1;
-                    if let Err(error) = transport
-                        .send_target_output(
-                            &command.transport_session_id,
-                            &command.target_id,
-                            output_seq,
-                            "pty",
-                            bytes,
-                        )
-                        .map_err(remote_authority_error)
-                    {
+                    let send_result = if raw_pty_passthrough {
+                        transport
+                            .send_raw_pty_output(
+                                &command.transport_session_id,
+                                &command.target_id,
+                                output_seq,
+                                bytes,
+                            )
+                            .map_err(remote_authority_error)
+                    } else {
+                        transport
+                            .send_target_output(
+                                &command.transport_session_id,
+                                &command.target_id,
+                                output_seq,
+                                "pty",
+                                bytes,
+                            )
+                            .map_err(remote_authority_error)
+                    };
+                    if let Err(error) = send_result {
                         break Err(error);
                     }
                 }
                 Ok(AuthorityHostEvent::TransportClosed) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
                             break Err(error);
                         }
@@ -496,7 +522,7 @@ where
             }
         };
 
-        if mirror_state == MirrorState::Active {
+        if matches!(mirror_state, MirrorState::Active { .. }) {
             let _ = deactivate_mirror(self, &command, &pane);
         }
         running.store(false, Ordering::Relaxed);
@@ -1745,6 +1771,7 @@ mod tests {
                 console_id: "console-a".to_string(),
                 cols: 80,
                 rows: 24,
+                raw_pty_passthrough: false,
             }),
         }
     }

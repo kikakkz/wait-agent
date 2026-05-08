@@ -111,6 +111,7 @@ impl RemoteMainSlotRuntime {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub fn activate_target(
         &self,
         target: &ManagedSessionRecord,
@@ -118,10 +119,21 @@ impl RemoteMainSlotRuntime {
         cols: usize,
         rows: usize,
     ) -> Result<RemoteAttachmentBinding, LifecycleError> {
+        self.activate_target_with_raw_pty_mode(target, console, cols, rows, false)
+    }
+
+    pub fn activate_target_with_raw_pty_mode(
+        &self,
+        target: &ManagedSessionRecord,
+        console: RemoteConsoleDescriptor,
+        cols: usize,
+        rows: usize,
+        raw_pty_passthrough: bool,
+    ) -> Result<RemoteAttachmentBinding, LifecycleError> {
         let messages = {
             self.control_plane
                 .borrow_mut()
-                .open_target(target, console, cols, rows)
+                .open_target_with_raw_pty_mode(target, console, cols, rows, raw_pty_passthrough)
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?
         };
         let binding = extract_open_binding(&messages).ok_or_else(|| {
@@ -144,6 +156,21 @@ impl RemoteMainSlotRuntime {
             .control_plane
             .borrow_mut()
             .route_console_input(target, &binding.attachment_id, console_seq, bytes_base64)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        self.send_messages(&[message])
+    }
+
+    pub fn send_raw_pty_input(
+        &self,
+        target: &ManagedSessionRecord,
+        binding: &RemoteAttachmentBinding,
+        console_seq: u64,
+        input_bytes: Vec<u8>,
+    ) -> Result<(), LifecycleError> {
+        let message = self
+            .control_plane
+            .borrow_mut()
+            .route_raw_pty_input(target, &binding.attachment_id, console_seq, input_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.send_messages(&[message])
     }
@@ -190,6 +217,20 @@ impl RemoteMainSlotRuntime {
             .control_plane
             .borrow_mut()
             .route_target_output(target, output_seq, stream, output_bytes)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        self.send_messages(&[message])
+    }
+
+    pub fn send_raw_pty_output(
+        &self,
+        target: &ManagedSessionRecord,
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), LifecycleError> {
+        let message = self
+            .control_plane
+            .borrow_mut()
+            .route_raw_pty_output(target, output_seq, output_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.send_messages(&[message])
     }

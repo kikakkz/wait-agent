@@ -3,8 +3,8 @@ use crate::infra::remote_protocol::{
     ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, NodeSessionChannel,
     NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
-    ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload, TargetInputPayload,
-    TargetOutputPayload, TargetPublishedPayload,
+    RawPtyInputPayload, RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
+    TargetExitedPayload, TargetInputPayload, TargetOutputPayload, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -150,6 +150,7 @@ fn write_payload(
             write_string(writer, &payload.console_id)?;
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
+            write_bool(writer, payload.raw_pty_passthrough)?;
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
             write_u8(writer, 13)?;
@@ -226,12 +227,29 @@ fn write_payload(
             write_u64(writer, payload.input_seq)?;
             write_string(writer, &payload.bytes_base64)?;
         }
+        ControlPlanePayload::RawPtyInput(payload) => {
+            write_u8(writer, 18)?;
+            write_string(writer, &payload.attachment_id)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_string(writer, &payload.console_id)?;
+            write_string(writer, &payload.console_host_id)?;
+            write_u64(writer, payload.input_seq)?;
+            write_bytes(writer, &payload.input_bytes)?;
+        }
         ControlPlanePayload::TargetOutput(payload) => {
             write_u8(writer, 7)?;
             write_string(writer, &payload.session_id)?;
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.output_seq)?;
             write_static_string(writer, payload.stream)?;
+            write_bytes(writer, &payload.output_bytes)?;
+        }
+        ControlPlanePayload::RawPtyOutput(payload) => {
+            write_u8(writer, 19)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_u64(writer, payload.output_seq)?;
             write_bytes(writer, &payload.output_bytes)?;
         }
         ControlPlanePayload::ApplyResize(payload) => {
@@ -291,6 +309,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             console_id: read_string(reader)?,
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
+            raw_pty_passthrough: read_bool(reader)?,
         }),
         13 => ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
             session_id: read_string(reader)?,
@@ -358,11 +377,26 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             input_seq: read_u64(reader)?,
             bytes_base64: read_string(reader)?,
         }),
+        18 => ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
+            attachment_id: read_string(reader)?,
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            console_id: read_string(reader)?,
+            console_host_id: read_string(reader)?,
+            input_seq: read_u64(reader)?,
+            input_bytes: read_bytes(reader)?,
+        }),
         7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
             session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             output_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
+            output_bytes: read_bytes(reader)?,
+        }),
+        19 => ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            output_seq: read_u64(reader)?,
             output_bytes: read_bytes(reader)?,
         }),
         8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
@@ -742,6 +776,7 @@ mod tests {
                 console_id: "console-1".to_string(),
                 cols: 120,
                 rows: 40,
+                raw_pty_passthrough: false,
             }),
         };
         let mut bytes = Vec::new();

@@ -236,6 +236,7 @@ impl RemoteMainSlotPaneRuntime {
             usize::from(initial_size.cols),
             usize::from(initial_size.rows),
         );
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox.clone());
 
         let (event_tx, event_rx) = mpsc::channel();
         spawn_input_thread(event_tx.clone());
@@ -307,9 +308,15 @@ impl RemoteMainSlotPaneRuntime {
             loop {
                 match event_rx.recv() {
                     Ok(RemotePaneEvent::MailboxUpdated) => {
-                        let raw = observer
-                            .sync_and_collect_raw()
-                            .map_err(remote_protocol_error)?;
+                        let raw = if raw_pty_passthrough {
+                            raw_output_reader
+                                .sync_and_collect_raw()
+                                .map_err(remote_protocol_error)?
+                        } else {
+                            observer
+                                .sync_and_collect_raw()
+                                .map_err(remote_protocol_error)?
+                        };
                         if raw.is_empty() {
                             continue;
                         }
@@ -468,12 +475,21 @@ impl RemoteMainSlotPaneRuntime {
                                 continue;
                             }
                             console_seq += 1;
-                            remote_runtime.send_console_input(
-                                &target,
-                                binding,
-                                console_seq,
-                                encode_base64(&normalized),
-                            )?;
+                            if raw_pty_passthrough {
+                                remote_runtime.send_raw_pty_input(
+                                    &target,
+                                    binding,
+                                    console_seq,
+                                    normalized,
+                                )?;
+                            } else {
+                                remote_runtime.send_console_input(
+                                    &target,
+                                    binding,
+                                    console_seq,
+                                    encode_base64(&normalized),
+                                )?;
+                            }
                         }
                     }
                     Err(_) => return Ok(()),
@@ -532,7 +548,7 @@ fn activate_surface_target_with_mode(
     raw_pty_passthrough: bool,
 ) -> Result<(RemoteAttachmentBinding, Vec<u8>), LifecycleError> {
     observer.begin_bootstrap();
-    let binding = remote_runtime.activate_target(
+    let binding = remote_runtime.activate_target_with_raw_pty_mode(
         target,
         RemoteConsoleDescriptor {
             console_id: spec.console_id.clone(),
@@ -541,6 +557,7 @@ fn activate_surface_target_with_mode(
         },
         usize::from(size.cols),
         usize::from(size.rows),
+        raw_pty_passthrough,
     )?;
     let raw = if raw_pty_passthrough {
         observer
@@ -696,6 +713,12 @@ struct RemotePaneResizeWatcher {
     _writer: UnixStream,
 }
 
+struct RemoteRawPtyMailboxReader {
+    mailbox: LocalNodeMailbox,
+    processed_envelopes: usize,
+    last_output_seq: Option<u64>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RemoteTerminalInputTranslator {
     pending: Vec<u8>,
@@ -725,6 +748,37 @@ impl Drop for RemotePaneCursorGuard {
 impl Drop for RemotePaneResizeWatcher {
     fn drop(&mut self) {
         REMOTE_PANE_SIGWINCH_WRITE_FD.store(-1, Ordering::Relaxed);
+    }
+}
+
+impl RemoteRawPtyMailboxReader {
+    fn new(mailbox: LocalNodeMailbox) -> Self {
+        Self {
+            mailbox,
+            processed_envelopes: 0,
+            last_output_seq: None,
+        }
+    }
+
+    fn sync_and_collect_raw(&mut self) -> Result<Vec<u8>, RemoteSocketTransportError> {
+        let envelopes = self.mailbox.snapshot_from(self.processed_envelopes);
+        let mut raw = Vec::new();
+        for envelope in &envelopes {
+            if let ControlPlanePayload::RawPtyOutput(payload) = &envelope.payload {
+                if let Some(last_output_seq) = self.last_output_seq {
+                    if payload.output_seq <= last_output_seq {
+                        return Err(RemoteSocketTransportError::new(format!(
+                            "remote raw PTY received out-of-order output for `{}`: {} after {}",
+                            payload.target_id, payload.output_seq, last_output_seq
+                        )));
+                    }
+                }
+                self.last_output_seq = Some(payload.output_seq);
+                raw.extend_from_slice(&payload.output_bytes);
+            }
+        }
+        self.processed_envelopes += envelopes.len();
+        Ok(raw)
     }
 }
 
@@ -925,6 +979,18 @@ pub(crate) fn apply_authority_envelope(
                     payload.stream,
                     payload.output_bytes.clone(),
                 )
+                .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
+        }
+        ControlPlanePayload::RawPtyOutput(payload) => {
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
+            }
+            remote_runtime
+                .send_raw_pty_output(target, payload.output_seq, payload.output_bytes.clone())
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
         ControlPlanePayload::MirrorBootstrapChunk(payload) => {
