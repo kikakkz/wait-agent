@@ -450,10 +450,7 @@ where
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
                     payload,
                 ))) => {
-                    if let Err(error) = input_fifo
-                        .write_all(&payload.input_bytes)
-                        .and_then(|_| input_fifo.flush())
-                    {
+                    if let Err(error) = input_fifo.write_all(&payload.input_bytes) {
                         break Err(remote_authority_error(error));
                     }
                 }
