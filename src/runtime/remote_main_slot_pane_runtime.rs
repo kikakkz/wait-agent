@@ -313,7 +313,7 @@ impl RemoteMainSlotPaneRuntime {
                         if snapshot.has_visible_output
                             && matches!(authority_status, AuthorityTransportStatus::Connected)
                         {
-                            render_cursor_overlay(&mut stdout, snapshot.active_screen())?;
+                            render_remote_cursor(&mut stdout, snapshot.active_screen())?;
                         }
                         stdout.flush().map_err(|error| {
                             LifecycleError::Io(
@@ -960,7 +960,7 @@ fn draw_remote_snapshot(
     }
 
     if connected_visible_output {
-        render_cursor_overlay(&mut stdout, active_screen)?;
+        render_remote_cursor(&mut stdout, active_screen)?;
     } else {
         write!(stdout, "\x1b[?7h\x1b[?25l").map_err(|error| {
             LifecycleError::Io("failed to hide remote main-slot cursor".to_string(), error)
@@ -971,40 +971,15 @@ fn draw_remote_snapshot(
     })
 }
 
-/// Always render a visual cursor indicator at the cursor position.
-/// Many terminal programs (e.g. Claude) hide the cursor via DECTCEM
-/// \x1b[?25l after startup and never re-show it, leaving cursor_visible
-/// false in the observer. However, the user still needs to see where
-/// input goes. The reverse-video overlay is part of the rendered text
-/// and visible regardless of pane focus or DECTCEM state.
-fn render_cursor_overlay(
+fn render_remote_cursor(
     stdout: &mut io::StdoutLock<'_>,
     active_screen: &ScreenSnapshot,
 ) -> Result<(), LifecycleError> {
     let display_row = usize::from(active_screen.cursor_row.saturating_add(1));
     let display_col = usize::from(active_screen.cursor_col.saturating_add(1));
-    let cursor_char = active_screen
-        .lines
-        .get(active_screen.cursor_row as usize)
-        .and_then(|line| {
-            let target = active_screen.cursor_col as usize;
-            let mut col = 0usize;
-            for ch in line.chars() {
-                let w = terminal_char_display_width(ch);
-                if col + w > target || col == target {
-                    return Some(ch);
-                }
-                col += w;
-            }
-            None
-        })
-        .unwrap_or(' ');
     write!(
         stdout,
-        "\x1b[?7h\x1b[{};{}H\x1b[7m{}\x1b[27m\x1b[{};{}H{}",
-        display_row,
-        display_col,
-        cursor_char,
+        "\x1b[?7h\x1b[{};{}H{}",
         display_row,
         display_col,
         if active_screen.cursor_visible {
@@ -1014,10 +989,7 @@ fn render_cursor_overlay(
         },
     )
     .map_err(|error| {
-        LifecycleError::Io(
-            "failed to draw remote main-slot visual cursor".to_string(),
-            error,
-        )
+        LifecycleError::Io("failed to sync remote main-slot cursor".to_string(), error)
     })
 }
 
