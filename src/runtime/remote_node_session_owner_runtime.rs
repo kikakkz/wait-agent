@@ -933,7 +933,7 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
     match command {
         RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::TargetInput(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
     }
 }
@@ -1135,7 +1135,7 @@ fn forward_host_output_to_session(
                     &payload.target_id,
                     payload.output_seq,
                     payload.stream,
-                    payload.bytes_base64,
+                    payload.output_bytes,
                 )?;
             }
             other => {
@@ -1301,7 +1301,27 @@ fn forward_host_output_to_shared_session(
                         &payload.target_id,
                         payload.output_seq,
                         payload.stream,
-                        payload.bytes_base64,
+                        payload.output_bytes,
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::RawPtyOutput(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                if session
+                    .send_raw_pty_output(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.output_seq,
+                        payload.output_bytes,
                     )
                     .is_err()
                 {
@@ -1329,7 +1349,7 @@ fn authority_command_envelope(
     let session_id = match &command {
         RemoteAuthorityCommand::OpenMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
-        RemoteAuthorityCommand::TargetInput(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
     };
     let payload = match command {
@@ -1339,7 +1359,7 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => {
             ControlPlanePayload::CloseMirrorRequest(payload)
         }
-        RemoteAuthorityCommand::TargetInput(payload) => ControlPlanePayload::TargetInput(payload),
+        RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
     };
     ProtocolEnvelope {
@@ -1387,7 +1407,7 @@ mod tests {
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, ProtocolEnvelope, TargetExitedPayload, TargetInputPayload,
+        NodeSessionEnvelope, ProtocolEnvelope, RawPtyInputPayload, TargetExitedPayload,
         TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::infra::remote_transport_codec::{
@@ -1439,6 +1459,7 @@ mod tests {
                 console_id: "console-a".to_string(),
                 cols: 80,
                 rows: 24,
+                raw_pty_passthrough: false,
             },
         );
 
@@ -1737,16 +1758,16 @@ mod tests {
                 stream,
                 &NodeSessionEnvelope {
                     channel: NodeSessionChannel::Authority,
-                    envelope: target_input_envelope(
+                    envelope: raw_pty_input_envelope(
                         target_id_a,
                         "attach-a",
                         "console-a",
                         7,
-                        "YQ==",
+                        b"a".to_vec(),
                     ),
                 },
             )
-            .expect("target input should encode");
+            .expect("raw PTY input should encode");
             write_node_session_envelope(
                 stream,
                 &NodeSessionEnvelope {
@@ -1760,10 +1781,10 @@ mod tests {
         match recv_command_with_timeout(transport_a, Duration::from_secs(1))
             .expect("target-a command should arrive")
         {
-            RemoteAuthorityCommand::TargetInput(payload) => {
+            RemoteAuthorityCommand::RawPtyInput(payload) => {
                 assert_eq!(payload.target_id, target_id_a);
                 assert_eq!(payload.input_seq, 7);
-                assert_eq!(payload.bytes_base64, "YQ==");
+                assert_eq!(payload.input_bytes, b"a");
             }
             other => panic!("unexpected target-a authority command: {other:?}"),
         }
@@ -1941,17 +1962,24 @@ mod tests {
                 stream,
                 &NodeSessionEnvelope {
                     channel: NodeSessionChannel::Authority,
-                    envelope: target_input_envelope(target_id, "attach-a", "console-a", 1, "YQ=="),
+                    envelope: raw_pty_input_envelope(
+                        target_id,
+                        "attach-a",
+                        "console-a",
+                        1,
+                        b"a".to_vec(),
+                    ),
                 },
             )
-            .expect("initial target input should encode");
+            .expect("initial raw PTY input should encode");
         }
         match recv_shared_command_with_timeout(transport_a.clone(), Duration::from_secs(1))
             .expect("initial target-a command should arrive")
         {
-            RemoteAuthorityCommand::TargetInput(payload) => {
+            RemoteAuthorityCommand::RawPtyInput(payload) => {
                 assert_eq!(payload.target_id, target_id);
                 assert_eq!(payload.input_seq, 1);
+                assert_eq!(payload.input_bytes, b"a");
             }
             other => panic!("unexpected initial authority command: {other:?}"),
         }
@@ -1984,18 +2012,24 @@ mod tests {
                 stream,
                 &NodeSessionEnvelope {
                     channel: NodeSessionChannel::Authority,
-                    envelope: target_input_envelope(target_id, "attach-a", "console-a", 2, "Yg=="),
+                    envelope: raw_pty_input_envelope(
+                        target_id,
+                        "attach-a",
+                        "console-a",
+                        2,
+                        b"b".to_vec(),
+                    ),
                 },
             )
-            .expect("reconnected target input should encode");
+            .expect("reconnected raw PTY input should encode");
         }
         match recv_shared_command_with_timeout(transport_a, Duration::from_secs(1))
             .expect("reconnected target-a command should arrive")
         {
-            RemoteAuthorityCommand::TargetInput(payload) => {
+            RemoteAuthorityCommand::RawPtyInput(payload) => {
                 assert_eq!(payload.target_id, target_id);
                 assert_eq!(payload.input_seq, 2);
-                assert_eq!(payload.bytes_base64, "Yg==");
+                assert_eq!(payload.input_bytes, b"b");
             }
             other => panic!("unexpected reconnected authority command: {other:?}"),
         }
@@ -2020,14 +2054,14 @@ mod tests {
         ))
     }
 
-    fn target_input_envelope(
+    fn raw_pty_input_envelope(
         target_id: &str,
         attachment_id: &str,
         console_id: &str,
         input_seq: u64,
-        bytes_base64: &str,
+        input_bytes: Vec<u8>,
     ) -> ProtocolEnvelope<ControlPlanePayload> {
-        let payload = ControlPlanePayload::TargetInput(TargetInputPayload {
+        let payload = ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
             attachment_id: attachment_id.to_string(),
             session_id: target_id
                 .splitn(3, ':')
@@ -2038,11 +2072,11 @@ mod tests {
             console_id: console_id.to_string(),
             console_host_id: "host-a".to_string(),
             input_seq,
-            bytes_base64: bytes_base64.to_string(),
+            input_bytes,
         });
         ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!("target-input-{input_seq}"),
+            message_id: format!("raw-pty-input-{input_seq}"),
             message_type: payload.message_type(),
             timestamp: "1Z".to_string(),
             sender_id: "server".to_string(),

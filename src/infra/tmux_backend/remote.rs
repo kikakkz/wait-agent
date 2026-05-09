@@ -100,6 +100,22 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    pub(crate) fn pane_tty_path_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "#{pane_tty}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout.trim().to_string())
+    }
+
     pub(crate) fn resize_pane_on_socket(
         &self,
         socket_name: &str,
@@ -359,6 +375,7 @@ fn clear_pane_pipe_args(pane: &TmuxPaneId) -> Vec<String> {
 fn set_pane_pipe_args(pane: &TmuxPaneId, command: &str) -> Vec<String> {
     vec![
         "pipe-pane".to_string(),
+        "-I".to_string(),
         "-O".to_string(),
         "-t".to_string(),
         pane.as_str().to_string(),
@@ -428,7 +445,7 @@ mod tests {
         );
         assert_eq!(
             set_pane_pipe_args(&TmuxPaneId::new("%4"), "echo bridge"),
-            vec!["pipe-pane", "-O", "-t", "%4", "echo bridge"]
+            vec!["pipe-pane", "-I", "-O", "-t", "%4", "echo bridge"]
         );
         assert_eq!(
             set_session_environment_args("shell-1", "WAITAGENT_X", "value"),

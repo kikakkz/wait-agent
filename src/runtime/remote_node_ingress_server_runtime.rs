@@ -1,9 +1,8 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
-use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
-    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
     TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
@@ -14,6 +13,7 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
     REMOTE_PROTOCOL_VERSION,
 };
+use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
@@ -84,7 +84,7 @@ impl RemoteNodeIngressServerRuntime {
             .set_nonblocking(true)
             .map_err(remote_node_ingress_error)?;
         let _guard = self.start()?;
-        while any_live_workspace_exists(&self.publication_runtime)? {
+        while any_live_workspace_exists()? {
             let _ = drain_owner_ping(&listener);
             thread::sleep(BRIDGE_REFRESH_INTERVAL);
         }
@@ -181,12 +181,14 @@ fn drain_owner_ping(listener: &std::os::unix::net::UnixListener) -> io::Result<(
     }
 }
 
-fn any_live_workspace_exists(
-    publication_runtime: &RemoteTargetPublicationRuntime,
-) -> Result<bool, LifecycleError> {
-    Ok(!publication_runtime
-        .live_workspace_socket_names()?
-        .is_empty())
+fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
+    let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_node_ingress_error)?;
+    let sockets = backend
+        .discover_waitagent_sockets()
+        .map_err(remote_node_ingress_error)?;
+    Ok(sockets
+        .iter()
+        .any(|socket_name| backend.socket_is_live(socket_name)))
 }
 
 impl Drop for RemoteNodeIngressServerGuard {
@@ -219,8 +221,10 @@ fn run_node_ingress_server_loop(
                     sessions.insert(node_id, active);
                 }
                 RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
-                    if let Some(active) = sessions.get_mut(&node_id) {
-                        refresh_authority_bridges(&node_id, active, internal_tx.clone());
+                    if !is_high_frequency_authority_input(&envelope) {
+                        if let Some(active) = sessions.get_mut(&node_id) {
+                            refresh_authority_bridges(&node_id, active, internal_tx.clone());
+                        }
                     }
                     let _ = route_transport_envelope(
                         &publication_runtime,
@@ -265,6 +269,10 @@ fn run_node_ingress_server_loop(
     }
 }
 
+fn is_high_frequency_authority_input(envelope: &GrpcNodeSessionEnvelope) -> bool {
+    matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_)))
+}
+
 fn route_transport_envelope(
     publication_runtime: &RemoteTargetPublicationRuntime,
     node_id: &str,
@@ -301,7 +309,28 @@ fn route_transport_envelope(
                         target_id,
                         payload.output_seq,
                         stream,
-                        encode_base64(&payload.output_bytes),
+                        payload.output_bytes.clone(),
+                    )
+                },
+            )
+        }
+        Some(Body::RawPtyOutput(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_raw_pty_output(
+                        session_id,
+                        target_id,
+                        payload.output_seq,
+                        payload.output_bytes.clone(),
                     )
                 },
             )
@@ -324,7 +353,7 @@ fn route_transport_envelope(
                         target_id,
                         payload.chunk_seq,
                         stream,
-                        encode_base64(&payload.output_bytes),
+                        payload.output_bytes.clone(),
                     )
                 },
             )
@@ -508,7 +537,7 @@ fn map_authority_command_to_grpc(
     command: RemoteAuthorityCommand,
 ) -> Result<GrpcNodeSessionEnvelope, io::Error> {
     let (route, body) = match command {
-        RemoteAuthorityCommand::TargetInput(payload) => (
+        RemoteAuthorityCommand::RawPtyInput(payload) => (
             Some(RouteContext {
                 authority_node_id: Some(session.node_id().to_string()),
                 target_id: Some(payload.target_id.clone()),
@@ -517,16 +546,14 @@ fn map_authority_command_to_grpc(
                 console_host_id: Some(payload.console_host_id.clone()),
                 session_id: Some(payload.session_id.clone()),
             }),
-            Some(Body::TargetInputDelivery(TargetInputDelivery {
+            Some(Body::RawPtyInput(RawPtyInput {
                 attachment_id: payload.attachment_id,
                 target_id: payload.target_id,
                 console_id: payload.console_id,
                 console_host_id: payload.console_host_id,
                 input_seq: payload.input_seq,
                 session_id: payload.session_id,
-                input_bytes: decode_base64(&payload.bytes_base64).map_err(|error| {
-                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-                })?,
+                input_bytes: payload.input_bytes,
             })),
         ),
         RemoteAuthorityCommand::ApplyResize(payload) => (
@@ -562,6 +589,7 @@ fn map_authority_command_to_grpc(
                 console_id: payload.console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             })),
         ),
         RemoteAuthorityCommand::CloseMirror(payload) => (
@@ -756,14 +784,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_authority_socket_paths, extract_target_component, route_transport_envelope,
-        ActiveAuthoritySocketBridge, ActiveNodeIngressSession, RemoteNodeIngressServerRuntime,
+        discover_authority_socket_paths, extract_target_component,
+        is_high_frequency_authority_input, route_transport_envelope, ActiveAuthoritySocketBridge,
+        ActiveNodeIngressSession, RemoteNodeIngressServerRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_proto::v1::{
-        MirrorBootstrapChunk, MirrorBootstrapComplete, NodeSessionEnvelope, RouteContext,
-        TargetOutput,
+        MirrorBootstrapChunk, MirrorBootstrapComplete, NodeSessionEnvelope, RawPtyInput,
+        RouteContext, TargetOutput,
     };
     use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
     use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityTransportRuntime;
@@ -820,23 +849,52 @@ mod tests {
         fs::write(&matching_scoped, b"").expect("scoped matching file should write");
         fs::write(&different_authority, b"").expect("other authority file should write");
 
-        let mut paths = discover_authority_socket_paths("peer-a")
+        let paths = discover_authority_socket_paths("peer-a")
             .expect("authority socket discovery should succeed");
-        paths.sort();
-
-        assert_eq!(
-            paths,
-            vec![
-                matching_b.clone(),
-                matching_scoped.clone(),
-                matching_a.clone()
-            ]
-        );
+        assert!(paths.contains(&matching_a));
+        assert!(paths.contains(&matching_b));
+        assert!(paths.contains(&matching_scoped));
+        assert!(!paths.contains(&different_authority));
 
         let _ = fs::remove_file(matching_a);
         let _ = fs::remove_file(matching_b);
         let _ = fs::remove_file(matching_scoped);
         let _ = fs::remove_file(different_authority);
+    }
+
+    #[test]
+    fn high_frequency_authority_input_skips_bridge_refresh() {
+        assert!(is_high_frequency_authority_input(&NodeSessionEnvelope {
+            message_id: "raw-input".to_string(),
+            sent_at: None,
+            session_instance_id: "session-1".to_string(),
+            correlation_id: None,
+            route: None,
+            body: Some(Body::RawPtyInput(RawPtyInput {
+                attachment_id: "attach-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-a".to_string(),
+                console_host_id: "observer-a".to_string(),
+                input_seq: 1,
+                session_id: "shell-1".to_string(),
+                input_bytes: b"x".to_vec(),
+            })),
+        }));
+
+        assert!(!is_high_frequency_authority_input(&NodeSessionEnvelope {
+            message_id: "output".to_string(),
+            sent_at: None,
+            session_instance_id: "session-1".to_string(),
+            correlation_id: None,
+            route: None,
+            body: Some(Body::TargetOutput(TargetOutput {
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 1,
+                stream: "pty".to_string(),
+                session_id: "shell-1".to_string(),
+                output_bytes: b"x".to_vec(),
+            })),
+        }));
     }
 
     #[test]
@@ -922,7 +980,7 @@ mod tests {
                 assert_eq!(payload.session_id, "shell-1");
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.chunk_seq, 1);
-                assert_eq!(payload.bytes_base64, "Ym9vdHN0cmFw");
+                assert_eq!(payload.output_bytes, b"bootstrap");
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -951,7 +1009,7 @@ mod tests {
                 assert_eq!(payload.session_id, "shell-1");
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.output_seq, 7);
-                assert_eq!(payload.bytes_base64, "YQ==");
+                assert_eq!(payload.output_bytes, b"a");
             }
             other => panic!("unexpected payload: {other:?}"),
         }

@@ -436,7 +436,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
-    fn discover_waitagent_sockets(&self) -> Result<Vec<TmuxSocketName>, TmuxError> {
+    pub(crate) fn discover_waitagent_sockets(&self) -> Result<Vec<TmuxSocketName>, TmuxError> {
         let socket_dir = tmux_socket_dir();
         if !socket_dir.exists() {
             return Ok(Vec::new());

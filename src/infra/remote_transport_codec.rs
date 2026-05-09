@@ -3,13 +3,24 @@ use crate::infra::remote_protocol::{
     ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, NodeSessionChannel,
     NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
-    ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload, TargetInputPayload,
-    TargetOutputPayload, TargetPublishedPayload,
+    RawPtyInputPayload, RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
+    TargetExitedPayload, TargetOutputPayload, TargetPublishedPayload,
 };
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 
 const REGISTRATION_MAGIC: &[u8; 4] = b"wr1n";
+const AUTHORITY_FRAME_MAGIC: &[u8; 4] = b"waRP";
+const AUTHORITY_FRAME_CONTROL_PLANE: u8 = 1;
+const AUTHORITY_FRAME_RAW_PTY_INPUT: u8 = 2;
+const AUTHORITY_FRAME_RAW_PTY_OUTPUT: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorityTransportFrame {
+    ControlPlane(ProtocolEnvelope<ControlPlanePayload>),
+    RawPtyInput(RawPtyInputPayload),
+    RawPtyOutput(RawPtyOutputPayload),
+}
 
 pub fn write_registration_frame(
     writer: &mut impl Write,
@@ -38,6 +49,15 @@ pub fn write_control_plane_envelope(
     writer: &mut impl Write,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<(), RemoteTransportCodecError> {
+    write_control_plane_envelope_without_flush(writer, envelope)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_control_plane_envelope_without_flush(
+    writer: &mut impl Write,
+    envelope: &ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<(), RemoteTransportCodecError> {
     write_string(writer, &envelope.protocol_version)?;
     write_string(writer, &envelope.message_id)?;
     write_string(writer, &envelope.timestamp)?;
@@ -48,7 +68,6 @@ pub fn write_control_plane_envelope(
     write_optional_string(writer, envelope.attachment_id.as_deref())?;
     write_optional_string(writer, envelope.console_id.as_deref())?;
     write_payload(writer, &envelope.payload)?;
-    writer.flush()?;
     Ok(())
 }
 
@@ -88,6 +107,55 @@ pub fn read_control_plane_envelope(
         console_id,
         payload,
     })
+}
+
+pub fn write_authority_transport_frame(
+    writer: &mut impl Write,
+    frame: &AuthorityTransportFrame,
+) -> Result<(), RemoteTransportCodecError> {
+    writer.write_all(AUTHORITY_FRAME_MAGIC)?;
+    match frame {
+        AuthorityTransportFrame::ControlPlane(envelope) => {
+            write_u8(writer, AUTHORITY_FRAME_CONTROL_PLANE)?;
+            write_control_plane_envelope_without_flush(writer, envelope)?;
+        }
+        AuthorityTransportFrame::RawPtyInput(payload) => {
+            write_u8(writer, AUTHORITY_FRAME_RAW_PTY_INPUT)?;
+            write_raw_pty_input_payload(writer, payload)?;
+        }
+        AuthorityTransportFrame::RawPtyOutput(payload) => {
+            write_u8(writer, AUTHORITY_FRAME_RAW_PTY_OUTPUT)?;
+            write_raw_pty_output_payload(writer, payload)?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn read_authority_transport_frame(
+    reader: &mut impl Read,
+) -> Result<AuthorityTransportFrame, RemoteTransportCodecError> {
+    let mut prefix = [0_u8; 4];
+    reader.read_exact(&mut prefix)?;
+    if &prefix != AUTHORITY_FRAME_MAGIC {
+        let mut chained = Cursor::new(prefix).chain(reader);
+        return read_control_plane_envelope(&mut chained)
+            .map(AuthorityTransportFrame::ControlPlane);
+    }
+    match read_u8(reader)? {
+        AUTHORITY_FRAME_CONTROL_PLANE => {
+            read_control_plane_envelope(reader).map(AuthorityTransportFrame::ControlPlane)
+        }
+        AUTHORITY_FRAME_RAW_PTY_INPUT => {
+            read_raw_pty_input_payload(reader).map(AuthorityTransportFrame::RawPtyInput)
+        }
+        AUTHORITY_FRAME_RAW_PTY_OUTPUT => {
+            read_raw_pty_output_payload(reader).map(AuthorityTransportFrame::RawPtyOutput)
+        }
+        other => Err(RemoteTransportCodecError::new(format!(
+            "unknown authority transport frame tag `{other}`"
+        ))),
+    }
 }
 
 pub fn read_node_session_envelope(
@@ -150,6 +218,7 @@ fn write_payload(
             write_string(writer, &payload.console_id)?;
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
+            write_bool(writer, payload.raw_pty_passthrough)?;
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
             write_u8(writer, 13)?;
@@ -175,7 +244,7 @@ fn write_payload(
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.chunk_seq)?;
             write_static_string(writer, payload.stream)?;
-            write_string(writer, &payload.bytes_base64)?;
+            write_bytes(writer, &payload.output_bytes)?;
         }
         ControlPlanePayload::MirrorBootstrapComplete(payload) => {
             write_u8(writer, 17)?;
@@ -216,15 +285,9 @@ fn write_payload(
             write_optional_usize(writer, payload.cols)?;
             write_optional_usize(writer, payload.rows)?;
         }
-        ControlPlanePayload::TargetInput(payload) => {
-            write_u8(writer, 6)?;
-            write_string(writer, &payload.attachment_id)?;
-            write_string(writer, &payload.session_id)?;
-            write_string(writer, &payload.target_id)?;
-            write_string(writer, &payload.console_id)?;
-            write_string(writer, &payload.console_host_id)?;
-            write_u64(writer, payload.input_seq)?;
-            write_string(writer, &payload.bytes_base64)?;
+        ControlPlanePayload::RawPtyInput(payload) => {
+            write_u8(writer, 18)?;
+            write_raw_pty_input_payload(writer, payload)?;
         }
         ControlPlanePayload::TargetOutput(payload) => {
             write_u8(writer, 7)?;
@@ -232,7 +295,11 @@ fn write_payload(
             write_string(writer, &payload.target_id)?;
             write_u64(writer, payload.output_seq)?;
             write_static_string(writer, payload.stream)?;
-            write_string(writer, &payload.bytes_base64)?;
+            write_bytes(writer, &payload.output_bytes)?;
+        }
+        ControlPlanePayload::RawPtyOutput(payload) => {
+            write_u8(writer, 19)?;
+            write_raw_pty_output_payload(writer, payload)?;
         }
         ControlPlanePayload::ApplyResize(payload) => {
             write_u8(writer, 8)?;
@@ -291,6 +358,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             console_id: read_string(reader)?,
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
+            raw_pty_passthrough: read_bool(reader)?,
         }),
         13 => ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
             session_id: read_string(reader)?,
@@ -312,7 +380,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             target_id: read_string(reader)?,
             chunk_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
-            bytes_base64: read_string(reader)?,
+            output_bytes: read_bytes(reader)?,
         }),
         17 => ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
             session_id: read_string(reader)?,
@@ -349,22 +417,15 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             cols: read_optional_usize(reader)?,
             rows: read_optional_usize(reader)?,
         }),
-        6 => ControlPlanePayload::TargetInput(TargetInputPayload {
-            attachment_id: read_string(reader)?,
-            session_id: read_string(reader)?,
-            target_id: read_string(reader)?,
-            console_id: read_string(reader)?,
-            console_host_id: read_string(reader)?,
-            input_seq: read_u64(reader)?,
-            bytes_base64: read_string(reader)?,
-        }),
+        18 => ControlPlanePayload::RawPtyInput(read_raw_pty_input_payload(reader)?),
         7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
             session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             output_seq: read_u64(reader)?,
             stream: read_known_static_string(reader)?,
-            bytes_base64: read_string(reader)?,
+            output_bytes: read_bytes(reader)?,
         }),
+        19 => ControlPlanePayload::RawPtyOutput(read_raw_pty_output_payload(reader)?),
         8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
             session_id: read_string(reader)?,
             target_id: read_string(reader)?,
@@ -428,13 +489,73 @@ fn read_node_session_channel(
     }
 }
 
-fn write_string(writer: &mut impl Write, value: &str) -> Result<(), RemoteTransportCodecError> {
-    let bytes = value.as_bytes();
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| RemoteTransportCodecError::new("string too long for transport frame"))?;
+fn write_bytes(writer: &mut impl Write, value: &[u8]) -> Result<(), RemoteTransportCodecError> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| RemoteTransportCodecError::new("bytes too long for transport frame"))?;
     writer.write_all(&len.to_le_bytes())?;
-    writer.write_all(bytes)?;
+    writer.write_all(value)?;
     Ok(())
+}
+
+fn write_raw_pty_input_payload(
+    writer: &mut impl Write,
+    payload: &RawPtyInputPayload,
+) -> Result<(), RemoteTransportCodecError> {
+    write_string(writer, &payload.attachment_id)?;
+    write_string(writer, &payload.session_id)?;
+    write_string(writer, &payload.target_id)?;
+    write_string(writer, &payload.console_id)?;
+    write_string(writer, &payload.console_host_id)?;
+    write_u64(writer, payload.input_seq)?;
+    write_bytes(writer, &payload.input_bytes)?;
+    Ok(())
+}
+
+fn read_raw_pty_input_payload(
+    reader: &mut impl Read,
+) -> Result<RawPtyInputPayload, RemoteTransportCodecError> {
+    Ok(RawPtyInputPayload {
+        attachment_id: read_string(reader)?,
+        session_id: read_string(reader)?,
+        target_id: read_string(reader)?,
+        console_id: read_string(reader)?,
+        console_host_id: read_string(reader)?,
+        input_seq: read_u64(reader)?,
+        input_bytes: read_bytes(reader)?,
+    })
+}
+
+fn write_raw_pty_output_payload(
+    writer: &mut impl Write,
+    payload: &RawPtyOutputPayload,
+) -> Result<(), RemoteTransportCodecError> {
+    write_string(writer, &payload.session_id)?;
+    write_string(writer, &payload.target_id)?;
+    write_u64(writer, payload.output_seq)?;
+    write_bytes(writer, &payload.output_bytes)?;
+    Ok(())
+}
+
+fn read_raw_pty_output_payload(
+    reader: &mut impl Read,
+) -> Result<RawPtyOutputPayload, RemoteTransportCodecError> {
+    Ok(RawPtyOutputPayload {
+        session_id: read_string(reader)?,
+        target_id: read_string(reader)?,
+        output_seq: read_u64(reader)?,
+        output_bytes: read_bytes(reader)?,
+    })
+}
+
+fn read_bytes(reader: &mut impl Read) -> Result<Vec<u8>, RemoteTransportCodecError> {
+    let len = read_u32(reader)? as usize;
+    let mut bytes = vec![0u8; len];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn write_string(writer: &mut impl Write, value: &str) -> Result<(), RemoteTransportCodecError> {
+    write_bytes(writer, value.as_bytes())
 }
 
 fn read_string(reader: &mut impl Read) -> Result<String, RemoteTransportCodecError> {
@@ -627,13 +748,14 @@ fn read_u8(reader: &mut impl Read) -> Result<u8, RemoteTransportCodecError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_control_plane_envelope, read_node_session_envelope, read_registration_frame,
-        write_control_plane_envelope, write_node_session_envelope, write_registration_frame,
+        read_authority_transport_frame, read_control_plane_envelope, read_node_session_envelope,
+        read_registration_frame, write_authority_transport_frame, write_control_plane_envelope,
+        write_node_session_envelope, write_registration_frame, AuthorityTransportFrame,
     };
     use crate::infra::remote_protocol::{
         CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel, NodeSessionEnvelope,
-        OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, TargetOutputPayload,
-        TargetPublishedPayload,
+        OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
+        RawPtyOutputPayload, TargetOutputPayload, TargetPublishedPayload,
     };
 
     #[test]
@@ -665,7 +787,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq: 7,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         };
         let mut bytes = Vec::new();
@@ -675,6 +797,43 @@ mod tests {
             read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
 
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn authority_transport_frame_round_trips_raw_pty_input_without_envelope() {
+        let frame = AuthorityTransportFrame::RawPtyInput(RawPtyInputPayload {
+            attachment_id: "attach-1".to_string(),
+            session_id: "shell-1".to_string(),
+            target_id: "remote-peer:peer-a:shell-1".to_string(),
+            console_id: "console-a".to_string(),
+            console_host_id: "observer-a".to_string(),
+            input_seq: 9,
+            input_bytes: b"abc\r".to_vec(),
+        });
+        let mut bytes = Vec::new();
+
+        write_authority_transport_frame(&mut bytes, &frame).expect("frame should encode");
+        let decoded =
+            read_authority_transport_frame(&mut bytes.as_slice()).expect("frame should decode");
+
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn authority_transport_frame_round_trips_raw_pty_output_without_envelope() {
+        let frame = AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
+            session_id: "shell-1".to_string(),
+            target_id: "remote-peer:peer-a:shell-1".to_string(),
+            output_seq: 7,
+            output_bytes: b"\x1b[32mok\r\n".to_vec(),
+        });
+        let mut bytes = Vec::new();
+
+        write_authority_transport_frame(&mut bytes, &frame).expect("frame should encode");
+        let decoded =
+            read_authority_transport_frame(&mut bytes.as_slice()).expect("frame should decode");
+
+        assert_eq!(decoded, frame);
     }
 
     #[test]
@@ -732,6 +891,7 @@ mod tests {
                 console_id: "console-1".to_string(),
                 cols: 120,
                 rows: 40,
+                raw_pty_passthrough: false,
             }),
         };
         let mut bytes = Vec::new();

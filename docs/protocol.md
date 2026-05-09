@@ -163,7 +163,7 @@ message NodeSessionEnvelope {
     MirrorBootstrapComplete mirror_bootstrap_complete = 35;
 
     ConsoleInput console_input = 40;
-    TargetInputDelivery target_input_delivery = 41;
+    RawPtyInput raw_pty_input = 42;
 
     PtyResizeRequest pty_resize_request = 50;
     ApplyPtyResize apply_pty_resize = 51;
@@ -418,16 +418,18 @@ Rules:
 
 The server sends authority-directed terminal control over the same stream using:
 
-- `TargetInputDelivery`
+- `RawPtyInput`
 - `ApplyPtyResize`
 
-`TargetInputDelivery` carries:
+`RawPtyInput` carries:
 
 - `attachment_id`
 - `target_id`
 - `console_id`
 - `console_host_id`
 - `input_seq`
+- `input_bytes`
+- `session_id`
 - `input_bytes`
 
 `ApplyPtyResize` carries:
@@ -483,7 +485,7 @@ The accepted direction model is:
 | target publication | `TargetPublished`, `TargetExited` | none in `v1` |
 | observer attachment | `OpenTargetRequest`, `CloseTargetRequest` | `OpenTargetAccepted`, `OpenTargetRejected` |
 | terminal interaction from observing console | `ConsoleInput`, `PtyResizeRequest` | none directly |
-| authority-directed terminal control | none directly | `TargetInputDelivery`, `ApplyPtyResize` |
+| authority-directed terminal control | none directly | `RawPtyInput`, `ApplyPtyResize` |
 | authority terminal output | `TargetOutput`, `PtyResizeApplied` | `TargetOutput` fanout to observing nodes when applicable |
 | recoverable command rejection | `CommandRejected` when server-issued command cannot be applied | `CommandRejected` when client-issued command is rejected |
 

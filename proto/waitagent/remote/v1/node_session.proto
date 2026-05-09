@@ -36,13 +36,14 @@ message NodeSessionEnvelope {
     MirrorBootstrapComplete mirror_bootstrap_complete = 35;
 
     ConsoleInput console_input = 40;
-    TargetInputDelivery target_input_delivery = 41;
+    RawPtyInput raw_pty_input = 42;
 
     PtyResizeRequest pty_resize_request = 50;
     ApplyPtyResize apply_pty_resize = 51;
     PtyResizeApplied pty_resize_applied = 52;
 
     TargetOutput target_output = 60;
+    RawPtyOutput raw_pty_output = 61;
   }
 }
 
@@ -154,6 +155,7 @@ message OpenMirrorRequest {
   string console_id = 3;
   uint32 cols = 4;
   uint32 rows = 5;
+  bool raw_pty_passthrough = 6;
 }
 
 message OpenMirrorAccepted {
@@ -231,7 +233,7 @@ message ConsoleInput {
   string session_id = 6;
 }
 
-message TargetInputDelivery {
+message RawPtyInput {
   string attachment_id = 1;
   string target_id = 2;
   string console_id = 3;
@@ -274,4 +276,11 @@ message TargetOutput {
   string stream = 3;
   bytes output_bytes = 4;
   string session_id = 5;
+}
+
+message RawPtyOutput {
+  string target_id = 1;
+  uint64 output_seq = 2;
+  bytes output_bytes = 3;
+  string session_id = 4;
 }

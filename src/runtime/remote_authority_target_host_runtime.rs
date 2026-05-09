@@ -2,7 +2,6 @@ use crate::cli::{
     prepend_global_network_args, RemoteAuthorityOutputPumpCommand,
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
-use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -14,8 +13,9 @@ use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +26,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirrorState {
     Inactive,
-    Active,
+    Active { raw_pty_passthrough: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +54,6 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<TmuxPaneId, Self::Error>;
-
-    fn send_input(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        bytes: &[u8],
-    ) -> Result<(), Self::Error>;
 
     fn resize_pty(
         &self,
@@ -107,15 +100,6 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         target_session_name: &str,
     ) -> Result<TmuxPaneId, Self::Error> {
         self.target_presentation_pane_on_socket(socket_name, target_session_name)
-    }
-
-    fn send_input(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        bytes: &[u8],
-    ) -> Result<(), Self::Error> {
-        self.send_input_to_pane_on_socket(socket_name, pane, bytes)
     }
 
     fn resize_pty(
@@ -238,6 +222,7 @@ where
     socket_name: String,
     pane: TmuxPaneId,
     ingest_socket_path: PathBuf,
+    input_fifo_path: PathBuf,
 }
 
 pub struct RemoteAuthorityOutputPumpRuntime;
@@ -294,13 +279,17 @@ where
         );
         let ingest_socket_path =
             authority_output_ingest_socket_path(&command.transport_socket_path, &command.target_id);
+        let input_fifo_path =
+            authority_input_fifo_path(&command.transport_socket_path, &command.target_id);
         let listener =
             bind_output_ingest_listener(&ingest_socket_path).map_err(remote_authority_error)?;
+        create_input_fifo(&input_fifo_path).map_err(remote_authority_error)?;
         let _output_guard = OutputPipeGuard {
             gateway: self.gateway.clone(),
             socket_name: command.socket_name.clone(),
             pane: pane.clone(),
             ingest_socket_path: ingest_socket_path.clone(),
+            input_fifo_path: input_fifo_path.clone(),
         };
 
         let (event_tx, event_rx) = mpsc::channel();
@@ -323,12 +312,18 @@ where
         let mut output_seq = 0_u64;
         let mut mirror_state = MirrorState::Inactive;
 
+        let mut input_fifo = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&input_fifo_path)
+            .map_err(remote_authority_error)?;
+
         let loop_result = loop {
             match event_rx.recv() {
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
                     payload,
                 ))) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = self
                             .gateway
                             .resize_pty(&command.socket_name, &pane, payload.cols, payload.rows)
@@ -390,7 +385,9 @@ where
                         }
                         continue;
                     }
-                    mirror_state = MirrorState::Active;
+                    mirror_state = MirrorState::Active {
+                        raw_pty_passthrough: payload.raw_pty_passthrough,
+                    };
                     if let Err(error) = transport
                         .send_open_mirror_accepted(
                             &payload.session_id,
@@ -412,21 +409,14 @@ where
                         break Err(error);
                     }
                 }
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::TargetInput(
+                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
                     payload,
                 ))) => {
-                    let bytes = match decode_base64(&payload.bytes_base64)
-                        .map_err(remote_authority_error)
+                    if let Err(error) = input_fifo
+                        .write_all(&payload.input_bytes)
+                        .and_then(|_| input_fifo.flush())
                     {
-                        Ok(bytes) => bytes,
-                        Err(error) => break Err(error),
-                    };
-                    if let Err(error) = self
-                        .gateway
-                        .send_input(&command.socket_name, &pane, &bytes)
-                        .map_err(remote_authority_error)
-                    {
-                        break Err(error);
+                        break Err(remote_authority_error(error));
                     }
                 }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
@@ -443,7 +433,7 @@ where
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
                     _payload,
                 ))) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
                             break Err(error);
                         }
@@ -451,25 +441,39 @@ where
                     }
                 }
                 Ok(AuthorityHostEvent::OutputChunk(bytes)) => {
-                    if mirror_state != MirrorState::Active {
-                        continue;
-                    }
+                    let raw_pty_passthrough = match mirror_state {
+                        MirrorState::Inactive => continue,
+                        MirrorState::Active {
+                            raw_pty_passthrough,
+                        } => raw_pty_passthrough,
+                    };
                     output_seq += 1;
-                    if let Err(error) = transport
-                        .send_target_output(
-                            &command.transport_session_id,
-                            &command.target_id,
-                            output_seq,
-                            "pty",
-                            encode_base64(&bytes),
-                        )
-                        .map_err(remote_authority_error)
-                    {
+                    let send_result = if raw_pty_passthrough {
+                        transport
+                            .send_raw_pty_output(
+                                &command.transport_session_id,
+                                &command.target_id,
+                                output_seq,
+                                bytes,
+                            )
+                            .map_err(remote_authority_error)
+                    } else {
+                        transport
+                            .send_target_output(
+                                &command.transport_session_id,
+                                &command.target_id,
+                                output_seq,
+                                "pty",
+                                bytes,
+                            )
+                            .map_err(remote_authority_error)
+                    };
+                    if let Err(error) = send_result {
                         break Err(error);
                     }
                 }
                 Ok(AuthorityHostEvent::TransportClosed) => {
-                    if mirror_state == MirrorState::Active {
+                    if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
                             break Err(error);
                         }
@@ -480,7 +484,7 @@ where
             }
         };
 
-        if mirror_state == MirrorState::Active {
+        if matches!(mirror_state, MirrorState::Active { .. }) {
             let _ = deactivate_mirror(self, &command, &pane);
         }
         running.store(false, Ordering::Relaxed);
@@ -532,9 +536,36 @@ pub(crate) fn remote_authority_target_host_args(
 
 impl RemoteAuthorityOutputPumpRuntime {
     pub fn run(command: RemoteAuthorityOutputPumpCommand) -> Result<(), LifecycleError> {
+        let input_fifo_path = command.input_fifo_path.clone();
+        let input_thread = thread::spawn(move || -> Result<(), RemoteAuthorityHostError> {
+            let mut fifo = OpenOptions::new().read(true).open(input_fifo_path)?;
+            let mut stdout = io::stdout().lock();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = fifo.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                stdout.write_all(&buffer[..read])?;
+                stdout.flush()?;
+            }
+            Ok(())
+        });
+
         let stdin = io::stdin();
-        pump_reader_to_ingest_socket(stdin.lock(), &command.ingest_socket_path)
-            .map_err(remote_authority_error)
+        let pump_result = pump_reader_to_ingest_socket(stdin.lock(), &command.ingest_socket_path);
+        match input_thread.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if pump_result.is_ok() => return Err(remote_authority_error(error)),
+            Ok(Err(_)) => {}
+            Err(_) if pump_result.is_ok() => {
+                return Err(remote_authority_error(RemoteAuthorityHostError::new(
+                    "remote authority input pump panicked",
+                )))
+            }
+            Err(_) => {}
+        }
+        pump_result.map_err(remote_authority_error)
     }
 }
 
@@ -547,6 +578,7 @@ where
             .gateway
             .clear_output_pipe(&self.socket_name, &self.pane);
         let _ = fs::remove_file(&self.ingest_socket_path);
+        let _ = fs::remove_file(&self.input_fifo_path);
     }
 }
 
@@ -557,8 +589,24 @@ fn bind_output_ingest_listener(
         let _ = fs::remove_file(socket_path);
     }
     let listener = UnixListener::bind(socket_path)?;
-    listener.set_nonblocking(true)?;
     Ok(listener)
+}
+
+fn create_input_fifo(fifo_path: &Path) -> Result<(), RemoteAuthorityHostError> {
+    if fifo_path.exists() {
+        let _ = fs::remove_file(fifo_path);
+    }
+    let c_path = std::ffi::CString::new(fifo_path.as_os_str().as_bytes())
+        .map_err(|_| RemoteAuthorityHostError::new("input fifo path contains interior NUL"))?;
+    let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if result == -1 {
+        return Err(RemoteAuthorityHostError::new(format!(
+            "failed to create input fifo {}: {}",
+            fifo_path.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 fn spawn_output_ingest_thread(
@@ -580,9 +628,6 @@ fn spawn_output_ingest_thread(
                         Err(_) => break,
                     }
                 },
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
                 Err(_) => break,
             }
         }
@@ -634,15 +679,23 @@ pub fn authority_output_ingest_socket_path(
     std::env::temp_dir().join(format!("waitagent-authority-output-{hash}.sock"))
 }
 
+pub fn authority_input_fifo_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
+    let hash = stable_socket_hash(&[transport_socket_path, target_id]);
+    std::env::temp_dir().join(format!("waitagent-authority-input-{hash}.fifo"))
+}
+
 fn remote_authority_output_pump_shell_command(
     executable: &str,
     ingest_socket_path: &Path,
+    input_fifo_path: &Path,
 ) -> String {
     [
         shell_escape(executable),
         shell_escape("__remote-authority-output-pump"),
         shell_escape("--ingest-socket-path"),
         shell_escape(&ingest_socket_path.display().to_string()),
+        shell_escape("--input-fifo-path"),
+        shell_escape(&input_fifo_path.display().to_string()),
     ]
     .join(" ")
 }
@@ -661,6 +714,7 @@ where
     let pipe_command = remote_authority_output_pump_shell_command(
         runtime.current_executable.to_string_lossy().as_ref(),
         ingest_socket_path,
+        &authority_input_fifo_path(&command.transport_socket_path, &command.target_id),
     );
     runtime
         .gateway
@@ -702,6 +756,7 @@ where
         .capture_terminal_flags(socket_name, pane)
         .map_err(remote_authority_error)?;
     let replay = render_bootstrap_replay(&screen, cursor_x, cursor_y);
+    let last_chunk_seq = if replay.is_empty() { 0 } else { 1 };
     if !replay.is_empty() {
         transport
             .send_mirror_bootstrap_chunk(
@@ -709,7 +764,7 @@ where
                 target_id,
                 1,
                 "pty",
-                encode_base64(replay.as_bytes()),
+                replay.as_bytes().to_vec(),
             )
             .map_err(remote_authority_error)?;
     }
@@ -717,7 +772,7 @@ where
         .send_mirror_bootstrap_complete(
             session_id,
             target_id,
-            if replay.is_empty() { 0 } else { 1 },
+            last_chunk_seq,
             flags.alternate_screen_active,
             flags.application_cursor_keys,
             flags.cursor_visible,
@@ -833,18 +888,18 @@ fn wait_for_ready_socket(socket_path: &Path) -> Result<(), LifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
-        remote_authority_error, remote_authority_output_pump_shell_command,
-        remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame,
-        LifecycleError, RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
+        authority_input_fifo_path, authority_output_ingest_socket_path,
+        pump_reader_to_ingest_socket, read_output_chunk_frame, remote_authority_error,
+        remote_authority_output_pump_shell_command, remote_authority_target_host_args,
+        render_bootstrap_replay, write_output_chunk_frame, LifecycleError,
+        RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
         RemoteTargetPtyGateway, RemoteTargetTerminalFlags,
     };
     use crate::cli::RemoteAuthorityTargetHostCommand;
     use crate::cli::RemoteNetworkConfig;
-    use crate::infra::base64::decode_base64;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
+        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
         TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
@@ -857,7 +912,9 @@ mod tests {
     use crate::runtime::remote_node_session_runtime::RemoteNodeSessionRuntime;
     use crate::runtime::remote_node_transport_runtime::write_server_hello;
     use std::fs;
+    use std::fs::OpenOptions;
     use std::io::Cursor;
+    use std::io::Read;
     use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -869,7 +926,6 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FakeGateway {
-        input_calls: Arc<Mutex<Vec<Vec<u8>>>>,
         resize_calls: Arc<Mutex<Vec<(usize, usize)>>>,
         pipe_calls: Arc<Mutex<Vec<String>>>,
         clear_calls: Arc<Mutex<usize>>,
@@ -887,19 +943,6 @@ mod tests {
             _target_session_name: &str,
         ) -> Result<TmuxPaneId, Self::Error> {
             Ok(TmuxPaneId::new("%7"))
-        }
-
-        fn send_input(
-            &self,
-            _socket_name: &str,
-            _pane: &TmuxPaneId,
-            bytes: &[u8],
-        ) -> Result<(), Self::Error> {
-            self.input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .push(bytes.to_vec());
-            Ok(())
         }
 
         fn resize_pty(
@@ -1046,11 +1089,12 @@ mod tests {
         let command = remote_authority_output_pump_shell_command(
             "/tmp/wait agent",
             Path::new("/tmp/output path.sock"),
+            Path::new("/tmp/input path.fifo"),
         );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock'"
+            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--input-fifo-path' '/tmp/input path.fifo'"
         );
     }
 
@@ -1146,8 +1190,25 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
+        let input_fifo_path =
+            authority_input_fifo_path(command.transport_socket_path.as_str(), &command.target_id);
         let server_ingest_socket_path = ingest_socket_path.clone();
         let (server_tx, server_rx) = std::sync::mpsc::channel();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let input_reader_path = input_fifo_path.clone();
+        thread::spawn(move || {
+            wait_for_path(&input_reader_path);
+            let mut fifo = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&input_reader_path)
+                .expect("input fifo should open");
+            let mut bytes = [0_u8; 1];
+            fifo.read_exact(&mut bytes)
+                .expect("input fifo should receive target input");
+            let _ = input_tx.send(bytes.to_vec());
+        });
+        let server_input_fifo_path = input_fifo_path.clone();
         thread::spawn(move || {
             let (mut stream, _) = transport_listener
                 .accept()
@@ -1171,14 +1232,15 @@ mod tests {
                 },
             )
             .expect("open mirror should encode");
+            wait_for_path(&server_input_fifo_path);
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
                     channel: NodeSessionChannel::Authority,
-                    envelope: target_input_envelope(),
+                    envelope: raw_pty_input_envelope(),
                 },
             )
-            .expect("target input should encode");
+            .expect("raw PTY input should encode");
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -1207,7 +1269,7 @@ mod tests {
                     payload @ ControlPlanePayload::OpenMirrorAccepted(_) => {
                         if accepted_payload.is_none() {
                             accepted_payload = Some(payload);
-                            wait_for_socket(&server_ingest_socket_path);
+                            wait_for_path(&server_ingest_socket_path);
                             let mut output_stream = UnixStream::connect(&server_ingest_socket_path)
                                 .expect("ingest socket should accept");
                             write_output_chunk_frame(&mut output_stream, b"hello")
@@ -1266,12 +1328,10 @@ mod tests {
             .expect("runtime should finish cleanly");
 
         assert_eq!(
-            fake_gateway
-                .input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .clone(),
-            vec![b"a".to_vec()]
+            input_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("input fifo should receive target input"),
+            b"a".to_vec()
         );
         assert_eq!(
             fake_gateway
@@ -1308,11 +1368,11 @@ mod tests {
         match output {
             ControlPlanePayload::TargetOutput(TargetOutputPayload {
                 output_seq,
-                bytes_base64,
+                ref output_bytes,
                 ..
             }) => {
                 assert_eq!(output_seq, 1);
-                assert_eq!(bytes_base64, "aGVsbG8=");
+                assert_eq!(output_bytes, b"hello");
             }
             other => panic!("unexpected authority output payload: {other:?}"),
         }
@@ -1423,7 +1483,7 @@ mod tests {
         match bootstrap_chunk {
             ControlPlanePayload::MirrorBootstrapChunk(payload) => {
                 assert_eq!(
-                    decode_base64(&payload.bytes_base64).expect("bootstrap payload should decode"),
+                    &payload.output_bytes,
                     b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                 );
             }
@@ -1519,8 +1579,7 @@ mod tests {
                     ControlPlanePayload::MirrorBootstrapChunk(payload) => {
                         bootstrap_chunk_count += 1;
                         assert_eq!(
-                            decode_base64(&payload.bytes_base64)
-                                .expect("bootstrap payload should decode"),
+                            &payload.output_bytes,
                             b"\x1b[2J\x1b[H\x1b[1;1H\x1b[32mbash\x1b[0m\x1b[1;5H"
                         );
                     }
@@ -1597,14 +1656,14 @@ mod tests {
         assert!(rendered.ends_with(".sock"));
     }
 
-    fn wait_for_socket(path: &Path) {
+    fn wait_for_path(path: &Path) {
         for _ in 0..100 {
             if path.exists() {
                 return;
             }
             thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("socket did not appear at {}", path.display());
+        panic!("path did not appear at {}", path.display());
     }
 
     fn transport_socket_path(name: &str) -> PathBuf {
@@ -1637,11 +1696,11 @@ mod tests {
         format!("{prefix}-{}-{millis}", process::id())
     }
 
-    fn target_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+    fn raw_pty_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
-            message_id: "msg-target-input".to_string(),
-            message_type: "target_input",
+            message_id: "msg-raw-pty-input".to_string(),
+            message_type: "raw_pty_input",
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
@@ -1649,14 +1708,14 @@ mod tests {
             target_id: Some("remote-peer:peer-a:target-1".to_string()),
             attachment_id: Some("attach-1".to_string()),
             console_id: Some("console-a".to_string()),
-            payload: ControlPlanePayload::TargetInput(TargetInputPayload {
+            payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
                 attachment_id: "attach-1".to_string(),
                 session_id: "target-1".to_string(),
                 target_id: "remote-peer:peer-a:target-1".to_string(),
                 console_id: "console-a".to_string(),
                 console_host_id: "observer-a".to_string(),
                 input_seq: 1,
-                bytes_base64: "YQ==".to_string(),
+                input_bytes: b"a".to_vec(),
             }),
         }
     }
@@ -1679,6 +1738,7 @@ mod tests {
                 console_id: "console-a".to_string(),
                 cols: 80,
                 rows: 24,
+                raw_pty_passthrough: false,
             }),
         }
     }

@@ -42,6 +42,7 @@ pub struct RemoteObserverRuntime {
     has_visible_output: bool,
     bootstrap_complete: bool,
     terminal: TerminalEngine,
+    pending_raw_output: Vec<u8>,
 }
 
 impl RemoteObserverRuntime {
@@ -61,7 +62,19 @@ impl RemoteObserverRuntime {
             has_visible_output: false,
             bootstrap_complete: false,
             terminal: TerminalEngine::new(terminal_size(cols, rows)),
+            pending_raw_output: Vec::new(),
         }
+    }
+
+    /// Sync pending envelopes and return the raw decoded output bytes from
+    /// TargetOutput, MirrorBootstrapChunk, and MirrorBootstrapComplete envelopes.
+    /// The raw bytes can be written directly to stdout for incremental terminal
+    /// rendering (SSH-like forwarding), while the observer continues to update
+    /// its TerminalEngine state for cursor tracking and input translation.
+    pub fn sync_and_collect_raw(&mut self) -> Result<Vec<u8>, RemoteObserverRuntimeError> {
+        self.pending_raw_output.clear();
+        let _ = self.sync()?;
+        Ok(std::mem::take(&mut self.pending_raw_output))
     }
 
     pub fn sync(&mut self) -> Result<usize, RemoteObserverRuntimeError> {
@@ -132,7 +145,14 @@ impl RemoteObserverRuntime {
                 Ok(())
             }
             ControlPlanePayload::TargetOutput(payload) => self.apply_target_output(payload),
-            _ => Ok(()),
+            other => {
+                eprintln!(
+                    "[observer] ignored envelope type={} message_id={}",
+                    other.message_type(),
+                    envelope.message_id,
+                );
+                Ok(())
+            }
         }
     }
 
@@ -140,15 +160,11 @@ impl RemoteObserverRuntime {
         &mut self,
         payload: &crate::infra::remote_protocol::MirrorBootstrapChunkPayload,
     ) -> Result<(), RemoteObserverRuntimeError> {
-        let decoded = decode_base64(&payload.bytes_base64).map_err(|error| {
-            RemoteObserverRuntimeError::new(format!(
-                "failed to decode mirror_bootstrap_chunk for `{}`: {error}",
-                payload.target_id
-            ))
-        })?;
         self.session_id = Some(payload.session_id.clone());
         self.target_id = Some(payload.target_id.clone());
-        self.terminal.feed(&decoded);
+        self.pending_raw_output
+            .extend_from_slice(&payload.output_bytes);
+        self.terminal.feed(&payload.output_bytes);
         self.has_visible_output = true;
         Ok(())
     }
@@ -173,6 +189,9 @@ impl RemoteObserverRuntime {
         });
         self.terminal.feed(suffix.as_bytes());
         self.bootstrap_complete = true;
+        if !suffix.is_empty() {
+            self.pending_raw_output.extend_from_slice(suffix.as_bytes());
+        }
     }
 
     fn apply_target_output(
@@ -188,16 +207,12 @@ impl RemoteObserverRuntime {
             }
         }
 
-        let decoded = decode_base64(&payload.bytes_base64).map_err(|error| {
-            RemoteObserverRuntimeError::new(format!(
-                "failed to decode target_output for `{}`: {error}",
-                payload.target_id
-            ))
-        })?;
         self.session_id = Some(payload.session_id.clone());
         self.target_id = Some(payload.target_id.clone());
 
-        self.terminal.feed(&decoded);
+        self.pending_raw_output
+            .extend_from_slice(&payload.output_bytes);
+        self.terminal.feed(&payload.output_bytes);
 
         self.last_output_seq = Some(payload.output_seq);
         self.has_visible_output = true;
@@ -256,54 +271,6 @@ fn terminal_size(cols: usize, rows: usize) -> TerminalSize {
     }
 }
 
-fn decode_base64(input: &str) -> Result<Vec<u8>, &'static str> {
-    let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return Err("invalid base64 length");
-    }
-
-    let mut decoded = Vec::with_capacity((bytes.len() / 4) * 3);
-    for chunk in bytes.chunks(4) {
-        let mut values = [0u8; 4];
-        let mut padding = 0usize;
-        for (index, byte) in chunk.iter().enumerate() {
-            match *byte {
-                b'=' => {
-                    values[index] = 0;
-                    padding += 1;
-                }
-                _ => {
-                    if padding > 0 {
-                        return Err("invalid base64 padding");
-                    }
-                    values[index] = decode_base64_value(*byte)?;
-                }
-            }
-        }
-
-        decoded.push((values[0] << 2) | (values[1] >> 4));
-        if padding < 2 {
-            decoded.push((values[1] << 4) | (values[2] >> 2));
-        }
-        if padding == 0 {
-            decoded.push((values[2] << 6) | values[3]);
-        }
-    }
-
-    Ok(decoded)
-}
-
-fn decode_base64_value(byte: u8) -> Result<u8, &'static str> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err("invalid base64 character"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::RemoteObserverRuntime;
@@ -311,7 +278,6 @@ mod tests {
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
     };
-    use crate::infra::base64::encode_base64;
     use crate::infra::remote_protocol::RemoteConsoleDescriptor;
     use crate::runtime::remote_main_slot_runtime::RemoteMainSlotRuntime;
     use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
@@ -377,7 +343,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                "aGVsbG8NCndvcmxk",
+                b"hello\r\nworld".to_vec(),
             )
             .expect("target output should fan out");
 
@@ -415,10 +381,10 @@ mod tests {
             )
             .expect("remote activation should succeed");
         runtime
-            .send_target_output(&remote_target("peer-a", "shell-1"), 2, "pty", "Yg==")
+            .send_target_output(&remote_target("peer-a", "shell-1"), 2, "pty", b"b".to_vec())
             .expect("first target output should fan out");
         runtime
-            .send_target_output(&remote_target("peer-a", "shell-1"), 1, "pty", "YQ==")
+            .send_target_output(&remote_target("peer-a", "shell-1"), 1, "pty", b"a".to_vec())
             .expect("second target output still routes through control plane");
 
         let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
@@ -453,7 +419,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                "aGVsbG8NCndvcmxk",
+                b"hello\r\nworld".to_vec(),
             )
             .expect("bootstrap chunk should fan out");
         runtime
@@ -505,7 +471,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                encode_base64(b"\x1b[2J\x1b[H\x1b[1;1Hkk@lenovo:~/wait-agent$ \x1b[1;25H"),
+                b"\x1b[2J\x1b[H\x1b[1;1Hkk@lenovo:~/wait-agent$ \x1b[1;25H".to_vec(),
             )
             .expect("bootstrap replay should fan out");
         runtime
@@ -551,7 +517,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                encode_base64(replay),
+                replay.to_vec(),
             )
             .expect("first bootstrap replay should fan out");
         runtime
@@ -568,7 +534,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 2,
                 "pty",
-                encode_base64(replay),
+                replay.to_vec(),
             )
             .expect("second bootstrap replay should fan out");
         runtime
@@ -635,7 +601,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                encode_base64(bootstrap.as_bytes()),
+                bootstrap.into_bytes(),
             )
             .expect("bootstrap replay should fan out");
         runtime
@@ -652,7 +618,7 @@ mod tests {
                 &remote_target("peer-a", "shell-1"),
                 1,
                 "pty",
-                encode_base64(redraw),
+                redraw.to_vec(),
             )
             .expect("redraw should fan out");
 

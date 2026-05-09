@@ -372,11 +372,26 @@ impl RemoteTargetPublicationRuntime {
     }
 
     pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
-        let sessions = self
+        let mut all_sessions = self
             .local_tmux
             .list_sessions()
             .map_err(remote_target_publication_error)?;
-        Ok(live_workspace_socket_names_from_sessions(&sessions))
+        // Also discover managed waitagent tmux sockets (wa-*) that are running
+        // workspace chrome sessions. When waitagent runs inside an outer tmux
+        // (e.g. --port on a remote machine), the managed sessions live on a
+        // separate tmux server and won't appear in the default tmux list.
+        if let Ok(managed_sockets) = self.local_tmux.discover_waitagent_sockets() {
+            for socket in &managed_sockets {
+                if let Ok(sessions) = self
+                    .local_tmux
+                    .list_sessions_on_socket(socket)
+                    .map_err(remote_target_publication_error)
+                {
+                    all_sessions.extend(sessions);
+                }
+            }
+        }
+        Ok(live_workspace_socket_names_from_sessions(&all_sessions))
     }
 
     fn refresh_live_workspaces(&self, socket_names: &[String]) -> Result<(), LifecycleError> {

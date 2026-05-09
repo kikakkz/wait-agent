@@ -11,7 +11,7 @@ pub fn spawn_waitagent_sidecar(current_executable: &Path, args: Vec<String>) -> 
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
 
     #[cfg(unix)]
     unsafe {

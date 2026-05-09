@@ -52,8 +52,9 @@ pub enum ControlPlanePayload {
     OpenTargetOk(OpenTargetOkPayload),
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
-    TargetInput(TargetInputPayload),
+    RawPtyInput(RawPtyInputPayload),
     TargetOutput(TargetOutputPayload),
+    RawPtyOutput(RawPtyOutputPayload),
     ApplyResize(ApplyResizePayload),
     TargetPublished(TargetPublishedPayload),
     TargetExited(TargetExitedPayload),
@@ -74,8 +75,9 @@ impl ControlPlanePayload {
             Self::OpenTargetOk(_) => "open_target_ok",
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
-            Self::TargetInput(_) => "target_input",
+            Self::RawPtyInput(_) => "raw_pty_input",
             Self::TargetOutput(_) => "target_output",
+            Self::RawPtyOutput(_) => "raw_pty_output",
             Self::ApplyResize(_) => "apply_resize",
             Self::TargetPublished(_) => "target_published",
             Self::TargetExited(_) => "target_exited",
@@ -106,6 +108,7 @@ pub struct OpenMirrorRequestPayload {
     pub console_id: String,
     pub cols: usize,
     pub rows: usize,
+    pub raw_pty_passthrough: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +138,7 @@ pub struct MirrorBootstrapChunkPayload {
     pub target_id: String,
     pub chunk_seq: u64,
     pub stream: &'static str,
-    pub bytes_base64: String,
+    pub output_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,14 +185,14 @@ pub struct ResizeAuthorityChangedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetInputPayload {
+pub struct RawPtyInputPayload {
     pub attachment_id: String,
     pub session_id: String,
     pub target_id: String,
     pub console_id: String,
     pub console_host_id: String,
     pub input_seq: u64,
-    pub bytes_base64: String,
+    pub input_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +201,15 @@ pub struct TargetOutputPayload {
     pub target_id: String,
     pub output_seq: u64,
     pub stream: &'static str,
-    pub bytes_base64: String,
+    pub output_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPtyOutputPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub output_seq: u64,
+    pub output_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

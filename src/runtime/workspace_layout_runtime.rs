@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 const STARTUP_CHROME_READY_TIMEOUT: Duration = Duration::from_millis(300);
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
 const WAITAGENT_MAIN_PANE_PIPE_OPTION: &str = "@waitagent_main_pane_pipe_id";
+const WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION: &str = "@waitagent_main_pane_output_bridge";
+const MAIN_PANE_OUTPUT_BRIDGE_DISABLED: &str = "disabled";
+const MAIN_PANE_OUTPUT_BRIDGE_ENABLED: &str = "enabled";
 
 #[derive(Clone, Copy)]
 enum InitialChromePane {
@@ -132,6 +135,55 @@ impl WorkspaceLayoutRuntime {
         } else {
             self.refresh_chrome(workspace, workspace_dir)
         }
+    }
+
+    pub fn suspend_main_pane_output_bridge(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        let Some(main_pane) = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .map(TmuxPaneId::new)
+        else {
+            return Ok(());
+        };
+        match self.backend.clear_pane_pipe(workspace, &main_pane) {
+            Ok(()) => {}
+            Err(error) if error.is_command_failure() => {}
+            Err(error) => return Err(tmux_layout_error(error)),
+        }
+        self.backend
+            .set_session_option(workspace, WAITAGENT_MAIN_PANE_PIPE_OPTION, "")
+            .map_err(tmux_layout_error)
+    }
+
+    pub fn disable_main_pane_output_bridge(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION,
+                MAIN_PANE_OUTPUT_BRIDGE_DISABLED,
+            )
+            .map_err(tmux_layout_error)?;
+        self.suspend_main_pane_output_bridge(workspace)
+    }
+
+    pub fn enable_main_pane_output_bridge(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION,
+                MAIN_PANE_OUTPUT_BRIDGE_ENABLED,
+            )
+            .map_err(tmux_layout_error)
     }
 
     pub fn run_reconcile(&self, command: LayoutReconcileCommand) -> Result<(), LifecycleError> {
@@ -327,7 +379,15 @@ impl WorkspaceLayoutRuntime {
                 layout.main_pane.as_str(),
             )
             .map_err(tmux_layout_error)?;
-        self.ensure_main_pane_output_bridge(workspace, &layout.main_pane, &main_pane_pipe_command)?;
+        if self.main_pane_output_bridge_enabled(workspace)? {
+            self.ensure_main_pane_output_bridge(
+                workspace,
+                &layout.main_pane,
+                &main_pane_pipe_command,
+            )?;
+        } else {
+            self.suspend_main_pane_output_bridge(workspace)?;
+        }
         self.layout_service
             .ensure_layout_hooks(
                 workspace,
@@ -380,6 +440,18 @@ impl WorkspaceLayoutRuntime {
             .map_err(tmux_layout_error)?;
 
         Ok(())
+    }
+
+    fn main_pane_output_bridge_enabled(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<bool, LifecycleError> {
+        Ok(self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION)
+            .map_err(tmux_layout_error)?
+            .as_deref()
+            != Some(MAIN_PANE_OUTPUT_BRIDGE_DISABLED))
     }
 
     fn wait_for_initial_chrome_render(

@@ -1,7 +1,9 @@
-use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+};
 use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, read_registration_frame, write_control_plane_envelope,
-    RemoteTransportCodecError,
+    read_authority_transport_frame, read_registration_frame, write_authority_transport_frame,
+    write_control_plane_envelope, AuthorityTransportFrame, RemoteTransportCodecError,
 };
 use crate::runtime::remote_main_slot_runtime::RemoteControlPlaneTransportError;
 use crate::runtime::remote_transport_runtime::{
@@ -26,6 +28,10 @@ pub enum AuthorityTransportEvent {
     Disconnected,
     Failed(String),
     Envelope(ProtocolEnvelope<ControlPlanePayload>),
+    RawPtyOutput {
+        authority_id: String,
+        payload: RawPtyOutputPayload,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,8 +221,8 @@ pub fn register_authority_stream(
 
     thread::spawn(move || {
         while connected.load(Ordering::Relaxed) {
-            match read_control_plane_envelope(&mut stream) {
-                Ok(envelope) => {
+            match read_authority_transport_frame(&mut stream) {
+                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
                     if reader_tx
                         .send(AuthorityTransportEvent::Envelope(envelope))
                         .is_err()
@@ -224,6 +230,18 @@ pub fn register_authority_stream(
                         break;
                     }
                 }
+                Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
+                    if reader_tx
+                        .send(AuthorityTransportEvent::RawPtyOutput {
+                            authority_id: node_id.clone(),
+                            payload,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(AuthorityTransportFrame::RawPtyInput(_)) => break,
                 Err(_) => break,
             }
         }
@@ -402,6 +420,26 @@ impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
         write_control_plane_envelope(&mut *writer, envelope)
             .map_err(|error| RemoteControlPlaneTransportError::new(error.to_string()))
     }
+
+    fn send_raw_pty_input(
+        &self,
+        payload: &RawPtyInputPayload,
+    ) -> Result<(), RemoteControlPlaneTransportError> {
+        if !self.connected.load(Ordering::Relaxed) {
+            return Err(RemoteControlPlaneTransportError::new(
+                "authority transport connection is closed",
+            ));
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("authority transport writer mutex should not be poisoned");
+        write_authority_transport_frame(
+            &mut *writer,
+            &AuthorityTransportFrame::RawPtyInput(payload.clone()),
+        )
+        .map_err(|error| RemoteControlPlaneTransportError::new(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,10 +484,11 @@ mod tests {
         RemoteAuthorityConnectionRuntime,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, TargetOutputPayload,
+        ControlPlanePayload, ProtocolEnvelope, RawPtyOutputPayload, TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
-        write_control_plane_envelope, write_registration_frame,
+        read_control_plane_envelope, write_authority_transport_frame, write_control_plane_envelope,
+        write_registration_frame, AuthorityTransportFrame,
     };
     use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
     use std::fs;
@@ -482,13 +521,54 @@ mod tests {
                 match envelope.payload {
                     ControlPlanePayload::TargetOutput(payload) => {
                         assert_eq!(payload.output_seq, 1);
-                        assert_eq!(payload.bytes_base64, "YQ==");
+                        assert_eq!(payload.output_bytes, b"a".to_vec());
                     }
                     other => panic!("unexpected payload: {other:?}"),
                 }
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn register_authority_stream_forwards_raw_pty_output_without_envelope() {
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+
+        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
+        register_authority_stream(server, registry.clone(), "peer-a".to_string(), tx)
+            .expect("authority stream should register");
+
+        assert_eq!(
+            rx.recv().expect("transport event should be emitted"),
+            AuthorityTransportEvent::Connected
+        );
+
+        write_authority_transport_frame(
+            &mut client,
+            &AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 7,
+                output_bytes: b"raw".to_vec(),
+            }),
+        )
+        .expect("raw output frame should encode");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("raw output event should arrive"),
+            AuthorityTransportEvent::RawPtyOutput {
+                authority_id: "peer-a".to_string(),
+                payload: RawPtyOutputPayload {
+                    session_id: "shell-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    output_seq: 7,
+                    output_bytes: b"raw".to_vec(),
+                },
+            }
+        );
     }
 
     #[test]
@@ -633,7 +713,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 7);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -710,7 +790,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 9);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -756,7 +836,7 @@ mod tests {
             AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 13);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a".to_vec());
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
@@ -781,7 +861,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 output_seq,
                 stream: "pty",
-                bytes_base64: "YQ==".to_string(),
+                output_bytes: b"a".to_vec(),
             }),
         }
     }
@@ -795,5 +875,102 @@ mod tests {
             "waitagent-test-authority-connection-{name}-{}-{millis}.sock",
             process::id()
         ))
+    }
+
+    #[test]
+    #[ignore]
+    fn benchmark_authority_transport_rtt() {
+        // Run with: cargo test benchmark_authority_transport_rtt -- --nocapture --ignored
+        const ITERATIONS: usize = 10_000;
+
+        // --- Codec overhead (encode + decode) ---
+        let envelope = authority_target_output_envelope(1);
+        let mut buf = Vec::with_capacity(4096);
+        let mut decode_cursor = std::io::Cursor::new(Vec::new());
+
+        let codec_start = std::time::Instant::now();
+        for i in 0..ITERATIONS {
+            let mut env = envelope.clone();
+            if let ControlPlanePayload::TargetOutput(ref mut p) = env.payload {
+                p.output_seq = i as u64;
+            }
+            buf.clear();
+            write_control_plane_envelope(&mut buf, &env).expect("encode");
+            decode_cursor.get_mut().clear();
+            decode_cursor.get_mut().extend_from_slice(&buf);
+            decode_cursor.set_position(0);
+            let _decoded = read_control_plane_envelope(&mut decode_cursor).expect("decode");
+        }
+        let codec_ns = codec_start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        // --- Authority transport RTT (Unix socket) ---
+        let registry = RemoteConnectionRegistry::new();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+        write_registration_frame(&mut client, "peer-a").expect("ok");
+        register_authority_stream(server, registry.clone(), "peer-a".to_string(), event_tx)
+            .expect("ok");
+        event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("connected");
+
+        let rtt_start = std::time::Instant::now();
+        for i in 0..ITERATIONS {
+            let env = authority_target_output_envelope(i as u64);
+            write_control_plane_envelope(&mut client, &env).expect("encode");
+            match event_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(AuthorityTransportEvent::Envelope(_)) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let rtt_ns = rtt_start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        // --- Throughput (send batched then recv batched) ---
+        let env = authority_target_output_envelope(1);
+        let send_start = std::time::Instant::now();
+        for i in 0..ITERATIONS {
+            let mut e = env.clone();
+            if let ControlPlanePayload::TargetOutput(ref mut p) = e.payload {
+                p.output_seq = i as u64;
+            }
+            write_control_plane_envelope(&mut client, &e).expect("encode");
+        }
+        let send_ns = send_start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        let recv_start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            match event_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(AuthorityTransportEvent::Envelope(_)) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let recv_ns = recv_start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+        println!("=== Authority Transport Benchmark ({ITERATIONS} iters) ===");
+        println!(
+            "Codec encode+decode:       {:.0} ns  ({:.3} µs)",
+            codec_ns,
+            codec_ns / 1000.0
+        );
+        println!(
+            "Send-only (encode+write):  {:.0} ns  ({:.3} µs)",
+            send_ns,
+            send_ns / 1000.0
+        );
+        println!(
+            "Receive-only (read+decode): {:.0} ns  ({:.3} µs)",
+            recv_ns,
+            recv_ns / 1000.0
+        );
+        println!(
+            "Authority transport RTT:    {:.0} ns  ({:.3} µs)",
+            rtt_ns,
+            rtt_ns / 1000.0
+        );
+        println!("========================================");
+        println!("For reference:");
+        println!("  Tmux send-keys subprocess:  ~3 ms   (3000 µs)");
+        println!("  Direct pty write:           ~1.5 µs");
+        println!("  Network RTT (this link):    avg ~90 ms");
     }
 }

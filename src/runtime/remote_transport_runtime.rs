@@ -1,5 +1,5 @@
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, NodeBoundControlPlaneMessage, ProtocolEnvelope,
+    ControlPlanePayload, NodeBoundControlPlaneMessage, ProtocolEnvelope, RawPtyInputPayload,
 };
 use crate::runtime::remote_main_slot_runtime::{
     RemoteControlPlaneSink, RemoteControlPlaneTransportError,
@@ -12,6 +12,15 @@ pub trait RemoteControlPlaneConnection: Send + Sync {
         &self,
         envelope: &ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), RemoteControlPlaneTransportError>;
+
+    fn send_raw_pty_input(
+        &self,
+        _payload: &RawPtyInputPayload,
+    ) -> Result<(), RemoteControlPlaneTransportError> {
+        Err(RemoteControlPlaneTransportError::new(
+            "remote control-plane connection does not support raw PTY input frames",
+        ))
+    }
 }
 
 #[derive(Clone, Default)]

@@ -202,6 +202,7 @@ pub struct RemoteAuthorityTargetHostCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteAuthorityOutputPumpCommand {
     pub ingest_socket_path: String,
+    pub input_fifo_path: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -742,11 +743,15 @@ fn parse_remote_authority_output_pump(
 ) -> Result<RemoteAuthorityOutputPumpCommand, CliError> {
     let mut iter = args.into_iter();
     let mut ingest_socket_path = None;
+    let mut input_fifo_path = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--ingest-socket-path" => {
                 ingest_socket_path = Some(expect_value("--ingest-socket-path", &mut iter)?)
+            }
+            "--input-fifo-path" => {
+                input_fifo_path = Some(expect_value("--input-fifo-path", &mut iter)?)
             }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
@@ -756,6 +761,8 @@ fn parse_remote_authority_output_pump(
     Ok(RemoteAuthorityOutputPumpCommand {
         ingest_socket_path: ingest_socket_path
             .ok_or_else(|| CliError::MissingValue("--ingest-socket-path".to_string()))?,
+        input_fifo_path: input_fifo_path
+            .ok_or_else(|| CliError::MissingValue("--input-fifo-path".to_string()))?,
     })
 }
 
@@ -1446,11 +1453,14 @@ mod tests {
             "__remote-authority-output-pump",
             "--ingest-socket-path",
             "/tmp/output.sock",
+            "--input-fifo-path",
+            "/tmp/input.fifo",
         ])
         .command
         {
             Command::RemoteAuthorityOutputPump(command) => {
                 assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
+                assert_eq!(command.input_fifo_path, "/tmp/input.fifo");
             }
             other => panic!("unexpected command: {other:?}"),
         }

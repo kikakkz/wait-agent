@@ -1,11 +1,10 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    OpenMirrorRequest, RawPtyInput, RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited,
     TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
@@ -15,8 +14,8 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
     NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-    TargetExitedPayload, TargetInputPayload, TargetOutputPayload, TargetPublishedPayload,
-    REMOTE_PROTOCOL_VERSION,
+    RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload, TargetOutputPayload,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -152,7 +151,7 @@ impl RemoteNodeSessionRuntime {
         target_id: &str,
         output_seq: u64,
         stream: &'static str,
-        bytes_base64: impl Into<String>,
+        output_bytes: Vec<u8>,
     ) -> Result<(), RemoteNodeSessionError> {
         self.send_payload(
             NodeSessionChannel::Authority,
@@ -164,7 +163,28 @@ impl RemoteNodeSessionRuntime {
                 target_id: target_id.to_string(),
                 output_seq,
                 stream,
-                bytes_base64: bytes_base64.into(),
+                output_bytes,
+            }),
+        )
+    }
+
+    pub fn send_raw_pty_output(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload(
+            NodeSessionChannel::Authority,
+            session_id,
+            target_id,
+            "authority-msg",
+            ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                output_seq,
+                output_bytes,
             }),
         )
     }
@@ -189,6 +209,7 @@ impl RemoteNodeSessionRuntime {
                 console_id: console_id.to_string(),
                 cols,
                 rows,
+                raw_pty_passthrough: false,
             }),
         )
     }
@@ -514,8 +535,8 @@ fn recv_local_authority_command(
         ControlPlanePayload::CloseMirrorRequest(payload) => {
             Ok(RemoteAuthorityCommand::CloseMirror(payload))
         }
-        ControlPlanePayload::TargetInput(payload) => {
-            Ok(RemoteAuthorityCommand::TargetInput(payload))
+        ControlPlanePayload::RawPtyInput(payload) => {
+            Ok(RemoteAuthorityCommand::RawPtyInput(payload))
         }
         ControlPlanePayload::ApplyResize(payload) => {
             Ok(RemoteAuthorityCommand::ApplyResize(payload))
@@ -532,8 +553,8 @@ pub(crate) fn map_inbound_grpc_authority_event(
 ) -> Option<GrpcAuthorityEvent> {
     let route_session_id = route_session_id(&envelope);
     match envelope.body {
-        Some(GrpcBody::TargetInputDelivery(payload)) => Some(GrpcAuthorityEvent::Command(
-            RemoteAuthorityCommand::TargetInput(TargetInputPayload {
+        Some(GrpcBody::RawPtyInput(payload)) => Some(GrpcAuthorityEvent::Command(
+            RemoteAuthorityCommand::RawPtyInput(RawPtyInputPayload {
                 attachment_id: payload.attachment_id,
                 session_id: grpc_session_id(
                     route_session_id,
@@ -544,7 +565,7 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 console_id: payload.console_id,
                 console_host_id: payload.console_host_id,
                 input_seq: payload.input_seq,
-                bytes_base64: encode_base64(&payload.input_bytes),
+                input_bytes: payload.input_bytes,
             }),
         )),
         Some(GrpcBody::ApplyPtyResize(payload)) => Some(GrpcAuthorityEvent::Command(
@@ -572,6 +593,7 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 console_id: payload.console_id,
                 cols: payload.cols as usize,
                 rows: payload.rows as usize,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }),
         )),
         Some(GrpcBody::CloseMirrorRequest(payload)) => Some(GrpcAuthorityEvent::Command(
@@ -621,7 +643,7 @@ pub(crate) fn map_outbound_grpc_envelope(
         attachment_id: envelope.attachment_id.clone(),
         console_id: envelope.console_id.clone(),
         console_host_id: match &envelope.payload {
-            ControlPlanePayload::TargetInput(payload) => Some(payload.console_host_id.clone()),
+            ControlPlanePayload::RawPtyInput(payload) => Some(payload.console_host_id.clone()),
             _ => None,
         },
         session_id: envelope.session_id.clone(),
@@ -633,20 +655,26 @@ pub(crate) fn map_outbound_grpc_envelope(
                 output_seq: payload.output_seq,
                 stream: payload.stream.to_string(),
                 session_id: payload.session_id.clone(),
-                output_bytes: decode_base64(&payload.bytes_base64)
-                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+                output_bytes: payload.output_bytes.clone(),
             }))
         }
-        (NodeSessionChannel::Authority, ControlPlanePayload::TargetInput(payload)) => {
-            Some(GrpcBody::TargetInputDelivery(TargetInputDelivery {
+        (NodeSessionChannel::Authority, ControlPlanePayload::RawPtyOutput(payload)) => {
+            Some(GrpcBody::RawPtyOutput(RawPtyOutput {
+                target_id: payload.target_id.clone(),
+                output_seq: payload.output_seq,
+                session_id: payload.session_id.clone(),
+                output_bytes: payload.output_bytes.clone(),
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::RawPtyInput(payload)) => {
+            Some(GrpcBody::RawPtyInput(RawPtyInput {
                 attachment_id: payload.attachment_id.clone(),
                 target_id: payload.target_id.clone(),
                 console_id: payload.console_id.clone(),
                 console_host_id: payload.console_host_id.clone(),
                 input_seq: payload.input_seq,
                 session_id: payload.session_id.clone(),
-                input_bytes: decode_base64(&payload.bytes_base64)
-                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+                input_bytes: payload.input_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::ApplyResize(payload)) => {
@@ -666,6 +694,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 console_id: payload.console_id.clone(),
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::CloseMirrorRequest(payload)) => {
@@ -695,8 +724,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 session_id: payload.session_id.clone(),
                 chunk_seq: payload.chunk_seq,
                 stream: payload.stream.to_string(),
-                output_bytes: decode_base64(&payload.bytes_base64)
-                    .map_err(|error| RemoteNodeSessionError::new(error.to_string()))?,
+                output_bytes: payload.output_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::MirrorBootstrapComplete(payload)) => {
@@ -954,7 +982,7 @@ mod tests {
     use crate::infra::remote_protocol::{
         CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
         MirrorBootstrapCompletePayload, NodeSessionChannel, OpenMirrorRequestPayload,
-        ProtocolEnvelope, TargetInputPayload, TargetPublishedPayload,
+        ProtocolEnvelope, RawPtyInputPayload, TargetPublishedPayload,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityConnectionStarter, AuthorityTransportEvent,
@@ -1039,7 +1067,7 @@ mod tests {
                     protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
                         .to_string(),
                     message_id: "msg-in".to_string(),
-                    message_type: "target_input",
+                    message_type: "raw_pty_input",
                     timestamp: "1Z".to_string(),
                     sender_id: "observer".to_string(),
                     correlation_id: None,
@@ -1047,17 +1075,17 @@ mod tests {
                     target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                     attachment_id: Some("att-1".to_string()),
                     console_id: Some("console-1".to_string()),
-                    payload: ControlPlanePayload::TargetInput(TargetInputPayload {
+                    payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
                         attachment_id: "att-1".to_string(),
                         session_id: "shell-1".to_string(),
                         target_id: "remote-peer:peer-a:shell-1".to_string(),
                         console_id: "console-1".to_string(),
                         console_host_id: "wa-local".to_string(),
                         input_seq: 1,
-                        bytes_base64: "YQ==".to_string(),
+                        input_bytes: b"a".to_vec(),
                     }),
                 })
-                .expect("authority input should send");
+                .expect("raw authority input should send");
             session_writer
                 .send_target_published(&remote_target("peer-a", "shell-1"), Some("target-host-1"))
                 .expect("publication should send");
@@ -1067,10 +1095,11 @@ mod tests {
             .recv_authority_command()
             .expect("authority command should arrive")
         {
-            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::TargetInput(
+            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
                 payload,
             ) => {
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
+                assert_eq!(payload.input_bytes, b"a");
             }
             other => panic!("unexpected authority command: {other:?}"),
         }
@@ -1139,7 +1168,13 @@ mod tests {
         }
 
         session
-            .send_target_output("shell-1", "remote-peer:peer-a:shell-1", 7, "pty", "YQ==")
+            .send_target_output(
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                7,
+                "pty",
+                b"a".to_vec(),
+            )
             .expect("target output should send through grpc node session");
         let authority_event = event_rx
             .recv_timeout(TEST_TIMEOUT)
@@ -1149,7 +1184,7 @@ mod tests {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(payload.output_seq, 7);
-                    assert_eq!(payload.bytes_base64, "YQ==");
+                    assert_eq!(payload.output_bytes, b"a");
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },
@@ -1176,6 +1211,7 @@ mod tests {
                     console_id,
                     cols,
                     rows,
+                    raw_pty_passthrough: _,
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");
@@ -1199,7 +1235,7 @@ mod tests {
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     chunk_seq: 1,
                     stream: "pty",
-                    bytes_base64: "Ym9vdHN0cmFw".to_string(),
+                    output_bytes: b"bootstrap".to_vec(),
                 }),
             )
             .expect("mirror bootstrap chunk should send through grpc node session");
@@ -1213,13 +1249,13 @@ mod tests {
                     target_id,
                     chunk_seq,
                     stream,
-                    bytes_base64,
+                    ref output_bytes,
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(chunk_seq, 1);
                     assert_eq!(stream, "pty");
-                    assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                    assert_eq!(output_bytes, b"bootstrap");
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },
@@ -1295,7 +1331,7 @@ mod tests {
                         protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
                             .to_string(),
                         message_id: "target-input-1".to_string(),
-                        message_type: "target_input",
+                        message_type: "raw_pty_input",
                         timestamp: "1Z".to_string(),
                         sender_id: "server".to_string(),
                         correlation_id: None,
@@ -1303,29 +1339,29 @@ mod tests {
                         target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                         attachment_id: Some("attach-1".to_string()),
                         console_id: Some("console-1".to_string()),
-                        payload: ControlPlanePayload::TargetInput(TargetInputPayload {
+                        payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
                             attachment_id: "attach-1".to_string(),
                             session_id: "shell-1".to_string(),
                             target_id: "remote-peer:peer-a:shell-1".to_string(),
                             console_id: "console-1".to_string(),
                             console_host_id: "host-1".to_string(),
                             input_seq: 3,
-                            bytes_base64: "Yg==".to_string(),
+                            input_bytes: b"b".to_vec(),
                         }),
                     },
                 },
             ])
-            .expect("target input should route through grpc node session");
+            .expect("raw PTY input should route through grpc node session");
         match session
             .recv_authority_command()
             .expect("authority command should arrive over grpc")
         {
-            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::TargetInput(
+            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
                 payload,
             ) => {
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.input_seq, 3);
-                assert_eq!(payload.bytes_base64, "Yg==");
+                assert_eq!(payload.input_bytes, b"b");
             }
             other => panic!("unexpected authority command: {other:?}"),
         }

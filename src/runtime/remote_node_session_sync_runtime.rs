@@ -17,7 +17,8 @@ use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
+    TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_target_host_runtime::{
@@ -39,10 +40,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
+const SESSION_SYNC_RAW_INPUT_QUIET_WINDOW: Duration = Duration::from_millis(750);
 const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
 const REMOTE_SESSION_SYNC_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
@@ -278,13 +280,14 @@ impl SessionSyncAuthorityManager {
 
     fn handle_event(
         &mut self,
-        gateway: &impl LocalSessionCatalog,
         session_handle: &RemoteNodeSessionHandle,
         event: GrpcAuthorityEvent,
     ) {
         match event {
             GrpcAuthorityEvent::Command(command) => {
-                let _ = self.ensure_and_send_command(gateway, session_handle, command);
+                if let Err(error) = self.ensure_and_send_command(session_handle, command) {
+                    eprintln!("[session-sync] failed to handle authority command: {error}");
+                }
             }
             GrpcAuthorityEvent::MirrorAccepted
             | GrpcAuthorityEvent::MirrorRejected(_)
@@ -295,23 +298,23 @@ impl SessionSyncAuthorityManager {
 
     fn ensure_and_send_command(
         &mut self,
-        gateway: &impl LocalSessionCatalog,
         session_handle: &RemoteNodeSessionHandle,
         command: RemoteAuthorityCommand,
     ) -> Result<(), LifecycleError> {
         let target_id = authority_command_target_id(&command).to_string();
         if !self.running_hosts.contains_key(&target_id) {
             let session_name = target_session_name_from_target_id(&target_id).ok_or_else(|| {
+                eprintln!("[session-sync] failed to extract session from target id `{target_id}`");
                 LifecycleError::Protocol(format!(
                     "failed to derive local session from target id `{target_id}`"
                 ))
             })?;
-            let socket_name =
-                find_socket_name_for_session(gateway, &session_name).ok_or_else(|| {
-                    LifecycleError::Protocol(format!(
-                        "no local workspace socket owns session `{session_name}` for `{target_id}`"
-                    ))
-                })?;
+            let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
+                eprintln!("[session-sync] no local socket owns session `{session_name}` for `{target_id}`");
+                LifecycleError::Protocol(format!(
+                    "no local workspace socket owns session `{session_name}` for `{target_id}`"
+                ))
+            })?;
             let authority_socket_path =
                 live_authority_session_socket_path(&socket_name, &session_name);
             let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
@@ -440,22 +443,27 @@ fn run_remote_session_sync_loop<G, T>(
         let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
         let mut authority_manager = SessionSyncAuthorityManager::new();
         let mut should_reconnect = false;
+        let mut next_sync_at = Instant::now() + poll_interval;
+        let mut raw_input_quiet_until: Option<Instant> = None;
 
         while !should_reconnect {
-            if let Ok(event) = event_rx.recv_timeout(poll_interval) {
-                should_reconnect |= handle_transport_event(
-                    event,
-                    &mut active_session,
-                    &gateway,
-                    &mut authority_manager,
-                );
+            let wait_duration = next_sync_at.saturating_duration_since(Instant::now());
+            if let Ok(event) = event_rx.recv_timeout(wait_duration) {
+                let outcome =
+                    handle_transport_event(event, &mut active_session, &mut authority_manager);
+                should_reconnect |= outcome.should_reconnect;
+                if outcome.raw_pty_input {
+                    raw_input_quiet_until =
+                        Some(Instant::now() + SESSION_SYNC_RAW_INPUT_QUIET_WINDOW);
+                }
                 while let Ok(event) = event_rx.try_recv() {
-                    should_reconnect |= handle_transport_event(
-                        event,
-                        &mut active_session,
-                        &gateway,
-                        &mut authority_manager,
-                    );
+                    let outcome =
+                        handle_transport_event(event, &mut active_session, &mut authority_manager);
+                    should_reconnect |= outcome.should_reconnect;
+                    if outcome.raw_pty_input {
+                        raw_input_quiet_until =
+                            Some(Instant::now() + SESSION_SYNC_RAW_INPUT_QUIET_WINDOW);
+                    }
                 }
             }
 
@@ -464,8 +472,19 @@ fn run_remote_session_sync_loop<G, T>(
             }
 
             let Some(session_handle) = active_session.as_ref() else {
+                next_sync_at = Instant::now() + poll_interval;
                 continue;
             };
+            if Instant::now() < next_sync_at {
+                continue;
+            }
+            if raw_input_quiet_until
+                .map(|quiet_until| Instant::now() < quiet_until)
+                .unwrap_or(false)
+            {
+                next_sync_at = raw_input_quiet_until.unwrap_or_else(Instant::now);
+                continue;
+            }
             if let Err(_) = sync_local_sessions(
                 &gateway,
                 &node_id,
@@ -475,6 +494,7 @@ fn run_remote_session_sync_loop<G, T>(
             ) {
                 should_reconnect = true;
             }
+            next_sync_at = Instant::now() + poll_interval;
         }
 
         if wait_or_stop(&stop_rx, reconnect_delay) {
@@ -484,31 +504,43 @@ fn run_remote_session_sync_loop<G, T>(
     }
 }
 
+#[derive(Debug, Default)]
+struct TransportEventOutcome {
+    should_reconnect: bool,
+    raw_pty_input: bool,
+}
+
 fn handle_transport_event(
     event: RemoteNodeTransportEvent,
     active_session: &mut Option<RemoteNodeSessionHandle>,
-    gateway: &impl LocalSessionCatalog,
     authority_manager: &mut SessionSyncAuthorityManager,
-) -> bool {
+) -> TransportEventOutcome {
     match event {
         RemoteNodeTransportEvent::SessionOpened { session } => {
             *active_session = Some(session);
-            false
+            TransportEventOutcome::default()
         }
         RemoteNodeTransportEvent::EnvelopeReceived { envelope, .. } => {
             let Some(session_handle) = active_session.as_ref() else {
-                return false;
+                return TransportEventOutcome::default();
             };
+            let raw_pty_input = matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_)));
             if let Some(event) = map_inbound_grpc_authority_event(envelope) {
-                authority_manager.handle_event(gateway, session_handle, event);
+                authority_manager.handle_event(session_handle, event);
             }
-            false
+            TransportEventOutcome {
+                should_reconnect: false,
+                raw_pty_input,
+            }
         }
         RemoteNodeTransportEvent::SessionClosed { .. }
         | RemoteNodeTransportEvent::TransportFailed { .. } => {
             authority_manager.shutdown();
             *active_session = None;
-            true
+            TransportEventOutcome {
+                should_reconnect: true,
+                raw_pty_input: false,
+            }
         }
     }
 }
@@ -706,7 +738,10 @@ fn compute_session_sync_delta(
     let publish = current
         .iter()
         .filter_map(|(local_id, session)| {
-            if previous.get(local_id) == Some(session) {
+            if previous
+                .get(local_id)
+                .is_some_and(|previous| session_records_equivalent_for_sync(previous, session))
+            {
                 None
             } else {
                 Some(session.clone())
@@ -726,11 +761,34 @@ fn compute_session_sync_delta(
     SessionSyncDelta { publish, exit }
 }
 
+fn session_records_equivalent_for_sync(
+    previous: &ManagedSessionRecord,
+    current: &ManagedSessionRecord,
+) -> bool {
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    if is_interactive_shell_state(&previous) && is_interactive_shell_state(&current) {
+        previous.task_state = ManagedSessionTaskState::Input;
+        current.task_state = ManagedSessionTaskState::Input;
+    }
+    previous == current
+}
+
+fn is_interactive_shell_state(session: &ManagedSessionRecord) -> bool {
+    matches!(
+        session.command_name.as_deref(),
+        Some("bash" | "zsh" | "fish" | "sh")
+    ) && matches!(
+        session.task_state,
+        ManagedSessionTaskState::Input | ManagedSessionTaskState::Running
+    )
+}
+
 fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
     match command {
         RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::TargetInput(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
     }
 }
@@ -741,7 +799,7 @@ fn authority_command_envelope(
     let session_id = match &command {
         RemoteAuthorityCommand::OpenMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
-        RemoteAuthorityCommand::TargetInput(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
     };
     let payload = match command {
@@ -751,7 +809,7 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => {
             ControlPlanePayload::CloseMirrorRequest(payload)
         }
-        RemoteAuthorityCommand::TargetInput(payload) => ControlPlanePayload::TargetInput(payload),
+        RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
     };
     ProtocolEnvelope {
@@ -781,16 +839,19 @@ fn target_session_name_from_target_id(target_id: &str) -> Option<String> {
     }
 }
 
-fn find_socket_name_for_session(
-    gateway: &impl LocalSessionCatalog,
-    target_session_name: &str,
-) -> Option<String> {
-    gateway
-        .list_local_sessions()
-        .ok()?
-        .into_iter()
-        .find(|session| session.address.session_id() == target_session_name)
-        .map(|session| session.address.server_id().to_string())
+fn find_socket_for_session(target_session_name: &str) -> Option<String> {
+    let backend = EmbeddedTmuxBackend::from_build_env().ok()?;
+    let sockets = backend.discover_waitagent_sockets().ok()?;
+    for socket_name in &sockets {
+        let sessions = backend.list_sessions_on_socket(socket_name).ok()?;
+        if sessions
+            .iter()
+            .any(|s| s.address.session_id() == target_session_name)
+        {
+            return Some(socket_name.as_str().to_string());
+        }
+    }
+    None
 }
 
 fn spawn_in_process_authority_target_host(
@@ -1158,6 +1219,55 @@ mod tests {
         assert_eq!(delta.publish.len(), 2);
         assert_eq!(delta.exit.len(), 1);
         assert_eq!(delta.exit[0].address.session_id(), "shell-old");
+    }
+
+    #[test]
+    fn session_sync_delta_ignores_interactive_shell_input_running_flaps() {
+        let mut previous_session = session("wa-1", "shell-1");
+        previous_session.command_name = Some("bash".to_string());
+        previous_session.task_state = ManagedSessionTaskState::Input;
+        let mut current_session = previous_session.clone();
+        current_session.task_state = ManagedSessionTaskState::Running;
+        let previous = local_sessions_by_local_id(vec![previous_session]);
+        let current = local_sessions_by_local_id(vec![current_session]);
+
+        let delta = compute_session_sync_delta(&previous, &current);
+
+        assert!(delta.publish.is_empty());
+        assert!(delta.exit.is_empty());
+    }
+
+    #[test]
+    fn session_sync_delta_publishes_non_shell_state_changes() {
+        let mut previous_session = session("wa-1", "shell-1");
+        previous_session.command_name = Some("codex".to_string());
+        previous_session.task_state = ManagedSessionTaskState::Input;
+        let mut current_session = previous_session.clone();
+        current_session.task_state = ManagedSessionTaskState::Running;
+        let previous = local_sessions_by_local_id(vec![previous_session]);
+        let current = local_sessions_by_local_id(vec![current_session]);
+
+        let delta = compute_session_sync_delta(&previous, &current);
+
+        assert_eq!(delta.publish.len(), 1);
+        assert!(delta.exit.is_empty());
+    }
+
+    #[test]
+    fn session_sync_delta_publishes_interactive_shell_non_state_changes() {
+        let mut previous_session = session("wa-1", "shell-1");
+        previous_session.command_name = Some("bash".to_string());
+        previous_session.task_state = ManagedSessionTaskState::Input;
+        let mut current_session = previous_session.clone();
+        current_session.current_path = Some(PathBuf::from("/tmp/other"));
+        current_session.task_state = ManagedSessionTaskState::Running;
+        let previous = local_sessions_by_local_id(vec![previous_session]);
+        let current = local_sessions_by_local_id(vec![current_session]);
+
+        let delta = compute_session_sync_delta(&previous, &current);
+
+        assert_eq!(delta.publish.len(), 1);
+        assert!(delta.exit.is_empty());
     }
 
     #[test]

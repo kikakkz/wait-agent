@@ -1,9 +1,8 @@
-use crate::infra::base64::{decode_base64, encode_base64};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, RouteContext, TargetExited as GrpcTargetExited, TargetInputDelivery,
+    OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
     TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
@@ -355,6 +354,7 @@ fn route_grpc_envelope(
                     console_id: payload.console_id.clone(),
                     cols: payload.cols as usize,
                     rows: payload.rows as usize,
+                    raw_pty_passthrough: payload.raw_pty_passthrough,
                 }),
             })
         }
@@ -534,7 +534,7 @@ fn map_target_output_envelope(
             target_id: payload.target_id.clone(),
             output_seq: payload.output_seq,
             stream: known_output_stream(&payload.stream)?,
-            bytes_base64: encode_base64(&payload.output_bytes),
+            output_bytes: payload.output_bytes.clone(),
         }),
     })
 }
@@ -562,7 +562,7 @@ fn map_mirror_bootstrap_chunk_envelope(
             target_id: payload.target_id.clone(),
             chunk_seq: payload.chunk_seq,
             stream: known_output_stream(&payload.stream)?,
-            bytes_base64: encode_base64(&payload.output_bytes),
+            output_bytes: payload.output_bytes.clone(),
         }),
     })
 }
@@ -621,25 +621,21 @@ fn map_outbound_control_plane_envelope(
         attachment_id: envelope.attachment_id.clone(),
         console_id: envelope.console_id.clone(),
         console_host_id: match &envelope.payload {
-            ControlPlanePayload::TargetInput(payload) => Some(payload.console_host_id.clone()),
+            ControlPlanePayload::RawPtyInput(payload) => Some(payload.console_host_id.clone()),
             _ => None,
         },
         session_id: envelope.session_id.clone(),
     });
     let body = match envelope.payload {
-        ControlPlanePayload::TargetInput(payload) => {
-            Some(Body::TargetInputDelivery(TargetInputDelivery {
-                attachment_id: payload.attachment_id,
-                target_id: payload.target_id,
-                console_id: payload.console_id,
-                console_host_id: payload.console_host_id,
-                input_seq: payload.input_seq,
-                session_id: payload.session_id,
-                input_bytes: decode_base64(&payload.bytes_base64).map_err(|error| {
-                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-                })?,
-            }))
-        }
+        ControlPlanePayload::RawPtyInput(payload) => Some(Body::RawPtyInput(RawPtyInput {
+            attachment_id: payload.attachment_id,
+            target_id: payload.target_id,
+            console_id: payload.console_id,
+            console_host_id: payload.console_host_id,
+            input_seq: payload.input_seq,
+            session_id: payload.session_id,
+            input_bytes: payload.input_bytes,
+        })),
         ControlPlanePayload::ApplyResize(payload) => Some(Body::ApplyPtyResize(ApplyPtyResize {
             target_id: payload.target_id,
             resize_epoch: payload.resize_epoch,
@@ -655,6 +651,7 @@ fn map_outbound_control_plane_envelope(
                 console_id: payload.console_id,
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
+                raw_pty_passthrough: payload.raw_pty_passthrough,
             }))
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
@@ -805,7 +802,7 @@ mod tests {
     };
     use crate::infra::remote_protocol::{
         ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
-        OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload, REMOTE_PROTOCOL_VERSION,
+        OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent, QueuedAuthorityStreamSource,
@@ -895,7 +892,7 @@ mod tests {
                     ControlPlanePayload::TargetOutput(payload) => {
                         assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(payload.output_seq, 7);
-                        assert_eq!(payload.bytes_base64, "YQ==");
+                        assert_eq!(payload.output_bytes, b"a");
                     }
                     other => panic!("unexpected authority envelope payload: {other:?}"),
                 },
@@ -913,12 +910,12 @@ mod tests {
                     ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
                         target_id,
                         chunk_seq,
-                        bytes_base64,
+                        ref output_bytes,
                         ..
                     }) => {
                         assert_eq!(target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(chunk_seq, 1);
-                        assert_eq!(bytes_base64, "Ym9vdHN0cmFw");
+                        assert_eq!(output_bytes, b"bootstrap");
                     }
                     other => panic!("unexpected authority envelope payload: {other:?}"),
                 },
@@ -954,8 +951,8 @@ mod tests {
                         node_id: "peer-a".to_string(),
                         envelope: ProtocolEnvelope {
                             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-                            message_id: "target-input-1".to_string(),
-                            message_type: "target_input",
+                            message_id: "raw-pty-input-1".to_string(),
+                            message_type: "raw_pty_input",
                             timestamp: "1Z".to_string(),
                             sender_id: "server".to_string(),
                             correlation_id: None,
@@ -963,26 +960,26 @@ mod tests {
                             target_id: Some("remote-peer:peer-a:shell-1".to_string()),
                             attachment_id: Some("attach-1".to_string()),
                             console_id: Some("console-1".to_string()),
-                            payload: ControlPlanePayload::TargetInput(TargetInputPayload {
+                            payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
                                 attachment_id: "attach-1".to_string(),
                                 session_id: "shell-1".to_string(),
                                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                                 console_id: "console-1".to_string(),
                                 console_host_id: "host-1".to_string(),
                                 input_seq: 3,
-                                bytes_base64: "Yg==".to_string(),
+                                input_bytes: b"b".to_vec(),
                             }),
                         },
                     },
                 ])
-                .expect("target input should route through bridged grpc authority session");
+                .expect("raw PTY input should route through bridged grpc authority session");
             let outbound = inbound
                 .message()
                 .await
                 .expect("outbound authority envelope should decode")
                 .expect("outbound authority envelope should exist");
             match outbound.body.expect("body should exist") {
-                Body::TargetInputDelivery(payload) => {
+                Body::RawPtyInput(payload) => {
                     assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(payload.input_seq, 3);
                     assert_eq!(payload.input_bytes, b"b".to_vec());
@@ -1051,6 +1048,7 @@ mod tests {
                             console_id: "console-1".to_string(),
                             cols: 120,
                             rows: 40,
+                            raw_pty_passthrough: false,
                         }),
                     },
                 },
