@@ -450,7 +450,10 @@ where
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
                     payload,
                 ))) => {
-                    if let Err(error) = input_fifo.write_all(&payload.input_bytes) {
+                    if let Err(error) = input_fifo
+                        .write_all(&payload.input_bytes)
+                        .and_then(|_| input_fifo.flush())
+                    {
                         break Err(remote_authority_error(error));
                     }
                 }
@@ -617,7 +620,6 @@ fn bind_output_ingest_listener(
         let _ = fs::remove_file(socket_path);
     }
     let listener = UnixListener::bind(socket_path)?;
-    listener.set_nonblocking(true)?;
     Ok(listener)
 }
 
@@ -657,9 +659,6 @@ fn spawn_output_ingest_thread(
                         Err(_) => break,
                     }
                 },
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
                 Err(_) => break,
             }
         }
@@ -1229,7 +1228,7 @@ mod tests {
         let (input_tx, input_rx) = std::sync::mpsc::channel();
         let input_reader_path = input_fifo_path.clone();
         thread::spawn(move || {
-            wait_for_socket(&input_reader_path);
+            wait_for_path(&input_reader_path);
             let mut fifo = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -1240,6 +1239,7 @@ mod tests {
                 .expect("input fifo should receive target input");
             let _ = input_tx.send(bytes.to_vec());
         });
+        let server_input_fifo_path = input_fifo_path.clone();
         thread::spawn(move || {
             let (mut stream, _) = transport_listener
                 .accept()
@@ -1263,6 +1263,7 @@ mod tests {
                 },
             )
             .expect("open mirror should encode");
+            wait_for_path(&server_input_fifo_path);
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -1299,7 +1300,7 @@ mod tests {
                     payload @ ControlPlanePayload::OpenMirrorAccepted(_) => {
                         if accepted_payload.is_none() {
                             accepted_payload = Some(payload);
-                            wait_for_socket(&server_ingest_socket_path);
+                            wait_for_path(&server_ingest_socket_path);
                             let mut output_stream = UnixStream::connect(&server_ingest_socket_path)
                                 .expect("ingest socket should accept");
                             write_output_chunk_frame(&mut output_stream, b"hello")
@@ -1686,14 +1687,14 @@ mod tests {
         assert!(rendered.ends_with(".sock"));
     }
 
-    fn wait_for_socket(path: &Path) {
+    fn wait_for_path(path: &Path) {
         for _ in 0..100 {
             if path.exists() {
                 return;
             }
             thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("socket did not appear at {}", path.display());
+        panic!("path did not appear at {}", path.display());
     }
 
     fn transport_socket_path(name: &str) -> PathBuf {

@@ -705,15 +705,16 @@ mod tests {
             .expect("raw output should send");
         match rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("raw output envelope should arrive")
+            .expect("raw output event should arrive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
-                ControlPlanePayload::RawPtyOutput(payload) => {
-                    assert_eq!(payload.output_seq, 12);
-                    assert_eq!(payload.output_bytes, b"c");
-                }
-                other => panic!("unexpected payload: {other:?}"),
-            },
+            AuthorityTransportEvent::RawPtyOutput {
+                authority_id,
+                payload,
+            } => {
+                assert_eq!(authority_id, "peer-a");
+                assert_eq!(payload.output_seq, 12);
+                assert_eq!(payload.output_bytes, b"c");
+            }
             other => panic!("unexpected event: {other:?}"),
         }
         let _ = fs::remove_file(&socket_path);

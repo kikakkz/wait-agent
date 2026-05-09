@@ -1,4 +1,6 @@
-use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload};
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+};
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, read_registration_frame, write_authority_transport_frame,
     write_control_plane_envelope, AuthorityTransportFrame, RemoteTransportCodecError,
@@ -26,6 +28,10 @@ pub enum AuthorityTransportEvent {
     Disconnected,
     Failed(String),
     Envelope(ProtocolEnvelope<ControlPlanePayload>),
+    RawPtyOutput {
+        authority_id: String,
+        payload: RawPtyOutputPayload,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,22 +231,11 @@ pub fn register_authority_stream(
                     }
                 }
                 Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
-                    let envelope = ProtocolEnvelope {
-                        protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
-                            .to_string(),
-                        message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
-                        message_type: "raw_pty_output",
-                        timestamp: raw_pty_now_rfc3339_like(),
-                        sender_id: node_id.clone(),
-                        correlation_id: None,
-                        session_id: Some(payload.session_id.clone()),
-                        target_id: Some(payload.target_id.clone()),
-                        attachment_id: None,
-                        console_id: None,
-                        payload: ControlPlanePayload::RawPtyOutput(payload),
-                    };
                     if reader_tx
-                        .send(AuthorityTransportEvent::Envelope(envelope))
+                        .send(AuthorityTransportEvent::RawPtyOutput {
+                            authority_id: node_id.clone(),
+                            payload,
+                        })
                         .is_err()
                     {
                         break;
@@ -447,14 +442,6 @@ impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
     }
 }
 
-fn raw_pty_now_rfc3339_like() -> String {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{millis}Z")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteAuthorityConnectionError {
     message: String,
@@ -497,10 +484,11 @@ mod tests {
         RemoteAuthorityConnectionRuntime,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, ProtocolEnvelope, TargetOutputPayload,
+        ControlPlanePayload, ProtocolEnvelope, RawPtyOutputPayload, TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
-        read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
+        read_control_plane_envelope, write_authority_transport_frame, write_control_plane_envelope,
+        write_registration_frame, AuthorityTransportFrame,
     };
     use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
     use std::fs;
@@ -540,6 +528,47 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn register_authority_stream_forwards_raw_pty_output_without_envelope() {
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+
+        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
+        register_authority_stream(server, registry.clone(), "peer-a".to_string(), tx)
+            .expect("authority stream should register");
+
+        assert_eq!(
+            rx.recv().expect("transport event should be emitted"),
+            AuthorityTransportEvent::Connected
+        );
+
+        write_authority_transport_frame(
+            &mut client,
+            &AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 7,
+                output_bytes: b"raw".to_vec(),
+            }),
+        )
+        .expect("raw output frame should encode");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("raw output event should arrive"),
+            AuthorityTransportEvent::RawPtyOutput {
+                authority_id: "peer-a".to_string(),
+                payload: RawPtyOutputPayload {
+                    session_id: "shell-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    output_seq: 7,
+                    output_bytes: b"raw".to_vec(),
+                },
+            }
+        );
     }
 
     #[test]

@@ -5,7 +5,8 @@ use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RemoteConsoleDescriptor,
+    ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    RemoteConsoleDescriptor,
 };
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 use crate::lifecycle::LifecycleError;
@@ -448,9 +449,29 @@ impl RemoteMainSlotPaneRuntime {
                                 &authority_status,
                             )?;
                         }
+                        AuthorityTransportEvent::RawPtyOutput {
+                            authority_id,
+                            payload,
+                        } => {
+                            if raw_pty_passthrough {
+                                let raw = collect_direct_raw_pty_output_payload(
+                                    &target,
+                                    &authority_id,
+                                    &payload,
+                                    &mut direct_raw_output_last_seq,
+                                )
+                                .map_err(remote_protocol_error)?;
+                                write_remote_raw_output(&raw)?;
+                            } else {
+                                return Err(LifecycleError::Protocol(
+                                    "received raw PTY output while raw passthrough is disabled"
+                                        .to_string(),
+                                ));
+                            }
+                        }
                         AuthorityTransportEvent::Envelope(envelope) => {
                             if raw_pty_passthrough {
-                                if let Some(raw) = collect_direct_raw_pty_output(
+                                if let Some(raw) = collect_direct_raw_pty_output_envelope(
                                     &target,
                                     &envelope,
                                     &mut direct_raw_output_last_seq,
@@ -637,7 +658,7 @@ fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError> {
         .map_err(|error| LifecycleError::Io("failed to flush remote raw output".to_string(), error))
 }
 
-fn collect_direct_raw_pty_output(
+fn collect_direct_raw_pty_output_envelope(
     target: &ManagedSessionRecord,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
     last_output_seq: &mut Option<u64>,
@@ -662,6 +683,31 @@ fn collect_direct_raw_pty_output(
     }
     *last_output_seq = Some(payload.output_seq);
     Ok(Some(payload.output_bytes.clone()))
+}
+
+fn collect_direct_raw_pty_output_payload(
+    target: &ManagedSessionRecord,
+    authority_id: &str,
+    payload: &RawPtyOutputPayload,
+    last_output_seq: &mut Option<u64>,
+) -> Result<Vec<u8>, RemoteSocketTransportError> {
+    if authority_id != target.address.authority_id() {
+        return Err(RemoteSocketTransportError::new(format!(
+            "authority `{}` does not match target authority `{}`",
+            authority_id,
+            target.address.authority_id()
+        )));
+    }
+    if let Some(last) = *last_output_seq {
+        if payload.output_seq <= last {
+            return Err(RemoteSocketTransportError::new(format!(
+                "remote raw PTY received out-of-order output for `{}`: {} after {}",
+                payload.target_id, payload.output_seq, last
+            )));
+        }
+    }
+    *last_output_seq = Some(payload.output_seq);
+    Ok(payload.output_bytes.clone())
 }
 
 fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, bytes: &[u8]) -> bool {
@@ -1606,8 +1652,9 @@ mod tests {
     use super::{
         activate_surface_target, activate_surface_target_with_mode, apply_authority_envelope,
         authority_status_from_runtime, authority_transport_event_sender,
-        collect_direct_raw_pty_output, encode_base64, main_slot_console_id, main_slot_surface_spec,
-        placeholder_lines, remote_raw_pty_passthrough_enabled, should_draw_remote_snapshot,
+        collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
+        encode_base64, main_slot_console_id, main_slot_surface_spec, placeholder_lines,
+        remote_raw_pty_passthrough_enabled, should_draw_remote_snapshot,
         should_exit_surface_for_target_presence, should_exit_surface_locally,
         spawn_mailbox_watcher, AuthorityTransportStatus, RawPtyInputRoute,
         RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
@@ -2819,7 +2866,7 @@ mod tests {
     #[test]
     fn direct_raw_pty_output_collects_bytes_without_mailbox_replay() {
         let mut last_output_seq = None;
-        let raw = collect_direct_raw_pty_output(
+        let raw = collect_direct_raw_pty_output_envelope(
             &remote_target(),
             &authority_raw_pty_output_envelope(1, b"\x1b[32mok\r\n".to_vec()),
             &mut last_output_seq,
@@ -2830,13 +2877,33 @@ mod tests {
         assert_eq!(raw, b"\x1b[32mok\r\n");
         assert_eq!(last_output_seq, Some(1));
 
-        let duplicate = collect_direct_raw_pty_output(
+        let duplicate = collect_direct_raw_pty_output_envelope(
             &remote_target(),
             &authority_raw_pty_output_envelope(1, b"again".to_vec()),
             &mut last_output_seq,
         )
         .expect_err("duplicate raw output sequence should be rejected");
         assert!(duplicate.to_string().contains("out-of-order output"));
+    }
+
+    #[test]
+    fn direct_raw_pty_output_payload_collects_bytes_without_envelope() {
+        let mut last_output_seq = None;
+        let raw = collect_direct_raw_pty_output_payload(
+            &remote_target(),
+            "peer-a",
+            &RawPtyOutputPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 1,
+                output_bytes: b"\x1b[32mok\r\n".to_vec(),
+            },
+            &mut last_output_seq,
+        )
+        .expect("raw output should collect");
+
+        assert_eq!(raw, b"\x1b[32mok\r\n");
+        assert_eq!(last_output_seq, Some(1));
     }
 
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
