@@ -81,6 +81,24 @@ impl EmbeddedTmuxBackend {
         self.run_workspace_command(workspace, &set_pane_pipe_args(pane, command))?;
         Ok(())
     }
+
+    pub(crate) fn pane_pipe_state(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<String, TmuxError> {
+        let output = self.run_workspace_command(
+            workspace,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane.as_str().to_string(),
+                "#{pane_pipe}".to_string(),
+            ],
+        )?;
+        Ok(output.stdout.trim().to_string())
+    }
 }
 
 impl TmuxLayoutGateway for EmbeddedTmuxBackend {

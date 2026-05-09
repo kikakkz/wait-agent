@@ -125,7 +125,11 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
-        if self.active_target(workspace)?.is_some() {
+        if let Some(active_target) = self.active_target(workspace)? {
+            self.configure_main_pane_output_bridge_for_active_target(
+                workspace,
+                Some(active_target.as_str()),
+            )?;
             self.layout_runtime
                 .sync_main_slot_bindings(workspace, workspace_dir)?;
             return Ok(());
@@ -169,6 +173,8 @@ impl MainSlotRuntime {
             .map_err(main_slot_error)?;
         self.set_workspace_main_pane(workspace, &target_main_pane)?;
         self.set_active_target(workspace, Some(&target.address.qualified_target()))?;
+        self.layout_runtime
+            .enable_main_pane_output_bridge(workspace)?;
         self.layout_runtime
             .sync_main_slot_bindings(workspace, workspace_dir)?;
         self.layout_runtime
@@ -273,6 +279,8 @@ impl MainSlotRuntime {
             == Some(target.address.qualified_target().as_str())
         {
             self.layout_runtime
+                .enable_main_pane_output_bridge(&workspace)?;
+            self.layout_runtime
                 .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
             return Ok(());
         }
@@ -313,6 +321,8 @@ impl MainSlotRuntime {
         self.set_workspace_main_pane(&workspace, &target_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
+            .enable_main_pane_output_bridge(&workspace)?;
+        self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
         self.layout_runtime
             .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir)
@@ -330,6 +340,8 @@ impl MainSlotRuntime {
         if self.active_target(&workspace)?.as_deref()
             == Some(target.address.qualified_target().as_str())
         {
+            self.layout_runtime
+                .disable_main_pane_output_bridge(&workspace)?;
             self.layout_runtime
                 .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
             return Ok(());
@@ -365,6 +377,8 @@ impl MainSlotRuntime {
         self.set_workspace_main_pane(&workspace, &workspace_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
         self.layout_runtime
+            .disable_main_pane_output_bridge(&workspace)?;
+        self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
         self.layout_runtime
             .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir)
@@ -393,6 +407,8 @@ impl MainSlotRuntime {
             .map_err(main_slot_error)?;
         self.set_workspace_main_pane(&workspace, &target_main_pane)?;
         self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
+        self.layout_runtime
+            .enable_main_pane_output_bridge(&workspace)?;
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
         self.layout_runtime
@@ -423,6 +439,8 @@ impl MainSlotRuntime {
                     workspace,
                     Some(target.address.qualified_target().as_str()),
                 )?;
+                self.layout_runtime
+                    .enable_main_pane_output_bridge(workspace)?;
             }
             None => {
                 self.backend
@@ -434,6 +452,8 @@ impl MainSlotRuntime {
                     .map_err(main_slot_error)?;
                 self.set_workspace_main_pane(workspace, recovery_pane)?;
                 self.set_active_target(workspace, None)?;
+                self.layout_runtime
+                    .enable_main_pane_output_bridge(workspace)?;
                 self.layout_runtime
                     .sync_main_slot_bindings(workspace, &current_workspace.workspace_dir)?;
                 self.layout_runtime
@@ -606,6 +626,20 @@ impl MainSlotRuntime {
             return Ok(false);
         };
         Ok(self.remote_target_record(socket_name, target)?.is_some())
+    }
+
+    fn configure_main_pane_output_bridge_for_active_target(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        target: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        if self.active_target_is_remote(workspace.socket_name.as_str(), target)? {
+            self.layout_runtime
+                .disable_main_pane_output_bridge(workspace)
+        } else {
+            self.layout_runtime
+                .enable_main_pane_output_bridge(workspace)
+        }
     }
 
     fn infer_target_main_pane(&self, workspace: &TmuxWorkspaceHandle) -> Option<String> {
@@ -985,6 +1019,9 @@ mod tests {
         wait_for_condition(|| {
             workspace_main_pane_command(&backend, &workspace.workspace_handle).as_deref()
                 == Some("waitagent")
+        });
+        wait_for_condition(|| {
+            workspace_main_pane_pipe(&backend, &workspace.workspace_handle).as_deref() == Some("0")
         });
 
         let target_host_handle = TmuxWorkspaceHandle {
@@ -1391,6 +1428,19 @@ mod tests {
                 !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
             })
             .and_then(|pane| pane.current_command)
+    }
+
+    fn workspace_main_pane_pipe(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Option<String> {
+        let pane_id = backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .ok()
+            .flatten()?;
+        backend
+            .pane_pipe_state(workspace, &crate::infra::tmux::TmuxPaneId::new(pane_id))
+            .ok()
     }
 
     fn wait_for_condition(predicate: impl Fn() -> bool) {
