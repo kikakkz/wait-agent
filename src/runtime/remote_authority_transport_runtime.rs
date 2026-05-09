@@ -2,7 +2,7 @@ use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
     OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    RawPtyOutputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, read_control_plane_envelope, write_authority_transport_frame,
@@ -39,7 +39,6 @@ pub struct AuthorityTransportListenerGuard {
 pub enum RemoteAuthorityCommand {
     OpenMirror(OpenMirrorRequestPayload),
     CloseMirror(CloseMirrorRequestPayload),
-    TargetInput(TargetInputPayload),
     RawPtyInput(RawPtyInputPayload),
     ApplyResize(ApplyResizePayload),
 }
@@ -79,9 +78,6 @@ impl RemoteAuthorityTransportRuntime {
             }
             ControlPlanePayload::CloseMirrorRequest(payload) => {
                 Ok(RemoteAuthorityCommand::CloseMirror(payload))
-            }
-            ControlPlanePayload::TargetInput(payload) => {
-                Ok(RemoteAuthorityCommand::TargetInput(payload))
             }
             ControlPlanePayload::RawPtyInput(payload) => {
                 Ok(RemoteAuthorityCommand::RawPtyInput(payload))
@@ -512,7 +508,6 @@ mod tests {
     };
     use crate::infra::remote_protocol::{
         ClientHelloPayload, ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload,
-        TargetInputPayload,
     };
     use crate::infra::remote_transport_codec::read_control_plane_envelope;
     use crate::runtime::remote_authority_connection_runtime::{
@@ -604,29 +599,6 @@ mod tests {
             AuthorityTransportEvent::Connected
         );
         assert!(registry.has_connection("peer-a"));
-
-        RegistryRemoteControlPlaneSink::new(registry.clone())
-            .send(&[
-                crate::infra::remote_protocol::NodeBoundControlPlaneMessage {
-                    node_id: "peer-a".to_string(),
-                    envelope: target_input_envelope(),
-                },
-            ])
-            .expect("target input should route to bridged authority transport");
-        assert_eq!(
-            transport
-                .recv_command()
-                .expect("target input should decode"),
-            RemoteAuthorityCommand::TargetInput(TargetInputPayload {
-                attachment_id: "attach-1".to_string(),
-                session_id: "shell-1".to_string(),
-                target_id: "remote-peer:peer-a:shell-1".to_string(),
-                console_id: "console-a".to_string(),
-                console_host_id: "observer-a".to_string(),
-                input_seq: 7,
-                bytes_base64: "YQ==".to_string(),
-            })
-        );
 
         RegistryRemoteControlPlaneSink::new(registry.clone())
             .send(&[
@@ -729,30 +701,6 @@ mod tests {
             "waitagent-test-remote-authority-{name}-{}-{millis}.sock",
             process::id()
         ))
-    }
-
-    fn target_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
-        ProtocolEnvelope {
-            protocol_version: "1.1".to_string(),
-            message_id: "msg-target-input".to_string(),
-            message_type: "target_input",
-            timestamp: "2026-04-28T00:00:00Z".to_string(),
-            sender_id: "server".to_string(),
-            correlation_id: None,
-            session_id: Some("shell-1".to_string()),
-            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
-            attachment_id: Some("attach-1".to_string()),
-            console_id: Some("console-a".to_string()),
-            payload: ControlPlanePayload::TargetInput(TargetInputPayload {
-                attachment_id: "attach-1".to_string(),
-                session_id: "shell-1".to_string(),
-                target_id: "remote-peer:peer-a:shell-1".to_string(),
-                console_id: "console-a".to_string(),
-                console_host_id: "observer-a".to_string(),
-                input_seq: 7,
-                bytes_base64: "YQ==".to_string(),
-            }),
-        }
     }
 
     fn raw_pty_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {

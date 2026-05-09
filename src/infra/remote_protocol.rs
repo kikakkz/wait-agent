@@ -52,7 +52,6 @@ pub enum ControlPlanePayload {
     OpenTargetOk(OpenTargetOkPayload),
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
-    TargetInput(TargetInputPayload),
     RawPtyInput(RawPtyInputPayload),
     TargetOutput(TargetOutputPayload),
     RawPtyOutput(RawPtyOutputPayload),
@@ -76,7 +75,6 @@ impl ControlPlanePayload {
             Self::OpenTargetOk(_) => "open_target_ok",
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
-            Self::TargetInput(_) => "target_input",
             Self::RawPtyInput(_) => "raw_pty_input",
             Self::TargetOutput(_) => "target_output",
             Self::RawPtyOutput(_) => "raw_pty_output",
@@ -184,17 +182,6 @@ pub struct ResizeAuthorityChangedPayload {
     pub resize_authority_host_id: String,
     pub cols: Option<usize>,
     pub rows: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetInputPayload {
-    pub attachment_id: String,
-    pub session_id: String,
-    pub target_id: String,
-    pub console_id: String,
-    pub console_host_id: String,
-    pub input_seq: u64,
-    pub bytes_base64: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

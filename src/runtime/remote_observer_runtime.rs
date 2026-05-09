@@ -86,10 +86,6 @@ impl RemoteObserverRuntime {
         Ok(envelopes.len())
     }
 
-    pub fn application_cursor_keys(&self) -> bool {
-        self.terminal.application_cursor_keys()
-    }
-
     pub fn snapshot(&self) -> RemoteObserverSnapshot {
         RemoteObserverSnapshot {
             session_id: self.session_id.clone(),

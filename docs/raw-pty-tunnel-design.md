@@ -17,24 +17,20 @@ It does not introduce a raw TCP side channel.
 
 ## Current State
 
-The remote path currently has two mixed responsibilities:
+Remote interactive sessions now use the raw PTY data plane by default. The
+remote path keeps two responsibilities:
 
 - control plane: open target, close target, resize, publication, authority
   connection lifecycle
-- interactive data plane: `TargetInput`, `TargetOutput`,
-  `MirrorBootstrapChunk`, `MirrorBootstrapComplete`, and
-  `RemoteObserverRuntime`
+- interactive data plane: `RawPtyInput`, `RawPtyOutput`, optional one-time
+  bootstrap bytes, and direct stdout writes
 
 The authority host already uses the correct PTY backend primitive:
 `tmux pipe-pane -I -O`.
 
 - `-O` sends pane output to the output pump
 - `-I` lets the output pump write bytes back into the pane
-- the current FIFO-based input path is the part that must be preserved
-
-The remaining mismatch is local rendering. The local remote main slot still
-feeds output through observer/model state and performs cursor synchronization.
-That is not SSH-like and is the source of fidelity issues.
+- the FIFO-based input path is preserved
 
 ## Target Architecture
 
@@ -59,13 +55,11 @@ Introduce an interactive PTY byte stream with this contract:
 - ordered bytes from authority-host pipe output to local stdout
 - no terminal-model replay in the interactive path after attach
 - no cursor overlay or cursor reconstruction in the interactive path
-- no base64 in internal runtime structs unless the selected transport boundary
-  requires it
+- no base64 in internal runtime structs
 
-The data plane may initially reuse the existing `TargetInput` and
-`TargetOutput` envelopes for compatibility, but the runtime should treat their
-payload as raw PTY bytes and bypass `RemoteObserverRuntime` for the active
-interactive surface.
+Interactive remote surfaces must use `RawPtyInput` and `RawPtyOutput`.
+`TargetOutput` remains available for observer/model consumers, but the active
+remote-main-slot data plane does not use it.
 
 ## Attach Sequence
 
@@ -84,59 +78,12 @@ Bootstrap screen replay is optional for the raw path. If retained, it must be a
 one-time byte write before live output starts and must not install a local
 observer as the source of truth for ongoing interaction.
 
-## Compatibility Plan
+## Remaining Cleanup
 
-The migration should be split into small slices.
-
-### Slice 1: Raw PTY Runtime Boundary
-
-Add a small internal abstraction for interactive PTY bytes:
-
-- `RemotePtyInput(bytes)`
-- `RemotePtyOutput(bytes)`
-- monotonically ordered per target/session
-
-This can map to existing `TargetInput` and `TargetOutput` envelopes at first.
-No user-visible behavior changes.
-
-### Slice 2: Authority Host Byte Pump Contract
-
-Keep the current `pipe-pane -I -O` and FIFO implementation, but make the code
-name and tests reflect that it is a bidirectional raw PTY bridge, not a mirror
-output pump.
-
-Acceptance:
-
-- bytes received from the transport are written to the FIFO unchanged
-- bytes read from tmux pipe stdin are emitted unchanged
-- no `send-keys` fallback is introduced
-
-### Slice 3: Local Raw Passthrough Mode Behind a Switch
-
-Add a hidden/env-gated local remote-main-slot mode:
-
-- mailbox `TargetOutput` bytes are written directly to stdout
-- input bytes are sent unchanged except for local escape handling used to leave
-  server-console mode
-- observer snapshot rendering and cursor synchronization are bypassed
-
-Acceptance:
-
-- `ls Enter` executes in a simulated remote session
-- the command line cursor artifact after Enter is gone
-- full-screen TUIs do not receive synthesized cursor or redraw bytes
-
-### Slice 4: Make Raw Passthrough Default for Interactive Remote Targets
-
-After Slice 3 passes local and cross-host tests, enable raw passthrough by
-default for remote interactive surfaces.
-
-Keep observer/mirror behavior only for non-interactive uses that still need a
+Observer/mirror behavior remains only for non-interactive uses that still need a
 terminal model, such as sidebar previews, diagnostics, or retained replay.
 
-### Slice 5: Protocol Cleanup
-
-Once the raw path is default and stable:
+Remaining cleanup:
 
 - remove base64 from internal runtime payloads
 - keep bytes in protobuf `bytes` fields at the gRPC boundary

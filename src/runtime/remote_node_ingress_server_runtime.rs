@@ -1,10 +1,9 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
-use crate::infra::base64::decode_base64;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
     OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
-    TargetInputDelivery, TargetPublished as GrpcTargetPublished,
+    TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
@@ -268,10 +267,7 @@ fn run_node_ingress_server_loop(
 }
 
 fn is_high_frequency_authority_input(envelope: &GrpcNodeSessionEnvelope) -> bool {
-    matches!(
-        envelope.body.as_ref(),
-        Some(Body::RawPtyInput(_)) | Some(Body::TargetInputDelivery(_))
-    )
+    matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_)))
 }
 
 fn route_transport_envelope(
@@ -538,27 +534,6 @@ fn map_authority_command_to_grpc(
     command: RemoteAuthorityCommand,
 ) -> Result<GrpcNodeSessionEnvelope, io::Error> {
     let (route, body) = match command {
-        RemoteAuthorityCommand::TargetInput(payload) => (
-            Some(RouteContext {
-                authority_node_id: Some(session.node_id().to_string()),
-                target_id: Some(payload.target_id.clone()),
-                attachment_id: Some(payload.attachment_id.clone()),
-                console_id: Some(payload.console_id.clone()),
-                console_host_id: Some(payload.console_host_id.clone()),
-                session_id: Some(payload.session_id.clone()),
-            }),
-            Some(Body::TargetInputDelivery(TargetInputDelivery {
-                attachment_id: payload.attachment_id,
-                target_id: payload.target_id,
-                console_id: payload.console_id,
-                console_host_id: payload.console_host_id,
-                input_seq: payload.input_seq,
-                session_id: payload.session_id,
-                input_bytes: decode_base64(&payload.bytes_base64).map_err(|error| {
-                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-                })?,
-            })),
-        ),
         RemoteAuthorityCommand::RawPtyInput(payload) => (
             Some(RouteContext {
                 authority_node_id: Some(session.node_id().to_string()),

@@ -723,7 +723,6 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
     match command {
         RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::TargetInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
     }
@@ -735,7 +734,6 @@ fn authority_command_envelope(
     let session_id = match &command {
         RemoteAuthorityCommand::OpenMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
-        RemoteAuthorityCommand::TargetInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
     };
@@ -746,7 +744,6 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => {
             ControlPlanePayload::CloseMirrorRequest(payload)
         }
-        RemoteAuthorityCommand::TargetInput(payload) => ControlPlanePayload::TargetInput(payload),
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
     };

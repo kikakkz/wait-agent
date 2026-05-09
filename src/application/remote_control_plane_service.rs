@@ -4,7 +4,7 @@ use crate::infra::remote_protocol::{
     MirrorBootstrapCompletePayload, NodeBoundControlPlaneMessage, OpenMirrorRequestPayload,
     OpenTargetOkPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
     RemoteConsoleDescriptor, ResizeAuthorityChangedPayload, RoutedControlPlaneMessage,
-    TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
+    TargetOutputPayload, REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -220,61 +220,6 @@ impl RemoteControlPlaneService {
             }
         }
         Ok(messages)
-    }
-
-    pub fn route_console_input(
-        &mut self,
-        target: &ManagedSessionRecord,
-        attachment_id: &str,
-        console_seq: u64,
-        bytes_base64: impl Into<String>,
-    ) -> Result<RoutedControlPlaneMessage, RemoteControlPlaneError> {
-        validate_remote_target(target)?;
-        let session_id = target.address.session_id().to_string();
-        let target_id = target.address.id().as_str().to_string();
-        if console_seq == 0 {
-            return Err(RemoteControlPlaneError::InvalidConsoleSequence);
-        }
-
-        let (input_seq, console_id, console_host_id) = {
-            let state = self
-                .session_states
-                .get_mut(&session_id)
-                .ok_or(RemoteControlPlaneError::TargetNotOpened(target_id.clone()))?;
-            let attachment = state
-                .attachments
-                .iter()
-                .find(|attachment| attachment.attachment_id == attachment_id)
-                .ok_or_else(|| {
-                    RemoteControlPlaneError::AttachmentNotOpen(attachment_id.to_string())
-                })?;
-            state.input_seq += 1;
-            (
-                state.input_seq,
-                attachment.console.console_id.clone(),
-                attachment.console.console_host_id.clone(),
-            )
-        };
-        Ok(RoutedControlPlaneMessage {
-            destination: ControlPlaneDestination::AuthorityNode(
-                target.address.authority_id().to_string(),
-            ),
-            envelope: self.server_message(
-                Some(session_id.clone()),
-                Some(target_id.clone()),
-                Some(attachment_id.to_string()),
-                Some(console_id.clone()),
-                ControlPlanePayload::TargetInput(TargetInputPayload {
-                    attachment_id: attachment_id.to_string(),
-                    session_id,
-                    target_id,
-                    console_id,
-                    console_host_id,
-                    input_seq,
-                    bytes_base64: bytes_base64.into(),
-                }),
-            ),
-        })
     }
 
     pub fn route_raw_pty_input(
@@ -902,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn console_input_is_serialized_by_server_sequence() {
+    fn raw_pty_input_is_serialized_by_server_sequence() {
         let mut service = RemoteControlPlaneService::new();
         let target = remote_target("peer-a", "shell-1");
 
@@ -932,18 +877,18 @@ mod tests {
         };
 
         let first_input = service
-            .route_console_input(&target, &first_attachment, 1, "YQ==")
+            .route_raw_pty_input(&target, &first_attachment, 1, b"a".to_vec())
             .expect("first input should route");
         let second_input = service
-            .route_console_input(&target, &second_attachment, 9, "Yg==")
+            .route_raw_pty_input(&target, &second_attachment, 9, b"b".to_vec())
             .expect("second input should route");
 
         match &first_input.envelope.payload {
-            ControlPlanePayload::TargetInput(payload) => assert_eq!(payload.input_seq, 1),
+            ControlPlanePayload::RawPtyInput(payload) => assert_eq!(payload.input_seq, 1),
             other => panic!("unexpected payload: {other:?}"),
         }
         match &second_input.envelope.payload {
-            ControlPlanePayload::TargetInput(payload) => assert_eq!(payload.input_seq, 2),
+            ControlPlanePayload::RawPtyInput(payload) => assert_eq!(payload.input_seq, 2),
             other => panic!("unexpected payload: {other:?}"),
         }
     }

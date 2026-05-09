@@ -3,7 +3,6 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
-use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
     RemoteConsoleDescriptor,
@@ -38,7 +37,6 @@ const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
 const CLEAR_SCREEN_HOME_ESCAPE: &str = "\x1b[2J\x1b[H";
 const TARGET_PRESENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET_PRESENCE_MISS_GRACE_POLLS: usize = 4;
-const REMOTE_RAW_PTY_ENV: &str = "WAITAGENT_REMOTE_RAW_PTY";
 
 static REMOTE_PANE_SIGWINCH_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static REMOTE_DRAW_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -245,7 +243,6 @@ impl RemoteMainSlotPaneRuntime {
         spawn_input_thread(
             event_tx.clone(),
             RawInputMode {
-                enabled: remote_raw_pty_passthrough_enabled(),
                 route: raw_input_route.clone(),
                 registry: registry.clone(),
             },
@@ -279,8 +276,6 @@ impl RemoteMainSlotPaneRuntime {
         });
         let mut console_seq = 0u64;
         let mut input_signal_decoder = RemoteInteractInputSignalDecoder::default();
-        let mut input_translator = RemoteTerminalInputTranslator::default();
-        let raw_pty_passthrough = remote_raw_pty_passthrough_enabled();
         let mut binding = None;
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
@@ -296,19 +291,16 @@ impl RemoteMainSlotPaneRuntime {
                 &spec,
                 &initial_size,
                 &mut observer,
-                raw_pty_passthrough,
             )
             .map(Some)?;
             if let Some((activated_binding, raw)) = activated {
-                if raw_pty_passthrough {
-                    write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
-                    raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
-                }
+                raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
+                write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
                 binding = Some(activated_binding);
             }
         }
         let run_result = (|| -> Result<(), LifecycleError> {
-            if should_draw_remote_snapshot(raw_pty_passthrough, binding.as_ref()) {
+            if should_draw_remote_snapshot(binding.as_ref()) {
                 draw_remote_snapshot(
                     &terminal,
                     &target,
@@ -321,44 +313,16 @@ impl RemoteMainSlotPaneRuntime {
             loop {
                 match event_rx.recv() {
                     Ok(RemotePaneEvent::MailboxUpdated) => {
-                        let raw = if raw_pty_passthrough {
-                            raw_output_reader
-                                .sync_and_collect_raw()
-                                .map_err(remote_protocol_error)?
-                        } else {
-                            observer
-                                .sync_and_collect_raw()
-                                .map_err(remote_protocol_error)?
-                        };
+                        let raw = raw_output_reader
+                            .sync_and_collect_raw()
+                            .map_err(remote_protocol_error)?;
                         if raw.is_empty() {
                             continue;
                         }
-                        if raw_pty_passthrough {
-                            write_remote_raw_output_with_initial_clear(
-                                &raw,
-                                &mut raw_screen_initialized,
-                            )?;
-                        } else {
-                            let mut stdout = io::stdout().lock();
-                            stdout.write_all(&raw).map_err(|error| {
-                                LifecycleError::Io(
-                                    "failed to write remote raw output".to_string(),
-                                    error,
-                                )
-                            })?;
-                            let snapshot = observer.snapshot();
-                            if snapshot.has_visible_output
-                                && matches!(authority_status, AuthorityTransportStatus::Connected)
-                            {
-                                render_remote_cursor(&mut stdout, snapshot.active_screen())?;
-                            }
-                            stdout.flush().map_err(|error| {
-                                LifecycleError::Io(
-                                    "failed to flush remote raw output".to_string(),
-                                    error,
-                                )
-                            })?;
-                        }
+                        write_remote_raw_output_with_initial_clear(
+                            &raw,
+                            &mut raw_screen_initialized,
+                        )?;
                     }
                     Ok(RemotePaneEvent::Resize) => {
                         if let Ok(Some(size)) = terminal.capture_resize() {
@@ -371,7 +335,7 @@ impl RemoteMainSlotPaneRuntime {
                                 )?;
                             }
                         }
-                        if should_draw_remote_snapshot(raw_pty_passthrough, binding.as_ref()) {
+                        if should_draw_remote_snapshot(binding.as_ref()) {
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -397,20 +361,17 @@ impl RemoteMainSlotPaneRuntime {
                                     &spec,
                                     &terminal.current_size_or_default(),
                                     &mut observer,
-                                    raw_pty_passthrough,
                                 ) {
                                     Ok(activated) => {
-                                        if raw_pty_passthrough {
-                                            write_remote_raw_output_with_initial_clear(
-                                                &activated.1,
-                                                &mut raw_screen_initialized,
-                                            )?;
-                                            raw_input_route.activate(
-                                                &target,
-                                                &activated.0,
-                                                &spec.console_host_id,
-                                            );
-                                        }
+                                        raw_input_route.activate(
+                                            &target,
+                                            &activated.0,
+                                            &spec.console_host_id,
+                                        );
+                                        write_remote_raw_output_with_initial_clear(
+                                            &activated.1,
+                                            &mut raw_screen_initialized,
+                                        )?;
                                         binding = Some(activated.0);
                                     }
                                     Err(error) => {
@@ -419,7 +380,7 @@ impl RemoteMainSlotPaneRuntime {
                                     }
                                 }
                             }
-                            if should_draw_remote_snapshot(raw_pty_passthrough, binding.as_ref()) {
+                            if should_draw_remote_snapshot(binding.as_ref()) {
                                 draw_remote_snapshot(
                                     &terminal,
                                     &target,
@@ -460,40 +421,31 @@ impl RemoteMainSlotPaneRuntime {
                             authority_id,
                             payload,
                         } => {
-                            if raw_pty_passthrough {
-                                let raw = collect_direct_raw_pty_output_payload(
-                                    &target,
-                                    &authority_id,
-                                    &payload,
-                                    &mut direct_raw_output_last_seq,
-                                )
-                                .map_err(remote_protocol_error)?;
+                            let raw = collect_direct_raw_pty_output_payload(
+                                &target,
+                                &authority_id,
+                                &payload,
+                                &mut direct_raw_output_last_seq,
+                            )
+                            .map_err(remote_protocol_error)?;
+                            write_remote_raw_output_with_initial_clear(
+                                &raw,
+                                &mut raw_screen_initialized,
+                            )?;
+                        }
+                        AuthorityTransportEvent::Envelope(envelope) => {
+                            if let Some(raw) = collect_direct_raw_pty_output_envelope(
+                                &target,
+                                &envelope,
+                                &mut direct_raw_output_last_seq,
+                            )
+                            .map_err(remote_protocol_error)?
+                            {
                                 write_remote_raw_output_with_initial_clear(
                                     &raw,
                                     &mut raw_screen_initialized,
                                 )?;
-                            } else {
-                                return Err(LifecycleError::Protocol(
-                                    "received raw PTY output while raw passthrough is disabled"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        AuthorityTransportEvent::Envelope(envelope) => {
-                            if raw_pty_passthrough {
-                                if let Some(raw) = collect_direct_raw_pty_output_envelope(
-                                    &target,
-                                    &envelope,
-                                    &mut direct_raw_output_last_seq,
-                                )
-                                .map_err(remote_protocol_error)?
-                                {
-                                    write_remote_raw_output_with_initial_clear(
-                                        &raw,
-                                        &mut raw_screen_initialized,
-                                    )?;
-                                    continue;
-                                }
+                                continue;
                             }
                             apply_authority_envelope(&remote_runtime, &target, &envelope)
                                 .map_err(remote_protocol_error)?;
@@ -509,7 +461,7 @@ impl RemoteMainSlotPaneRuntime {
                             is_present,
                             &waiting_authority_status,
                         );
-                        if should_draw_remote_snapshot(raw_pty_passthrough, binding.as_ref()) {
+                        if should_draw_remote_snapshot(binding.as_ref()) {
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -530,35 +482,20 @@ impl RemoteMainSlotPaneRuntime {
                             return Ok(());
                         }
                         if let Some(binding) = binding.as_ref() {
-                            let normalized = if raw_pty_passthrough {
-                                bytes
-                            } else {
-                                input_translator
-                                    .translate(&bytes, observer.application_cursor_keys())
-                            };
-                            if normalized.is_empty() {
+                            if bytes.is_empty() {
                                 continue;
                             }
                             console_seq += 1;
-                            if raw_pty_passthrough {
-                                if raw_forwarded {
-                                    // Raw mode sends PTY bytes directly from the stdin thread to
-                                    // avoid adding the UI event loop to every keystroke.
-                                    continue;
-                                }
-                                remote_runtime.send_raw_pty_input(
-                                    &target,
-                                    binding,
-                                    console_seq,
-                                    normalized,
-                                )?;
+                            if raw_forwarded {
+                                // Raw mode sends PTY bytes directly from the stdin thread to avoid
+                                // adding the UI event loop to every keystroke.
                                 continue;
                             }
-                            remote_runtime.send_console_input(
+                            remote_runtime.send_raw_pty_input(
                                 &target,
                                 binding,
                                 console_seq,
-                                encode_base64(&normalized),
+                                bytes,
                             )?;
                         }
                     }
@@ -605,7 +542,7 @@ fn activate_surface_target(
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
-    activate_surface_target_with_mode(remote_runtime, target, spec, size, observer, false)
+    activate_surface_target_with_mode(remote_runtime, target, spec, size, observer)
         .map(|(binding, _)| binding)
 }
 
@@ -615,7 +552,6 @@ fn activate_surface_target_with_mode(
     spec: &RemoteInteractSurfaceSpec,
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
-    raw_pty_passthrough: bool,
 ) -> Result<(RemoteAttachmentBinding, Vec<u8>), LifecycleError> {
     observer.begin_bootstrap();
     let binding = remote_runtime.activate_target_with_raw_pty_mode(
@@ -627,35 +563,16 @@ fn activate_surface_target_with_mode(
         },
         usize::from(size.cols),
         usize::from(size.rows),
-        raw_pty_passthrough,
+        true,
     )?;
-    let raw = if raw_pty_passthrough {
-        observer
-            .sync_and_collect_raw()
-            .map_err(remote_protocol_error)?
-    } else {
-        observer.sync().map_err(remote_protocol_error)?;
-        Vec::new()
-    };
+    let raw = observer
+        .sync_and_collect_raw()
+        .map_err(remote_protocol_error)?;
     Ok((binding, raw))
 }
 
-fn remote_raw_pty_passthrough_enabled() -> bool {
-    std::env::var(REMOTE_RAW_PTY_ENV)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn should_draw_remote_snapshot(
-    raw_pty_passthrough: bool,
-    binding: Option<&RemoteAttachmentBinding>,
-) -> bool {
-    !raw_pty_passthrough || binding.is_none()
+fn should_draw_remote_snapshot(binding: Option<&RemoteAttachmentBinding>) -> bool {
+    binding.is_none()
 }
 
 fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError> {
@@ -856,7 +773,6 @@ struct RemoteRawPtyMailboxReader {
 }
 
 struct RawInputMode {
-    enabled: bool,
     route: Arc<RawPtyInputRoute>,
     registry: RemoteConnectionRegistry,
 }
@@ -875,11 +791,6 @@ struct RawPtyInputRouteState {
     attachment_id: String,
     console_id: String,
     console_host_id: String,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RemoteTerminalInputTranslator {
-    pending: Vec<u8>,
 }
 
 struct RemotePaneCursorGuard {
@@ -1023,62 +934,6 @@ impl RawPtyInputRoute {
     }
 }
 
-impl RemoteTerminalInputTranslator {
-    fn translate(&mut self, bytes: &[u8], application_cursor_keys: bool) -> Vec<u8> {
-        self.pending.extend_from_slice(bytes);
-        let mut translated = Vec::with_capacity(self.pending.len());
-        loop {
-            if self.pending.is_empty() {
-                break;
-            }
-            if let Some((normal, application)) = application_cursor_key_mapping(&self.pending) {
-                translated.extend_from_slice(if application_cursor_keys {
-                    application
-                } else {
-                    normal
-                });
-                self.pending.drain(..normal.len());
-                continue;
-            }
-            if is_partial_cursor_key_sequence(&self.pending) {
-                break;
-            }
-            translated.push(self.pending.remove(0));
-        }
-        translated
-    }
-}
-
-fn application_cursor_key_mapping(pending: &[u8]) -> Option<(&'static [u8], &'static [u8])> {
-    const MAPPINGS: [(&[u8], &[u8]); 6] = [
-        (b"\x1b[A", b"\x1bOA"),
-        (b"\x1b[B", b"\x1bOB"),
-        (b"\x1b[C", b"\x1bOC"),
-        (b"\x1b[D", b"\x1bOD"),
-        (b"\x1b[H", b"\x1bOH"),
-        (b"\x1b[F", b"\x1bOF"),
-    ];
-    MAPPINGS
-        .iter()
-        .copied()
-        .find(|(normal, _)| pending.starts_with(normal))
-}
-
-fn is_partial_cursor_key_sequence(pending: &[u8]) -> bool {
-    [
-        b"\x1b".as_slice(),
-        b"\x1b[".as_slice(),
-        b"\x1b[A".as_slice(),
-        b"\x1b[B".as_slice(),
-        b"\x1b[C".as_slice(),
-        b"\x1b[D".as_slice(),
-        b"\x1b[H".as_slice(),
-        b"\x1b[F".as_slice(),
-    ]
-    .iter()
-    .any(|pattern| pattern.starts_with(pending))
-}
-
 fn spawn_input_thread(tx: mpsc::Sender<RemotePaneEvent>, raw_input: RawInputMode) {
     thread::spawn(move || {
         let mut stdin = io::stdin().lock();
@@ -1089,10 +944,8 @@ fn spawn_input_thread(tx: mpsc::Sender<RemotePaneEvent>, raw_input: RawInputMode
                 Ok(read) => {
                     let bytes = buffer[..read].to_vec();
                     let raw_forwarded = raw_input
-                        .enabled
-                        .then(|| raw_input.route.send(&raw_input.registry, bytes.clone()))
-                        .transpose()
-                        .map(|sent| sent.unwrap_or(false))
+                        .route
+                        .send(&raw_input.registry, bytes.clone())
                         .unwrap_or(false);
                     if tx
                         .send(RemotePaneEvent::Input {
@@ -1699,14 +1552,13 @@ mod tests {
         activate_surface_target, activate_surface_target_with_mode, apply_authority_envelope,
         authority_status_from_runtime, authority_transport_event_sender,
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
-        encode_base64, main_slot_console_id, main_slot_surface_spec, placeholder_lines,
-        remote_raw_pty_passthrough_enabled, should_draw_remote_snapshot,
-        should_exit_surface_for_target_presence, should_exit_surface_locally,
-        spawn_mailbox_watcher, write_remote_raw_output_with_initial_clear,
-        AuthorityTransportStatus, RawPtyInputRoute, RemoteInteractInputSignalDecoder,
-        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
-        RemotePaneEvent, RemoteRawPtyMailboxReader, RemoteTerminalInputTranslator,
-        CLEAR_SCREEN_HOME_ESCAPE, REMOTE_RAW_PTY_ENV,
+        main_slot_console_id, main_slot_surface_spec, placeholder_lines,
+        should_draw_remote_snapshot, should_exit_surface_for_target_presence,
+        should_exit_surface_locally, spawn_mailbox_watcher,
+        write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, RawPtyInputRoute,
+        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
+        RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
+        CLEAR_SCREEN_HOME_ESCAPE,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1794,23 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_raw_pty_passthrough_env_is_opt_in() {
-        std::env::remove_var(REMOTE_RAW_PTY_ENV);
-        assert!(!remote_raw_pty_passthrough_enabled());
-
-        std::env::set_var(REMOTE_RAW_PTY_ENV, "1");
-        assert!(remote_raw_pty_passthrough_enabled());
-
-        std::env::set_var(REMOTE_RAW_PTY_ENV, "true");
-        assert!(remote_raw_pty_passthrough_enabled());
-
-        std::env::set_var(REMOTE_RAW_PTY_ENV, "0");
-        assert!(!remote_raw_pty_passthrough_enabled());
-        std::env::remove_var(REMOTE_RAW_PTY_ENV);
-    }
-
-    #[test]
-    fn raw_passthrough_draws_placeholder_until_target_is_bound() {
+    fn raw_remote_draws_placeholder_until_target_is_bound() {
         let binding = RemoteAttachmentBinding {
             session_id: "shell-1".to_string(),
             target_id: "remote-peer:peer-a:shell-1".to_string(),
@@ -1818,9 +1654,8 @@ mod tests {
             console_id: "console-a".to_string(),
         };
 
-        assert!(should_draw_remote_snapshot(true, None));
-        assert!(!should_draw_remote_snapshot(true, Some(&binding)));
-        assert!(should_draw_remote_snapshot(false, Some(&binding)));
+        assert!(should_draw_remote_snapshot(None));
+        assert!(!should_draw_remote_snapshot(Some(&binding)));
     }
 
     #[test]
@@ -1940,13 +1775,6 @@ mod tests {
             error.to_string(),
             "remote main-slot pane runtime is not configured for external authority streams"
         );
-    }
-
-    #[test]
-    fn encode_base64_matches_standard_output_for_short_chunks() {
-        assert_eq!(encode_base64(b"a"), "YQ==");
-        assert_eq!(encode_base64(b"ab"), "YWI=");
-        assert_eq!(encode_base64(b"abc"), "YWJj");
     }
 
     #[test]
@@ -2422,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_passthrough_activation_leaves_future_bootstrap_bytes_collectable() {
+    fn raw_activation_leaves_future_bootstrap_bytes_collectable() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         let mailbox = runtime
             .ensure_local_observer_connection("observer-a")
@@ -2450,7 +2278,6 @@ mod tests {
                 pixel_height: 0,
             },
             &mut observer,
-            true,
         )
         .expect("raw activation should succeed");
 
@@ -2723,110 +2550,67 @@ mod tests {
         );
 
         runtime
-            .send_console_input(&target, &binding, 1, "YQ==")
+            .send_raw_pty_input(&target, &binding, 1, b"a".to_vec())
             .expect("input should route");
         assert_eq!(
             match crate::infra::remote_transport_codec::read_control_plane_envelope(&mut authority,)
                 .expect("input command should arrive")
                 .payload
             {
-                ControlPlanePayload::TargetInput(payload) => {
-                    RemoteAuthorityCommand::TargetInput(payload)
+                ControlPlanePayload::RawPtyInput(payload) => {
+                    RemoteAuthorityCommand::RawPtyInput(payload)
                 }
                 other => panic!("unexpected payload: {other:?}"),
             },
-            RemoteAuthorityCommand::TargetInput(
-                crate::infra::remote_protocol::TargetInputPayload {
+            RemoteAuthorityCommand::RawPtyInput(
+                crate::infra::remote_protocol::RawPtyInputPayload {
                     attachment_id: "attach-1".to_string(),
                     session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     console_id: "console-a".to_string(),
                     console_host_id: "observer-a".to_string(),
                     input_seq: 1,
-                    bytes_base64: "YQ==".to_string(),
+                    input_bytes: b"a".to_vec(),
                 }
             )
         );
 
-        crate::infra::remote_transport_codec::write_control_plane_envelope(
+        crate::infra::remote_transport_codec::write_authority_transport_frame(
             &mut authority,
-            &ProtocolEnvelope {
-                protocol_version: "1.1".to_string(),
-                message_id: "msg-1".to_string(),
-                message_type: "target_output",
-                timestamp: "2026-04-28T00:00:00Z".to_string(),
-                sender_id: "peer-a".to_string(),
-                correlation_id: None,
-                session_id: Some("shell-1".to_string()),
-                target_id: Some("remote-peer:peer-a:shell-1".to_string()),
-                attachment_id: None,
-                console_id: None,
-                payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+            &crate::infra::remote_transport_codec::AuthorityTransportFrame::RawPtyOutput(
+                RawPtyOutputPayload {
                     session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
                     output_seq: 1,
-                    stream: "pty",
                     output_bytes: b"b".to_vec(),
-                }),
-            },
+                },
+            ),
         )
-        .expect("target output should send");
+        .expect("raw output should send");
         match pane_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("authority envelope should arrive")
+            .expect("authority raw output should arrive")
         {
-            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::Envelope(envelope)) => {
-                apply_authority_envelope(&runtime, &target, &envelope)
-                    .expect("authority output should apply");
+            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::RawPtyOutput {
+                authority_id,
+                payload,
+            }) => {
+                assert_eq!(authority_id, "peer-a");
+                runtime
+                    .send_raw_pty_output(&target, payload.output_seq, payload.output_bytes)
+                    .expect("raw authority output should apply");
             }
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
-        observer.sync().expect("observer sync should succeed");
-        let snapshot = observer.snapshot();
-        assert_eq!(snapshot.last_output_seq, Some(1));
+        let mut raw_reader = RemoteRawPtyMailboxReader::new(mailbox);
         assert_eq!(
-            snapshot.active_screen().lines[0],
-            "b           ".to_string()
+            raw_reader
+                .sync_and_collect_raw()
+                .expect("raw output should be collectable"),
+            b"b"
         );
         let _ = fs::remove_file(&socket_path);
-    }
-
-    #[test]
-    fn remote_input_translator_maps_arrow_keys_in_application_cursor_mode() {
-        let mut translator = RemoteTerminalInputTranslator::default();
-
-        assert_eq!(translator.translate(b"\x1b[B", true), b"\x1bOB");
-        assert_eq!(translator.translate(b"\x1b[A", true), b"\x1bOA");
-        assert_eq!(translator.translate(b"\x1b[C", true), b"\x1bOC");
-        assert_eq!(translator.translate(b"\x1b[D", true), b"\x1bOD");
-    }
-
-    #[test]
-    fn remote_input_translator_preserves_arrow_keys_outside_application_cursor_mode() {
-        let mut translator = RemoteTerminalInputTranslator::default();
-
-        assert_eq!(translator.translate(b"\x1b[B", false), b"\x1b[B");
-        assert_eq!(translator.translate(b"\x1b[A", false), b"\x1b[A");
-    }
-
-    #[test]
-    fn remote_input_translator_waits_for_split_application_cursor_sequences() {
-        let mut translator = RemoteTerminalInputTranslator::default();
-
-        assert_eq!(translator.translate(b"\x1b", true), b"");
-        assert_eq!(translator.translate(b"[", true), b"");
-        assert_eq!(translator.translate(b"B", true), b"\x1bOB");
-    }
-
-    #[test]
-    fn remote_input_translator_waits_for_split_normal_cursor_sequences() {
-        let mut translator = RemoteTerminalInputTranslator::default();
-
-        assert_eq!(translator.translate(b"\x1b", false), b"");
-        assert_eq!(translator.translate(b"[", false), b"");
-        assert_eq!(translator.translate(b"B", false), b"\x1b[B");
     }
 
     #[test]

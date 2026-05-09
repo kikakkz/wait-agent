@@ -4,7 +4,7 @@ use crate::infra::remote_protocol::{
     NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
     RawPtyInputPayload, RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
-    TargetExitedPayload, TargetInputPayload, TargetOutputPayload, TargetPublishedPayload,
+    TargetExitedPayload, TargetOutputPayload, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -285,16 +285,6 @@ fn write_payload(
             write_optional_usize(writer, payload.cols)?;
             write_optional_usize(writer, payload.rows)?;
         }
-        ControlPlanePayload::TargetInput(payload) => {
-            write_u8(writer, 6)?;
-            write_string(writer, &payload.attachment_id)?;
-            write_string(writer, &payload.session_id)?;
-            write_string(writer, &payload.target_id)?;
-            write_string(writer, &payload.console_id)?;
-            write_string(writer, &payload.console_host_id)?;
-            write_u64(writer, payload.input_seq)?;
-            write_string(writer, &payload.bytes_base64)?;
-        }
         ControlPlanePayload::RawPtyInput(payload) => {
             write_u8(writer, 18)?;
             write_raw_pty_input_payload(writer, payload)?;
@@ -426,15 +416,6 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             resize_authority_host_id: read_string(reader)?,
             cols: read_optional_usize(reader)?,
             rows: read_optional_usize(reader)?,
-        }),
-        6 => ControlPlanePayload::TargetInput(TargetInputPayload {
-            attachment_id: read_string(reader)?,
-            session_id: read_string(reader)?,
-            target_id: read_string(reader)?,
-            console_id: read_string(reader)?,
-            console_host_id: read_string(reader)?,
-            input_seq: read_u64(reader)?,
-            bytes_base64: read_string(reader)?,
         }),
         18 => ControlPlanePayload::RawPtyInput(read_raw_pty_input_payload(reader)?),
         7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {

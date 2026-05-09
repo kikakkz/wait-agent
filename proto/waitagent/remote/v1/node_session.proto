@@ -36,7 +36,6 @@ message NodeSessionEnvelope {
     MirrorBootstrapComplete mirror_bootstrap_complete = 35;
 
     ConsoleInput console_input = 40;
-    TargetInputDelivery target_input_delivery = 41;
     RawPtyInput raw_pty_input = 42;
 
     PtyResizeRequest pty_resize_request = 50;
@@ -232,16 +231,6 @@ message ConsoleInput {
   uint64 console_seq = 4;
   bytes input_bytes = 5;
   string session_id = 6;
-}
-
-message TargetInputDelivery {
-  string attachment_id = 1;
-  string target_id = 2;
-  string console_id = 3;
-  string console_host_id = 4;
-  uint64 input_seq = 5;
-  bytes input_bytes = 6;
-  string session_id = 7;
 }
 
 message RawPtyInput {

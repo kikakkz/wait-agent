@@ -145,21 +145,6 @@ impl RemoteMainSlotRuntime {
         Ok(binding)
     }
 
-    pub fn send_console_input(
-        &self,
-        target: &ManagedSessionRecord,
-        binding: &RemoteAttachmentBinding,
-        console_seq: u64,
-        bytes_base64: impl Into<String>,
-    ) -> Result<(), LifecycleError> {
-        let message = self
-            .control_plane
-            .borrow_mut()
-            .route_console_input(target, &binding.attachment_id, console_seq, bytes_base64)
-            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-        self.send_messages(&[message])
-    }
-
     pub fn send_raw_pty_input(
         &self,
         target: &ManagedSessionRecord,
@@ -406,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_backed_runtime_routes_console_input_to_authority_mailbox() {
+    fn registry_backed_runtime_routes_raw_pty_input_to_authority_mailbox() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         runtime.ensure_local_connection("observer-a");
         let authority_mailbox = runtime
@@ -422,13 +407,18 @@ mod tests {
             )
             .expect("remote activation should succeed");
         runtime
-            .send_console_input(&remote_target("peer-a", "shell-1"), &binding, 1, "YQ==")
-            .expect("console input should route to authority");
+            .send_raw_pty_input(
+                &remote_target("peer-a", "shell-1"),
+                &binding,
+                1,
+                b"a".to_vec(),
+            )
+            .expect("raw PTY input should route to authority");
 
         let envelopes = authority_mailbox.snapshot();
         assert_eq!(envelopes.len(), 2);
         assert_eq!(envelopes[0].message_type, "open_mirror_request");
-        assert_eq!(envelopes[1].message_type, "target_input");
+        assert_eq!(envelopes[1].message_type, "raw_pty_input");
     }
 
     #[test]

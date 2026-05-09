@@ -2,7 +2,6 @@ use crate::cli::{
     prepend_global_network_args, RemoteAuthorityOutputPumpCommand,
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
-use crate::infra::base64::decode_base64;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -429,22 +428,6 @@ where
                         &command.target_id,
                     ) {
                         break Err(error);
-                    }
-                }
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::TargetInput(
-                    payload,
-                ))) => {
-                    let bytes = match decode_base64(&payload.bytes_base64)
-                        .map_err(remote_authority_error)
-                    {
-                        Ok(bytes) => bytes,
-                        Err(error) => break Err(error),
-                    };
-                    if let Err(error) = input_fifo
-                        .write_all(&bytes)
-                        .and_then(|_| input_fifo.flush())
-                    {
-                        break Err(remote_authority_error(error));
                     }
                 }
                 Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
@@ -930,7 +913,7 @@ mod tests {
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
         ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, TargetInputPayload,
+        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
         TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
@@ -1268,10 +1251,10 @@ mod tests {
                 &mut stream,
                 &NodeSessionEnvelope {
                     channel: NodeSessionChannel::Authority,
-                    envelope: target_input_envelope(),
+                    envelope: raw_pty_input_envelope(),
                 },
             )
-            .expect("target input should encode");
+            .expect("raw PTY input should encode");
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -1727,11 +1710,11 @@ mod tests {
         format!("{prefix}-{}-{millis}", process::id())
     }
 
-    fn target_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+    fn raw_pty_input_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
-            message_id: "msg-target-input".to_string(),
-            message_type: "target_input",
+            message_id: "msg-raw-pty-input".to_string(),
+            message_type: "raw_pty_input",
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "server".to_string(),
             correlation_id: None,
@@ -1739,14 +1722,14 @@ mod tests {
             target_id: Some("remote-peer:peer-a:target-1".to_string()),
             attachment_id: Some("attach-1".to_string()),
             console_id: Some("console-a".to_string()),
-            payload: ControlPlanePayload::TargetInput(TargetInputPayload {
+            payload: ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
                 attachment_id: "attach-1".to_string(),
                 session_id: "target-1".to_string(),
                 target_id: "remote-peer:peer-a:target-1".to_string(),
                 console_id: "console-a".to_string(),
                 console_host_id: "observer-a".to_string(),
                 input_seq: 1,
-                bytes_base64: "YQ==".to_string(),
+                input_bytes: b"a".to_vec(),
             }),
         }
     }

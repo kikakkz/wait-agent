@@ -161,7 +161,7 @@ The accepted architecture maps that shape onto one typed gRPC node session.
 
 One primary bidirectional streaming RPC should carry:
 
-- `TargetInput`
+- `RawPtyInput`
 - `ApplyResize`
 - `TargetOutput`
 - optional server-to-client control or prompt projection only when that
