@@ -5,7 +5,8 @@ use crate::infra::remote_protocol::{
     RawPtyOutputPayload, TargetInputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
+    read_authority_transport_frame, read_control_plane_envelope, write_authority_transport_frame,
+    write_control_plane_envelope, write_registration_frame, AuthorityTransportFrame,
     RemoteTransportCodecError,
 };
 use crate::runtime::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
@@ -421,27 +422,86 @@ fn bridge_authority_transport(
     let mut transport_writer = transport_stream.try_clone()?;
     write_server_hello(&mut transport_writer, AUTHORITY_TRANSPORT_SERVER_ID)?;
     let local_writer = local_reader.try_clone()?;
-    let forward_network =
-        thread::spawn(move || forward_control_plane_envelopes(transport_stream, local_writer));
-    let forward_local = forward_control_plane_envelopes(local_reader, transport_writer);
+    let forward_network = thread::spawn(move || {
+        forward_authority_frames_to_control_plane(transport_stream, local_writer)
+    });
+    let forward_local = forward_control_plane_to_authority_frames(local_reader, transport_writer);
     let _ = forward_network.join();
     forward_local
 }
 
-fn forward_control_plane_envelopes(
+fn forward_authority_frames_to_control_plane(
     mut reader: UnixStream,
     mut writer: UnixStream,
 ) -> Result<(), RemoteAuthorityTransportError> {
-    while let Ok(envelope) = read_control_plane_envelopes(&mut reader) {
-        write_control_plane_envelope(&mut writer, &envelope)?;
+    while let Ok(frame) = read_authority_transport_frame(&mut reader) {
+        let frame = match frame {
+            AuthorityTransportFrame::ControlPlane(envelope) => match envelope.payload {
+                ControlPlanePayload::RawPtyOutput(payload) => {
+                    AuthorityTransportFrame::RawPtyOutput(payload)
+                }
+                payload => AuthorityTransportFrame::ControlPlane(ProtocolEnvelope {
+                    payload,
+                    ..envelope
+                }),
+            },
+            raw_frame => raw_frame,
+        };
+        write_authority_transport_frame(&mut writer, &frame)?;
     }
     Ok(())
 }
 
-fn read_control_plane_envelopes(
-    reader: &mut UnixStream,
-) -> Result<ProtocolEnvelope<ControlPlanePayload>, RemoteAuthorityTransportError> {
-    read_control_plane_envelope(reader).map_err(RemoteAuthorityTransportError::from)
+fn forward_control_plane_to_authority_frames(
+    mut reader: UnixStream,
+    mut writer: UnixStream,
+) -> Result<(), RemoteAuthorityTransportError> {
+    while let Ok(frame) = read_authority_transport_frame(&mut reader) {
+        match frame {
+            AuthorityTransportFrame::ControlPlane(envelope) => {
+                write_control_plane_envelope(&mut writer, &envelope)?;
+            }
+            AuthorityTransportFrame::RawPtyInput(payload) => {
+                write_control_plane_envelope(&mut writer, &raw_pty_input_envelope(payload))?;
+            }
+            AuthorityTransportFrame::RawPtyOutput(payload) => {
+                write_control_plane_envelope(&mut writer, &raw_pty_output_envelope(payload))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn raw_pty_input_envelope(payload: RawPtyInputPayload) -> ProtocolEnvelope<ControlPlanePayload> {
+    ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: format!("raw-pty-input-{}", payload.input_seq),
+        message_type: "raw_pty_input",
+        timestamp: now_rfc3339_like(),
+        sender_id: AUTHORITY_TRANSPORT_SERVER_ID.to_string(),
+        correlation_id: None,
+        session_id: Some(payload.session_id.clone()),
+        target_id: Some(payload.target_id.clone()),
+        attachment_id: Some(payload.attachment_id.clone()),
+        console_id: Some(payload.console_id.clone()),
+        payload: ControlPlanePayload::RawPtyInput(payload),
+    }
+}
+
+fn raw_pty_output_envelope(payload: RawPtyOutputPayload) -> ProtocolEnvelope<ControlPlanePayload> {
+    ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: format!("raw-pty-output-{}", payload.output_seq),
+        message_type: "raw_pty_output",
+        timestamp: now_rfc3339_like(),
+        sender_id: AUTHORITY_TRANSPORT_SERVER_ID.to_string(),
+        correlation_id: None,
+        session_id: Some(payload.session_id.clone()),
+        target_id: Some(payload.target_id.clone()),
+        attachment_id: None,
+        console_id: None,
+        payload: ControlPlanePayload::RawPtyOutput(payload),
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +646,35 @@ mod tests {
                 console_host_id: "observer-a".to_string(),
                 input_seq: 8,
                 input_bytes: b"\x1b[A".to_vec(),
+            })
+        );
+
+        let raw_connection = registry
+            .connection_for("peer-a")
+            .expect("raw authority connection should be registered");
+        raw_connection
+            .send_raw_pty_input(&RawPtyInputPayload {
+                attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-a".to_string(),
+                console_host_id: "observer-a".to_string(),
+                input_seq: 9,
+                input_bytes: b"raw-frame".to_vec(),
+            })
+            .expect("raw frame input should route to bridged authority transport");
+        assert_eq!(
+            transport
+                .recv_command()
+                .expect("raw frame input should decode"),
+            RemoteAuthorityCommand::RawPtyInput(RawPtyInputPayload {
+                attachment_id: "attach-1".to_string(),
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                console_id: "console-a".to_string(),
+                console_host_id: "observer-a".to_string(),
+                input_seq: 9,
+                input_bytes: b"raw-frame".to_vec(),
             })
         );
 

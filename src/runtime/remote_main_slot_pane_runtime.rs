@@ -6,7 +6,6 @@ use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, Sess
 use crate::infra::base64::encode_base64;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RemoteConsoleDescriptor,
-    REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
 };
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 use crate::lifecycle::LifecycleError;
@@ -30,7 +29,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const SIGWINCH: c_int = 28;
 const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
@@ -638,14 +637,6 @@ fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError> {
         .map_err(|error| LifecycleError::Io("failed to flush remote raw output".to_string(), error))
 }
 
-fn raw_pty_now_rfc3339_like() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{millis}Z")
-}
-
 fn collect_direct_raw_pty_output(
     target: &ManagedSessionRecord,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
@@ -924,7 +915,7 @@ impl RawPtyInputRoute {
             return Ok(false);
         };
         let input_seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let payload = ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
+        let payload = RawPtyInputPayload {
             attachment_id: route.attachment_id.clone(),
             session_id: route.session_id.clone(),
             target_id: route.target_id.clone(),
@@ -932,22 +923,9 @@ impl RawPtyInputRoute {
             console_host_id: route.console_host_id.clone(),
             input_seq,
             input_bytes,
-        });
-        let envelope = ProtocolEnvelope {
-            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!("server-raw-pty-input-{input_seq}"),
-            message_type: payload.message_type(),
-            timestamp: raw_pty_now_rfc3339_like(),
-            sender_id: SERVER_SENDER_ID.to_string(),
-            correlation_id: None,
-            session_id: Some(route.session_id),
-            target_id: Some(route.target_id),
-            attachment_id: Some(route.attachment_id),
-            console_id: Some(route.console_id),
-            payload,
         };
         connection
-            .send(&envelope)
+            .send_raw_pty_input(&payload)
             .map_err(|error| RemoteSocketTransportError::new(error.to_string()))?;
         Ok(true)
     }
@@ -1646,7 +1624,8 @@ mod tests {
     };
     use crate::infra::remote_protocol::{
         ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
-        ProtocolEnvelope, RawPtyOutputPayload, RemoteConsoleDescriptor, TargetOutputPayload,
+        ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, RemoteConsoleDescriptor,
+        TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::write_registration_frame;
     use crate::runtime::remote_authority_connection_runtime::{
@@ -2789,7 +2768,7 @@ mod tests {
     #[test]
     fn raw_pty_input_route_sends_bytes_directly_without_base64_target_input() {
         let registry = RemoteConnectionRegistry::new();
-        let capture = Arc::new(CapturingRemoteConnection::default());
+        let capture = Arc::new(CapturingRawRemoteConnection::default());
         registry.register_connection("peer-a", capture.clone());
         let route = RawPtyInputRoute::default();
         route.activate(
@@ -2807,17 +2786,34 @@ mod tests {
             .send(&registry, b"ls\r".to_vec())
             .expect("raw route should send"));
 
-        let envelopes = capture.envelopes();
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].message_type, "raw_pty_input");
-        match &envelopes[0].payload {
-            ControlPlanePayload::RawPtyInput(payload) => {
-                assert_eq!(payload.input_bytes, b"ls\r");
-                assert_eq!(payload.console_host_id, "observer-a");
-                assert_eq!(payload.input_seq, 1);
-            }
-            other => panic!("expected raw PTY input, got {other:?}"),
-        }
+        let payloads = capture.raw_inputs();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].input_bytes, b"ls\r");
+        assert_eq!(payloads[0].console_host_id, "observer-a");
+        assert_eq!(payloads[0].input_seq, 1);
+    }
+
+    #[test]
+    fn raw_pty_input_route_fails_without_raw_frame_support() {
+        let registry = RemoteConnectionRegistry::new();
+        registry.register_connection("peer-a", Arc::new(CapturingRemoteConnection::default()));
+        let route = RawPtyInputRoute::default();
+        route.activate(
+            &remote_target(),
+            &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                attachment_id: "attach-1".to_string(),
+                console_id: "console-a".to_string(),
+            },
+            "observer-a",
+        );
+
+        let error = route
+            .send(&registry, b"x".to_vec())
+            .expect_err("raw mode must not fall back to control-plane envelopes");
+
+        assert!(error.to_string().contains("raw PTY input frames"));
     }
 
     #[test]
@@ -3003,15 +2999,6 @@ mod tests {
         envelopes: Mutex<Vec<ProtocolEnvelope<ControlPlanePayload>>>,
     }
 
-    impl CapturingRemoteConnection {
-        fn envelopes(&self) -> Vec<ProtocolEnvelope<ControlPlanePayload>> {
-            self.envelopes
-                .lock()
-                .expect("capturing connection mutex should not be poisoned")
-                .clone()
-        }
-    }
-
     impl RemoteControlPlaneConnection for CapturingRemoteConnection {
         fn send(
             &self,
@@ -3021,6 +3008,40 @@ mod tests {
                 .lock()
                 .expect("capturing connection mutex should not be poisoned")
                 .push(envelope.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingRawRemoteConnection {
+        raw_inputs: Mutex<Vec<RawPtyInputPayload>>,
+    }
+
+    impl CapturingRawRemoteConnection {
+        fn raw_inputs(&self) -> Vec<RawPtyInputPayload> {
+            self.raw_inputs
+                .lock()
+                .expect("capturing raw connection mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl RemoteControlPlaneConnection for CapturingRawRemoteConnection {
+        fn send(
+            &self,
+            _envelope: &ProtocolEnvelope<ControlPlanePayload>,
+        ) -> Result<(), RemoteControlPlaneTransportError> {
+            panic!("raw input route must not fall back to control-plane envelopes")
+        }
+
+        fn send_raw_pty_input(
+            &self,
+            payload: &RawPtyInputPayload,
+        ) -> Result<(), RemoteControlPlaneTransportError> {
+            self.raw_inputs
+                .lock()
+                .expect("capturing raw connection mutex should not be poisoned")
+                .push(payload.clone());
             Ok(())
         }
     }

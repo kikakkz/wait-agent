@@ -1,7 +1,7 @@
-use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
+use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload};
 use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, read_registration_frame, write_control_plane_envelope,
-    RemoteTransportCodecError,
+    read_authority_transport_frame, read_registration_frame, write_authority_transport_frame,
+    write_control_plane_envelope, AuthorityTransportFrame, RemoteTransportCodecError,
 };
 use crate::runtime::remote_main_slot_runtime::RemoteControlPlaneTransportError;
 use crate::runtime::remote_transport_runtime::{
@@ -215,8 +215,8 @@ pub fn register_authority_stream(
 
     thread::spawn(move || {
         while connected.load(Ordering::Relaxed) {
-            match read_control_plane_envelope(&mut stream) {
-                Ok(envelope) => {
+            match read_authority_transport_frame(&mut stream) {
+                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
                     if reader_tx
                         .send(AuthorityTransportEvent::Envelope(envelope))
                         .is_err()
@@ -224,6 +224,29 @@ pub fn register_authority_stream(
                         break;
                     }
                 }
+                Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
+                    let envelope = ProtocolEnvelope {
+                        protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
+                            .to_string(),
+                        message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
+                        message_type: "raw_pty_output",
+                        timestamp: raw_pty_now_rfc3339_like(),
+                        sender_id: node_id.clone(),
+                        correlation_id: None,
+                        session_id: Some(payload.session_id.clone()),
+                        target_id: Some(payload.target_id.clone()),
+                        attachment_id: None,
+                        console_id: None,
+                        payload: ControlPlanePayload::RawPtyOutput(payload),
+                    };
+                    if reader_tx
+                        .send(AuthorityTransportEvent::Envelope(envelope))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(AuthorityTransportFrame::RawPtyInput(_)) => break,
                 Err(_) => break,
             }
         }
@@ -402,6 +425,34 @@ impl RemoteControlPlaneConnection for SocketRemoteControlPlaneConnection {
         write_control_plane_envelope(&mut *writer, envelope)
             .map_err(|error| RemoteControlPlaneTransportError::new(error.to_string()))
     }
+
+    fn send_raw_pty_input(
+        &self,
+        payload: &RawPtyInputPayload,
+    ) -> Result<(), RemoteControlPlaneTransportError> {
+        if !self.connected.load(Ordering::Relaxed) {
+            return Err(RemoteControlPlaneTransportError::new(
+                "authority transport connection is closed",
+            ));
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("authority transport writer mutex should not be poisoned");
+        write_authority_transport_frame(
+            &mut *writer,
+            &AuthorityTransportFrame::RawPtyInput(payload.clone()),
+        )
+        .map_err(|error| RemoteControlPlaneTransportError::new(error.to_string()))
+    }
+}
+
+fn raw_pty_now_rfc3339_like() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{millis}Z")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -836,7 +887,7 @@ mod tests {
 
         let rtt_start = std::time::Instant::now();
         for i in 0..ITERATIONS {
-            let mut env = authority_target_output_envelope(i as u64);
+            let env = authority_target_output_envelope(i as u64);
             write_control_plane_envelope(&mut client, &env).expect("encode");
             match event_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(AuthorityTransportEvent::Envelope(_)) => {}
