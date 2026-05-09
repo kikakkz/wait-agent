@@ -35,6 +35,7 @@ use std::time::Duration;
 const SIGWINCH: c_int = 28;
 const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
 const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
+const CLEAR_SCREEN_HOME_ESCAPE: &str = "\x1b[2J\x1b[H";
 const TARGET_PRESENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET_PRESENCE_MISS_GRACE_POLLS: usize = 4;
 const REMOTE_RAW_PTY_ENV: &str = "WAITAGENT_REMOTE_RAW_PTY";
@@ -378,12 +379,11 @@ impl RemoteMainSlotPaneRuntime {
                     }
                     Ok(RemotePaneEvent::AuthorityTransport(event)) => match event {
                         AuthorityTransportEvent::Connected => {
-                            authority_status = authority_status_from_runtime(
-                                &remote_runtime,
-                                &target,
-                                target_is_present(&target_presence),
-                                &waiting_authority_status,
-                            );
+                            authority_status = if target_is_present(&target_presence) {
+                                AuthorityTransportStatus::Connected
+                            } else {
+                                AuthorityTransportStatus::Disconnected
+                            };
                             if binding.is_none()
                                 && matches!(authority_status, AuthorityTransportStatus::Connected)
                             {
@@ -397,6 +397,8 @@ impl RemoteMainSlotPaneRuntime {
                                 ) {
                                     Ok(activated) => {
                                         if raw_pty_passthrough {
+                                            write_escape(CLEAR_SCREEN_HOME_ESCAPE)
+                                                .map_err(remote_pane_error)?;
                                             write_remote_raw_output(&activated.1)?;
                                             raw_input_route.activate(
                                                 &target,
@@ -454,6 +456,7 @@ impl RemoteMainSlotPaneRuntime {
                             payload,
                         } => {
                             if raw_pty_passthrough {
+                                let first_direct_raw_output = direct_raw_output_last_seq.is_none();
                                 let raw = collect_direct_raw_pty_output_payload(
                                     &target,
                                     &authority_id,
@@ -461,6 +464,10 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut direct_raw_output_last_seq,
                                 )
                                 .map_err(remote_protocol_error)?;
+                                if first_direct_raw_output {
+                                    write_escape(CLEAR_SCREEN_HOME_ESCAPE)
+                                        .map_err(remote_pane_error)?;
+                                }
                                 write_remote_raw_output(&raw)?;
                             } else {
                                 return Err(LifecycleError::Protocol(
@@ -1659,7 +1666,7 @@ mod tests {
         spawn_mailbox_watcher, AuthorityTransportStatus, RawPtyInputRoute,
         RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
         RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteTerminalInputTranslator,
-        REMOTE_RAW_PTY_ENV,
+        CLEAR_SCREEN_HOME_ESCAPE, REMOTE_RAW_PTY_ENV,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -2904,6 +2911,11 @@ mod tests {
 
         assert_eq!(raw, b"\x1b[32mok\r\n");
         assert_eq!(last_output_seq, Some(1));
+    }
+
+    #[test]
+    fn clear_screen_escape_matches_full_terminal_reset_for_raw_activation() {
+        assert_eq!(CLEAR_SCREEN_HOME_ESCAPE.as_bytes(), b"\x1b[2J\x1b[H");
     }
 
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
