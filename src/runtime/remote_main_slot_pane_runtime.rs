@@ -922,17 +922,36 @@ impl RemoteRawPtyMailboxReader {
         let envelopes = self.mailbox.snapshot_from(self.processed_envelopes);
         let mut raw = Vec::new();
         for envelope in &envelopes {
-            if let ControlPlanePayload::RawPtyOutput(payload) = &envelope.payload {
-                if let Some(last_output_seq) = self.last_output_seq {
-                    if payload.output_seq <= last_output_seq {
-                        return Err(RemoteSocketTransportError::new(format!(
-                            "remote raw PTY received out-of-order output for `{}`: {} after {}",
-                            payload.target_id, payload.output_seq, last_output_seq
-                        )));
-                    }
+            match &envelope.payload {
+                ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                    raw.extend_from_slice(&payload.output_bytes);
                 }
-                self.last_output_seq = Some(payload.output_seq);
-                raw.extend_from_slice(&payload.output_bytes);
+                ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+                    if payload.alternate_screen_active {
+                        raw.extend_from_slice(b"\x1b[?1049h");
+                    }
+                    if payload.application_cursor_keys {
+                        raw.extend_from_slice(b"\x1b[?1h");
+                    }
+                    raw.extend_from_slice(if payload.cursor_visible {
+                        b"\x1b[?25h".as_slice()
+                    } else {
+                        b"\x1b[?25l".as_slice()
+                    });
+                }
+                ControlPlanePayload::RawPtyOutput(payload) => {
+                    if let Some(last_output_seq) = self.last_output_seq {
+                        if payload.output_seq <= last_output_seq {
+                            return Err(RemoteSocketTransportError::new(format!(
+                                "remote raw PTY received out-of-order output for `{}`: {} after {}",
+                                payload.target_id, payload.output_seq, last_output_seq
+                            )));
+                        }
+                    }
+                    self.last_output_seq = Some(payload.output_seq);
+                    raw.extend_from_slice(&payload.output_bytes);
+                }
+                _ => {}
             }
         }
         self.processed_envelopes += envelopes.len();
@@ -1686,8 +1705,8 @@ mod tests {
         spawn_mailbox_watcher, write_remote_raw_output_with_initial_clear,
         AuthorityTransportStatus, RawPtyInputRoute, RemoteInteractInputSignalDecoder,
         RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
-        RemotePaneEvent, RemoteTerminalInputTranslator, CLEAR_SCREEN_HOME_ESCAPE,
-        REMOTE_RAW_PTY_ENV,
+        RemotePaneEvent, RemoteRawPtyMailboxReader, RemoteTerminalInputTranslator,
+        CLEAR_SCREEN_HOME_ESCAPE, REMOTE_RAW_PTY_ENV,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -2935,6 +2954,34 @@ mod tests {
     }
 
     #[test]
+    fn raw_pty_mailbox_reader_collects_bootstrap_before_direct_output() {
+        let registry = RemoteConnectionRegistry::new();
+        let mailbox = registry.register_loopback_connection("observer-a");
+        let connection = registry
+            .connection_for("observer-a")
+            .expect("loopback connection should exist");
+        connection
+            .send(&authority_bootstrap_chunk_envelope_with_bytes(
+                1,
+                b"prompt$ ".to_vec(),
+            ))
+            .expect("bootstrap chunk should enqueue");
+        connection
+            .send(&authority_bootstrap_complete_envelope(1))
+            .expect("bootstrap complete should enqueue");
+        connection
+            .send(&authority_raw_pty_output_envelope(1, b"echo\r\n".to_vec()))
+            .expect("raw output should enqueue");
+        let mut reader = RemoteRawPtyMailboxReader::new(mailbox);
+
+        let raw = reader
+            .sync_and_collect_raw()
+            .expect("raw mailbox reader should collect bootstrap and raw output");
+
+        assert_eq!(raw, b"prompt$ \x1b[?25hecho\r\n");
+    }
+
+    #[test]
     fn clear_screen_escape_matches_full_terminal_reset_for_raw_activation() {
         assert_eq!(CLEAR_SCREEN_HOME_ESCAPE.as_bytes(), b"\x1b[2J\x1b[H");
     }
@@ -2996,6 +3043,13 @@ mod tests {
     }
 
     fn authority_bootstrap_chunk_envelope(chunk_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
+        authority_bootstrap_chunk_envelope_with_bytes(chunk_seq, b"a".to_vec())
+    }
+
+    fn authority_bootstrap_chunk_envelope_with_bytes(
+        chunk_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
             message_id: format!("bootstrap-{chunk_seq}"),
@@ -3012,7 +3066,7 @@ mod tests {
                 target_id: "remote-peer:peer-a:shell-1".to_string(),
                 chunk_seq,
                 stream: "pty",
-                output_bytes: b"a".to_vec(),
+                output_bytes,
             }),
         }
     }
