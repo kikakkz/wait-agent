@@ -14,8 +14,8 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
     NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-    RawPtyInputPayload, TargetExitedPayload, TargetOutputPayload, TargetPublishedPayload,
-    REMOTE_PROTOCOL_VERSION,
+    RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload, TargetOutputPayload,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -163,6 +163,27 @@ impl RemoteNodeSessionRuntime {
                 target_id: target_id.to_string(),
                 output_seq,
                 stream,
+                output_bytes,
+            }),
+        )
+    }
+
+    pub fn send_raw_pty_output(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload(
+            NodeSessionChannel::Authority,
+            session_id,
+            target_id,
+            "authority-msg",
+            ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                output_seq,
                 output_bytes,
             }),
         )

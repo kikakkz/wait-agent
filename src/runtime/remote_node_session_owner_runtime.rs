@@ -1312,6 +1312,26 @@ fn forward_host_output_to_shared_session(
                     );
                 }
             }
+            ControlPlanePayload::RawPtyOutput(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                if session
+                    .send_raw_pty_output(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.output_seq,
+                        payload.output_bytes,
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
             other => {
                 return Err(RemoteNodeSessionError::new(format!(
                     "unexpected live authority host payload `{}`",

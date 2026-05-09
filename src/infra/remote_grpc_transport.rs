@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
@@ -22,6 +22,9 @@ use tonic::{Request, Response, Status};
 
 const SERVER_ID: &str = "waitagent-remote-ingress";
 const HEARTBEAT_INTERVAL_SECONDS: i64 = 15;
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNodeSessionRequest {
@@ -90,7 +93,11 @@ impl GrpcRemoteNodeTransport {
     pub fn endpoint(&self, endpoint_uri: &str) -> Result<Endpoint, RemoteNodeTransportError> {
         Ok(Endpoint::from_shared(endpoint_uri.to_string())
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?
-            .tcp_nodelay(true))
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(TCP_KEEPALIVE_IDLE))
+            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+            .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+            .keep_alive_while_idle(true))
     }
 
     pub fn client(&self, channel: Channel) -> NodeSessionServiceClient<Channel> {
@@ -343,6 +350,9 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 };
                 let server = Server::builder()
                     .tcp_nodelay(true)
+                    .tcp_keepalive(Some(TCP_KEEPALIVE_IDLE))
+                    .http2_keepalive_interval(Some(HTTP2_KEEPALIVE_INTERVAL))
+                    .http2_keepalive_timeout(Some(HTTP2_KEEPALIVE_TIMEOUT))
                     .add_service(NodeSessionServiceServer::new(service))
                     .serve_with_incoming_shutdown(incoming, async move {
                         let _ = shutdown_rx.await;
