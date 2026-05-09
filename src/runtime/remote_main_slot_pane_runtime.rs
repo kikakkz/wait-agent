@@ -283,6 +283,7 @@ impl RemoteMainSlotPaneRuntime {
         let raw_pty_passthrough = remote_raw_pty_passthrough_enabled();
         let mut binding = None;
         let mut direct_raw_output_last_seq = None;
+        let mut raw_screen_initialized = false;
         let mut authority_status = if remote_runtime.has_connection(target.address.authority_id()) {
             AuthorityTransportStatus::Connected
         } else {
@@ -300,7 +301,7 @@ impl RemoteMainSlotPaneRuntime {
             .map(Some)?;
             if let Some((activated_binding, raw)) = activated {
                 if raw_pty_passthrough {
-                    write_remote_raw_output(&raw)?;
+                    write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
                     raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
                 }
                 binding = Some(activated_binding);
@@ -333,7 +334,10 @@ impl RemoteMainSlotPaneRuntime {
                             continue;
                         }
                         if raw_pty_passthrough {
-                            write_remote_raw_output(&raw)?;
+                            write_remote_raw_output_with_initial_clear(
+                                &raw,
+                                &mut raw_screen_initialized,
+                            )?;
                         } else {
                             let mut stdout = io::stdout().lock();
                             stdout.write_all(&raw).map_err(|error| {
@@ -397,9 +401,10 @@ impl RemoteMainSlotPaneRuntime {
                                 ) {
                                     Ok(activated) => {
                                         if raw_pty_passthrough {
-                                            write_escape(CLEAR_SCREEN_HOME_ESCAPE)
-                                                .map_err(remote_pane_error)?;
-                                            write_remote_raw_output(&activated.1)?;
+                                            write_remote_raw_output_with_initial_clear(
+                                                &activated.1,
+                                                &mut raw_screen_initialized,
+                                            )?;
                                             raw_input_route.activate(
                                                 &target,
                                                 &activated.0,
@@ -456,7 +461,6 @@ impl RemoteMainSlotPaneRuntime {
                             payload,
                         } => {
                             if raw_pty_passthrough {
-                                let first_direct_raw_output = direct_raw_output_last_seq.is_none();
                                 let raw = collect_direct_raw_pty_output_payload(
                                     &target,
                                     &authority_id,
@@ -464,11 +468,10 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut direct_raw_output_last_seq,
                                 )
                                 .map_err(remote_protocol_error)?;
-                                if first_direct_raw_output {
-                                    write_escape(CLEAR_SCREEN_HOME_ESCAPE)
-                                        .map_err(remote_pane_error)?;
-                                }
-                                write_remote_raw_output(&raw)?;
+                                write_remote_raw_output_with_initial_clear(
+                                    &raw,
+                                    &mut raw_screen_initialized,
+                                )?;
                             } else {
                                 return Err(LifecycleError::Protocol(
                                     "received raw PTY output while raw passthrough is disabled"
@@ -485,7 +488,10 @@ impl RemoteMainSlotPaneRuntime {
                                 )
                                 .map_err(remote_protocol_error)?
                                 {
-                                    write_remote_raw_output(&raw)?;
+                                    write_remote_raw_output_with_initial_clear(
+                                        &raw,
+                                        &mut raw_screen_initialized,
+                                    )?;
                                     continue;
                                 }
                             }
@@ -663,6 +669,20 @@ fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError> {
     stdout
         .flush()
         .map_err(|error| LifecycleError::Io("failed to flush remote raw output".to_string(), error))
+}
+
+fn write_remote_raw_output_with_initial_clear(
+    bytes: &[u8],
+    screen_initialized: &mut bool,
+) -> Result<(), LifecycleError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if !*screen_initialized {
+        write_escape(CLEAR_SCREEN_HOME_ESCAPE).map_err(remote_pane_error)?;
+        *screen_initialized = true;
+    }
+    write_remote_raw_output(bytes)
 }
 
 fn collect_direct_raw_pty_output_envelope(
@@ -1663,10 +1683,11 @@ mod tests {
         encode_base64, main_slot_console_id, main_slot_surface_spec, placeholder_lines,
         remote_raw_pty_passthrough_enabled, should_draw_remote_snapshot,
         should_exit_surface_for_target_presence, should_exit_surface_locally,
-        spawn_mailbox_watcher, AuthorityTransportStatus, RawPtyInputRoute,
-        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
-        RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteTerminalInputTranslator,
-        CLEAR_SCREEN_HOME_ESCAPE, REMOTE_RAW_PTY_ENV,
+        spawn_mailbox_watcher, write_remote_raw_output_with_initial_clear,
+        AuthorityTransportStatus, RawPtyInputRoute, RemoteInteractInputSignalDecoder,
+        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
+        RemotePaneEvent, RemoteTerminalInputTranslator, CLEAR_SCREEN_HOME_ESCAPE,
+        REMOTE_RAW_PTY_ENV,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -2916,6 +2937,16 @@ mod tests {
     #[test]
     fn clear_screen_escape_matches_full_terminal_reset_for_raw_activation() {
         assert_eq!(CLEAR_SCREEN_HOME_ESCAPE.as_bytes(), b"\x1b[2J\x1b[H");
+    }
+
+    #[test]
+    fn empty_raw_output_does_not_mark_screen_initialized() {
+        let mut initialized = false;
+
+        write_remote_raw_output_with_initial_clear(b"", &mut initialized)
+            .expect("empty raw output should be ignored");
+
+        assert!(!initialized);
     }
 
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
