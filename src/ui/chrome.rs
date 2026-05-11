@@ -70,7 +70,6 @@ pub fn style_sidebar_separator_line(line: &str, width: usize) -> String {
 pub fn style_sidebar_badge(
     state: SidebarBadgeState,
     row_style: SidebarRowStyle,
-    _now_millis: u128,
 ) -> (String, usize) {
     let badge = match state {
         SidebarBadgeState::Running => "🔥R",
@@ -154,8 +153,7 @@ mod tests {
 
     #[test]
     fn running_badge_reports_double_width_emoji_space() {
-        let (_, width) =
-            style_sidebar_badge(SidebarBadgeState::Running, SidebarRowStyle::Selected, 0);
+        let (_, width) = style_sidebar_badge(SidebarBadgeState::Running, SidebarRowStyle::Selected);
 
         assert_eq!(width, display_width("🍳R"));
     }

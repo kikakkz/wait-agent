@@ -89,6 +89,7 @@ impl VendoredTmuxSource {
         Self { path: path.into() }
     }
 
+    #[allow(dead_code)]
     pub fn discover_from_repo_root(repo_root: impl AsRef<Path>) -> Result<Self, TmuxError> {
         let path = repo_root.as_ref().join(VENDORED_TMUX_SUBMODULE_PATH);
         if !path.exists() {
@@ -123,10 +124,12 @@ impl VendoredTmuxSource {
 }
 
 impl VendoredTmuxSource {
+    #[allow(dead_code)]
     pub fn build_plan(&self, build_root: impl Into<PathBuf>) -> TmuxGlueBuildPlan {
         TmuxGlueBuildPlan::new(self.path.clone(), build_root.into())
     }
 
+    #[allow(dead_code)]
     pub fn metadata(&self) -> Result<TmuxGlueSourceMetadata, TmuxError> {
         TmuxGlueSourceMetadata::discover(self.path.clone()).map_err(TmuxError::from)
     }

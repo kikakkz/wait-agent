@@ -1,0 +1,40 @@
+id: task.refactor-7
+kind: task
+version: 1
+title: decouple remote publication and session sync from direct tmux backend coupling
+status: ready
+priority: medium
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - constraint requires local and remote sessions to converge on one transport-agnostic target catalog
+    - RemoteTargetPublicationRuntime directly calls EmbeddedTmuxBackend methods, bypassing the catalog gateway
+    - SocketScopedLocalSessionCatalog directly couples to TmuxChromeGateway
+    - these couplings block future transport-agnostic session management
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.refactor-5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - RemoteTargetPublicationRuntime accesses session data through a trait-based catalog gateway, not direct EmbeddedTmuxBackend calls
+  - SocketScopedLocalSessionCatalog is parameterized over a trait rather than coupled to TmuxChromeGateway
+  - the unified ManagedSessionRecord and SessionTransport model remain the single session identity surface
+  - no new local-vs-remote split is introduced
+  - cargo test passes with zero regressions
+verification:
+  - cargo test
+  - cargo build --release (no new warnings)
+  - targeted review: verify publication runtime no longer imports EmbeddedTmuxBackend directly
+  - manual: remote session discovery and publication still work end-to-end
+touched_paths:
+  - src/runtime/remote_target_publication_runtime.rs
+  - src/runtime/remote_node_session_sync_runtime.rs
+  - src/application/target_registry_service.rs
+notes:
+  - This is the final cleanup item. It depends on refactor-5 because the file splits may change import paths.
+  - The goal is to make publication and sync go through the same transport-agnostic catalog that local sessions use.
+  - Do not over-abstract. A simple read-only trait for session listing is sufficient.

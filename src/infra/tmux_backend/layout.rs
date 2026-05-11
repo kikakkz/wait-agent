@@ -23,6 +23,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn break_pane_to_window(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -33,6 +34,8 @@ impl EmbeddedTmuxBackend {
         parse_break_pane_result(workspace, &output.stdout)
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub(crate) fn join_pane(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -54,6 +57,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn kill_pane(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -82,6 +86,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pane_pipe_state(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -427,6 +432,7 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
     }
 }
 
+#[allow(dead_code)]
 fn break_pane_args(pane: &TmuxPaneId, window_name: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "break-pane".to_string(),
@@ -444,6 +450,7 @@ fn break_pane_args(pane: &TmuxPaneId, window_name: Option<&str>) -> Vec<String> 
     args
 }
 
+#[allow(dead_code)]
 fn join_pane_args(source: &TmuxPaneId, destination: &TmuxPaneId, full_size: bool) -> Vec<String> {
     let mut args = vec![
         "join-pane".to_string(),
@@ -470,6 +477,7 @@ fn swap_panes_args(source: &TmuxPaneId, destination: &TmuxPaneId) -> Vec<String>
     ]
 }
 
+#[allow(dead_code)]
 fn kill_pane_args(pane: &TmuxPaneId) -> Vec<String> {
     vec![
         "kill-pane".to_string(),
@@ -507,6 +515,7 @@ fn set_pane_hook_args(pane: &TmuxPaneId, hook_name: &str, command: &str) -> Vec<
     ]
 }
 
+#[allow(dead_code)]
 fn parse_break_pane_result(
     workspace: &TmuxWorkspaceHandle,
     output: &str,

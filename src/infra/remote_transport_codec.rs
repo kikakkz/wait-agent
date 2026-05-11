@@ -709,6 +709,7 @@ fn read_u64(reader: &mut impl Read) -> Result<u64, RemoteTransportCodecError> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+#[allow(dead_code)]
 fn write_u32(writer: &mut impl Write, value: u32) -> Result<(), RemoteTransportCodecError> {
     writer.write_all(&value.to_le_bytes())?;
     Ok(())

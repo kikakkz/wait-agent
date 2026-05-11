@@ -11,7 +11,7 @@ use crate::ui::chrome::{
 pub struct SidebarUi;
 
 impl SidebarUi {
-    pub fn render_view_model(model: &SidebarViewModel, now_millis: u128) -> String {
+    pub fn render_view_model(model: &SidebarViewModel) -> String {
         Self::render(
             &model.active_socket,
             &model.active_session,
@@ -20,7 +20,6 @@ impl SidebarUi {
             &model.sessions,
             model.surface.width,
             model.surface.height,
-            now_millis,
         )
     }
 
@@ -32,7 +31,6 @@ impl SidebarUi {
         sessions: &[ManagedSessionRecord],
         width: usize,
         height: usize,
-        _now_millis: u128,
     ) -> String {
         let width = width.max(1);
         let height = height.max(1);
@@ -78,7 +76,7 @@ impl SidebarUi {
             let is_selected = qualified_target == selected.address.qualified_target();
             push_line(
                 &mut lines,
-                render_session_row(session, is_current, is_selected, width, _now_millis),
+                render_session_row(session, is_current, is_selected, width),
                 height,
             );
         }
@@ -134,7 +132,6 @@ fn render_session_row(
     is_current: bool,
     is_selected: bool,
     width: usize,
-    now_millis: u128,
 ) -> String {
     let marker = if is_selected {
         ">"
@@ -151,7 +148,7 @@ fn render_session_row(
         SidebarRowStyle::Normal
     };
     let badge_state = sidebar_badge_state(session.task_state);
-    let (badge, badge_width) = style_sidebar_badge(badge_state, row_style, now_millis);
+    let (badge, badge_width) = style_sidebar_badge(badge_state, row_style);
     let reserved = marker.len() + 1 + 1 + badge_width;
     let label_width = width.saturating_sub(reserved);
     let primary_label = session_row_primary_label(session, label_width);
@@ -320,7 +317,6 @@ mod tests {
             ],
             28,
             9,
-            0,
         );
 
         assert!(output.starts_with("\u{1b}[48;5;236m"));
@@ -338,7 +334,7 @@ mod tests {
 
     #[test]
     fn sidebar_ui_renders_collapsed_marker_for_hidden_width() {
-        let output = SidebarUi::render("wa-1", "waitagent-1", None, None, &[], 1, 3, 0);
+        let output = SidebarUi::render("wa-1", "waitagent-1", None, None, &[], 1, 3);
 
         assert!(output.contains("<"));
     }
@@ -369,7 +365,6 @@ mod tests {
             }],
             32,
             6,
-            0,
         );
 
         assert!(output.contains("bash@192.168.31.182:7513"));
@@ -403,7 +398,6 @@ mod tests {
             }],
             24,
             6,
-            0,
         );
 
         assert!(output.contains("192.168.31.182 INPUT"));

@@ -43,6 +43,7 @@ impl PublishedTargetStore {
         Self { path: path.into() }
     }
 
+    #[allow(dead_code)]
     pub fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         Ok(self
             .list_records()?
@@ -189,6 +190,7 @@ impl PublishedTargetStore {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn remove_source_socket_targets_except(
         &self,
         socket_name: &str,
@@ -441,17 +443,6 @@ fn encode_optional_string_field(value: Option<&str>) -> String {
     value
         .map(encode_string_field)
         .unwrap_or_else(|| OPTIONAL_NONE_SENTINEL.to_string())
-}
-
-fn encode_string_list_field(values: &BTreeSet<String>) -> String {
-    if values.is_empty() {
-        return OPTIONAL_NONE_SENTINEL.to_string();
-    }
-    values
-        .iter()
-        .map(|value| encode_string_field(value))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn encode_source_binding_list_field(values: &BTreeSet<PublishedTargetSourceBinding>) -> String {

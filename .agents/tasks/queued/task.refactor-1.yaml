@@ -1,0 +1,37 @@
+id: task.refactor-1
+kind: task
+version: 1
+title: replace custom base64 implementation with the mature base64 crate
+status: ready
+priority: low
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - constraints prefer mature maintained Rust components over custom infrastructure
+    - base64 crate is already a transitive dependency via tonic and adds zero new deps
+    - this is the smallest independent cleanup item and should land first to reduce surface
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - src/infra/base64.rs is deleted
+  - base64 = "0.22" is added to Cargo.toml as a direct dependency
+  - all usages in published_target_store.rs and remote_target_publication_runtime.rs are migrated to base64::engine::general_purpose::STANDARD
+  - cargo test passes with no regressions
+  - no behavioral change to published target store serialization or IPC command encoding
+verification:
+  - cargo test
+  - cargo build --release (no new warnings)
+touched_paths:
+  - Cargo.toml
+  - src/infra/base64.rs
+  - src/infra/mod.rs
+  - src/infra/published_target_store.rs
+  - src/runtime/remote_target_publication_runtime.rs
+notes:
+  - This is a drop-in replacement. The custom module uses standard base64 alphabet with padding, matching STANDARD encoding.
+  - Must not change any serialized format. Verify published_target_store round-trip tests still pass.

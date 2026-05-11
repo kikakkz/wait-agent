@@ -86,18 +86,22 @@ impl EmbeddedTmuxBackend {
         }
     }
 
+    #[allow(dead_code)]
     pub fn source(&self) -> &VendoredTmuxSource {
         &self.source
     }
 
+    #[allow(dead_code)]
     pub fn build_config(&self) -> &TmuxGlueBuildConfig {
         &self.build_config
     }
 
+    #[allow(dead_code)]
     pub fn artifacts(&self) -> &TmuxGlueArtifacts {
         &self.artifacts
     }
 
+    #[allow(dead_code)]
     pub fn build_status(&self) -> &TmuxGlueBuildStatus {
         &self.build_status
     }
@@ -758,6 +762,7 @@ impl EmbeddedTmuxBackend {
             .map(|value| value.as_deref() == Some(pane_target))
     }
 
+    #[allow(dead_code)]
     pub fn capture_pane_text_on_socket(
         &self,
         socket_name: &str,

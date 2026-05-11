@@ -11,6 +11,7 @@ enum FooterProjection {
 }
 
 impl FooterUi {
+    #[allow(dead_code)]
     pub fn render_view_model(model: &FooterViewModel) -> String {
         if model.fullscreen {
             Self::render_fullscreen(

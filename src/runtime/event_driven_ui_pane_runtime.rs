@@ -11,7 +11,6 @@ use crate::runtime::event_driven_chrome_runtime::{
     EventDrivenChromeRenderUpdate, EventDrivenChromeRuntime,
 };
 use std::sync::mpsc::Receiver;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct EventDrivenUiPaneRuntime {
     bus: LocalRuntimeEventBus,
@@ -60,7 +59,7 @@ impl EventDrivenUiPaneRuntime {
             listener_display,
             connect_endpoint,
         );
-        self.drain_pending_events(now_millis())
+        self.drain_pending_events()
     }
 
     pub fn publish_surface_resize(
@@ -126,17 +125,16 @@ impl EventDrivenUiPaneRuntime {
 
     fn publish(&mut self, event: LocalRuntimeEvent) -> EventDrivenChromeRenderUpdate {
         self.bus.publish(event);
-        self.drain_pending_events(now_millis())
+        self.drain_pending_events()
     }
 
-    fn drain_pending_events(&mut self, now_millis: u128) -> EventDrivenChromeRenderUpdate {
+    fn drain_pending_events(&mut self) -> EventDrivenChromeRenderUpdate {
         let mut update = EventDrivenChromeRenderUpdate::default();
         while let Ok(envelope) = self.event_rx.try_recv() {
             self.state.observe(&envelope.payload);
             merge_render_update(
                 &mut update,
-                self.chrome_runtime
-                    .apply_event(&envelope.payload, now_millis),
+                self.chrome_runtime.apply_event(&envelope.payload),
             );
         }
         update
@@ -359,13 +357,6 @@ fn merge_render_update(
     if next.fullscreen_status.is_some() {
         update.fullscreen_status = next.fullscreen_status;
     }
-}
-
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_millis())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

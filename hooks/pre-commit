@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Source cargo env for non-interactive git hook context
+if [ -f "${HOME}/.cargo/env" ]; then
+  . "${HOME}/.cargo/env"
+fi
+
 echo "==> Running cargo fmt --check..."
 cargo fmt --check
 

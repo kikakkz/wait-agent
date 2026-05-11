@@ -205,7 +205,6 @@ impl Default for ManagedSessionTaskState {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionAvailability {
     Online,
@@ -236,7 +235,6 @@ impl SessionAvailability {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleLocation {
     LocalWorkspace,

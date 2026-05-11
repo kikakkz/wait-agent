@@ -1,0 +1,44 @@
+id: task.refactor-3
+kind: task
+version: 1
+title: extract semantic agent detection into a plugin-based AgentDetector trait
+status: ready
+priority: high
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - current agent identification and task-state inference are hardcoded in tmux_backend.rs and session_catalog.rs
+    - adding a new agent requires modifying core files in two locations
+    - a plugin trait lets each agent define its own detection and classification rules independently
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.refactor-2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - an AgentDetector trait is defined in the domain layer with methods for process detection, pane-text detection, and task-state classification
+  - ClaudeDetector and CodexDetector each implement the trait as independent modules
+  - tmux_backend.rs session_runtime_metadata() iterates a registry of detectors instead of calling hardcoded functions
+  - session_catalog.rs ManagedSessionTaskState::infer is replaced by detector registry dispatch
+  - adding a new agent requires only a new impl + registration, no changes to tmux_backend or session_catalog
+  - hardcoded shell name lists (bash/zsh/fish/sh) in is_interactive_shell_state and should_overlay are parameterized or moved to a shared constant
+  - all existing detection behavior is preserved (claude, codex, node wrappers, shell prompts)
+  - cargo test passes with identical behavior
+verification:
+  - cargo test
+  - targeted review: verify each existing detection path is covered by a detector impl
+  - manual: open claude and codex sessions, verify sidebar badges still show correct state
+touched_paths:
+  - src/domain/session_catalog.rs
+  - src/infra/tmux_backend.rs
+  - src/runtime/remote_node_session_sync_runtime.rs
+  - new: src/domain/agent_detector.rs (or similar)
+  - new: src/domain/agent_detector_claude.rs
+  - new: src/domain/agent_detector_codex.rs
+notes:
+  - The trait should live in domain, not infra, because it defines a domain concept (agent identity and state).
+  - Shell detection (looks_like_shell_prompt) should be the default/fallback detector, not part of agent-specific plugins.
+  - Preserve the priority order: process detection first, pane-text detection second, shell fallback last.

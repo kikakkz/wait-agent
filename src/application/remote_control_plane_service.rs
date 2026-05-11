@@ -10,7 +10,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MirrorRouteState {
     /// Mirror not yet requested for this session.
     None,
@@ -22,8 +21,8 @@ pub enum MirrorRouteState {
     Rejected(String),
 }
 
-#[allow(dead_code)]
 impl MirrorRouteState {
+    #[allow(dead_code)]
     fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }

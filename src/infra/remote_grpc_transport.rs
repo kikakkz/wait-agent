@@ -77,6 +77,7 @@ pub struct GrpcRemoteNodeTransport;
 pub struct GrpcRemoteNodeTransportGuard {
     shutdown_tx: Option<oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
+    #[allow(dead_code)]
     local_addr: SocketAddr,
 }
 
@@ -100,6 +101,7 @@ impl GrpcRemoteNodeTransport {
             .keep_alive_while_idle(true))
     }
 
+    #[allow(dead_code)]
     pub fn client(&self, channel: Channel) -> NodeSessionServiceClient<Channel> {
         NodeSessionServiceClient::new(channel)
     }
@@ -138,6 +140,7 @@ impl RemoteNodeSessionHandle {
 }
 
 impl GrpcRemoteNodeTransportGuard {
+    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

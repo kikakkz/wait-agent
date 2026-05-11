@@ -17,11 +17,7 @@ impl EventDrivenChromeRuntime {
         Self::default()
     }
 
-    pub fn apply_event(
-        &mut self,
-        event: &LocalRuntimeEvent,
-        now_millis: u128,
-    ) -> EventDrivenChromeRenderUpdate {
+    pub fn apply_event(&mut self, event: &LocalRuntimeEvent) -> EventDrivenChromeRenderUpdate {
         let fullscreen_changed = match event {
             LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged { is_fullscreen }) => {
                 let changed = self.last_fullscreen_state != Some(*is_fullscreen);
@@ -45,7 +41,7 @@ impl EventDrivenChromeRuntime {
         };
 
         if let Some(model) = projection.sidebar {
-            let buffer = SidebarUi::render_view_model(&model, now_millis);
+            let buffer = SidebarUi::render_view_model(&model);
             if self.last_sidebar_buffer.as_ref() != Some(&buffer) {
                 self.last_sidebar_buffer = Some(buffer.clone());
                 update.sidebar = Some(buffer);
@@ -111,34 +107,27 @@ mod tests {
     fn snapshot_and_surface_events_produce_sidebar_and_footer_buffers() {
         let mut runtime = EventDrivenChromeRuntime::new();
 
-        runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
-                surface: ChromeSurface::SidebarPane,
-                width: 24,
-                height: 18,
-            }),
-            0,
-        );
-        runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
-                surface: ChromeSurface::FooterPane,
-                width: 80,
-                height: 1,
-            }),
-            0,
-        );
+        runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::SidebarPane,
+            width: 24,
+            height: 18,
+        }));
+        runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::FooterPane,
+            width: 80,
+            height: 1,
+        }));
 
-        let update = runtime.apply_event(
-            &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
+        let update = runtime.apply_event(&LocalRuntimeEvent::SessionCatalog(
+            SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
                 listener_display: Some("192.168.1.22:7474".to_string()),
                 connect_endpoint: None,
-            }),
-            0,
-        );
+            },
+        ));
 
         assert!(update
             .sidebar
@@ -160,14 +149,11 @@ mod tests {
     #[test]
     fn repeated_equivalent_events_do_not_emit_duplicate_buffers() {
         let mut runtime = EventDrivenChromeRuntime::new();
-        runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
-                surface: ChromeSurface::FooterPane,
-                width: 80,
-                height: 1,
-            }),
-            0,
-        );
+        runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::FooterPane,
+            width: 80,
+            height: 1,
+        }));
 
         let event = LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
             active_socket: "wa-1".to_string(),
@@ -177,8 +163,8 @@ mod tests {
             listener_display: None,
             connect_endpoint: None,
         });
-        let first = runtime.apply_event(&event, 0);
-        let second = runtime.apply_event(&event, 0);
+        let first = runtime.apply_event(&event);
+        let second = runtime.apply_event(&event);
 
         assert!(first.footer.is_some());
         assert!(second.footer.is_none());
@@ -187,38 +173,30 @@ mod tests {
     #[test]
     fn fullscreen_invalidation_only_happens_on_state_transition() {
         let mut runtime = EventDrivenChromeRuntime::new();
-        runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
-                surface: ChromeSurface::FooterPane,
-                width: 80,
-                height: 1,
-            }),
-            0,
-        );
-        runtime.apply_event(
-            &LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
+        runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+            surface: ChromeSurface::FooterPane,
+            width: 80,
+            height: 1,
+        }));
+        runtime.apply_event(&LocalRuntimeEvent::SessionCatalog(
+            SessionCatalogEvent::SnapshotUpdated {
                 active_socket: "wa-1".to_string(),
                 active_session: "sess-1".to_string(),
                 active_target: Some("wa-1:sess-1".to_string()),
                 sessions: vec![session("wa-1", "sess-1", "bash")],
                 listener_display: None,
                 connect_endpoint: None,
-            }),
-            0,
-        );
+            },
+        ));
 
-        let first = runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
+        let first =
+            runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
                 is_fullscreen: true,
-            }),
-            0,
-        );
-        let second = runtime.apply_event(
-            &LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
+            }));
+        let second =
+            runtime.apply_event(&LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged {
                 is_fullscreen: true,
-            }),
-            0,
-        );
+            }));
 
         assert!(first.invalidate_footer);
         assert!(first.footer.is_some());

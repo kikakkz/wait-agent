@@ -1,0 +1,44 @@
+id: task.refactor-4
+kind: task
+version: 1
+title: cluster runtime modules into sub-directories by concept
+status: ready
+priority: high
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - 31 flat modules in runtime/ lack physical grouping and make navigation difficult
+    - clustering by concept aligns file layout with architectural boundaries
+    - must land before file-size splits so that split files go into the right sub-directory
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.refactor-3.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - runtime/ modules are reorganized into sub-directories: remote_authority/, remote_node/, remote_main_slot/, remote_publication/, workspace/, event_driven/
+  - remaining standalone modules stay in runtime/ root with clear naming
+  - mod.rs re-exports maintain the same public API surface (no downstream import breakage)
+  - circular dependencies between clusters are documented but do not cause compile errors (Rust allows intra-crate circular module references)
+  - cargo build and cargo test pass with zero regressions
+  - no behavioral change
+verification:
+  - cargo build --release (no new warnings)
+  - cargo test
+  - verify all existing use crate::runtime::* paths still resolve
+touched_paths:
+  - src/runtime/mod.rs
+  - src/runtime/remote_authority/ (new sub-directory)
+  - src/runtime/remote_node/ (new sub-directory)
+  - src/runtime/remote_main_slot/ (new sub-directory)
+  - src/runtime/remote_publication/ (new sub-directory)
+  - src/runtime/workspace/ (new sub-directory)
+  - src/runtime/event_driven/ (new sub-directory)
+  - all files that import from runtime (update paths)
+notes:
+  - Rust module system allows circular references within a crate, so circular deps between clusters compile fine. The value is in physical grouping, not enforced acyclicity.
+  - Keep the mod.rs flat re-export so external consumers do not need path changes.
+  - Move files physically, do not copy. Each file should exist in exactly one location.

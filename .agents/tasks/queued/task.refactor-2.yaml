@@ -1,0 +1,36 @@
+id: task.refactor-2
+kind: task
+version: 1
+title: clean up dead code annotations and unused API surface
+status: ready
+priority: low
+design_ref:
+  doc: docs/architecture.md
+  why:
+    - module-level #![allow(dead_code)] hides real unused surface that should be removed or gated
+    - cleaning dead code before file splits avoids carrying dead weight into new module boundaries
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - #![allow(dead_code)] is removed from infra/mod.rs and ui/mod.rs module level
+  - targeted #[allow(dead_code)] on session_catalog.rs and remote_control_plane_service.rs are resolved (remove unused variants/methods or gate behind feature)
+  - unused _now_millis parameter in sidebar rendering is either wired up or removed
+  - cargo build produces no new dead_code warnings
+  - no functional change
+verification:
+  - cargo build 2>&1 | grep -c "dead_code" should be zero
+  - cargo test
+touched_paths:
+  - src/infra/mod.rs
+  - src/ui/mod.rs
+  - src/domain/session_catalog.rs
+  - src/application/remote_control_plane_service.rs
+  - src/ui/sidebar.rs
+notes:
+  - Some dead_code may be test-only constructors (#[cfg(test)] methods). Those are acceptable and should stay.
+  - Focus on removing the module-level blanket allows and resolving each targeted annotation.

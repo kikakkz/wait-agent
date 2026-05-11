@@ -79,6 +79,7 @@ impl EmbeddedTmuxBackend {
             })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn send_input_to_pane_on_socket(
         &self,
         socket_name: &str,
@@ -100,6 +101,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pane_tty_path_on_socket(
         &self,
         socket_name: &str,
@@ -219,6 +221,7 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn list_remote_publication_bindings(
         &self,
     ) -> Result<Vec<RemoteTargetPublicationBinding>, TmuxError> {
@@ -259,12 +262,14 @@ impl EmbeddedTmuxBackend {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TmuxInputChunk {
     Literal(String),
     HexBytes(Vec<u8>),
 }
 
+#[allow(dead_code)]
 fn split_tmux_input(bytes: &[u8]) -> Result<Vec<TmuxInputChunk>, TmuxError> {
     let mut chunks = Vec::new();
     let mut literal = String::new();
