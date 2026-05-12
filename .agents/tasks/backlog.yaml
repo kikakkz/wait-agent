@@ -283,7 +283,7 @@ next:
     status: done
   - id: task.refactor-7
     title: decouple remote publication and session sync from direct tmux backend coupling
-    status: ready
+    status: done
   - id: task.bug-sidebar-switch-lag
     title: fix severe lag on first sidebar switch while main pane is running
     status: done
