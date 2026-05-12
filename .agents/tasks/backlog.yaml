@@ -280,7 +280,7 @@ next:
     status: in_progress
   - id: task.refactor-6
     title: refine fullscreen history UX so users can browse scrollback naturally
-    status: in_progress
+    status: done
   - id: task.refactor-7
     title: decouple remote publication and session sync from direct tmux backend coupling
     status: ready
