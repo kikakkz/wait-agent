@@ -314,6 +314,11 @@ fn run_node_ingress_server_loop(
                     sessions.insert(node_id, active);
                 }
                 RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
+                    if !matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_))) {
+                        if let Some(active) = sessions.get_mut(&node_id) {
+                            refresh_authority_bridges(&node_id, active, internal_tx.clone());
+                        }
+                    }
                     let _ = route_transport_envelope(
                         &publication_runtime,
                         &node_id,
