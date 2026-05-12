@@ -1,7 +1,7 @@
 kind: state
 version: 1
 current_task: null
-focus_statement: the full remote session foundation phase (t5-08) is now complete — protocol, server-side mirror-route ownership, PTY-owner mirror lifecycle, bootstrap replay, live output binding, and cross-host acceptance are all implemented and verified. No remaining queued tasks in backlog.
+focus_statement: the full remote session foundation phase (t5-08) is now complete — protocol, server-side mirror-route ownership, PTY-owner mirror lifecycle, bootstrap replay, live output binding, and cross-host acceptance are all implemented and verified. Refactor queue (refactor-1 through refactor-4) done; remaining work: refactor-5 (file splitting), refactor-6 (fullscreen page-up), refactor-7 (publication decoupling), multi-remote-switch-lag bug, and deferred feature-agent-status-recognition.
 last_updated_from:
   file: .agents/tasks/backlog.yaml
   reference: active

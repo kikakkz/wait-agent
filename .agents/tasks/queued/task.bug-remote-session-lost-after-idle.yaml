@@ -1,0 +1,34 @@
+id: task.bug-remote-session-lost-after-idle
+kind: task
+version: 1
+title: fix remote session content not showing in main pane and sidebar becoming unswitchable after idle
+status: wontfix
+priority: high
+design_ref:
+  doc: investigation
+  why:
+    - after running for a while, switching to a remote session shows a command line in the main pane instead of remote content
+    - pressing Enter on the main pane does not show remote content
+    - sidebar shows a one-line command entry; pressing Esc returns sidebar to item list
+    - after this state, sidebar cannot be switched on the client side
+    - this effectively breaks all remote session interaction until reconnect
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - remote session content remains visible in the main pane after extended runtime
+  - sidebar switching remains functional after returning from idle-affected state
+  - if the authority connection drops, recovery is automatic and does not leave the UI in a broken state
+verification:
+  - cargo test
+  - manual: run with active remote sessions for extended period, verify remote content still renders on switch
+  - manual: simulate authority disconnect, verify sidebar recovery
+touched_paths:
+  - src/runtime/remote_main_slot/
+  - src/runtime/remote_authority/
+  - src/runtime/remote_node/
+  - src/application/control_service.rs
+notes:
+  - The one-line command in the main pane suggests the workspace main pane fell back to target-host boot (edit command) instead of the remote mirror.
+  - The sidebar showing a command line instead of items suggests a state machine transition left the sidebar in an unexpected mode.
+  - Could be related to authority session bridge timeout, stale publication records, or a race in the remote session lifecycle.

@@ -254,6 +254,9 @@ next:
   - id: task.ux-2
     title: show last user input line at top of main pane area like VS Code
     status: ready
+  - id: task.feature-agent-status-recognition
+    title: improve session state recognition accuracy in catalog and sidebar with agent plugin
+    status: deferred
   - id: task.ux-3
     title: implement workspace snapshot persistence and auto-load on startup
     status: ready
@@ -262,40 +265,37 @@ next:
     status: ready
   - id: task.refactor-1
     title: replace custom base64 implementation with the mature base64 crate
-    status: ready
+    status: done
   - id: task.refactor-2
     title: clean up dead code annotations and unused API surface
-    status: ready
+    status: done
   - id: task.refactor-3
     title: extract semantic agent detection into a plugin-based AgentDetector trait
-    status: ready
+    status: done
   - id: task.refactor-4
     title: cluster runtime modules into sub-directories by concept
-    status: ready
+    status: done
   - id: task.refactor-5
     title: split oversized source files to stay at or below 1000 lines each
-    status: ready
+    status: in_progress
   - id: task.refactor-6
     title: refine fullscreen history UX so users can browse scrollback naturally
-    status: ready
+    status: in_progress
   - id: task.refactor-7
     title: decouple remote publication and session sync from direct tmux backend coupling
     status: ready
   - id: task.bug-sidebar-switch-lag
     title: fix severe lag on first sidebar switch while main pane is running
-    status: ready
+    status: done
   - id: task.bug-local-session-freeze-after-connect
     title: fix local session switching freeze after connecting to remote server
-    status: ready
+    status: done
   - id: task.bug-multi-remote-switch-lag
     title: fix severe lag switching to second remote session after the first
     status: ready
   - id: task.bug-remote-session-lost-after-idle
     title: fix remote session content not showing in main pane and sidebar becoming unswitchable after idling
-    status: ready
-  - id: task.bug-status-recognition-inaccurate
-    title: improve session state recognition accuracy in catalog and sidebar
-    status: ready
+    status: wontfix
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
@@ -337,3 +337,5 @@ notes:
   - The refactor queue does not block the existing remote PTY latency queue (task.t5-08c4d3e through task.t5-08c4d3i). Both queues can proceed in parallel on their respective branches.
   - The original `task.tmux-1` through `task.tmux-6` split is preserved as historical planning only and is superseded by the rewrite queue after review found that the bridge-heavy path would preserve too much of the legacy lifecycle structure.
   - 2026-05-11 bugs: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` are reported UX bugs. They are independent of the refactor queue and can be investigated in parallel.
+  - 2026-05-12 refactor queue update: refactor-1 through refactor-4 are done and committed. refactor-5 and refactor-6 are in_progress. refactor-7 remains ready.
+  - 2026-05-12 bug update: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` fixed and committed. `task.bug-remote-session-lost-after-idle` marked wontfix (cannot reproduce). `task.bug-status-recognition-inaccurate` converted to feature and deferred to before workspace snapshot.
