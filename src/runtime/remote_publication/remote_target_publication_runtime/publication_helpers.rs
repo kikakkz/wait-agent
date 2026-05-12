@@ -8,7 +8,7 @@ use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
 };
-use crate::infra::tmux::RemoteTargetPublicationBinding;
+use crate::infra::tmux::{RemoteTargetPublicationBinding, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use base64::Engine;
@@ -1149,4 +1149,104 @@ pub(crate) fn signal_publication_sender_command(
         .write_all(render_publication_sender_command(&command).as_bytes())
         .map_err(remote_target_publication_error)?;
     stream.flush().map_err(remote_target_publication_error)
+}
+
+/// Decoupled publication operations using only TmuxSessionGateway trait methods.
+/// These replace the methods that were previously on EmbeddedTmuxBackend.
+
+pub(crate) fn bind_publication_on_socket(
+    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
+    socket_name: &str,
+    target_session_name: &str,
+    authority_id: &str,
+    transport_session_id: &str,
+    selector: Option<&str>,
+) -> Result<(), crate::infra::tmux::TmuxError> {
+    let socket = TmuxSocketName::new(socket_name);
+    gateway.set_session_environment(
+        &socket,
+        target_session_name,
+        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
+        authority_id,
+    )?;
+    gateway.set_session_environment(
+        &socket,
+        target_session_name,
+        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
+        transport_session_id,
+    )?;
+    match selector {
+        Some(selector) => gateway.set_session_environment(
+            &socket,
+            target_session_name,
+            crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
+            selector,
+        )?,
+        None => gateway.unset_session_environment(
+            &socket,
+            target_session_name,
+            crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
+        )?,
+    }
+    Ok(())
+}
+
+pub(crate) fn unbind_publication_on_socket(
+    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
+    socket_name: &str,
+    target_session_name: &str,
+) -> Result<(), crate::infra::tmux::TmuxError> {
+    let socket = TmuxSocketName::new(socket_name);
+    for key in [
+        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
+        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
+        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
+    ] {
+        gateway.unset_session_environment(&socket, target_session_name, key)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn list_publication_bindings_on_socket(
+    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
+    socket_name: &TmuxSocketName,
+) -> Result<Vec<RemoteTargetPublicationBinding>, crate::infra::tmux::TmuxError> {
+    let sessions = gateway.list_sessions_on_socket(socket_name)?;
+    let mut bindings = Vec::new();
+    for session in sessions {
+        if session.session_role != Some(WorkspaceSessionRole::TargetHost) {
+            continue;
+        }
+        let env_vars =
+            gateway.show_session_environment(socket_name, session.address.session_id())?;
+        let mut authority_id = None;
+        let mut transport_session_id = None;
+        let mut selector = None;
+        for (key, value) in &env_vars {
+            if key.as_str() == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV {
+                authority_id = Some(value.clone());
+            } else if key.as_str()
+                == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV
+            {
+                transport_session_id = Some(value.clone());
+            } else if key.as_str() == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV
+            {
+                selector = Some(value.clone());
+            }
+        }
+        let Some(authority_id) = authority_id else {
+            continue;
+        };
+        let Some(transport_session_id) = transport_session_id else {
+            continue;
+        };
+        bindings.push(RemoteTargetPublicationBinding {
+            socket_name: socket_name.as_str().to_string(),
+            target_session_name: session.address.session_id().to_string(),
+            authority_id,
+            transport_session_id,
+            selector,
+        });
+    }
+    Ok(bindings)
 }

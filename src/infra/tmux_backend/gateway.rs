@@ -252,6 +252,67 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
             .into_iter()
             .find(|session| session.address.session_id() == session_name))
     }
+
+    fn set_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Self::Error> {
+        self.run_on_socket(
+            socket,
+            &[
+                "set-environment".to_string(),
+                "-t".to_string(),
+                session.to_string(),
+                key.to_string(),
+                value.to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn unset_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+        key: &str,
+    ) -> Result<(), Self::Error> {
+        self.run_on_socket(
+            socket,
+            &[
+                "set-environment".to_string(),
+                "-u".to_string(),
+                "-t".to_string(),
+                session.to_string(),
+                key.to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn show_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+    ) -> Result<Vec<(String, String)>, Self::Error> {
+        let output = self.run_on_socket(
+            socket,
+            &[
+                "show-environment".to_string(),
+                "-t".to_string(),
+                session.to_string(),
+            ],
+        )?;
+        let mut vars = Vec::new();
+        for line in output.stdout.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                vars.push((key.to_string(), value.to_string()));
+            }
+        }
+        Ok(vars)
+    }
 }
 
 fn current_client_socket_name() -> Result<TmuxSocketName, TmuxError> {

@@ -408,15 +408,15 @@ impl RemoteTargetPublicationRuntime {
         command: RemoteTargetBindPublicationCommand,
     ) -> Result<(), LifecycleError> {
         self.ensure_publication_hooks_on_socket(&command.socket_name)?;
-        self.local_tmux
-            .bind_remote_publication_on_socket(
-                &command.socket_name,
-                &command.target_session_name,
-                &command.authority_id,
-                &command.transport_session_id,
-                command.selector.as_deref(),
-            )
-            .map_err(remote_target_publication_error)?;
+        bind_publication_on_socket(
+            &self.local_tmux,
+            &command.socket_name,
+            &command.target_session_name,
+            &command.authority_id,
+            &command.transport_session_id,
+            command.selector.as_deref(),
+        )
+        .map_err(remote_target_publication_error)?;
         self.ensure_publication_owner_running(&command.socket_name, &command.target_session_name)?;
         self.signal_publication_owner_command(
             &command.socket_name,
@@ -437,9 +437,12 @@ impl RemoteTargetPublicationRuntime {
                 PublicationOwnerCommand::Stop,
             )
             .is_ok();
-        self.local_tmux
-            .unbind_remote_publication_on_socket(&command.socket_name, &command.target_session_name)
-            .map_err(remote_target_publication_error)?;
+        unbind_publication_on_socket(
+            &self.local_tmux,
+            &command.socket_name,
+            &command.target_session_name,
+        )
+        .map_err(remote_target_publication_error)?;
         if owner_stopped {
             return Ok(());
         }
@@ -631,9 +634,7 @@ impl RemoteTargetPublicationRuntime {
     ) -> Result<(), LifecycleError> {
         self.ensure_publication_hooks_on_socket(socket_name)?;
         let socket = TmuxSocketName::new(socket_name);
-        let bindings = self
-            .local_tmux
-            .list_remote_publication_bindings_on_socket(&socket)
+        let bindings = list_publication_bindings_on_socket(&self.local_tmux, &socket)
             .map_err(remote_target_publication_error)?;
         let has_published_records = !self
             .store
@@ -714,10 +715,11 @@ impl RemoteTargetPublicationRuntime {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<Option<RemoteTargetPublicationBinding>, LifecycleError> {
-        let bindings = self
-            .local_tmux
-            .list_remote_publication_bindings_on_socket(&TmuxSocketName::new(socket_name))
-            .map_err(remote_target_publication_error)?;
+        let bindings = list_publication_bindings_on_socket(
+            &self.local_tmux,
+            &TmuxSocketName::new(socket_name),
+        )
+        .map_err(remote_target_publication_error)?;
         Ok(bindings
             .into_iter()
             .find(|binding| binding.target_session_name == target_session_name))
@@ -825,9 +827,7 @@ impl RemoteTargetPublicationRuntime {
         self.ensure_publication_server_running(socket_name)?;
         self.ensure_publication_sender_running(socket_name)?;
         let socket = TmuxSocketName::new(socket_name);
-        let bindings = self
-            .local_tmux
-            .list_remote_publication_bindings_on_socket(&socket)
+        let bindings = list_publication_bindings_on_socket(&self.local_tmux, &socket)
             .map_err(remote_target_publication_error)?;
         let local_targets = self
             .local_tmux

@@ -1,6 +1,5 @@
 use super::{EmbeddedTmuxBackend, TmuxError};
-use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::tmux::{RemoteTargetPublicationBinding, TmuxPaneId, TmuxSocketName};
+use crate::infra::tmux::{TmuxPaneId, TmuxSocketName};
 use std::str;
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
@@ -156,112 +155,7 @@ impl EmbeddedTmuxBackend {
         )?;
         Ok(())
     }
-
-    pub(crate) fn bind_remote_publication_on_socket(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-        authority_id: &str,
-        transport_session_id: &str,
-        selector: Option<&str>,
-    ) -> Result<(), TmuxError> {
-        let socket_name = TmuxSocketName::new(socket_name);
-        self.run_on_socket(
-            &socket_name,
-            &set_session_environment_args(
-                target_session_name,
-                super::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
-                authority_id,
-            ),
-        )?;
-        self.run_on_socket(
-            &socket_name,
-            &set_session_environment_args(
-                target_session_name,
-                super::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
-                transport_session_id,
-            ),
-        )?;
-        match selector {
-            Some(selector) => self.run_on_socket(
-                &socket_name,
-                &set_session_environment_args(
-                    target_session_name,
-                    super::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-                    selector,
-                ),
-            )?,
-            None => self.run_on_socket(
-                &socket_name,
-                &unset_session_environment_args(
-                    target_session_name,
-                    super::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-                ),
-            )?,
-        };
-        Ok(())
-    }
-
-    pub(crate) fn unbind_remote_publication_on_socket(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), TmuxError> {
-        let socket_name = TmuxSocketName::new(socket_name);
-        for key in [
-            super::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
-            super::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
-            super::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-        ] {
-            self.run_on_socket(
-                &socket_name,
-                &unset_session_environment_args(target_session_name, key),
-            )?;
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn list_remote_publication_bindings(
-        &self,
-    ) -> Result<Vec<RemoteTargetPublicationBinding>, TmuxError> {
-        let mut bindings = Vec::new();
-        for socket_name in self.discover_waitagent_sockets()? {
-            bindings.extend(self.list_remote_publication_bindings_on_socket(&socket_name)?);
-        }
-        Ok(bindings)
-    }
-
-    pub(crate) fn list_remote_publication_bindings_on_socket(
-        &self,
-        socket_name: &TmuxSocketName,
-    ) -> Result<Vec<RemoteTargetPublicationBinding>, TmuxError> {
-        let sessions = self.list_sessions_on_socket(socket_name)?;
-        let mut bindings = Vec::new();
-        for session in sessions {
-            if session.session_role != Some(WorkspaceSessionRole::TargetHost) {
-                continue;
-            }
-            let metadata = self.session_metadata(socket_name, session.address.session_id())?;
-            let Some(authority_id) = metadata.remote_publication_authority_id else {
-                continue;
-            };
-            let Some(transport_session_id) = metadata.remote_publication_transport_session_id
-            else {
-                continue;
-            };
-            bindings.push(RemoteTargetPublicationBinding {
-                socket_name: socket_name.as_str().to_string(),
-                target_session_name: session.address.session_id().to_string(),
-                authority_id,
-                transport_session_id,
-                selector: metadata.remote_publication_selector,
-            });
-        }
-        Ok(bindings)
-    }
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TmuxInputChunk {
@@ -388,6 +282,7 @@ fn set_pane_pipe_args(pane: &TmuxPaneId, command: &str) -> Vec<String> {
     ]
 }
 
+#[allow(dead_code)]
 fn set_session_environment_args(session_name: &str, key: &str, value: &str) -> Vec<String> {
     vec![
         "set-environment".to_string(),
@@ -398,6 +293,7 @@ fn set_session_environment_args(session_name: &str, key: &str, value: &str) -> V
     ]
 }
 
+#[allow(dead_code)]
 fn unset_session_environment_args(session_name: &str, key: &str) -> Vec<String> {
     vec![
         "set-environment".to_string(),

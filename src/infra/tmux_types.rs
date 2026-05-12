@@ -222,6 +222,28 @@ pub trait TmuxSessionGateway: TmuxGateway {
     fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error>;
 
     fn kill_server(&self, socket_name: &TmuxSocketName) -> Result<(), Self::Error>;
+
+    fn set_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn unset_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+        key: &str,
+    ) -> Result<(), Self::Error>;
+
+    /// Returns all session environment variables as (key, value) pairs.
+    fn show_session_environment(
+        &self,
+        socket: &TmuxSocketName,
+        session: &str,
+    ) -> Result<Vec<(String, String)>, Self::Error>;
 }
 
 pub trait TmuxChromeGateway: TmuxSessionGateway {

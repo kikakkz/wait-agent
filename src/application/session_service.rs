@@ -273,6 +273,33 @@ mod tests {
         fn kill_server(&self, _socket_name: &TmuxSocketName) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        fn set_session_environment(
+            &self,
+            _socket: &TmuxSocketName,
+            _session: &str,
+            _key: &str,
+            _value: &str,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn unset_session_environment(
+            &self,
+            _socket: &TmuxSocketName,
+            _session: &str,
+            _key: &str,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn show_session_environment(
+            &self,
+            _socket: &TmuxSocketName,
+            _session: &str,
+        ) -> Result<Vec<(String, String)>, Self::Error> {
+            Ok(Vec::new())
+        }
     }
 
     fn workspace_handle() -> TmuxWorkspaceHandle {
