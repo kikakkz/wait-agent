@@ -193,10 +193,25 @@ fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
         .any(|socket_name| backend.socket_is_live(socket_name)))
 }
 
-/// Watches the temp directory with inotify for new authority socket files and sends
-/// [`InternalEvent::SocketDirChanged`] through the channel when one appears. Replaces
-/// the previous periodic polling of `/tmp/` for socket discovery.
+/// Watches the temp directory for new authority socket files and sends
+/// [`InternalEvent::SocketDirChanged`] through the channel when one appears.
+///
+/// On Linux this uses inotify for zero-wakeup event-driven discovery. On other
+/// platforms (macOS, BSD) it falls back to a low-frequency polling loop since
+/// those are development-only targets; production deployment is Linux-only.
 fn start_socket_watcher(
+    internal_tx: mpsc::Sender<InternalEvent>,
+) -> io::Result<thread::JoinHandle<()>> {
+    #[cfg(target_os = "linux")]
+    return start_inotify_watcher(internal_tx);
+
+    #[cfg(not(target_os = "linux"))]
+    Ok(start_periodic_watcher(internal_tx))
+}
+
+/// Linux inotify-based watcher — zero wakeups when the directory is idle.
+#[cfg(target_os = "linux")]
+fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> io::Result<thread::JoinHandle<()>> {
     let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK) };
@@ -254,6 +269,16 @@ fn start_socket_watcher(
 
         unsafe { libc::close(fd) };
     }))
+}
+
+/// Fallback periodic watcher for non-Linux platforms (macOS, BSD). Polls the
+/// temp directory at a low frequency since these are dev-only targets.
+#[cfg(not(target_os = "linux"))]
+fn start_periodic_watcher(internal_tx: mpsc::Sender<InternalEvent>) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        let _ = internal_tx.send(InternalEvent::SocketDirChanged);
+        thread::sleep(Duration::from_secs(1));
+    })
 }
 
 impl Drop for RemoteNodeIngressServerGuard {
