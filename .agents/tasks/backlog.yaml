@@ -312,6 +312,11 @@ next:
       claude 输出内容错乱，codex 稍好，sidebar 偶尔也乱（切到 sidebar 再切回可恢复）。
       可能原因：escape sequence 被 capture-pane 截断，或多路 PTY 输出交错导致终端状态机不同步。
     status: pending
+  - id: task.feature-remote-session-creation-from-sidebar
+    title: >
+      sidebar focus 在 remote session client 时，允许在选中的 client 上创建新的 remote
+      session。当前只能在 local bash 上创建，remote client 可访问但无法在其上新建 session。
+    status: pending
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
