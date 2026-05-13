@@ -408,8 +408,15 @@ fn session_records_equivalent_for_sync(
     let mut previous = previous.clone();
     let mut current = current.clone();
     if is_interactive_shell_state(&previous) && is_interactive_shell_state(&current) {
-        previous.task_state = ManagedSessionTaskState::Input;
-        current.task_state = ManagedSessionTaskState::Input;
+        // Normalize Running/Input to Input only when the state hasn't
+        // actually changed.  This prevents spurious publications from
+        // prompt-character fluctuations (e.g. `$` vs `%` between polls),
+        // while still publishing a meaningful Running→Input transition
+        // (e.g. a command finished and the prompt just appeared).
+        if previous.task_state == current.task_state {
+            previous.task_state = ManagedSessionTaskState::Input;
+            current.task_state = ManagedSessionTaskState::Input;
+        }
     }
     previous == current
 }

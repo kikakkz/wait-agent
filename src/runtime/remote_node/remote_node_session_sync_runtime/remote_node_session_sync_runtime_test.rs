@@ -43,7 +43,9 @@ mod tests {
     }
 
     #[test]
-    fn session_sync_delta_ignores_interactive_shell_input_running_flaps() {
+    fn session_sync_delta_publishes_interactive_shell_input_running_transition() {
+        // An Input→Running state change for a shell session IS meaningful
+        // (e.g. a command just started producing output) and must be published.
         let mut previous_session = session("wa-1", "shell-1");
         previous_session.command_name = Some("bash".to_string());
         previous_session.task_state = ManagedSessionTaskState::Input;
@@ -51,6 +53,23 @@ mod tests {
         current_session.task_state = ManagedSessionTaskState::Running;
         let previous = local_sessions_by_local_id(vec![previous_session]);
         let current = local_sessions_by_local_id(vec![current_session]);
+
+        let delta = compute_session_sync_delta(&previous, &current);
+
+        assert_eq!(delta.publish.len(), 1);
+        assert!(delta.exit.is_empty());
+    }
+
+    #[test]
+    fn session_sync_delta_ignores_interactive_shell_prompt_fluctuation() {
+        // When the task_state hasn't changed (Running→Running or Input→Input),
+        // normalize to Input and skip publication to suppress spurious updates
+        // from prompt-character differences between polls.
+        let mut session = session("wa-1", "shell-1");
+        session.command_name = Some("bash".to_string());
+        session.task_state = ManagedSessionTaskState::Input;
+        let previous = local_sessions_by_local_id(vec![session.clone()]);
+        let current = local_sessions_by_local_id(vec![session]);
 
         let delta = compute_session_sync_delta(&previous, &current);
 
