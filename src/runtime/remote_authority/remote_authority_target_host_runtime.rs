@@ -332,6 +332,24 @@ enum AuthorityHostEvent {
     TransportClosed,
 }
 
+const OUTPUT_CHANNEL_BOUND: usize = 500;
+
+enum AuthorityOutputMessage {
+    RawPtyOutput {
+        session_id: String,
+        target_id: String,
+        output_seq: u64,
+        bytes: Vec<u8>,
+    },
+    TargetOutput {
+        session_id: String,
+        target_id: String,
+        output_seq: u64,
+        stream: &'static str,
+        bytes: Vec<u8>,
+    },
+}
+
 struct OutputPipeGuard<G>
 where
     G: RemoteTargetPtyGateway,
@@ -411,6 +429,8 @@ where
         };
 
         let (event_tx, event_rx) = mpsc::channel();
+        let (output_tx, output_rx) =
+            mpsc::sync_channel::<AuthorityOutputMessage>(OUTPUT_CHANNEL_BOUND);
         let reader_transport = transport.clone();
         let reader_tx = event_tx.clone();
         let command_thread = thread::spawn(move || {
@@ -425,6 +445,41 @@ where
             let _ = reader_tx.send(AuthorityHostEvent::TransportClosed);
         });
 
+        let sender_transport = transport.clone();
+        let output_sender_thread = thread::spawn(move || {
+            while let Ok(msg) = output_rx.recv() {
+                let result = match msg {
+                    AuthorityOutputMessage::RawPtyOutput {
+                        session_id,
+                        target_id,
+                        output_seq,
+                        bytes,
+                    } => sender_transport.send_raw_pty_output(
+                        &session_id,
+                        &target_id,
+                        output_seq,
+                        bytes,
+                    ),
+                    AuthorityOutputMessage::TargetOutput {
+                        session_id,
+                        target_id,
+                        output_seq,
+                        stream,
+                        bytes,
+                    } => sender_transport.send_target_output(
+                        &session_id,
+                        &target_id,
+                        output_seq,
+                        stream,
+                        bytes,
+                    ),
+                };
+                if let Err(error) = result {
+                    eprintln!("[authority] output send error: {error}");
+                }
+            }
+        });
+
         let running = Arc::new(AtomicBool::new(true));
         let output_thread = spawn_output_ingest_thread(listener, running.clone(), event_tx);
         let mut output_seq = 0_u64;
@@ -437,12 +492,48 @@ where
             .map_err(remote_authority_error)?;
 
         let health = Arc::new(EventLoopHealth::new());
+        let mut pending_input: Vec<u8> = Vec::new();
 
         let loop_result = loop {
-            match event_rx.recv() {
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
+            // Drain any queued input bytes before processing the next event.
+            // When output congestion fills the PTY buffer, the FIFO becomes
+            // non-writable. The pending buffer prevents keystroke loss while
+            // the output pump drains.
+            if !pending_input.is_empty() {
+                let fd = input_fifo.as_raw_fd();
+                let mut pollfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                if unsafe { libc::poll(&mut pollfd, 1, 0) } > 0
+                    && (pollfd.revents & libc::POLLOUT) != 0
+                {
+                    if let Err(error) = input_fifo
+                        .write_all(&pending_input)
+                        .and_then(|_| input_fifo.flush())
+                    {
+                        break Err(remote_authority_error(error));
+                    }
+                    pending_input.clear();
+                }
+            }
+            let event = if pending_input.is_empty() {
+                match event_rx.recv() {
+                    Ok(e) => e,
+                    Err(_) => break Ok(()),
+                }
+            } else {
+                match event_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(e) => e,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+                }
+            };
+            match event {
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
                     payload,
-                ))) => {
+                )) => {
                     health.record_event();
                     if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = self
@@ -531,14 +622,14 @@ where
                         break Err(error);
                     }
                 }
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::RawPtyInput(
                     payload,
-                ))) => {
+                )) => {
                     health.record_event();
-                    // Non-blocking FIFO write: use poll() to check writability
-                    // before writing. Prevents the single-threaded event loop
-                    // from freezing when the output-pump reader stalls (e.g.
-                    // under network jitter where the pump process may lag).
+                    // Try a direct non-blocking write. If the FIFO is not
+                    // writable, queue the bytes to the pending buffer. The
+                    // drain step at the top of each event-loop iteration
+                    // retries until the FIFO drains.
                     let fd = input_fifo.as_raw_fd();
                     let mut pollfd = libc::pollfd {
                         fd,
@@ -556,13 +647,22 @@ where
                         }
                         health.record_input(payload.input_bytes.len() as u64);
                     } else {
-                        health.record_fifo_stall(payload.input_bytes.len() as u64);
+                        // Queue to pending buffer. Cap at 64 KB to prevent
+                        // unbounded growth under sustained congestion.
+                        const PENDING_INPUT_MAX: usize = 64 * 1024;
+                        let input = &payload.input_bytes;
+                        if pending_input.len() + input.len() > PENDING_INPUT_MAX {
+                            let excess = pending_input.len() + input.len() - PENDING_INPUT_MAX;
+                            pending_input.drain(..excess.min(pending_input.len()));
+                        }
+                        pending_input.extend_from_slice(input);
+                        health.record_fifo_stall(input.len() as u64);
                         health.maybe_log_stall(&command.transport_socket_path, &command.target_id);
                     }
                 }
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
-                ))) => {
+                )) => {
                     health.record_event();
                     if let Err(error) = self
                         .gateway
@@ -572,9 +672,9 @@ where
                         break Err(error);
                     }
                 }
-                Ok(AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
                     _payload,
-                ))) => {
+                )) => {
                     health.record_event();
                     if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
@@ -584,7 +684,7 @@ where
                         health.mirror_active.store(false, Ordering::Relaxed);
                     }
                 }
-                Ok(AuthorityHostEvent::OutputChunk(bytes)) => {
+                AuthorityHostEvent::OutputChunk(bytes) => {
                     health.record_event();
                     health.record_output();
                     let raw_pty_passthrough = match mirror_state {
@@ -594,31 +694,35 @@ where
                         } => raw_pty_passthrough,
                     };
                     output_seq += 1;
-                    let send_result = if raw_pty_passthrough {
-                        transport
-                            .send_raw_pty_output(
-                                &command.transport_session_id,
-                                &command.target_id,
-                                output_seq,
-                                bytes,
-                            )
-                            .map_err(remote_authority_error)
+                    let msg = if raw_pty_passthrough {
+                        AuthorityOutputMessage::RawPtyOutput {
+                            session_id: command.transport_session_id.clone(),
+                            target_id: command.target_id.clone(),
+                            output_seq,
+                            bytes,
+                        }
                     } else {
-                        transport
-                            .send_target_output(
-                                &command.transport_session_id,
-                                &command.target_id,
-                                output_seq,
-                                "pty",
-                                bytes,
-                            )
-                            .map_err(remote_authority_error)
+                        AuthorityOutputMessage::TargetOutput {
+                            session_id: command.transport_session_id.clone(),
+                            target_id: command.target_id.clone(),
+                            output_seq,
+                            stream: "pty",
+                            bytes,
+                        }
                     };
-                    if let Err(error) = send_result {
-                        break Err(error);
+                    // Non-blocking send to the dedicated output thread. When
+                    // the network is congested the channel fills up and we
+                    // drop old chunks rather than blocking the event loop.
+                    // This keeps the event loop responsive for input while
+                    // the output thread deals with backpressure.
+                    if output_tx.try_send(msg).is_err() {
+                        eprintln!(
+                            "[authority] dropping output chunk {} (channel full)",
+                            output_seq
+                        );
                     }
                 }
-                Ok(AuthorityHostEvent::TransportClosed) => {
+                AuthorityHostEvent::TransportClosed => {
                     health.record_event();
                     if matches!(mirror_state, MirrorState::Active { .. }) {
                         if let Err(error) = deactivate_mirror(self, &command, &pane) {
@@ -627,9 +731,13 @@ where
                     }
                     break Ok(());
                 }
-                Err(_) => break Ok(()),
             }
         };
+
+        // Drop the output sender so the output thread can exit cleanly,
+        // then stop the ingest thread.
+        drop(output_tx);
+        let _ = output_sender_thread.join();
 
         if matches!(mirror_state, MirrorState::Active { .. }) {
             let _ = deactivate_mirror(self, &command, &pane);

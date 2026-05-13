@@ -214,7 +214,7 @@ fn run_grpc_node_ingress_worker(
                     publication_sink.as_ref(),
                 );
             }
-            RemoteNodeTransportEvent::SessionClosed { node_id } => {
+            RemoteNodeTransportEvent::SessionClosed { node_id, .. } => {
                 if let Some(session) = sessions.remove(&node_id) {
                     session.shutdown();
                 }

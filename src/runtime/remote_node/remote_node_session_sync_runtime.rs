@@ -347,42 +347,30 @@ impl SessionSyncAuthorityManager {
         command: RemoteAuthorityCommand,
     ) -> Result<(), LifecycleError> {
         let target_id = authority_command_target_id(&command).to_string();
-        let mut retried = false;
-
-        loop {
-            if !self.running_hosts.contains_key(&target_id) {
-                self.ensure_authority_host(session_handle, &target_id)?;
-            }
-
-            let host = self.running_hosts.get_mut(&target_id).ok_or_else(|| {
-                LifecycleError::Protocol("authority host cache lost entry".to_string())
-            })?;
-            if let Err(error) = send_command_to_host(host, command.clone()) {
-                host.running.store(false, Ordering::Relaxed);
-                if let Some(writer) = host
-                    .writer
-                    .lock()
-                    .expect("authority writer mutex should not be poisoned")
-                    .take()
-                {
-                    let _ = writer.shutdown(Shutdown::Both);
-                }
-                self.running_hosts.remove(&target_id);
-
-                if retried {
-                    eprintln!(
-                        "[session-sync] authority host for `{target_id}` failed after retry: {error}"
-                    );
-                    return Err(error);
-                }
-                retried = true;
-                eprintln!(
-                    "[session-sync] authority host for `{target_id}` is stale; reconnecting..."
-                );
-                continue;
-            }
-            return Ok(());
+        if !self.running_hosts.contains_key(&target_id) {
+            self.ensure_authority_host(session_handle, &target_id)?;
         }
+        let host = self.running_hosts.get_mut(&target_id).ok_or_else(|| {
+            LifecycleError::Protocol("authority host cache lost entry".to_string())
+        })?;
+        // Retry a few times — the authority bridge may not have finished
+        // connecting yet (e.g. the live-authority listener accepted the
+        // connection but bridge_live_authority_stream hasn't signaled the
+        // writer condvar yet, or there was a brief transport glitch).
+        // Unlike the previous approach, we do NOT tear down and recreate
+        // the host on failure — that race with the old host's cleanup
+        // caused reconnection to silently fail.
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match send_command_to_host(host, command.clone()) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(100 * (attempt + 1)));
+                }
+            }
+        }
+        Err(last_error.expect("retry loop should have produced an error"))
     }
 }
 

@@ -108,12 +108,14 @@ pub(super) fn write_remote_raw_output_with_initial_clear(
         write_escape(CLEAR_SCREEN_HOME_ESCAPE).map_err(remote_pane_error)?;
         *screen_initialized = true;
     }
-    // Reset terminal state before each raw batch to prevent accumulated
-    // escape sequences (scroll regions, wrapping, charsets) from
-    // corrupting cursor placement and display during active interaction.
-    // DECSTR alone does NOT reliably reset G0/G1 character-set designations,
-    // so we explicitly reset them to US-ASCII after the soft reset.
-    write_escape("\x1b[!p\x1b(B\x1b)B").map_err(remote_pane_error)?;
+    // Reset G0/G1 character-set designations to US-ASCII before each raw
+    // batch to prevent block-character corruption. We intentionally avoid
+    // DECSTR (\x1b[!p) here — it resets scroll regions, cursor position,
+    // SGR, margins, and wrapping, which corrupts mid-frame cursor placement
+    // for full-screen TUIs receiving small chunks via raw PTY passthrough.
+    // DECSTR is only safe in draw_remote_snapshot() where a full synthetic
+    // redraw follows immediately.
+    write_escape("\x1b(B\x1b)B").map_err(remote_pane_error)?;
     write_remote_raw_output(bytes)
 }
 

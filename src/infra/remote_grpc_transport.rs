@@ -194,6 +194,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
+
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -211,6 +212,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
+
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -225,6 +227,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         );
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
+
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -235,6 +238,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
+
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
