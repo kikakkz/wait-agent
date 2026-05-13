@@ -282,82 +282,107 @@ impl SessionSyncAuthorityManager {
         }
     }
 
+    fn ensure_authority_host(
+        &mut self,
+        session_handle: &RemoteNodeSessionHandle,
+        target_id: &str,
+    ) -> Result<(), LifecycleError> {
+        let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
+            eprintln!("[session-sync] failed to extract session from target id `{target_id}`");
+            LifecycleError::Protocol(format!(
+                "failed to derive local session from target id `{target_id}`"
+            ))
+        })?;
+        let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
+            eprintln!(
+                "[session-sync] no local socket owns session `{session_name}` for `{target_id}`"
+            );
+            LifecycleError::Protocol(format!(
+                "no local workspace socket owns session `{session_name}` for `{target_id}`"
+            ))
+        })?;
+        let authority_socket_path = live_authority_session_socket_path(&socket_name, &session_name);
+        let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
+        let running = Arc::new(AtomicBool::new(true));
+        let writer = Arc::new(Mutex::new(None));
+        let writer_ready = Arc::new(Condvar::new());
+        spawn_live_authority_listener(
+            authority_socket_path.clone(),
+            session_handle.clone(),
+            running.clone(),
+            writer.clone(),
+            writer_ready.clone(),
+        );
+        spawn_in_process_authority_target_host(
+            running.clone(),
+            writer.clone(),
+            writer_ready.clone(),
+            RemoteAuthorityTargetHostCommand {
+                socket_name: socket_name.clone(),
+                target_session_name: session_name.clone(),
+                transport_session_id: target_id
+                    .splitn(3, ':')
+                    .nth(2)
+                    .unwrap_or(target_id)
+                    .to_string(),
+                authority_id: session_handle.node_id().to_string(),
+                target_id: target_id.to_string(),
+                transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            },
+        )?;
+        self.running_hosts.insert(
+            target_id.to_string(),
+            SessionSyncAuthorityHost {
+                writer,
+                running,
+                writer_ready,
+            },
+        );
+        Ok(())
+    }
+
     fn ensure_and_send_command(
         &mut self,
         session_handle: &RemoteNodeSessionHandle,
         command: RemoteAuthorityCommand,
     ) -> Result<(), LifecycleError> {
         let target_id = authority_command_target_id(&command).to_string();
-        if !self.running_hosts.contains_key(&target_id) {
-            let session_name = target_session_name_from_target_id(&target_id).ok_or_else(|| {
-                eprintln!("[session-sync] failed to extract session from target id `{target_id}`");
-                LifecycleError::Protocol(format!(
-                    "failed to derive local session from target id `{target_id}`"
-                ))
-            })?;
-            let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
-                eprintln!("[session-sync] no local socket owns session `{session_name}` for `{target_id}`");
-                LifecycleError::Protocol(format!(
-                    "no local workspace socket owns session `{session_name}` for `{target_id}`"
-                ))
-            })?;
-            let authority_socket_path =
-                live_authority_session_socket_path(&socket_name, &session_name);
-            let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
-            let running = Arc::new(AtomicBool::new(true));
-            let writer = Arc::new(Mutex::new(None));
-            let writer_ready = Arc::new(Condvar::new());
-            spawn_live_authority_listener(
-                authority_socket_path.clone(),
-                session_handle.clone(),
-                running.clone(),
-                writer.clone(),
-                writer_ready.clone(),
-            );
-            spawn_in_process_authority_target_host(
-                running.clone(),
-                writer.clone(),
-                writer_ready.clone(),
-                RemoteAuthorityTargetHostCommand {
-                    socket_name: socket_name.clone(),
-                    target_session_name: session_name.clone(),
-                    transport_session_id: target_id
-                        .splitn(3, ':')
-                        .nth(2)
-                        .unwrap_or(target_id.as_str())
-                        .to_string(),
-                    authority_id: session_handle.node_id().to_string(),
-                    target_id: target_id.clone(),
-                    transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
-                },
-            )?;
-            self.running_hosts.insert(
-                target_id.clone(),
-                SessionSyncAuthorityHost {
-                    writer,
-                    running,
-                    writer_ready,
-                },
-            );
-        }
+        let mut retried = false;
 
-        let host = self.running_hosts.get_mut(&target_id).ok_or_else(|| {
-            LifecycleError::Protocol("authority host cache lost entry".to_string())
-        })?;
-        if let Err(error) = send_command_to_host(host, command) {
-            host.running.store(false, Ordering::Relaxed);
-            if let Some(writer) = host
-                .writer
-                .lock()
-                .expect("authority writer mutex should not be poisoned")
-                .take()
-            {
-                let _ = writer.shutdown(Shutdown::Both);
+        loop {
+            if !self.running_hosts.contains_key(&target_id) {
+                self.ensure_authority_host(session_handle, &target_id)?;
             }
-            self.running_hosts.remove(&target_id);
-            return Err(error);
+
+            let host = self.running_hosts.get_mut(&target_id).ok_or_else(|| {
+                LifecycleError::Protocol("authority host cache lost entry".to_string())
+            })?;
+            if let Err(error) = send_command_to_host(host, command.clone()) {
+                host.running.store(false, Ordering::Relaxed);
+                if let Some(writer) = host
+                    .writer
+                    .lock()
+                    .expect("authority writer mutex should not be poisoned")
+                    .take()
+                {
+                    let _ = writer.shutdown(Shutdown::Both);
+                }
+                self.running_hosts.remove(&target_id);
+
+                if retried {
+                    eprintln!(
+                        "[session-sync] authority host for `{target_id}` failed after retry: {error}"
+                    );
+                    return Err(error);
+                }
+                retried = true;
+                eprintln!(
+                    "[session-sync] authority host for `{target_id}` is stale; reconnecting..."
+                );
+                continue;
+            }
+            return Ok(());
         }
-        Ok(())
     }
 }
 
