@@ -662,9 +662,11 @@ mod tests {
     }
 
     #[test]
-    fn task_state_remains_running_when_claude_executing_with_visible_prompt() {
-        // Claude's TUI shows the ❯ prompt area even during execution, but the
-        // status line says "esc to interrupt" — must be Running, not Input.
+    fn task_state_input_when_claude_visible_prompt_regardless_of_status() {
+        // The ❯ prompt followed by a ── separator triggers Input detection
+        // regardless of status-line content. Execution vs. idle is
+        // disambiguated by the temporal content-change check in
+        // session_metadata.rs, not by the detector alone.
         let state = DetectorRegistry::default().infer_task_state(
             Some("claude"),
             "❯ run echo hello\n\
@@ -675,7 +677,7 @@ mod tests {
              ─────────────────────\n\
              esc to interrupt    ● high · /effort",
         );
-        assert_eq!(state, ManagedSessionTaskState::Running);
+        assert_eq!(state, ManagedSessionTaskState::Input);
     }
 
     #[test]

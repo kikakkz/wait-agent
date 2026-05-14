@@ -103,35 +103,34 @@ impl AgentDetector for ClaudeDetector {
             }
         }
 
-        // During active execution, claude shows "esc to interrupt" in the status
-        // line. The ❯ prompt is still visible but NOT actionable, so skip Input
-        // detection.
-        let is_executing = lowered.contains("interrupt") || lowered.starts_with("esc");
-
-        if !is_executing {
-            // Input — find ❯ in the input area (followed by a separator line of
-            // ─ characters). Claude Code's full-screen TUI places the prompt (❯)
-            // between two separators, above a footer/status line. Conversation
-            // ❯ lines (user's echoed input) are NOT followed by separators.
-            for (i, line) in normalized_lines.iter().enumerate() {
-                if line.starts_with('❯') {
-                    if let Some(next) = normalized_lines.get(i + 1) {
-                        if next.chars().all(|c| c == '─') {
-                            return Some(ManagedSessionTaskState::Input);
-                        }
+        // Input detection.
+        //
+        // Claude Code's full-screen TUI places the prompt (❯) between two
+        // separator lines (───), above a footer/status line. Conversation
+        // ❯ lines (user's echoed input) are NOT followed by separators.
+        //
+        // During active execution the ❯ prompt is still visible in the TUI
+        // but NOT actionable — in that case the temporal content-change check
+        // in session_metadata.rs will override Input → Running above the
+        // detector level.
+        for (i, line) in normalized_lines.iter().enumerate() {
+            if line.starts_with('❯') {
+                if let Some(next) = normalized_lines.get(i + 1) {
+                    if next.chars().all(|c| c == '─') {
+                        return Some(ManagedSessionTaskState::Input);
                     }
                 }
             }
-            // Also check `›` and keyword patterns on the last line for
-            // non-TUI/legacy modes.
-            if last_line.starts_with('›')
-                || last_line.starts_with("> ")
-                || lowered.contains("ready")
-                || lowered.contains("type your message")
-                || lowered.contains("send a message")
-            {
-                return Some(ManagedSessionTaskState::Input);
-            }
+        }
+        // Also check `›` and keyword patterns on the last line for
+        // non-TUI/legacy modes.
+        if last_line.starts_with('›')
+            || last_line.starts_with("> ")
+            || lowered.contains("ready")
+            || lowered.contains("type your message")
+            || lowered.contains("send a message")
+        {
+            return Some(ManagedSessionTaskState::Input);
         }
 
         Some(ManagedSessionTaskState::Running)
