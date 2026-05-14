@@ -39,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{
     LocalSessionCatalog, NoopAuthorityPublicationGateway, OutboundRemoteNodeTransport,
     SessionSyncAuthorityHost, SessionSyncAuthorityManager, LIVE_AUTHORITY_SERVER_ID,
-    SESSION_SYNC_AUTHORITY_ID, SESSION_SYNC_RAW_INPUT_QUIET_WINDOW, WAITAGENT_ACTIVE_TARGET_OPTION,
+    SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
 };
 
 pub(super) fn run_remote_session_sync_loop<G, T>(
@@ -83,7 +83,6 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
         let mut authority_manager = SessionSyncAuthorityManager::new();
         let mut should_reconnect = false;
         let mut next_sync_at = Instant::now() + poll_interval;
-        let mut raw_input_quiet_until: Option<Instant> = None;
 
         while !should_reconnect {
             let wait_duration = next_sync_at.saturating_duration_since(Instant::now());
@@ -91,18 +90,10 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
                 let outcome =
                     handle_transport_event(event, &mut active_session, &mut authority_manager);
                 should_reconnect |= outcome.should_reconnect;
-                if outcome.raw_pty_input {
-                    raw_input_quiet_until =
-                        Some(Instant::now() + SESSION_SYNC_RAW_INPUT_QUIET_WINDOW);
-                }
                 while let Ok(event) = event_rx.try_recv() {
                     let outcome =
                         handle_transport_event(event, &mut active_session, &mut authority_manager);
                     should_reconnect |= outcome.should_reconnect;
-                    if outcome.raw_pty_input {
-                        raw_input_quiet_until =
-                            Some(Instant::now() + SESSION_SYNC_RAW_INPUT_QUIET_WINDOW);
-                    }
                 }
             }
 
@@ -115,13 +106,6 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
                 continue;
             };
             if Instant::now() < next_sync_at {
-                continue;
-            }
-            if raw_input_quiet_until
-                .map(|quiet_until| Instant::now() < quiet_until)
-                .unwrap_or(false)
-            {
-                next_sync_at = raw_input_quiet_until.unwrap_or_else(Instant::now);
                 continue;
             }
             if let Err(_) = sync_local_sessions(
@@ -146,7 +130,6 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
 #[derive(Debug, Default)]
 pub(super) struct TransportEventOutcome {
     pub(super) should_reconnect: bool,
-    pub(super) raw_pty_input: bool,
 }
 
 pub(super) fn handle_transport_event(
@@ -163,13 +146,11 @@ pub(super) fn handle_transport_event(
             let Some(session_handle) = active_session.as_ref() else {
                 return TransportEventOutcome::default();
             };
-            let raw_pty_input = matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_)));
             if let Some(event) = map_inbound_grpc_authority_event(envelope) {
                 authority_manager.handle_event(session_handle, event);
             }
             TransportEventOutcome {
                 should_reconnect: false,
-                raw_pty_input,
             }
         }
         RemoteNodeTransportEvent::SessionClosed { .. }
@@ -178,7 +159,6 @@ pub(super) fn handle_transport_event(
             *active_session = None;
             TransportEventOutcome {
                 should_reconnect: true,
-                raw_pty_input: false,
             }
         }
     }

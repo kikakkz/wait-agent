@@ -29,7 +29,7 @@ pub(crate) use sync_helpers::*;
 
 const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
-const SESSION_SYNC_RAW_INPUT_QUIET_WINDOW: Duration = Duration::from_millis(750);
+
 const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
 const REMOTE_SESSION_SYNC_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 pub(super) const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
