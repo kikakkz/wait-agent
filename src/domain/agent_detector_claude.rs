@@ -122,28 +122,25 @@ impl AgentDetector for ClaudeDetector {
 
         // Input detection.
         //
-        // Claude Code's full-screen TUI places the prompt (❯) between two
-        // separator lines (───), above a footer/status line. Conversation
-        // ❯ lines (user's echoed input) are NOT followed by separators.
+        // Any non-empty line starting with the prompt character (❯ or ›)
+        // indicates the agent is awaiting input. During active execution
+        // the ❯ prompt is still visible in the TUI, but the temporal
+        // content-change check in session_metadata.rs overrides Input →
+        // Running above the detector level, so being permissive here is
+        // safe — the temporal check will correct it when content is
+        // actively changing.
         //
-        // During active execution the ❯ prompt is still visible in the TUI
-        // but NOT actionable — in that case the temporal content-change check
-        // in session_metadata.rs will override Input → Running above the
-        // detector level.
-        for (i, line) in normalized_lines.iter().enumerate() {
-            if line.starts_with('❯') {
-                if let Some(next) = normalized_lines.get(i + 1) {
-                    if next.chars().all(|c| c == '─') {
-                        return Some(ManagedSessionTaskState::Input);
-                    }
-                }
+        // Previously this required ❯ to be followed by a separator line
+        // (───) or to be the last visible line, but that missed cases where
+        // the bottom separator was scrolled off-screen or a footer line
+        // appeared below ❯.
+        for line in &normalized_lines {
+            if line.starts_with('❯') || line.starts_with('›') {
+                return Some(ManagedSessionTaskState::Input);
             }
         }
-        // Also check `›` and keyword patterns on the last line for
-        // non-TUI/legacy modes.
-        if last_line.starts_with('❯')
-            || last_line.starts_with('›')
-            || last_line.starts_with("> ")
+        // Legacy keyword-based fallback (no prompt character visible)
+        if last_line.starts_with("> ")
             || lowered.contains("ready")
             || lowered.contains("type your message")
             || lowered.contains("send a message")
