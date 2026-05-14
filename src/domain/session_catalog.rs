@@ -611,6 +611,67 @@ mod tests {
     }
 
     #[test]
+    fn task_state_infers_confirm_from_codex_allow_keyword() {
+        // Codex's "Allow Codex to run" prompt (pre-menu, no numbered options yet).
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("codex"),
+            "Allow Codex to run this command: echo hello\n\
+             › ",
+        );
+        assert_eq!(state, ManagedSessionTaskState::Confirm);
+    }
+
+    #[test]
+    fn task_state_infers_confirm_from_codex_dialog_marker() {
+        // Codex uses `?` at line start as a ratatui dialog marker for
+        // confirmation prompts, before the numbered menu renders.
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("codex"),
+            "? Allow Codex to run: echo hello\n\
+             › ",
+        );
+        assert_eq!(state, ManagedSessionTaskState::Confirm);
+    }
+
+    #[test]
+    fn task_state_infers_confirm_from_claude_dialog_marker() {
+        // Claude uses `?` dialog marker for confirmation, with ❯ prompt below.
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("claude"),
+            "? Allow this command?\n\
+             ❯ ",
+        );
+        assert_eq!(state, ManagedSessionTaskState::Confirm);
+    }
+
+    #[test]
+    fn task_state_input_not_confirm_from_user_question_before_prompt() {
+        // A user question ending with `?` in the conversation, followed by
+        // Codex's response and then `›`, should still be Input (not Confirm).
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("codex"),
+            "User: How do I list files?\n\
+             Codex: You can use `ls`.\n\
+             \n\
+             › \n\
+             tip: use @ to reference",
+        );
+        assert_eq!(state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
+    fn task_state_typing_in_codex_confirm_dialog_stays_confirm() {
+        // When the "allow codex" keyword is present, even typing at the prompt
+        // stays Confirm — the user is still in the confirmation flow.
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("codex"),
+            "? Allow Codex to run: echo hello\n\
+             › yes I want to run this",
+        );
+        assert_eq!(state, ManagedSessionTaskState::Confirm);
+    }
+
+    #[test]
     fn task_state_input_not_confirm_when_arrow_has_no_menu() {
         // Plain ❯ on its own (no "1." / "2." menu) must still be Input.
         let state = DetectorRegistry::default().infer_task_state(

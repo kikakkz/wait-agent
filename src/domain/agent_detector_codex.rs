@@ -86,11 +86,13 @@ impl AgentDetector for CodexDetector {
         // The › line contains "1." and is followed by "2." on the next line.
         //
         // Also check keywords across all lines since the prompt may appear
-        // above an instruction or footer line.
+        // above an instruction or footer line, and the numbered menu may not
+        // be rendered yet on the initial confirmation screen.
         for (i, line) in normalized_lines.iter().enumerate() {
             let lc = line.to_ascii_lowercase();
             if lc.contains("run this command")
                 || lc.contains("allow this")
+                || lc.contains("allow codex")
                 || lc.ends_with("[y/n]")
                 || lc.ends_with("(y/n)")
             {
@@ -102,6 +104,21 @@ impl AgentDetector for CodexDetector {
                     if next.starts_with("2.") || next.starts_with("2 ") {
                         return Some(ManagedSessionTaskState::Confirm);
                     }
+                }
+            }
+            // Dialog question starting with `?` (ratatui dialog marker).
+            // On the initial confirmation screen, the numbered menu hasn't
+            // rendered yet — only the `?` question and the `›` prompt are
+            // visible. The `?` character at line start is a ratatui convention
+            // for dialog/question state and is unlikely in regular output.
+            //
+            // Only match when `›` is empty (no user input yet). Once the user
+            // starts typing at the prompt, the confirm screen has shifted and
+            // Input detection should take over.
+            if line.trim_start().starts_with('?') && i + 1 < normalized_lines.len() {
+                let next = normalized_lines[i + 1];
+                if next.starts_with('›') && next.trim_start_matches('›').trim().is_empty() {
+                    return Some(ManagedSessionTaskState::Confirm);
                 }
             }
         }

@@ -82,7 +82,8 @@ impl AgentDetector for ClaudeDetector {
         // separator lines).
         //
         // Also check keywords across all lines, since the confirm prompt may be
-        // above a footer/instruction line.
+        // above a footer/instruction line, and the numbered menu may not be
+        // rendered yet in some TUI states.
         for (i, line) in normalized_lines.iter().enumerate() {
             let lc = line.to_ascii_lowercase();
             if lc.contains("run this command")
@@ -99,6 +100,22 @@ impl AgentDetector for ClaudeDetector {
                     if next.starts_with("2.") || next.starts_with("2 ") {
                         return Some(ManagedSessionTaskState::Confirm);
                     }
+                }
+            }
+            // Dialog question starting with `?` (ratatui dialog marker).
+            // On the initial confirmation screen, the numbered menu hasn't
+            // rendered yet — only the `?` question and the `❯` prompt are
+            // visible. The `?` character at line start is a ratatui convention
+            // for dialog/question state and is unlikely in regular output.
+            //
+            // Only match when `❯`/`›` is empty (no user input yet). Once the
+            // user starts typing, Input detection should take over.
+            if line.trim_start().starts_with('?') && i + 1 < normalized_lines.len() {
+                let next = normalized_lines[i + 1];
+                if (next.starts_with('❯') || next.starts_with('›'))
+                    && next.trim_start_matches(&['❯', '›'][..]).trim().is_empty()
+                {
+                    return Some(ManagedSessionTaskState::Confirm);
                 }
             }
         }
