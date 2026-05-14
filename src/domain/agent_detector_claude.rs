@@ -141,7 +141,8 @@ impl AgentDetector for ClaudeDetector {
         }
         // Also check `›` and keyword patterns on the last line for
         // non-TUI/legacy modes.
-        if last_line.starts_with('›')
+        if last_line.starts_with('❯')
+            || last_line.starts_with('›')
             || last_line.starts_with("> ")
             || lowered.contains("ready")
             || lowered.contains("type your message")
