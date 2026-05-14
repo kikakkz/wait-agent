@@ -1076,7 +1076,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "waitagent"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "base64",
  "libc",
