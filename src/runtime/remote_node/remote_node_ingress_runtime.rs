@@ -10,7 +10,7 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
+    BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, ProtocolEnvelope, TargetExitedPayload, TargetOutputPayload,
     TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
@@ -355,6 +355,11 @@ fn route_grpc_envelope(
                     cols: payload.cols as usize,
                     rows: payload.rows as usize,
                     raw_pty_passthrough: payload.raw_pty_passthrough,
+                    bootstrap_mode: if payload.bootstrap_mode_visible_only {
+                        BootstrapMode::VisibleOnly
+                    } else {
+                        BootstrapMode::Full
+                    },
                 }),
             })
         }
@@ -652,6 +657,10 @@ fn map_outbound_control_plane_envelope(
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
                 raw_pty_passthrough: payload.raw_pty_passthrough,
+                bootstrap_mode_visible_only: matches!(
+                    payload.bootstrap_mode,
+                    BootstrapMode::VisibleOnly
+                ),
             }))
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {

@@ -10,8 +10,8 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
-    REMOTE_PROTOCOL_VERSION,
+    BootstrapMode, ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
@@ -685,6 +685,10 @@ fn map_authority_command_to_grpc(
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
                 raw_pty_passthrough: payload.raw_pty_passthrough,
+                bootstrap_mode_visible_only: matches!(
+                    payload.bootstrap_mode,
+                    BootstrapMode::VisibleOnly
+                ),
             })),
         ),
         RemoteAuthorityCommand::CloseMirror(payload) => (

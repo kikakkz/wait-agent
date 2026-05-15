@@ -185,6 +185,7 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         &self,
         socket_name: &str,
         pane: &TmuxPaneId,
+        visible_only: bool,
     ) -> Result<String, Self::Error>;
 
     fn capture_cursor_position(
@@ -234,8 +235,13 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         &self,
         socket_name: &str,
         pane: &TmuxPaneId,
+        visible_only: bool,
     ) -> Result<String, Self::Error> {
-        self.capture_pane_ansi_on_socket(socket_name, pane.as_str())
+        if visible_only {
+            self.capture_pane_ansi_visible_on_socket(socket_name, pane.as_str())
+        } else {
+            self.capture_pane_ansi_on_socket(socket_name, pane.as_str())
+        }
     }
 
     fn capture_cursor_position(
@@ -563,6 +569,8 @@ where
                             &transport,
                             &command.transport_session_id,
                             &command.target_id,
+                            payload.bootstrap_mode
+                                == crate::infra::remote_protocol::BootstrapMode::VisibleOnly,
                         ) {
                             break Err(error);
                         }
@@ -621,6 +629,8 @@ where
                         &transport,
                         &command.transport_session_id,
                         &command.target_id,
+                        payload.bootstrap_mode
+                            == crate::infra::remote_protocol::BootstrapMode::VisibleOnly,
                     ) {
                         break Err(error);
                     }
@@ -987,6 +997,7 @@ fn emit_bootstrap<G, P>(
     transport: &RemoteAuthorityTransportRuntime,
     session_id: &str,
     target_id: &str,
+    visible_only: bool,
 ) -> Result<(), LifecycleError>
 where
     G: RemoteTargetPtyGateway,
@@ -994,7 +1005,7 @@ where
 {
     let screen = runtime
         .gateway
-        .capture_bootstrap_screen(socket_name, pane)
+        .capture_bootstrap_screen(socket_name, pane, visible_only)
         .map_err(remote_authority_error)?;
     let (cursor_x, cursor_y) = runtime
         .gateway

@@ -101,6 +101,12 @@ pub struct ServerHelloPayload {
     pub session_recovery_policy: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapMode {
+    Full,
+    VisibleOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenMirrorRequestPayload {
     pub session_id: String,
@@ -109,6 +115,7 @@ pub struct OpenMirrorRequestPayload {
     pub cols: usize,
     pub rows: usize,
     pub raw_pty_passthrough: bool,
+    pub bootstrap_mode: BootstrapMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

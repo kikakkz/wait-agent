@@ -1,13 +1,29 @@
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ControlPlaneDestination, ControlPlanePayload, MirrorBootstrapChunkPayload,
-    MirrorBootstrapCompletePayload, NodeBoundControlPlaneMessage, OpenMirrorRequestPayload,
-    OpenTargetOkPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-    RemoteConsoleDescriptor, ResizeAuthorityChangedPayload, RoutedControlPlaneMessage,
-    TargetOutputPayload, REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
+    ApplyResizePayload, BootstrapMode, ControlPlaneDestination, ControlPlanePayload,
+    MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, NodeBoundControlPlaneMessage,
+    OpenMirrorRequestPayload, OpenTargetOkPayload, ProtocolEnvelope, RawPtyInputPayload,
+    RawPtyOutputPayload, RemoteConsoleDescriptor, ResizeAuthorityChangedPayload,
+    RoutedControlPlaneMessage, TargetOutputPayload, REMOTE_PROTOCOL_VERSION, SERVER_SENDER_ID,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_OUTPUT_LOG_ENTRIES: usize = 2000;
+
+#[derive(Debug, Clone)]
+pub(super) struct OutputLogEntry {
+    pub(super) output_seq: u64,
+    pub(super) stream: &'static str,
+    pub(super) output_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TerminalFlags {
+    pub(super) alternate_screen_active: bool,
+    pub(super) application_cursor_keys: bool,
+    pub(super) cursor_visible: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirrorRouteState {
@@ -191,6 +207,16 @@ impl RemoteControlPlaneService {
             })
             .unwrap_or(false)
         {
+            let has_log = self
+                .session_states
+                .get(&session_id)
+                .map(|s| !s.output_log.is_empty())
+                .unwrap_or(false);
+            let bootstrap_mode = if has_log {
+                BootstrapMode::VisibleOnly
+            } else {
+                BootstrapMode::Full
+            };
             messages.push(RoutedControlPlaneMessage {
                 destination: ControlPlaneDestination::AuthorityNode(
                     target.address.authority_id().to_string(),
@@ -207,6 +233,7 @@ impl RemoteControlPlaneService {
                         cols,
                         rows,
                         raw_pty_passthrough,
+                        bootstrap_mode,
                     }),
                 ),
             });
@@ -215,6 +242,19 @@ impl RemoteControlPlaneService {
                 state.authority_node_id = Some(target.address.authority_id().to_string());
             }
         }
+
+        // Append output_log replay for the opening observer so content
+        // appears immediately without waiting for the authority bootstrap.
+        let has_history = self
+            .session_states
+            .get(&session_id)
+            .map(|s| !s.output_log.is_empty())
+            .unwrap_or(false);
+        if has_history {
+            let console_host_id = console.console_host_id.clone();
+            messages.extend(self.build_output_replay(&session_id, &console_host_id));
+        }
+
         Ok(messages)
     }
 
@@ -345,6 +385,14 @@ impl RemoteControlPlaneService {
             return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
         }
 
+        if let Some(state) = self.session_states.get_mut(&session_id) {
+            state.push_output_log_entry(OutputLogEntry {
+                output_seq,
+                stream,
+                output_bytes: output_bytes.clone(),
+            });
+        }
+
         Ok(RoutedControlPlaneMessage {
             destination: ControlPlaneDestination::AllOpenedObservers {
                 session_id: session_id.clone(),
@@ -414,6 +462,16 @@ impl RemoteControlPlaneService {
             return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
         }
 
+        // Bootstrap chunk on an existing session replaces stale output_log
+        if let Some(state) = self.session_states.get_mut(&session_id) {
+            if !state.output_log.is_empty() {
+                // This is a reconnect/reopen bootstrap that replaces prior history.
+                // Clear the old output_log so the new snapshot becomes the base.
+                state.output_log.clear();
+                state.output_seq = 0;
+            }
+        }
+
         Ok(RoutedControlPlaneMessage {
             destination: ControlPlaneDestination::AllOpenedObservers {
                 session_id: session_id.clone(),
@@ -449,6 +507,14 @@ impl RemoteControlPlaneService {
             return Err(RemoteControlPlaneError::TargetNotOpened(target_id));
         }
 
+        if let Some(state) = self.session_states.get_mut(&session_id) {
+            state.terminal_flags = Some(TerminalFlags {
+                alternate_screen_active,
+                application_cursor_keys,
+                cursor_visible,
+            });
+        }
+
         Ok(RoutedControlPlaneMessage {
             destination: ControlPlaneDestination::AllOpenedObservers {
                 session_id: session_id.clone(),
@@ -468,6 +534,76 @@ impl RemoteControlPlaneService {
                 }),
             ),
         })
+    }
+
+    /// Build playback messages from stored output_log for a new observer.
+    /// Returns TargetOutput entries followed by a synthetic MirrorBootstrapComplete
+    /// so the observer's terminal engine reaches the stored terminal state.
+    /// Build repeated messages from stored output_log for a new observer.
+    /// Returns TargetOutput entries followed by a synthetic MirrorBootstrapComplete
+    /// so the observer's terminal engine reaches the stored terminal state.
+    pub fn build_output_replay(
+        &self,
+        session_id: &str,
+        console_host_id: &str,
+    ) -> Vec<RoutedControlPlaneMessage> {
+        let state = match self.session_states.get(session_id) {
+            Some(state) => state,
+            None => return Vec::new(),
+        };
+        let mut messages = Vec::new();
+        for entry in &state.output_log {
+            messages.push(RoutedControlPlaneMessage {
+                destination: ControlPlaneDestination::ObserverNode(console_host_id.to_string()),
+                envelope: ProtocolEnvelope {
+                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                    message_id: String::new(),
+                    message_type: "target_output",
+                    timestamp: String::new(),
+                    sender_id: SERVER_SENDER_ID.to_string(),
+                    correlation_id: None,
+                    session_id: Some(session_id.to_string()),
+                    target_id: None,
+                    attachment_id: None,
+                    console_id: None,
+                    payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
+                        session_id: session_id.to_string(),
+                        target_id: String::new(),
+                        output_seq: entry.output_seq,
+                        stream: entry.stream,
+                        output_bytes: entry.output_bytes.clone(),
+                    }),
+                },
+            });
+        }
+        if let Some(flags) = &state.terminal_flags {
+            messages.push(RoutedControlPlaneMessage {
+                destination: ControlPlaneDestination::ObserverNode(console_host_id.to_string()),
+                envelope: ProtocolEnvelope {
+                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                    message_id: String::new(),
+                    message_type: "mirror_bootstrap_complete",
+                    timestamp: String::new(),
+                    sender_id: SERVER_SENDER_ID.to_string(),
+                    correlation_id: None,
+                    session_id: Some(session_id.to_string()),
+                    target_id: None,
+                    attachment_id: None,
+                    console_id: None,
+                    payload: ControlPlanePayload::MirrorBootstrapComplete(
+                        MirrorBootstrapCompletePayload {
+                            session_id: session_id.to_string(),
+                            target_id: String::new(),
+                            last_chunk_seq: 1,
+                            alternate_screen_active: flags.alternate_screen_active,
+                            application_cursor_keys: flags.application_cursor_keys,
+                            cursor_visible: flags.cursor_visible,
+                        },
+                    ),
+                },
+            });
+        }
+        messages
     }
 
     pub fn close_target(
@@ -496,8 +632,16 @@ impl RemoteControlPlaneService {
 
             if !removed_was_authority {
                 CloseOutcome::ClosedWithoutAuthorityChange { removed }
-            } else if state.attachments.is_empty() {
+            } else if state.attachments.is_empty() && state.output_log.is_empty() {
+                // No remaining output history either — safe to destroy state.
                 CloseOutcome::ClosedLastAttachment { removed }
+            } else if state.attachments.is_empty() {
+                // No live observers, but output_log exists — keep state so
+                // the next reopen can replay from history without needing a
+                // full authority tmux capture.
+                state.mirror_route = MirrorRouteState::None;
+                state.authority_node_id = None;
+                CloseOutcome::ClosedWithoutAuthorityChange { removed }
             } else {
                 let next_authority = state
                     .attachments
@@ -701,6 +845,9 @@ struct RemoteSessionState {
     last_pty_size: Option<(usize, usize)>,
     pty_resize_authority_attachment_id: Option<String>,
     attachments: Vec<RemoteAttachment>,
+    output_log: Vec<OutputLogEntry>,
+    output_seq: u64,
+    terminal_flags: Option<TerminalFlags>,
 }
 
 impl RemoteSessionState {
@@ -714,6 +861,17 @@ impl RemoteSessionState {
             last_pty_size: None,
             pty_resize_authority_attachment_id: None,
             attachments: Vec::new(),
+            output_log: Vec::new(),
+            output_seq: 0,
+            terminal_flags: None,
+        }
+    }
+
+    fn push_output_log_entry(&mut self, entry: OutputLogEntry) {
+        self.output_seq = entry.output_seq;
+        self.output_log.push(entry);
+        while self.output_log.len() > MAX_OUTPUT_LOG_ENTRIES {
+            self.output_log.remove(0);
         }
     }
 

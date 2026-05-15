@@ -1,7 +1,7 @@
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, ClientHelloPayload, CloseMirrorRequestPayload, ControlPlanePayload,
-    ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, NodeSessionChannel,
-    NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
+    ApplyResizePayload, BootstrapMode, ClientHelloPayload, CloseMirrorRequestPayload,
+    ControlPlanePayload, ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
+    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
     RawPtyInputPayload, RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
     TargetExitedPayload, TargetOutputPayload, TargetPublishedPayload,
@@ -219,6 +219,10 @@ fn write_payload(
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
             write_bool(writer, payload.raw_pty_passthrough)?;
+            write_bool(
+                writer,
+                matches!(payload.bootstrap_mode, BootstrapMode::VisibleOnly),
+            )?;
         }
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
             write_u8(writer, 13)?;
@@ -359,6 +363,11 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
             raw_pty_passthrough: read_bool(reader)?,
+            bootstrap_mode: if read_bool(reader)? {
+                BootstrapMode::VisibleOnly
+            } else {
+                BootstrapMode::Full
+            },
         }),
         13 => ControlPlanePayload::OpenMirrorAccepted(OpenMirrorAcceptedPayload {
             session_id: read_string(reader)?,
@@ -754,9 +763,9 @@ mod tests {
         write_node_session_envelope, write_registration_frame, AuthorityTransportFrame,
     };
     use crate::infra::remote_protocol::{
-        CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel, NodeSessionEnvelope,
-        OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-        RawPtyOutputPayload, TargetOutputPayload, TargetPublishedPayload,
+        BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
+        NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
+        RawPtyInputPayload, RawPtyOutputPayload, TargetOutputPayload, TargetPublishedPayload,
     };
 
     #[test]
@@ -893,6 +902,7 @@ mod tests {
                 cols: 120,
                 rows: 40,
                 raw_pty_passthrough: false,
+                bootstrap_mode: BootstrapMode::Full,
             }),
         };
         let mut bytes = Vec::new();

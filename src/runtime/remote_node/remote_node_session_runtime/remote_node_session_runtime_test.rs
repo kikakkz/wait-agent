@@ -241,6 +241,7 @@ mod tests {
                     cols,
                     rows,
                     raw_pty_passthrough: _,
+                    bootstrap_mode: _,
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");

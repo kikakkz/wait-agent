@@ -156,6 +156,7 @@ message OpenMirrorRequest {
   uint32 cols = 4;
   uint32 rows = 5;
   bool raw_pty_passthrough = 6;
+  bool bootstrap_mode_visible_only = 7;
 }
 
 message OpenMirrorAccepted {

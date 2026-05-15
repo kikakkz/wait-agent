@@ -61,6 +61,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 raw_pty_passthrough: false,
+                bootstrap_mode: crate::infra::remote_protocol::BootstrapMode::Full,
             },
         );
 

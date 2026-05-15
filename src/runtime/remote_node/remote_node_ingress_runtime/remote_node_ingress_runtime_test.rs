@@ -10,8 +10,9 @@ mod tests {
         ProtocolVersion, TargetOutput,
     };
     use crate::infra::remote_protocol::{
-        ControlPlanePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
-        OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
+        BootstrapMode, ControlPlanePayload, MirrorBootstrapChunkPayload,
+        MirrorBootstrapCompletePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
+        RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent, QueuedAuthorityStreamSource,
@@ -258,6 +259,7 @@ mod tests {
                             cols: 120,
                             rows: 40,
                             raw_pty_passthrough: false,
+                            bootstrap_mode: BootstrapMode::Full,
                         }),
                     },
                 },

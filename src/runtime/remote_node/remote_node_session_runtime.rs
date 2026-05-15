@@ -12,10 +12,10 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
-    NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-    RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload, TargetOutputPayload,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
+    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
+    ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload,
+    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -210,6 +210,7 @@ impl RemoteNodeSessionRuntime {
                 cols,
                 rows,
                 raw_pty_passthrough: false,
+                bootstrap_mode: BootstrapMode::Full,
             }),
         )
     }
@@ -594,6 +595,11 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 cols: payload.cols as usize,
                 rows: payload.rows as usize,
                 raw_pty_passthrough: payload.raw_pty_passthrough,
+                bootstrap_mode: if payload.bootstrap_mode_visible_only {
+                    BootstrapMode::VisibleOnly
+                } else {
+                    BootstrapMode::Full
+                },
             }),
         )),
         Some(GrpcBody::CloseMirrorRequest(payload)) => Some(GrpcAuthorityEvent::Command(
@@ -695,6 +701,10 @@ pub(crate) fn map_outbound_grpc_envelope(
                 cols: payload.cols as u32,
                 rows: payload.rows as u32,
                 raw_pty_passthrough: payload.raw_pty_passthrough,
+                bootstrap_mode_visible_only: matches!(
+                    payload.bootstrap_mode,
+                    BootstrapMode::VisibleOnly
+                ),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::CloseMirrorRequest(payload)) => {

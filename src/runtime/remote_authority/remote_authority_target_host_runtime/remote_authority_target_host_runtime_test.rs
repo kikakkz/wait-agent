@@ -10,9 +10,9 @@ mod tests {
     use crate::cli::RemoteAuthorityTargetHostCommand;
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
-        ApplyResizePayload, ClientHelloPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-        TargetOutputPayload,
+        ApplyResizePayload, BootstrapMode, ClientHelloPayload, ControlPlanePayload,
+        NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRequestPayload, ProtocolEnvelope,
+        RawPtyInputPayload, TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::{
         read_control_plane_envelope, read_node_session_envelope, write_node_session_envelope,
@@ -88,6 +88,7 @@ mod tests {
             &self,
             _socket_name: &str,
             _pane: &TmuxPaneId,
+            _visible_only: bool,
         ) -> Result<String, Self::Error> {
             Ok(self
                 .capture_bootstrap_screen
@@ -862,6 +863,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 raw_pty_passthrough: false,
+                bootstrap_mode: BootstrapMode::Full,
             }),
         }
     }

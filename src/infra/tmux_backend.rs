@@ -791,6 +791,25 @@ impl EmbeddedTmuxBackend {
         Ok(output.stdout)
     }
 
+    /// Captures only the visible portion of the pane (no scrollback history).
+    /// Used for reconnect catch-up when the server already has output_log history
+    /// but needs the current terminal state after a disconnect.
+    pub fn capture_pane_ansi_visible_on_socket(
+        &self,
+        socket_name: &str,
+        pane_target: &str,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "capture-pane".to_string(),
+            "-p".to_string(),
+            "-e".to_string(),
+            "-t".to_string(),
+            pane_target.to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout)
+    }
+
     pub fn pane_cursor_position_on_socket(
         &self,
         socket_name: &str,
