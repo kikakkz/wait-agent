@@ -327,8 +327,9 @@ impl RemoteMainSlotPaneRuntime {
                             } else {
                                 AuthorityTransportStatus::Disconnected
                             };
-                            let needs_activation =
-                                binding.is_none() || remote_runtime.is_mirror_pending(&target);
+                            let needs_activation = binding.is_none()
+                                || remote_runtime.is_mirror_pending(&target)
+                                || remote_runtime.is_mirror_needed(&target);
                             if needs_activation
                                 && matches!(authority_status, AuthorityTransportStatus::Connected)
                             {

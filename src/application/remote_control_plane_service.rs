@@ -758,6 +758,17 @@ impl RemoteControlPlaneService {
         }
     }
 
+    /// Returns true if the session's mirror_route is None
+    /// (not yet requested, or was cleared). Used to detect
+    /// whether OpenMirrorRequest needs to be (re-)sent when
+    /// the authority transport becomes available.
+    pub fn is_mirror_needed(&self, session_id: &str) -> bool {
+        self.session_states
+            .get(session_id)
+            .map(|s| s.mirror_route.should_send_mirror_request())
+            .unwrap_or(false)
+    }
+
     pub fn resolve_node_deliveries(
         &self,
         messages: &[RoutedControlPlaneMessage],

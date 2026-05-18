@@ -214,6 +214,14 @@ impl RemoteMainSlotRuntime {
         self.control_plane.borrow().is_mirror_pending(&session_id)
     }
 
+    /// Returns true when the session has no mirror request in flight or active
+    /// (mirror_route is None). After failed authority delivery the pending state
+    /// gets cleared back to None, so the connect handler must retry.
+    pub fn is_mirror_needed(&self, target: &ManagedSessionRecord) -> bool {
+        let session_id = target.address.session_id().to_string();
+        self.control_plane.borrow().is_mirror_needed(&session_id)
+    }
+
     pub fn send_raw_pty_input(
         &self,
         target: &ManagedSessionRecord,
