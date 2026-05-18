@@ -274,6 +274,22 @@ impl RemoteMainSlotPaneRuntime {
             write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
             binding = Some(activated_binding);
         }
+
+        // Re-read terminal size after layout reconciliation may have
+        // adjusted the pane height.  If the size changed between the
+        // initial read and the completion of activation, send an explicit
+        // resize so the remote PTY matches the current pane dimensions.
+        if let Some(b) = binding.as_ref() {
+            let current_size = terminal.current_size_or_default();
+            if current_size != initial_size {
+                remote_runtime.send_pty_resize(
+                    &target,
+                    b,
+                    usize::from(current_size.cols),
+                    usize::from(current_size.rows),
+                )?;
+            }
+        }
         let run_result = (|| -> Result<(), LifecycleError> {
             if should_draw_remote_snapshot(binding.as_ref()) {
                 draw_remote_snapshot(
