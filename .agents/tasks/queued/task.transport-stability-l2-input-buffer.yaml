@@ -1,0 +1,41 @@
+id: task.transport-stability-l2
+kind: task
+version: 1
+title: replace O_NONBLOCK input FIFO with large blocking ring buffer
+status: ready
+priority: medium
+design_ref:
+  doc: docs/remote-transport-stability-design.md
+  why:
+    - O_NONBLOCK FIFO with 64KB capacity silently drops input on EAGAIN when PTY write is slow
+    - large ring buffer with dedicated drain thread matches SSH's behavior of never dropping input
+    - congestion signaling enables remote peer to slow input production
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.transport-stability-l1.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - O_NONBLOCK FIFO replaced with 256KB VecDeque<u8> ring buffer
+  - dedicated input drain thread reads from ring buffer and calls tmux send-keys
+  - congestion signal frames sent at 75% capacity, cleared at 25%
+  - AuthorityTransportFrame::InputCongestion(bool) variant added
+  - cargo test passes
+verification:
+  - cargo test
+  - manual: simulate slow PTY write (e.g., heavy tmux send-keys load), verify no input drops
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/protocol/authority_transport_frame.rs (or equivalent)
+  - docs/remote-transport-stability-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.transport-stability-l2-input-buffer.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - The InputCongestion frame is advisory only; the remote peer may ignore it
+  - Must handle the case where tmux send-keys fails (session closed) gracefully

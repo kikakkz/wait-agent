@@ -202,6 +202,19 @@ impl CommandDispatcher {
                 println!("{help}");
                 Ok(())
             }
+            Command::ShowErrorLog => {
+                let entries = crate::infra::error_log::ERROR_LOG.entries();
+                if entries.is_empty() {
+                    println!("(no error log entries)");
+                } else {
+                    for (ts, msg) in &entries {
+                        let secs = ts / 1000;
+                        let millis = ts % 1000;
+                        println!("[{}.{:03}] {}", secs, millis, msg);
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }

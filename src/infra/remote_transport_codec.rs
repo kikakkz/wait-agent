@@ -14,12 +14,28 @@ const AUTHORITY_FRAME_MAGIC: &[u8; 4] = b"waRP";
 const AUTHORITY_FRAME_CONTROL_PLANE: u8 = 1;
 const AUTHORITY_FRAME_RAW_PTY_INPUT: u8 = 2;
 const AUTHORITY_FRAME_RAW_PTY_OUTPUT: u8 = 3;
+const AUTHORITY_FRAME_PING: u8 = 4;
+const AUTHORITY_FRAME_PONG: u8 = 5;
+const AUTHORITY_FRAME_SYNC_REQUEST: u8 = 6;
+const AUTHORITY_FRAME_SYNC_RESPONSE: u8 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityTransportFrame {
     ControlPlane(ProtocolEnvelope<ControlPlanePayload>),
     RawPtyInput(RawPtyInputPayload),
     RawPtyOutput(RawPtyOutputPayload),
+    Ping,
+    Pong,
+    SyncRequest {
+        expected_seq: u64,
+        received_seq: u64,
+    },
+    SyncResponse {
+        session_id: String,
+        target_id: String,
+        seq: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 pub fn write_registration_frame(
@@ -127,6 +143,32 @@ pub fn write_authority_transport_frame(
             write_u8(writer, AUTHORITY_FRAME_RAW_PTY_OUTPUT)?;
             write_raw_pty_output_payload(writer, payload)?;
         }
+        AuthorityTransportFrame::Ping => {
+            write_u8(writer, AUTHORITY_FRAME_PING)?;
+        }
+        AuthorityTransportFrame::Pong => {
+            write_u8(writer, AUTHORITY_FRAME_PONG)?;
+        }
+        AuthorityTransportFrame::SyncRequest {
+            expected_seq,
+            received_seq,
+        } => {
+            write_u8(writer, AUTHORITY_FRAME_SYNC_REQUEST)?;
+            write_u64(writer, *expected_seq)?;
+            write_u64(writer, *received_seq)?;
+        }
+        AuthorityTransportFrame::SyncResponse {
+            session_id,
+            target_id,
+            seq,
+            bytes,
+        } => {
+            write_u8(writer, AUTHORITY_FRAME_SYNC_RESPONSE)?;
+            write_string(writer, session_id)?;
+            write_string(writer, target_id)?;
+            write_u64(writer, *seq)?;
+            write_bytes(writer, bytes)?;
+        }
     }
     writer.flush()?;
     Ok(())
@@ -152,6 +194,28 @@ pub fn read_authority_transport_frame(
         AUTHORITY_FRAME_RAW_PTY_OUTPUT => {
             read_raw_pty_output_payload(reader).map(AuthorityTransportFrame::RawPtyOutput)
         }
+        AUTHORITY_FRAME_PING => Ok(AuthorityTransportFrame::Ping),
+        AUTHORITY_FRAME_PONG => Ok(AuthorityTransportFrame::Pong),
+        AUTHORITY_FRAME_SYNC_REQUEST => {
+            let expected_seq = read_u64(reader)?;
+            let received_seq = read_u64(reader)?;
+            Ok(AuthorityTransportFrame::SyncRequest {
+                expected_seq,
+                received_seq,
+            })
+        }
+        AUTHORITY_FRAME_SYNC_RESPONSE => {
+            let session_id = read_string(reader)?;
+            let target_id = read_string(reader)?;
+            let seq = read_u64(reader)?;
+            let bytes = read_bytes(reader)?;
+            Ok(AuthorityTransportFrame::SyncResponse {
+                session_id,
+                target_id,
+                seq,
+                bytes,
+            })
+        }
         other => Err(RemoteTransportCodecError::new(format!(
             "unknown authority transport frame tag `{other}`"
         ))),
@@ -169,13 +233,19 @@ pub fn read_node_session_envelope(
 #[derive(Debug)]
 pub struct RemoteTransportCodecError {
     message: String,
+    io_kind: Option<io::ErrorKind>,
 }
 
 impl RemoteTransportCodecError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            io_kind: None,
         }
+    }
+
+    pub fn is_timed_out(&self) -> bool {
+        self.io_kind == Some(io::ErrorKind::TimedOut)
     }
 }
 
@@ -189,7 +259,10 @@ impl std::error::Error for RemoteTransportCodecError {}
 
 impl From<io::Error> for RemoteTransportCodecError {
     fn from(value: io::Error) -> Self {
-        Self::new(value.to_string())
+        Self {
+            io_kind: Some(value.kind()),
+            ..Self::new(value.to_string())
+        }
     }
 }
 
@@ -844,6 +917,40 @@ mod tests {
             read_authority_transport_frame(&mut bytes.as_slice()).expect("frame should decode");
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn sync_request_and_response_frames_round_trip() {
+        let frames: Vec<AuthorityTransportFrame> = vec![
+            AuthorityTransportFrame::SyncRequest {
+                expected_seq: 42,
+                received_seq: 47,
+            },
+            AuthorityTransportFrame::SyncResponse {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                seq: 43,
+                bytes: b"\x1b[32mreplay data\r\n".to_vec(),
+            },
+        ];
+        for frame in frames {
+            let mut bytes = Vec::new();
+            write_authority_transport_frame(&mut bytes, &frame).expect("should encode");
+            let decoded =
+                read_authority_transport_frame(&mut bytes.as_slice()).expect("should decode");
+            assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn ping_pong_frames_round_trip_without_payload() {
+        for frame in [AuthorityTransportFrame::Ping, AuthorityTransportFrame::Pong] {
+            let mut bytes = Vec::new();
+            write_authority_transport_frame(&mut bytes, &frame).expect("ping/pong should encode");
+            let decoded = read_authority_transport_frame(&mut bytes.as_slice())
+                .expect("ping/pong should decode");
+            assert_eq!(decoded, frame);
+        }
     }
 
     #[test]

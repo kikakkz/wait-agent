@@ -15,15 +15,15 @@ use crate::runtime::remote_node_transport_runtime::{
 };
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTHORITY_TRANSPORT_SERVER_ID: &str = "waitagent-main-slot";
 pub struct RemoteAuthorityTransportRuntime {
     node_id: String,
@@ -63,7 +63,7 @@ impl RemoteAuthorityTransportRuntime {
         // the reader may be stranded during a gRPC reconnect window on the authority
         // node, and a slow or broken FIFO reader on the output-pump side must not
         // freeze the event loop by back-pressuring the transport writer.
-        stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
         writer.set_write_timeout(Some(Duration::from_secs(5))).ok();
         Ok(Self {
             node_id,
@@ -448,22 +448,52 @@ fn forward_authority_frames_to_control_plane(
     mut reader: UnixStream,
     mut writer: UnixStream,
 ) -> Result<(), RemoteAuthorityTransportError> {
-    while let Ok(frame) = read_authority_transport_frame(&mut reader) {
-        let frame = match frame {
-            AuthorityTransportFrame::ControlPlane(envelope) => match envelope.payload {
-                ControlPlanePayload::RawPtyOutput(payload) => {
-                    AuthorityTransportFrame::RawPtyOutput(payload)
+    // Set a short read timeout so we can handle Ping/Pong and detect
+    // peer death within AUTHORITY_TRANSPORT_READ_TIMEOUT seconds.
+    reader
+        .set_read_timeout(Some(AUTHORITY_TRANSPORT_READ_TIMEOUT))
+        .ok();
+    let mut last_received = Instant::now();
+
+    loop {
+        match read_authority_transport_frame(&mut reader) {
+            Ok(AuthorityTransportFrame::Ping) => {
+                last_received = Instant::now();
+                let mut buf = Vec::new();
+                let _ = write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong);
+                let _ = reader.write_all(&buf);
+            }
+            Ok(AuthorityTransportFrame::Pong) => {
+                last_received = Instant::now();
+            }
+            Ok(frame) => {
+                last_received = Instant::now();
+                let frame = match frame {
+                    AuthorityTransportFrame::ControlPlane(envelope) => match envelope.payload {
+                        ControlPlanePayload::RawPtyOutput(payload) => {
+                            AuthorityTransportFrame::RawPtyOutput(payload)
+                        }
+                        payload => AuthorityTransportFrame::ControlPlane(ProtocolEnvelope {
+                            payload,
+                            ..envelope
+                        }),
+                    },
+                    raw_frame => raw_frame,
+                };
+                write_authority_transport_frame(&mut writer, &frame)?;
+            }
+            Err(ref e) if e.is_timed_out() => {
+                if last_received.elapsed() > AUTHORITY_TRANSPORT_READ_TIMEOUT {
+                    return Ok(());
                 }
-                payload => AuthorityTransportFrame::ControlPlane(ProtocolEnvelope {
-                    payload,
-                    ..envelope
-                }),
-            },
-            raw_frame => raw_frame,
-        };
-        write_authority_transport_frame(&mut writer, &frame)?;
+                // Probe liveness while the remote is idle.
+                let mut buf = Vec::new();
+                let _ = write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Ping);
+                let _ = reader.write_all(&buf);
+            }
+            Err(_) => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 fn forward_control_plane_to_authority_frames(
@@ -473,6 +503,14 @@ fn forward_control_plane_to_authority_frames(
 ) -> Result<(), RemoteAuthorityTransportError> {
     while running.load(Ordering::Relaxed) {
         match read_authority_transport_frame(&mut reader) {
+            Ok(AuthorityTransportFrame::Ping) => {
+                let mut buf = Vec::new();
+                let _ = write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong);
+                let _ = reader.write_all(&buf);
+            }
+            Ok(AuthorityTransportFrame::Pong) => {
+                // Silently consume.
+            }
             Ok(frame) => match frame {
                 AuthorityTransportFrame::ControlPlane(envelope) => {
                     write_control_plane_envelope(&mut writer, &envelope)?;
@@ -483,6 +521,12 @@ fn forward_control_plane_to_authority_frames(
                 AuthorityTransportFrame::RawPtyOutput(payload) => {
                     write_control_plane_envelope(&mut writer, &raw_pty_output_envelope(payload))?;
                 }
+                // Sync frames pass through as-is to the external transport.
+                AuthorityTransportFrame::SyncRequest { .. }
+                | AuthorityTransportFrame::SyncResponse { .. } => {
+                    write_authority_transport_frame(&mut writer, &frame)?;
+                }
+                _ => {}
             },
             Err(_) => {
                 if !running.load(Ordering::Relaxed) {

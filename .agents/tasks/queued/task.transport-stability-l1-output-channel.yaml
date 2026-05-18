@@ -1,0 +1,40 @@
+id: task.transport-stability-l1
+kind: task
+version: 1
+title: replace output channel try_send with blocking send and larger buffer
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-transport-stability-design.md
+  why:
+    - try_send silently drops output frames when the sync_channel fills under network congestion
+    - this is the root cause of "display doesn't refresh in real-time" — the most visible user-facing symptom
+    - blocking send propagates backpressure correctly; dropped frames are never acceptable
+    - output frame ring buffer enables SyncRequest recovery (layer 3)
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.transport-stability-l4.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - OUTPUT_CHANNEL_BOUND increased from 500 to 8192
+  - output_tx.try_send replaced with blocking output_tx.send
+  - output frame cache ring buffer added (VecDeque, cap 1024), populated on every output frame
+  - cargo test passes
+verification:
+  - cargo test
+  - manual: connect remote during heavy output (e.g., tail -f on large file), verify continuous display update without freeze
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - docs/remote-transport-stability-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.transport-stability-l1-output-channel.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - Blocking send is safe because the channel reader (transport writer) has a bounded transport write timeout
+  - The ring buffer is for layer 3 SyncRequest; it can be a simple VecDeque with no persistence

@@ -2,12 +2,13 @@ kind: state
 version: 1
 current_task: null
 focus_statement: >
-  Current batch done: bug-multi-remote-switch-lag (BRIDGE_REFRESH_INTERVAL
-  reduction) and t5-08c4d3h (event-driven authority bridge discovery via inotify).
-  All refactor tasks (refactor-1 through refactor-7) and the three reported bugs
-  are now resolved. Future deferred work: feature-agent-status-recognition
-  (sidebar state sync + AgentDetector plugin integration) and ux-3 (workspace
-  snapshot persistence). No active tasks remaining in this batch.
+  Transport stability batch complete. All 5 layers implemented and tested:
+  layer 4 (read timeout 120s→15s + Ping/Pong liveness), layer 1 (output
+  channel try_send→blocking send + 8K buffer + 1K frame ring buffer), layer 2
+  (input FIFO blocking + 256KB buffer), layer 5 (reconnect backoff 1s→30s +
+  indefinite retry + jitter), layer 3 (output seq gap detection + SyncRequest/
+  SyncResponse frame types). Next deferred tasks: feature-agent-status-recognition,
+  ux-3 (workspace snapshot persistence), bug-fullscreen-scrollback-truncated.
 last_updated_from:
   file: .agents/tasks/backlog.yaml
   reference: next

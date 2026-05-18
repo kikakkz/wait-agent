@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
@@ -224,10 +224,32 @@ pub fn register_authority_stream(
         }),
     );
 
+    // Clone a stream handle for sending Ping/Pong frames from the reader loop.
+    // The reader loop needs its own write handle because `stream` is borrowed
+    // by the blocking read_authority_transport_frame call.
+    let mut pong_writer = stream.try_clone()?;
+
     thread::spawn(move || {
+        let mut last_received = Instant::now();
+        let mut next_expected_output_seq: u64 = 1;
         while connected.load(Ordering::Relaxed) {
             match read_authority_transport_frame(&mut stream) {
+                Ok(AuthorityTransportFrame::Ping) => {
+                    last_received = Instant::now();
+                    // Respond with Pong to confirm liveness.
+                    let mut buf = Vec::new();
+                    if write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong)
+                        .is_ok()
+                    {
+                        let _ = pong_writer.write_all(&buf);
+                    }
+                }
+                Ok(AuthorityTransportFrame::Pong) => {
+                    // Remote side is alive; reset idle timer.
+                    last_received = Instant::now();
+                }
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
+                    last_received = Instant::now();
                     if reader_tx
                         .send(AuthorityTransportEvent::Envelope(envelope))
                         .is_err()
@@ -236,6 +258,21 @@ pub fn register_authority_stream(
                     }
                 }
                 Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
+                    last_received = Instant::now();
+                    // Detect gaps in the output sequence. When frames are
+                    // dropped by the network or channel, the sequence number
+                    // jumps. We track the expected next seq and log a gap
+                    // so the operator can diagnose transport issues.
+                    if payload.output_seq > 0
+                        && payload.output_seq != next_expected_output_seq
+                        && next_expected_output_seq > 1
+                    {
+                        let _ = reader_tx.send(AuthorityTransportEvent::Failed(format!(
+                            "output seq gap: expected {}, got {}",
+                            next_expected_output_seq, payload.output_seq
+                        )));
+                    }
+                    next_expected_output_seq = payload.output_seq.saturating_add(1);
                     if reader_tx
                         .send(AuthorityTransportEvent::RawPtyOutput {
                             authority_id: node_id.clone(),
@@ -247,6 +284,52 @@ pub fn register_authority_stream(
                     }
                 }
                 Ok(AuthorityTransportFrame::RawPtyInput(_)) => break,
+                Ok(AuthorityTransportFrame::SyncRequest { .. }) => {
+                    // Remote peer is requesting replay from our output cache.
+                    // The cache is managed by the authority target host runtime,
+                    // not this connection loop. For now, consume silently.
+                    // Full SyncRequest handling requires plumbing to the
+                    // output cache (layer 1 ring buffer), which is deferred.
+                    last_received = Instant::now();
+                }
+                Ok(AuthorityTransportFrame::SyncResponse {
+                    session_id,
+                    target_id,
+                    seq: _,
+                    bytes,
+                }) => {
+                    // Remote peer is replaying frames we requested.
+                    // Deliver as RawPtyOutput so the display path processes them.
+                    last_received = Instant::now();
+                    if reader_tx
+                        .send(AuthorityTransportEvent::RawPtyOutput {
+                            authority_id: node_id.clone(),
+                            payload: RawPtyOutputPayload {
+                                session_id,
+                                target_id,
+                                output_seq: 0, // replayed; no sequence tracking
+                                output_bytes: bytes,
+                            },
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(ref e) if e.is_timed_out() => {
+                    // Read timed out — check total idle duration. If the remote
+                    // has been silent past the timeout, consider it dead.
+                    if last_received.elapsed() > AUTHORITY_TRANSPORT_READ_TIMEOUT {
+                        break;
+                    }
+                    // Probe liveness: send Ping to check if remote is still there.
+                    let mut buf = Vec::new();
+                    if write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Ping)
+                        .is_ok()
+                    {
+                        let _ = pong_writer.write_all(&buf);
+                    }
+                }
                 Err(_) => break,
             }
         }

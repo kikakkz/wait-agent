@@ -1,0 +1,39 @@
+id: task.transport-stability-l5
+kind: task
+version: 1
+title: extend shared authority reconnect backoff for indefinite retry
+status: ready
+priority: medium
+design_ref:
+  doc: docs/remote-transport-stability-design.md
+  why:
+    - 4-attempt cap (~1.5s total window) gives up too early during longer network interruptions
+    - SSH retries for minutes; WaitAgent should match that persistence
+    - full jitter prevents thundering herd on reconnect
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.transport-stability-l2.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - attempt cap removed (unlimited retries until explicit stop)
+  - SHARED_AUTHORITY_RECONNECT_MAX_DELAY increased from 1s to 30s
+  - full jitter added to delay calculation
+  - cargo test passes
+verification:
+  - cargo test
+  - manual: connect remote, kill network interface, wait 30s, restore, verify reconnect within ~35s
+touched_paths:
+  - src/runtime/remote_node/remote_node_session_owner_runtime/owner_helpers.rs
+  - docs/remote-transport-stability-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.transport-stability-l5-reconnect-backoff.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - Unlimited retries must still respect session close signal; the stop_tx/stop_rx mechanism already handles this
+  - Full jitter: delay = random_between(base, min(max_delay, base * 2^attempt))

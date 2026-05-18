@@ -317,6 +317,21 @@ next:
       sidebar focus 在 remote session client 时，允许在选中的 client 上创建新的 remote
       session。当前只能在 local bash 上创建，remote client 可访问但无法在其上新建 session。
     status: pending
+  - id: task.transport-stability-l4
+    title: shorten authority transport read timeout and add ping/pong liveness
+    status: done
+  - id: task.transport-stability-l1
+    title: replace output channel try_send with blocking send and larger buffer
+    status: done
+  - id: task.transport-stability-l2
+    title: replace O_NONBLOCK input FIFO with large blocking ring buffer
+    status: done
+  - id: task.transport-stability-l5
+    title: extend shared authority reconnect backoff for indefinite retry
+    status: done
+  - id: task.transport-stability-l3
+    title: add output sequence numbering and SyncRequest gap recovery
+    status: done
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
@@ -361,3 +376,4 @@ notes:
   - 2026-05-12 refactor queue update: refactor-1 through refactor-4 are done and committed. refactor-5 and refactor-6 are in_progress. refactor-7 remains ready.
   - 2026-05-12 bug update: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` fixed and committed. `task.bug-remote-session-lost-after-idle` marked wontfix (cannot reproduce). `task.bug-status-recognition-inaccurate` converted to feature and deferred to before workspace snapshot.
   - 2026-05-12 new bug: `task.bug-fullscreen-scrollback-truncated` recorded. Zoom fullscreen 后 PgUp 只显示当前屏，看不到更早 scrollback。可能在 workspace 布局时 history-limit 设置不足。在 feature-agent-status-recognition 之后处理。
+  - 2026-05-18 transport stability batch: comprehensive 5-layer design documented in `docs/remote-transport-stability-design.md` after root-cause analysis of output freeze, input loss, and "authority host already stopped" errors. Implementation order: l4 (read timeout + ping/pong) → l1 (output blocking send) → l2 (input ring buffer) → l5 (reconnect backoff) → l3 (seq gap detection). Each layer has its own queued task file in `.agents/tasks/queued/`. Active task: `task.transport-stability-l4`.

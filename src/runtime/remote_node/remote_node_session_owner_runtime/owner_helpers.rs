@@ -32,9 +32,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::hash::{Hash, Hasher};
+
 const LIVE_AUTHORITY_SERVER_ID: &str = "waitagent-live-authority-owner";
 const SHARED_AUTHORITY_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(100);
-const SHARED_AUTHORITY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(1);
+const SHARED_AUTHORITY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 
 pub(super) struct LiveSessionRoute {
     pub(super) socket_name: String,
@@ -654,11 +656,25 @@ fn restore_shared_authority_state(
 }
 
 fn shared_authority_reconnect_delay(attempt: u32) -> Duration {
-    let multiplier = 1_u32 << attempt.min(4);
-    std::cmp::min(
+    // Full jitter: delay = random_between(base, min(max_delay, base * 2^attempt))
+    // Uses a hash of the attempt number for deterministic pseudo-random jitter,
+    // which avoids an external rand dependency while still spreading out
+    // reconnection attempts across peers.
+    let multiplier = 1_u32 << attempt.min(30);
+    let max = std::cmp::min(
         SHARED_AUTHORITY_RECONNECT_BASE_DELAY.saturating_mul(multiplier),
         SHARED_AUTHORITY_RECONNECT_MAX_DELAY,
-    )
+    );
+    let base_ms = SHARED_AUTHORITY_RECONNECT_BASE_DELAY.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    if max_ms <= base_ms {
+        return max;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    attempt.hash(&mut hasher);
+    let range = max_ms - base_ms + 1;
+    let jitter = hasher.finish() % range;
+    Duration::from_millis(base_ms + jitter)
 }
 
 pub(super) fn reap_inactive_authority_sessions(

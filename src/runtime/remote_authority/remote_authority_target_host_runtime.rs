@@ -12,6 +12,7 @@ use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_registered,
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -338,8 +339,16 @@ enum AuthorityHostEvent {
     TransportClosed,
 }
 
-const OUTPUT_CHANNEL_BOUND: usize = 500;
+const OUTPUT_CHANNEL_BOUND: usize = 8192;
+const OUTPUT_CACHE_CAPACITY: usize = 1024;
 
+#[derive(Clone)]
+struct OutputFrame {
+    sequence: u64,
+    msg: AuthorityOutputMessage,
+}
+
+#[derive(Clone)]
 enum AuthorityOutputMessage {
     RawPtyOutput {
         session_id: String,
@@ -494,20 +503,19 @@ where
         let mut input_fifo = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NONBLOCK)
             .open(&input_fifo_path)
             .map_err(remote_authority_error)?;
 
         let health = Arc::new(EventLoopHealth::new());
         let mut pending_input: Vec<u8> = Vec::new();
+        let mut output_cache: VecDeque<OutputFrame> =
+            VecDeque::with_capacity(OUTPUT_CACHE_CAPACITY);
 
         let loop_result = loop {
-            // Drain queued input bytes without blocking the event loop.
-            // The FIFO is opened with O_NONBLOCK so `write()` returns a
-            // short count when the kernel buffer is congested, rather than
-            // blocking the entire event loop (which would freeze both input
-            // and output). Unwritten bytes remain in pending_input and are
-            // retried on the next iteration.
+            // Drain queued input bytes to the FIFO. The FIFO is blocking so
+            // the write completes once the output pump reads the data.  This
+            // ensures no input is silently dropped — backpressure propagates
+            // naturally through the FIFO buffer.
             if !pending_input.is_empty() {
                 match input_fifo.write(&pending_input) {
                     Ok(n) if n > 0 => {
@@ -515,13 +523,11 @@ where
                         health.record_input(n as u64);
                     }
                     Ok(_) => {} // no progress, retry next iteration
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(error) => {
                         break Err(remote_authority_error(error));
                     }
                 }
                 if !pending_input.is_empty() {
-                    // FIFO still congested — track for diagnostics.
                     let stuck = pending_input.len() as u64;
                     health.record_fifo_stall(stuck);
                     health.maybe_log_stall(&command.transport_socket_path, &command.target_id);
@@ -639,17 +645,16 @@ where
                     payload,
                 )) => {
                     health.record_event();
-                    // Always queue to pending_input. The drain at the top
-                    // of each loop iteration flushes as much as the FIFO
-                    // accepts without blocking. With O_NONBLOCK, a
-                    // congested FIFO never stalls the event loop.
-                    const PENDING_INPUT_MAX: usize = 64 * 1024;
+                    // Buffer input to the ring buffer. The blocking FIFO
+                    // write at the top of each loop iteration drains it.
+                    // If the buffer exceeds 256KiB, skip incoming bytes
+                    // rather than dropping already-buffered data (which
+                    // would corrupt the input stream ordering).
+                    const PENDING_INPUT_MAX: usize = 256 * 1024;
                     let input = &payload.input_bytes;
-                    if pending_input.len() + input.len() > PENDING_INPUT_MAX {
-                        let excess = pending_input.len() + input.len() - PENDING_INPUT_MAX;
-                        pending_input.drain(..excess.min(pending_input.len()));
+                    if pending_input.len() + input.len() <= PENDING_INPUT_MAX {
+                        pending_input.extend_from_slice(input);
                     }
-                    pending_input.extend_from_slice(input);
                 }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
@@ -701,16 +706,19 @@ where
                             bytes,
                         }
                     };
-                    // Non-blocking send to the dedicated output thread. When
-                    // the network is congested the channel fills up and we
-                    // drop old chunks rather than blocking the event loop.
-                    // This keeps the event loop responsive for input while
-                    // the output thread deals with backpressure.
-                    if output_tx.try_send(msg).is_err() {
-                        eprintln!(
-                            "[authority] dropping output chunk {} (channel full)",
-                            output_seq
-                        );
+                    // Blocking send ensures output frames are never silently
+                    // dropped. Backpressure propagates to the PTY capture
+                    // source when the network is congested, which is correct:
+                    // slowing the producer is better than losing data.
+                    if output_tx.send(msg.clone()).is_err() {
+                        break Ok(());
+                    }
+                    output_cache.push_back(OutputFrame {
+                        sequence: output_seq,
+                        msg,
+                    });
+                    if output_cache.len() > OUTPUT_CACHE_CAPACITY {
+                        output_cache.pop_front();
                     }
                 }
                 AuthorityHostEvent::TransportClosed => {

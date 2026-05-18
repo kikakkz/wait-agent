@@ -135,6 +135,7 @@ pub enum Command {
     ChromeRefresh(LayoutReconcileCommand),
     ChromeRefreshSignal(UiPaneCommand),
     ChromeRefreshAll,
+    ShowErrorLog,
     Attach(AttachCommand),
     List,
     Detach(DetachCommand),
@@ -457,6 +458,11 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::ChromeRefreshAll
+            }
+            "__error-log" => {
+                args.remove(0);
+                parse_no_args(args)?;
+                Command::ShowErrorLog
             }
             "attach" => {
                 args.remove(0);

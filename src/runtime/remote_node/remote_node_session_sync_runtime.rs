@@ -2,6 +2,7 @@ use crate::cli::{
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
@@ -282,7 +283,9 @@ impl SessionSyncAuthorityManager {
             let writer = match host.writer.lock() {
                 Ok(mut guard) => guard.take(),
                 Err(poisoned) => {
-                    eprintln!("[session-sync] authority writer mutex poisoned, recovering");
+                    ERROR_LOG.log(
+                        "[session-sync] authority writer mutex poisoned, recovering".to_string(),
+                    );
                     poisoned.into_inner().take()
                 }
             };
@@ -300,7 +303,9 @@ impl SessionSyncAuthorityManager {
         match event {
             GrpcAuthorityEvent::Command(command) => {
                 if let Err(error) = self.ensure_and_send_command(session_handle, command) {
-                    eprintln!("[session-sync] failed to handle authority command: {error}");
+                    ERROR_LOG.log(format!(
+                        "[session-sync] failed to handle authority command: {error}"
+                    ));
                 }
             }
             GrpcAuthorityEvent::MirrorAccepted
@@ -316,15 +321,17 @@ impl SessionSyncAuthorityManager {
         target_id: &str,
     ) -> Result<(), LifecycleError> {
         let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
-            eprintln!("[session-sync] failed to extract session from target id `{target_id}`");
+            ERROR_LOG.log(format!(
+                "[session-sync] failed to extract session from target id `{target_id}`"
+            ));
             LifecycleError::Protocol(format!(
                 "failed to derive local session from target id `{target_id}`"
             ))
         })?;
         let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
-            eprintln!(
+            ERROR_LOG.log(format!(
                 "[session-sync] no local socket owns session `{session_name}` for `{target_id}`"
-            );
+            ));
             LifecycleError::Protocol(format!(
                 "no local workspace socket owns session `{session_name}` for `{target_id}`"
             ))
@@ -393,6 +400,21 @@ impl SessionSyncAuthorityManager {
             });
         if result.is_err() {
             self.running_hosts.remove(&target_id);
+            // Self-heal: authority host exited (e.g. authority transport
+            // closed due to a transient disconnect). Recreate the host
+            // and retry once so the command doesn't get lost.
+            if self
+                .ensure_authority_host(session_handle, &target_id)
+                .is_ok()
+            {
+                if let Some(host) = self.running_hosts.get(&target_id) {
+                    let retry = send_command_to_host(host, command);
+                    if retry.is_err() {
+                        self.running_hosts.remove(&target_id);
+                    }
+                    return retry;
+                }
+            }
         }
         result
     }

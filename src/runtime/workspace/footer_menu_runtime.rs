@@ -140,6 +140,7 @@ fn build_footer_menu_args(
         );
     }
     push_action_item(&mut args, "Quit Client", "q", "detach-client");
+    push_action_item(&mut args, "Error Log", "e", &error_log_command(executable));
     push_separator(&mut args);
 
     if sessions.is_empty() {
@@ -259,6 +260,16 @@ fn activate_target_command(
     .join(" ");
 
     format!("run-shell -b {}", tmux_quote_argument(&shell_command))
+}
+
+fn error_log_command(executable: &std::path::Path) -> String {
+    format!(
+        "display-popup -w 80% -h 80% -E {}",
+        tmux_quote_argument(&format!(
+            "{} __error-log && echo '' && echo '--- Press ENTER to close ---' && read -r",
+            executable.display(),
+        ))
+    )
 }
 
 fn close_session_command(executable: &std::path::Path, command: &FooterMenuCommand) -> String {

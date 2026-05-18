@@ -1,0 +1,43 @@
+id: task.transport-stability-l4
+kind: task
+version: 1
+title: shorten authority transport read timeout and add ping/pong liveness
+status: ready
+priority: high
+design_ref:
+  doc: docs/remote-transport-stability-design.md
+  why:
+    - 120s read timeout is the primary obstacle to fast dead-peer detection and reconnect
+    - layer 4 is the foundational change; all other recovery paths depend on it
+    - adding ping/pong frames enables proactive liveness instead of passive timeout
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on: []
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - AUTHORITY_TRANSPORT_READ_TIMEOUT reduced from 120s to 15s
+  - AuthorityTransportFrame::Ping and AuthorityTransportFrame::Pong variants added and serialized
+  - reader side sends Pong on Ping receipt; closes connection after 3 missed pings or 15s idle
+  - sender side sends Ping after 10s of frame inactivity
+  - cargo test passes
+verification:
+  - cargo test
+  - manual: connect remote, kill authority-side process, verify local detects death within ~20s
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_connection_runtime.rs
+  - src/runtime/remote_authority/remote_authority_transport_runtime.rs
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/protocol/authority_transport_frame.rs (or equivalent frame definition location)
+  - docs/remote-transport-stability-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.transport-stability-l4-read-timeout.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - Ping/Pong must be minimal frames — no payload, no side effects
+  - The 15s timeout is the total idle window; sender-side Ping every 10s ensures at least one probe before timeout
+  - Must not interfere with existing frame processing; Pong is a no-op response

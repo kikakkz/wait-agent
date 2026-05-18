@@ -1,0 +1,43 @@
+id: task.transport-stability-l3
+kind: task
+version: 1
+title: add output sequence numbering and SyncRequest gap recovery
+status: ready
+priority: low
+design_ref:
+  doc: docs/remote-transport-stability-design.md
+  why:
+    - without sequence numbers, output gaps are invisible to the observer
+    - gap detection + ring buffer replay provides SSH-equivalent reliability
+    - only meaningful after layers 1 and 4 prevent spurious drops that would trigger false gap signals
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.transport-stability-l5.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-history-update
+  - primitive.task-board-sync
+done_criteria:
+  - sequence_number: u64 added to every TargetOutput frame
+  - SyncRequest(u64, u64) and SyncResponse(Vec<OutputFrame>) frame variants added
+  - reader tracks last_sequence_number, requests sync on gap
+  - writer replays from ring buffer (layer 1) on SyncRequest; falls back to full capture-pane if ring buffer overwritten
+  - cargo test passes
+verification:
+  - cargo test
+  - manual: inject frame drop, verify SyncRequest fires and replay fills the gap
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_authority/remote_authority_connection_runtime.rs
+  - src/protocol/authority_transport_frame.rs (or equivalent)
+  - docs/remote-transport-stability-design.md
+  - .agents/tasks/backlog.yaml
+  - .agents/tasks/current.yaml
+  - .agents/tasks/queued/task.transport-stability-l3-seq-gap-detection.yaml
+  - .agents/state/task-history.yaml
+notes:
+  - sequence_number is monotonically increasing per authority target host lifetime; wraps on overflow (practical: 2^64 is never reached)
+  - SyncRequest carries (expected_start_seq, actual_received_seq); writer replays from expected_start_seq
+  - Full capture-pane sync fallback: send current pane contents as a single SyncResponse

@@ -2,6 +2,7 @@ use crate::cli::RemoteAuthorityTargetHostCommand;
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::domain::agent_detector::SHELL_NAMES;
 use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
@@ -497,8 +498,8 @@ pub(super) fn spawn_in_process_authority_target_host(
         let writer_val = match writer.lock() {
             Ok(mut guard) => guard.take(),
             Err(poisoned) => {
-                eprintln!(
-                    "[session-sync] authority writer mutex poisoned during host cleanup, recovering"
+                ERROR_LOG.log(
+                    "[session-sync] authority writer mutex poisoned during host cleanup, recovering".to_string()
                 );
                 poisoned.into_inner().take()
             }
@@ -572,7 +573,10 @@ fn bridge_live_authority_stream(
         let mut writer_guard = match writer.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("[session-sync] authority writer mutex poisoned in bridge, recovering");
+                ERROR_LOG.log(
+                    "[session-sync] authority writer mutex poisoned in bridge, recovering"
+                        .to_string(),
+                );
                 poisoned.into_inner()
             }
         };
@@ -589,8 +593,9 @@ fn bridge_live_authority_stream(
     let _ = match writer.lock() {
         Ok(mut guard) => guard.take(),
         Err(poisoned) => {
-            eprintln!(
+            ERROR_LOG.log(
                 "[session-sync] authority writer mutex poisoned in bridge cleanup, recovering"
+                    .to_string(),
             );
             poisoned.into_inner().take()
         }
@@ -629,9 +634,9 @@ pub(super) fn flush_pending_authority_commands(
     let commands = match pending.lock() {
         Ok(mut guard) => std::mem::take(&mut *guard),
         Err(poisoned) => {
-            eprintln!(
-                "[session-sync] authority pending-commands mutex poisoned during flush, \
-                 recovering"
+            ERROR_LOG.log(
+                "[session-sync] authority pending-commands mutex poisoned during flush, recovering"
+                    .to_string(),
             );
             std::mem::take(&mut *poisoned.into_inner())
         }
@@ -642,9 +647,9 @@ pub(super) fn flush_pending_authority_commands(
     let mut guard = match writer.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!(
-                "[session-sync] authority writer mutex poisoned during pending flush, \
-                 recovering"
+            ERROR_LOG.log(
+                "[session-sync] authority writer mutex poisoned during pending flush, recovering"
+                    .to_string(),
             );
             poisoned.into_inner()
         }
@@ -668,7 +673,7 @@ pub(super) fn send_command_to_host(
     let mut guard = match host.writer.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("[session-sync] authority writer mutex poisoned, recovering");
+            ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
             poisoned.into_inner()
         }
     };
@@ -692,7 +697,10 @@ pub(super) fn send_command_to_host(
         match host.pending_commands.lock() {
             Ok(mut pending) => pending.push(command),
             Err(poisoned) => {
-                eprintln!("[session-sync] authority pending-commands mutex poisoned, recovering");
+                ERROR_LOG.log(
+                    "[session-sync] authority pending-commands mutex poisoned, recovering"
+                        .to_string(),
+                );
                 poisoned.into_inner().push(command);
             }
         }
