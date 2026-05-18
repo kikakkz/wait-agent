@@ -987,13 +987,15 @@ where
         .gateway
         .clear_output_pipe(&command.socket_name, pane)
         .map_err(remote_authority_error)?;
-    runtime
-        .gateway
-        .set_output_pipe(&command.socket_name, pane, &pipe_command)
-        .map_err(remote_authority_error)?;
+    // Resize BEFORE setting up pipe-pane.  pipe-pane -I -O triggers a
+    // layout recalculation in tmux that can override a subsequent resize.
     runtime
         .gateway
         .resize_pty(&command.socket_name, pane, payload.cols, payload.rows)
+        .map_err(remote_authority_error)?;
+    runtime
+        .gateway
+        .set_output_pipe(&command.socket_name, pane, &pipe_command)
         .map_err(remote_authority_error)?;
     Ok(())
 }
