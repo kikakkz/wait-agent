@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 

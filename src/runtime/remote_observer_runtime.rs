@@ -111,6 +111,15 @@ impl RemoteObserverRuntime {
         self.terminal = TerminalEngine::new(size);
     }
 
+    /// Reset sequence tracking without clearing terminal state.
+    /// Used during reconnect: the last known screen stays visible
+    /// until the first new bootstrap chunk or target output arrives
+    /// and overwrites it naturally via feed().
+    pub fn clear_output_seq(&mut self) {
+        self.bootstrap_complete = false;
+        self.last_output_seq = None;
+    }
+
     fn apply_envelope(
         &mut self,
         envelope: &ProtocolEnvelope<ControlPlanePayload>,

@@ -125,6 +125,9 @@ impl EventDrivenPaneRuntime {
 
     pub fn run_footer(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
         let pane_target = current_tmux_pane_target();
+        let _cursor_guard = PaneCursorGuard::hide().map_err(|error| {
+            LifecycleError::Io("failed to hide footer cursor".to_string(), error)
+        })?;
         let (event_rx, pending_refreshes) =
             spawn_pane_event_stream(self.backend.clone(), &command, false).map_err(|error| {
                 LifecycleError::Io("failed to install pane event watchers".to_string(), error)
@@ -281,7 +284,7 @@ fn write_buffer(stdout: &mut impl Write, buffer: &str) -> io::Result<()> {
         write!(stdout, "\x1b[{row};1H{line}\x1b[K")?;
     }
 
-    write!(stdout, "\x1b[0m")?;
+    write!(stdout, "\x1b[0m\x1b[H")?;
     Ok(())
 }
 

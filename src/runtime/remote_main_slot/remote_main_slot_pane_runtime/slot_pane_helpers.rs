@@ -65,7 +65,17 @@ pub(super) fn activate_surface_target_with_mode(
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
 ) -> Result<(RemoteAttachmentBinding, Vec<u8>), LifecycleError> {
-    observer.begin_bootstrap();
+    let had_visible_output = observer.snapshot().has_visible_output;
+    if had_visible_output {
+        // Reconnect path: keep the last known screen visible while the
+        // new mirror is being set up. Only clear sequence tracking so
+        // incoming TargetOutput frames won't be rejected as out-of-order.
+        // The first BootstrapChunk or TargetOutput will overwrite the old
+        // terminal state naturally via feed().
+        observer.clear_output_seq();
+    } else {
+        observer.begin_bootstrap();
+    }
     let binding = remote_runtime.activate_target_with_raw_pty_mode(
         target,
         RemoteConsoleDescriptor {

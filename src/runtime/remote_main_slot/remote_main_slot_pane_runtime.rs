@@ -481,12 +481,18 @@ impl RemoteMainSlotPaneRuntime {
                             binding = None;
                             raw_input_route.clear();
                         }
-                        authority_status = authority_status_from_runtime(
-                            &remote_runtime,
-                            &target,
-                            is_present,
-                            &waiting_authority_status,
-                        );
+                        // During reconnect, keep status as Disconnected so the
+                        // last known content stays visible with reconnecting bar
+                        // instead of downgrading to WaitingForRemoteAuthority
+                        // which would force placeholder display.
+                        if reconnecting_since.is_none() {
+                            authority_status = authority_status_from_runtime(
+                                &remote_runtime,
+                                &target,
+                                is_present,
+                                &waiting_authority_status,
+                            );
+                        }
                         // When both target and authority transport are back
                         // while reconnecting, reactivate. This handles the
                         // race where Connected arrives before or after
