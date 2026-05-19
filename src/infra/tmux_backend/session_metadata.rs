@@ -8,11 +8,22 @@ use std::path::PathBuf;
 
 use super::EmbeddedTmuxBackend;
 
-// Per-thread cache: `{socket}:{session}` → content signature hash.
 // When the content above the prompt separator changes between polls,
 // the agent is Running, even if the prompt character is visible.
+//
+// The stable_count tracks consecutive polls with matching content.
+// Content must be stable for STABLE_THRESHOLD polls before the state
+// transitions from Running → Input. This adds hysteresis so brief
+// pauses during streaming output don't cause I/R flickering.
+const STABLE_THRESHOLD: u8 = 3;
+
+struct CacheEntry {
+    hash: u64,
+    stable_count: u8,
+}
+
 thread_local! {
-    static PREVIOUS_PANE_SIGNATURE: RefCell<HashMap<String, u64>> =
+    static PREVIOUS_PANE_SIGNATURE: RefCell<HashMap<String, CacheEntry>> =
         RefCell::new(HashMap::new());
 }
 
@@ -163,12 +174,50 @@ impl EmbeddedTmuxBackend {
 
                 PREVIOUS_PANE_SIGNATURE.with(|cache| {
                     let mut cache = cache.borrow_mut();
-                    if let Some(prev_sig) = cache.get(&session_key) {
-                        if *prev_sig != current_sig {
+                    if let Some(prev) = cache.get(&session_key) {
+                        if prev.hash == current_sig {
+                            // Content stable — count consecutive stable polls.
+                            // Only transition to Input after the content has
+                            // been stable for STABLE_THRESHOLD polls, so brief
+                            // pauses during streaming don't cause I/R flicker.
+                            let new_count = prev.stable_count.saturating_add(1);
+                            if new_count >= STABLE_THRESHOLD {
+                                // genuinely awaiting input
+                            } else {
+                                state = ManagedSessionTaskState::Running;
+                            }
+                            cache.insert(
+                                session_key,
+                                CacheEntry {
+                                    hash: current_sig,
+                                    stable_count: new_count,
+                                },
+                            );
+                        } else {
+                            // Content still changing — override to Running
                             state = ManagedSessionTaskState::Running;
+                            cache.insert(
+                                session_key,
+                                CacheEntry {
+                                    hash: current_sig,
+                                    stable_count: 0,
+                                },
+                            );
                         }
+                    } else {
+                        // First poll for this session — seed the cache but
+                        // keep the detector's original Input state. This
+                        // means the first poll after a transition always
+                        // shows a brief I flash, which the hysteresis on
+                        // subsequent polls smooths out.
+                        cache.insert(
+                            session_key,
+                            CacheEntry {
+                                hash: current_sig,
+                                stable_count: 0,
+                            },
+                        );
                     }
-                    cache.insert(session_key, current_sig);
                 });
             }
 

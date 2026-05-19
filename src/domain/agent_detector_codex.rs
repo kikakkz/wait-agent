@@ -149,8 +149,11 @@ impl AgentDetector for CodexDetector {
             || last_line.starts_with("> ")
             || last_lowered.contains("type your message")
             || last_lowered.contains("send a message")
-            || last_lowered.contains("tip")
-            || last_lowered.contains("ask codex")
+        // NOT checking `tip` or `ask codex` here — those keywords appear
+        // in codex's running output and would cause false Input when the
+        // prompt character (`›`) isn't visible. The temporal content-change
+        // check in session_metadata.rs distinguishes "awaiting input" from
+        // "running with visible output."
         {
             return Some(ManagedSessionTaskState::Input);
         }
