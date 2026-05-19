@@ -141,6 +141,7 @@ pub enum Command {
     Detach(DetachCommand),
     Stop(StopCommand),
     Help(String),
+    Version,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -481,7 +482,9 @@ impl Cli {
                 args.remove(0);
                 Command::Stop(parse_stop(args)?)
             }
+            "version" => Command::Version,
             "help" => Command::Help(help_text()),
+            "--version" | "-V" => Command::Version,
             "--help" | "-h" => Command::Help(help_text()),
             other => {
                 if other.starts_with("--") {
@@ -1217,6 +1220,7 @@ fn help_text() -> String {
         "  waitagent ls",
         "  waitagent detach [<target>]",
         "  waitagent stop [<target>]",
+        "  waitagent version",
     ]
     .join("\n")
 }

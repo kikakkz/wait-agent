@@ -202,6 +202,10 @@ impl CommandDispatcher {
                 println!("{help}");
                 Ok(())
             }
+            Command::Version => {
+                println!("waitagent {}", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
             Command::ShowErrorLog => {
                 let entries = crate::infra::error_log::ERROR_LOG.entries();
                 if entries.is_empty() {
