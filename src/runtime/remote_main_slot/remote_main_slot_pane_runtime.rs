@@ -197,7 +197,6 @@ impl RemoteMainSlotPaneRuntime {
     {
         let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let mut terminal = TerminalRuntime::stdio();
-        let initial_size = terminal.current_size_or_default();
         let _raw_mode = terminal.enter_raw_mode()?;
         let _cursor_guard = RemotePaneCursorGuard::hide().map_err(|error| {
             LifecycleError::Io("failed to hide remote interact cursor".to_string(), error)
@@ -212,12 +211,6 @@ impl RemoteMainSlotPaneRuntime {
                     "remote observer connection registry is not available".to_string(),
                 )
             })?;
-        let mut observer = RemoteObserverRuntime::new(
-            mailbox.clone(),
-            usize::from(initial_size.cols),
-            usize::from(initial_size.rows),
-        );
-        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox.clone());
 
         let raw_input_route = Arc::new(RawPtyInputRoute::default());
         let (event_tx, event_rx) = mpsc::channel();
@@ -229,7 +222,17 @@ impl RemoteMainSlotPaneRuntime {
             },
         );
         let resize_watcher = spawn_resize_watcher(event_tx.clone()).map_err(remote_pane_error)?;
-        spawn_mailbox_watcher(mailbox, event_tx.clone());
+        spawn_mailbox_watcher(mailbox.clone(), event_tx.clone());
+
+        // Capture terminal size after the SIGWINCH handler is active,
+        // so the remote PTY is always sized to match the local display.
+        let initial_size = terminal.current_size_or_default();
+        let mut observer = RemoteObserverRuntime::new(
+            mailbox.clone(),
+            usize::from(initial_size.cols),
+            usize::from(initial_size.rows),
+        );
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox);
         let target_presence = Arc::new(Mutex::new(true));
         spawn_target_presence_watcher(
             self.target_registry.clone(),
