@@ -322,7 +322,8 @@ impl RemoteMainSlotPaneRuntime {
                     "-v".to_string(),
                     "-l".to_string(),
                     "5".to_string(),
-                    "cat".to_string(),
+                    "sleep".to_string(),
+                    "infinity".to_string(),
                 ];
                 if let Ok(output) = backend.run_on_socket(&socket, &split_args) {
                     let session_pane = TmuxPaneId::new(output.stdout.trim().to_string());
