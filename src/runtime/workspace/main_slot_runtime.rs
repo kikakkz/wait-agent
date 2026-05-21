@@ -9,7 +9,7 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxProgram,
-    TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+    TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
 const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
+const WAITAGENT_SESSION_PANE_PREFIX: &str = "@waitagent_session_pane_";
 
 pub struct MainSlotRuntime {
     backend: EmbeddedTmuxBackend,
@@ -310,14 +311,7 @@ impl MainSlotRuntime {
                 .remote_target_record(workspace.socket_name.as_str(), &active_target)?
                 .is_some()
             {
-                self.cleanup_orphan_isolation_panes(&workspace, &workspace_main_pane)?;
-                self.backend
-                    .respawn_pane(
-                        &workspace,
-                        &workspace_main_pane,
-                        &workspace_host_program(&current_workspace.workspace_dir),
-                    )
-                    .map_err(main_slot_error)?;
+                self.cleanup_stale_isolation_pane(&workspace, &workspace_main_pane)?;
             }
         }
 
@@ -355,6 +349,9 @@ impl MainSlotRuntime {
         }
 
         let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
+
+        // If switching from a local target host on the same socket, swap its
+        // pane back to its own position before swapping in the remote session.
         if let Some(active_target) = self.active_target(&workspace)? {
             if let Some((_, target_session)) = split_qualified_target(&active_target)
                 .filter(|(sock, _)| *sock == workspace.socket_name.as_str())
@@ -377,21 +374,31 @@ impl MainSlotRuntime {
             }
         }
 
-        self.cleanup_orphan_isolation_panes(&workspace, &workspace_main_pane)?;
-        self.backend
-            .respawn_pane(
-                &workspace,
-                &workspace_main_pane,
-                &remote_main_slot_program(
-                    &self.current_executable,
+        // One-time migration: clean up stale isolation panes from old architecture
+        self.cleanup_stale_isolation_pane(&workspace, &workspace_main_pane)?;
+
+        // Find or create a persistent per-session pane for this remote target
+        let qualified_target = target.address.qualified_target();
+        let session_pane = match self.find_session_pane(&workspace, &qualified_target)? {
+            Some(existing_pane) => existing_pane,
+            None => {
+                let new_pane = self.create_remote_session_pane(
+                    &workspace,
+                    &workspace_main_pane,
                     current_workspace,
                     target.address.id().as_str(),
-                    &self.network,
-                ),
-            )
+                )?;
+                self.set_session_pane(&workspace, &qualified_target, &new_pane)?;
+                new_pane
+            }
+        };
+
+        // Swap the session pane into the display position
+        self.backend
+            .swap_panes(&workspace, &session_pane, &workspace_main_pane)
             .map_err(main_slot_error)?;
-        self.set_workspace_main_pane(&workspace, &workspace_main_pane)?;
-        self.set_active_target(&workspace, Some(&target.address.qualified_target()))?;
+        self.set_workspace_main_pane(&workspace, &session_pane)?;
+        self.set_active_target(&workspace, Some(&qualified_target))?;
         self.layout_runtime
             .disable_main_pane_output_bridge(&workspace)?;
         self.layout_runtime
@@ -634,6 +641,75 @@ impl MainSlotRuntime {
         Ok(self.remote_target_record(socket_name, target)?.is_some())
     }
 
+    fn session_pane_option_name(&self, qualified_target: &str) -> String {
+        format!(
+            "{}{}",
+            WAITAGENT_SESSION_PANE_PREFIX,
+            qualified_target.replace(':', ".")
+        )
+    }
+
+    fn find_session_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        qualified_target: &str,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let option_name = self.session_pane_option_name(qualified_target);
+        let pane_id_str = self
+            .backend
+            .show_session_option(workspace, &option_name)
+            .map_err(main_slot_error)?;
+        let Some(pane_id_str) = pane_id_str else {
+            return Ok(None);
+        };
+        let pane_id = TmuxPaneId::new(pane_id_str);
+        if self.pane_is_live(workspace, pane_id.as_str()) {
+            Ok(Some(pane_id))
+        } else {
+            // Pane died — clean up the stale option so a new one is created
+            self.backend
+                .set_session_option(workspace, &option_name, "")
+                .map_err(main_slot_error)?;
+            Ok(None)
+        }
+    }
+
+    fn set_session_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        qualified_target: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(), LifecycleError> {
+        let option_name = self.session_pane_option_name(qualified_target);
+        self.backend
+            .set_session_option(workspace, &option_name, pane.as_str())
+            .map_err(main_slot_error)
+    }
+
+    fn create_remote_session_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
+        current_workspace: &CurrentWorkspace,
+        target: &str,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        let program = remote_main_slot_program(
+            &self.current_executable,
+            current_workspace,
+            target,
+            &self.network,
+        );
+        self.backend
+            .split_pane_bottom_with_program(
+                workspace,
+                main_pane,
+                TmuxSplitSize::Cells(1),
+                true,
+                &program,
+            )
+            .map_err(main_slot_error)
+    }
+
     fn configure_main_pane_output_bridge_for_active_target(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -645,13 +721,13 @@ impl MainSlotRuntime {
             .disable_main_pane_output_bridge(workspace)
     }
 
-    /// Kill any panes in the workspace window that are not the designated
-    /// main pane, sidebar, footer, or already dead. This cleans up orphan
-    /// isolation panes left behind when `respawn-pane -k` kills a
-    /// `__remote-main-slot` process without running Drop, leaving the
-    /// `SessionPaneGuard` isolation pane (`sleep infinity`) stranded at the
-    /// main display position.
-    fn cleanup_orphan_isolation_panes(
+    /// One-time migration: find and kill a stale isolation pane (`sleep
+    /// infinity`) left over from the old `SessionPaneGuard` architecture,
+    /// then swap the main pane back to the display position.
+    ///
+    /// Only kills panes whose `current_command` contains "sleep" to avoid
+    /// touching per-session panes introduced by the new architecture.
+    fn cleanup_stale_isolation_pane(
         &self,
         workspace: &TmuxWorkspaceHandle,
         main_pane: &TmuxPaneId,
@@ -664,16 +740,22 @@ impl MainSlotRuntime {
             .backend
             .list_panes(workspace, &window)
             .map_err(main_slot_error)?;
-        for pane in &panes {
-            if pane.is_dead
-                || pane.pane_id == *main_pane
-                || pane.title == SIDEBAR_PANE_TITLE
-                || pane.title == FOOTER_PANE_TITLE
-            {
-                continue;
-            }
+        let isolation = panes.iter().find(|p| {
+            !p.is_dead
+                && p.pane_id != *main_pane
+                && p.title != SIDEBAR_PANE_TITLE
+                && p.title != FOOTER_PANE_TITLE
+                && p.current_command
+                    .as_deref()
+                    .map_or(false, |cmd| cmd.contains("sleep"))
+        });
+        if let Some(pane) = isolation {
+            let isolation_id = pane.pane_id.clone();
             self.backend
-                .kill_pane(workspace, &pane.pane_id)
+                .kill_pane(workspace, &isolation_id)
+                .map_err(main_slot_error)?;
+            self.backend
+                .swap_panes(workspace, main_pane, &isolation_id)
                 .map_err(main_slot_error)?;
         }
         Ok(())

@@ -3,7 +3,6 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxPaneId, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::{
     AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
@@ -13,11 +12,8 @@ use crate::runtime::remote_authority_transport_runtime::authority_transport_sock
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
-use crate::terminal::platform as term_platform;
 use crate::terminal::TerminalRuntime;
-use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
@@ -30,39 +26,6 @@ use std::os::unix::net::UnixStream;
 
 mod slot_pane_helpers;
 pub(crate) use slot_pane_helpers::*;
-
-/// Guard for a per-session tmux pane that isolates this session's output.
-/// On drop, restores the original main pane position and kills the session pane.
-struct SessionPaneGuard {
-    backend: EmbeddedTmuxBackend,
-    socket: TmuxSocketName,
-    session_pane: TmuxPaneId,
-    original_main_pane: TmuxPaneId,
-}
-
-impl Drop for SessionPaneGuard {
-    fn drop(&mut self) {
-        let _ = self.backend.run_on_socket(
-            &self.socket,
-            &[
-                "swap-pane".to_string(),
-                "-d".to_string(),
-                "-s".to_string(),
-                self.original_main_pane.as_str().to_string(),
-                "-t".to_string(),
-                self.session_pane.as_str().to_string(),
-            ],
-        );
-        let _ = self.backend.run_on_socket(
-            &self.socket,
-            &[
-                "kill-pane".to_string(),
-                "-t".to_string(),
-                self.session_pane.as_str().to_string(),
-            ],
-        );
-    }
-}
 
 pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
@@ -302,75 +265,6 @@ impl RemoteMainSlotPaneRuntime {
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
         let mut authority_status = waiting_authority_status.clone();
-        // Set up per-session tmux pane for scrollback isolation.
-        // If the tmux backend is not available or any step fails,
-        // fall back to stdout (existing behavior).
-        let mut _session_pane_guard: Option<SessionPaneGuard> = None;
-        if let Ok(backend) = EmbeddedTmuxBackend::from_build_env() {
-            if let Ok(main_pane) =
-                backend.target_main_pane_on_socket(&spec.socket_name, &spec.surface_scope)
-            {
-                let socket = TmuxSocketName::new(&spec.socket_name);
-                let split_args = vec![
-                    "split-window".to_string(),
-                    "-d".to_string(),
-                    "-P".to_string(),
-                    "-F".to_string(),
-                    "#{pane_id}".to_string(),
-                    "-t".to_string(),
-                    main_pane.as_str().to_string(),
-                    "-v".to_string(),
-                    "-l".to_string(),
-                    "5".to_string(),
-                    "sleep".to_string(),
-                    "infinity".to_string(),
-                ];
-                if let Ok(output) = backend.run_on_socket(&socket, &split_args) {
-                    let session_pane = TmuxPaneId::new(output.stdout.trim().to_string());
-                    if let Ok(tty_path) =
-                        backend.pane_tty_path_on_socket(&spec.socket_name, &session_pane)
-                    {
-                        if let Ok(file) = OpenOptions::new().write(true).read(true).open(&tty_path)
-                        {
-                            if let Ok(termios) = term_platform::read_termios(file.as_raw_fd()) {
-                                let _ = term_platform::write_termios(
-                                    file.as_raw_fd(),
-                                    &term_platform::make_raw(termios),
-                                );
-                            }
-                            set_session_output(Some(file));
-                            let _ = backend.run_on_socket(
-                                &socket,
-                                &[
-                                    "swap-pane".to_string(),
-                                    "-d".to_string(),
-                                    "-s".to_string(),
-                                    session_pane.as_str().to_string(),
-                                    "-t".to_string(),
-                                    main_pane.as_str().to_string(),
-                                ],
-                            );
-                            let _ = backend.run_on_socket(
-                                &socket,
-                                &[
-                                    "resize-pane".to_string(),
-                                    "-y".to_string(),
-                                    "1".to_string(),
-                                    "-t".to_string(),
-                                    main_pane.as_str().to_string(),
-                                ],
-                            );
-                            _session_pane_guard = Some(SessionPaneGuard {
-                                backend,
-                                socket,
-                                session_pane,
-                                original_main_pane: main_pane,
-                            });
-                        }
-                    }
-                }
-            }
-        }
         // Always attempt activation — output_log replay comes from the
         // local mailbox; no need to wait for authority transport.
         let activated = activate_surface_target_with_mode(
@@ -767,9 +661,6 @@ impl RemoteMainSlotPaneRuntime {
         if let Some(binding) = binding.as_ref() {
             let _ = remote_runtime.close_target(&target, binding);
         }
-        // Tear down per-session tmux pane isolation.
-        drop(_session_pane_guard);
-        set_session_output(None);
         run_result
     }
 
