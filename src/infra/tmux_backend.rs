@@ -214,7 +214,7 @@ impl EmbeddedTmuxBackend {
         self.command_runner().run(&workspace.socket_name, args)
     }
 
-    fn run_on_socket(
+    pub(crate) fn run_on_socket(
         &self,
         socket_name: &TmuxSocketName,
         args: &[String],

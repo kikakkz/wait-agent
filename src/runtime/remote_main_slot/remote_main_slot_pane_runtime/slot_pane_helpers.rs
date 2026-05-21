@@ -14,11 +14,12 @@ use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMa
 use crate::runtime::remote_observer_runtime::{RemoteObserverRuntime, RemoteObserverSnapshot};
 use crate::runtime::remote_transport_runtime::{LocalNodeMailbox, RemoteConnectionRegistry};
 use crate::terminal::{ScreenSnapshot, TerminalRuntime, TerminalSize};
+use std::cell::RefCell;
 use std::fmt;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::raw::{c_int, c_void};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -40,6 +41,30 @@ const RECONNECT_SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠸', '⠴', '⠦', '
 
 static REMOTE_PANE_SIGWINCH_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static REMOTE_DRAW_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Thread-local override for session output. When set, remote session
+/// content is written to this file (a session-specific tmux pane TTY)
+/// instead of stdout. This gives each session its own scrollback buffer.
+thread_local! {
+    static SESSION_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
+}
+
+pub(super) fn set_session_output(file: Option<File>) {
+    SESSION_OUTPUT.with(|o| *o.borrow_mut() = file);
+}
+
+fn with_session_output<R>(f: impl FnOnce(&mut File) -> R) -> Option<R> {
+    SESSION_OUTPUT.with(|o| o.borrow_mut().as_mut().map(|file| f(file)))
+}
+
+/// Return a `Box<dyn Write>` pointing to the session pane TTY when
+/// session output isolation is active, or `io::stdout()` otherwise.
+fn session_stdout() -> Box<dyn Write + 'static> {
+    match with_session_output(|f| f.try_clone()) {
+        Some(Ok(file)) => Box::new(file),
+        _ => Box::new(io::stdout()),
+    }
+}
 
 extern "C" {
     fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
@@ -101,6 +126,10 @@ pub(super) fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError
     if bytes.is_empty() {
         return Ok(());
     }
+    // Route through the per-session TTY when session output isolation is active.
+    if with_session_output(|f| f.write_all(bytes).and_then(|_| f.flush())).is_some() {
+        return Ok(());
+    }
     let mut stdout = io::stdout().lock();
     stdout.write_all(bytes).map_err(|error| {
         LifecycleError::Io("failed to write remote raw output".to_string(), error)
@@ -118,7 +147,10 @@ pub(super) fn write_remote_raw_output_with_initial_clear(
         return Ok(());
     }
     if !*screen_initialized {
-        write_escape(CLEAR_SCREEN_HOME_ESCAPE).map_err(remote_pane_error)?;
+        let clear = CLEAR_SCREEN_HOME_ESCAPE.as_bytes();
+        if with_session_output(|f| f.write_all(clear).and_then(|_| f.flush())).is_none() {
+            write_escape(CLEAR_SCREEN_HOME_ESCAPE).map_err(remote_pane_error)?;
+        }
         *screen_initialized = true;
     }
     write_remote_raw_output(bytes)
@@ -742,9 +774,9 @@ pub(super) fn draw_remote_snapshot(
         ),
     );
 
-    let mut stdout = io::stdout().lock();
+    let mut output = session_stdout();
     // Hide cursor and disable line wrapping before redraw.
-    write!(stdout, "\x1b[?25l\x1b[?7l").map_err(|error| {
+    write!(output, "\x1b[?25l\x1b[?7l").map_err(|error| {
         LifecycleError::Io(
             "failed to hide remote main-slot cursor before redraw".to_string(),
             error,
@@ -752,7 +784,7 @@ pub(super) fn draw_remote_snapshot(
     })?;
     for row in 0..usize::from(viewport.rows.max(1)) {
         let line = rendered_lines.get(row).map(String::as_str).unwrap_or("");
-        write!(stdout, "\x1b[{};1H\x1b[2K{}", row + 1, line).map_err(|error| {
+        write!(output, "\x1b[{};1H\x1b[2K{}", row + 1, line).map_err(|error| {
             LifecycleError::Io("failed to draw remote main-slot output".to_string(), error)
         })?;
     }
@@ -762,13 +794,13 @@ pub(super) fn draw_remote_snapshot(
         && reconnecting_elapsed.is_none()
         && matches!(authority_status, AuthorityTransportStatus::Connected)
     {
-        render_remote_cursor(&mut stdout, active_screen)?;
+        render_remote_cursor(&mut output, active_screen)?;
     } else {
-        write!(stdout, "\x1b[?7h\x1b[?25l").map_err(|error| {
+        write!(output, "\x1b[?7h\x1b[?25l").map_err(|error| {
             LifecycleError::Io("failed to hide remote main-slot cursor".to_string(), error)
         })?;
     }
-    stdout.flush().map_err(|error| {
+    output.flush().map_err(|error| {
         LifecycleError::Io("failed to flush remote main-slot output".to_string(), error)
     })
 }
@@ -792,13 +824,13 @@ fn render_reconnecting_status(
 }
 
 fn render_remote_cursor(
-    stdout: &mut io::StdoutLock<'_>,
+    output: &mut impl Write,
     active_screen: &ScreenSnapshot,
 ) -> Result<(), LifecycleError> {
     let display_row = usize::from(active_screen.cursor_row.saturating_add(1));
     let display_col = usize::from(active_screen.cursor_col.saturating_add(1));
     write!(
-        stdout,
+        output,
         "\x1b[?7h\x1b[{};{}H{}",
         display_row,
         display_col,

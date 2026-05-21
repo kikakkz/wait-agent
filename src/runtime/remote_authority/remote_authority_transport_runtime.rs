@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTHORITY_TRANSPORT_SERVER_ID: &str = "waitagent-main-slot";
 pub struct RemoteAuthorityTransportRuntime {
     node_id: String,
@@ -414,7 +415,7 @@ fn bridge_authority_transport(
     mut transport_stream: UnixStream,
     sink: QueuedAuthorityStreamSink,
 ) -> Result<(), RemoteAuthorityTransportError> {
-    transport_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_READ_TIMEOUT))?;
+    transport_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT))?;
     let node_id = read_client_hello(&mut transport_stream)?;
 
     let (mut local_reader, pane_stream) = UnixStream::pair()?;
@@ -451,7 +452,7 @@ fn forward_authority_frames_to_control_plane(
     // Set a short read timeout so we can handle Ping/Pong and detect
     // peer death within AUTHORITY_TRANSPORT_READ_TIMEOUT seconds.
     reader
-        .set_read_timeout(Some(AUTHORITY_TRANSPORT_READ_TIMEOUT))
+        .set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT))
         .ok();
     let mut last_received = Instant::now();
 

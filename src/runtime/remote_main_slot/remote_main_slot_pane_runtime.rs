@@ -3,17 +3,21 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxPaneId, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::{
     AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
     AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
 };
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
-use crate::runtime::remote_main_slot_runtime::RemoteMainSlotRuntime;
+use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
+use crate::terminal::platform as term_platform;
 use crate::terminal::TerminalRuntime;
+use std::fs::OpenOptions;
 use std::io;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
@@ -26,6 +30,39 @@ use std::os::unix::net::UnixStream;
 
 mod slot_pane_helpers;
 pub(crate) use slot_pane_helpers::*;
+
+/// Guard for a per-session tmux pane that isolates this session's output.
+/// On drop, restores the original main pane position and kills the session pane.
+struct SessionPaneGuard {
+    backend: EmbeddedTmuxBackend,
+    socket: TmuxSocketName,
+    session_pane: TmuxPaneId,
+    original_main_pane: TmuxPaneId,
+}
+
+impl Drop for SessionPaneGuard {
+    fn drop(&mut self) {
+        let _ = self.backend.run_on_socket(
+            &self.socket,
+            &[
+                "swap-pane".to_string(),
+                "-d".to_string(),
+                "-s".to_string(),
+                self.original_main_pane.as_str().to_string(),
+                "-t".to_string(),
+                self.session_pane.as_str().to_string(),
+            ],
+        );
+        let _ = self.backend.run_on_socket(
+            &self.socket,
+            &[
+                "kill-pane".to_string(),
+                "-t".to_string(),
+                self.session_pane.as_str().to_string(),
+            ],
+        );
+    }
+}
 
 pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
@@ -260,10 +297,79 @@ impl RemoteMainSlotPaneRuntime {
         });
         let mut console_seq = 0u64;
         let mut input_signal_decoder = RemoteInteractInputSignalDecoder::default();
+        let mut paused_input_buffer: Vec<Vec<u8>> = Vec::new();
         let mut binding = None;
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
         let mut authority_status = waiting_authority_status.clone();
+        // Set up per-session tmux pane for scrollback isolation.
+        // If the tmux backend is not available or any step fails,
+        // fall back to stdout (existing behavior).
+        let mut _session_pane_guard: Option<SessionPaneGuard> = None;
+        if let Ok(backend) = EmbeddedTmuxBackend::from_build_env() {
+            if let Ok(main_pane) =
+                backend.target_main_pane_on_socket(&spec.socket_name, &spec.surface_scope)
+            {
+                let socket = TmuxSocketName::new(&spec.socket_name);
+                let split_args = vec![
+                    "split-window".to_string(),
+                    "-d".to_string(),
+                    "-P".to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}".to_string(),
+                    "-t".to_string(),
+                    main_pane.as_str().to_string(),
+                    "-v".to_string(),
+                    "-l".to_string(),
+                    "5".to_string(),
+                    "cat".to_string(),
+                ];
+                if let Ok(output) = backend.run_on_socket(&socket, &split_args) {
+                    let session_pane = TmuxPaneId::new(output.stdout.trim().to_string());
+                    if let Ok(tty_path) =
+                        backend.pane_tty_path_on_socket(&spec.socket_name, &session_pane)
+                    {
+                        if let Ok(file) = OpenOptions::new().write(true).read(true).open(&tty_path)
+                        {
+                            if let Ok(termios) = term_platform::read_termios(file.as_raw_fd()) {
+                                let _ = term_platform::write_termios(
+                                    file.as_raw_fd(),
+                                    &term_platform::make_raw(termios),
+                                );
+                            }
+                            set_session_output(Some(file));
+                            let _ = backend.run_on_socket(
+                                &socket,
+                                &[
+                                    "swap-pane".to_string(),
+                                    "-d".to_string(),
+                                    "-s".to_string(),
+                                    session_pane.as_str().to_string(),
+                                    "-t".to_string(),
+                                    main_pane.as_str().to_string(),
+                                ],
+                            );
+                            let _ = backend.run_on_socket(
+                                &socket,
+                                &[
+                                    "resize-pane".to_string(),
+                                    "-y".to_string(),
+                                    "1".to_string(),
+                                    "-t".to_string(),
+                                    main_pane.as_str().to_string(),
+                                ],
+                            );
+                            _session_pane_guard = Some(SessionPaneGuard {
+                                backend,
+                                socket,
+                                session_pane,
+                                original_main_pane: main_pane,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Always attempt activation — output_log replay comes from the
         // local mailbox; no need to wait for authority transport.
         let activated = activate_surface_target_with_mode(
@@ -278,12 +384,20 @@ impl RemoteMainSlotPaneRuntime {
             raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
             write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
             binding = Some(activated_binding);
+            flush_paused_input(
+                &remote_runtime,
+                &target,
+                binding.as_ref().unwrap(),
+                &paused_input_buffer,
+                &mut console_seq,
+            )?;
         }
         let run_result = (|| -> Result<(), LifecycleError> {
             let mut reconnecting_since: Option<Instant> = None;
             let mut reconnect_animation_frame: u8 = 0;
 
             if should_draw_remote_snapshot(binding.as_ref()) {
+                let _ = observer.sync();
                 draw_remote_snapshot(
                     &terminal,
                     &target,
@@ -305,6 +419,7 @@ impl RemoteMainSlotPaneRuntime {
                                 return Ok(());
                             }
                             reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
+                            let _ = observer.sync();
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -330,6 +445,11 @@ impl RemoteMainSlotPaneRuntime {
                         let raw = raw_output_reader
                             .sync_and_collect_raw()
                             .map_err(remote_protocol_error)?;
+                        // Keep the observer's terminal engine in sync with the
+                        // mailbox so that draw_remote_snapshot (used during
+                        // reconnection) shows the most recent content rather
+                        // than stale placeholder state.
+                        let _ = observer.sync();
                         if raw.is_empty() {
                             continue;
                         }
@@ -408,6 +528,13 @@ impl RemoteMainSlotPaneRuntime {
                                         )?;
                                         binding = Some(result.0);
                                         activated = true;
+                                        flush_paused_input(
+                                            &remote_runtime,
+                                            &target,
+                                            binding.as_ref().unwrap(),
+                                            &paused_input_buffer,
+                                            &mut console_seq,
+                                        )?;
                                     }
                                     Err(error) => {
                                         authority_status =
@@ -421,6 +548,7 @@ impl RemoteMainSlotPaneRuntime {
                             // a stale snapshot (which would clobber UI elements
                             // like claude's input area separator).
                             if !activated {
+                                let _ = observer.sync();
                                 draw_remote_snapshot(
                                     &terminal,
                                     &target,
@@ -437,9 +565,15 @@ impl RemoteMainSlotPaneRuntime {
                                 .handle_authority_disconnect(target.address.authority_id());
                             let _is_present = target_is_present(&target_presence);
                             authority_status = AuthorityTransportStatus::Disconnected;
+                            // Reset screen_initialized so that the recovery
+                            // path sends a full clear-screen before writing
+                            // new raw PTY output, rather than writing on top
+                            // of whatever draw_remote_snapshot left on screen.
+                            raw_screen_initialized = false;
                             // Keep binding and last content visible; start reconnecting
                             reconnecting_since = Some(Instant::now());
                             reconnect_animation_frame = 0;
+                            let _ = observer.sync();
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -498,8 +632,17 @@ impl RemoteMainSlotPaneRuntime {
                     },
                     RemotePaneEvent::TargetPresenceChanged(is_present) => {
                         if !is_present && reconnecting_since.is_none() {
-                            // Target truly gone while not reconnecting → exit
-                            return Ok(());
+                            // The target presence watcher polls at 250ms with a
+                            // 4-miss grace (1 second latency). If the authority
+                            // transport reconnected during this window, a stale
+                            // false event can arrive after `reconnecting_since`
+                            // was already cleared. In that case the session must
+                            // NOT exit — the watcher will correct on the next poll.
+                            if !remote_runtime.has_connection(target.address.authority_id()) {
+                                return Ok(());
+                            }
+                            // Connection is active; the false event is stale.
+                            // Skip it — the next poll will send the correct state.
                         }
                         if !is_present {
                             // During reconnect: target disappearance is a
@@ -556,6 +699,13 @@ impl RemoteMainSlotPaneRuntime {
                                     )?;
                                     binding = Some(result.0);
                                     activated = true;
+                                    flush_paused_input(
+                                        &remote_runtime,
+                                        &target,
+                                        binding.as_ref().unwrap(),
+                                        &paused_input_buffer,
+                                        &mut console_seq,
+                                    )?;
                                 }
                                 Err(error) => {
                                     authority_status =
@@ -564,6 +714,7 @@ impl RemoteMainSlotPaneRuntime {
                             }
                         }
                         if !activated {
+                            let _ = observer.sync();
                             draw_remote_snapshot(
                                 &terminal,
                                 &target,
@@ -601,6 +752,12 @@ impl RemoteMainSlotPaneRuntime {
                                 console_seq,
                                 bytes,
                             )?;
+                        } else if !bytes.is_empty() && !raw_forwarded {
+                            // During reconnection (binding is None), buffer
+                            // input locally so keystrokes aren't lost. The
+                            // buffer is flushed when reactivation restores
+                            // the binding.
+                            paused_input_buffer.push(bytes);
                         }
                     }
                 }
@@ -609,6 +766,9 @@ impl RemoteMainSlotPaneRuntime {
         if let Some(binding) = binding.as_ref() {
             let _ = remote_runtime.close_target(&target, binding);
         }
+        // Tear down per-session tmux pane isolation.
+        drop(_session_pane_guard);
+        set_session_output(None);
         run_result
     }
 
@@ -635,6 +795,23 @@ impl RemoteMainSlotPaneRuntime {
         }
         Ok(session)
     }
+}
+
+/// Flush any input that was buffered during a reconnection period.
+/// Each buffered chunk is sent as a separate PTY input message so
+/// that keystrokes queued while the binding was down are not lost.
+fn flush_paused_input(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: &RemoteAttachmentBinding,
+    buffer: &[Vec<u8>],
+    console_seq: &mut u64,
+) -> Result<(), LifecycleError> {
+    for chunk in buffer {
+        *console_seq += 1;
+        remote_runtime.send_raw_pty_input(target, binding, *console_seq, chunk.clone())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

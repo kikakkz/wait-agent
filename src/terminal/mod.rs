@@ -2,7 +2,7 @@
 
 mod ansi;
 mod engine;
-mod platform;
+pub(crate) mod platform;
 mod runtime;
 mod types;
 

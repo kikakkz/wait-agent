@@ -21,7 +21,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
@@ -211,7 +212,7 @@ pub fn register_authority_stream(
         )));
     }
 
-    stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_READ_TIMEOUT))?;
+    stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT))?;
     let writer = stream.try_clone()?;
     writer.set_write_timeout(Some(AUTHORITY_TRANSPORT_WRITE_TIMEOUT))?;
     let connected = Arc::new(AtomicBool::new(true));
