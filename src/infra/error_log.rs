@@ -1,54 +1,47 @@
-use std::sync::Mutex;
+use std::fs::{read_to_string, OpenOptions};
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_ENTRIES: usize = 500;
+const LOG_FILE: &str = "/tmp/waitagent-diag.log";
 
-#[derive(Clone)]
-struct LogEntry {
-    timestamp: u128,
-    message: String,
-}
-
-pub struct ErrorLog {
-    entries: Mutex<Vec<LogEntry>>,
-}
+pub struct ErrorLog;
 
 impl ErrorLog {
     pub const fn new() -> Self {
-        Self {
-            entries: Mutex::new(Vec::new()),
-        }
+        Self
     }
 
     pub fn log(&self, message: String) {
-        let mut entries = match self.entries.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        entries.push(LogEntry {
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-            message,
-        });
-        while entries.len() > MAX_ENTRIES {
-            entries.remove(0);
-        }
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let line = format!("[{}.{:03}] {}\n", ts / 1000, ts % 1000, message);
+        let _ = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+            .and_then(|mut f| f.write_all(line.as_bytes()));
     }
 
     pub fn entries(&self) -> Vec<(u128, String)> {
-        match self.entries.lock() {
-            Ok(guard) => guard
-                .iter()
-                .map(|e| (e.timestamp, e.message.clone()))
-                .collect(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .iter()
-                .map(|e| (e.timestamp, e.message.clone()))
-                .collect(),
-        }
+        let content = match read_to_string(LOG_FILE) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        content
+            .lines()
+            .filter_map(|line| {
+                if line.len() < 14 || !line.starts_with('[') {
+                    return None;
+                }
+                let secs: u128 = line[1..11].parse().ok()?;
+                let millis: u128 = line[12..15].parse().ok()?;
+                let ts = secs * 1000 + millis;
+                let msg = line[16..].to_string();
+                Some((ts, msg))
+            })
+            .collect()
     }
 }
 
