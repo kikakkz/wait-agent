@@ -392,6 +392,15 @@ impl MainSlotRuntime {
                         "[diag][{}] swapping pane {:?} with workspace_main_pane {:?}",
                         target_id, active_host_pane_id, workspace_main_pane
                     ));
+                    // Check if the session pane for the remote target we're
+                    // about to activate shares the same pane as the local host
+                    // pane being swapped back. If so, swap_panes will move the
+                    // session content to the old display position, and we must
+                    // update the session pane mapping accordingly.
+                    let previous_main_pane = workspace_main_pane.clone();
+                    let session_moved = self
+                        .find_session_pane(&workspace, &qualified_target)?
+                        .map_or(false, |p| p.as_str() == active_host_pane_id);
                     self.backend
                         .swap_panes(
                             &workspace,
@@ -399,7 +408,15 @@ impl MainSlotRuntime {
                             &workspace_main_pane,
                         )
                         .map_err(main_slot_error)?;
-                    workspace_main_pane = TmuxPaneId::new(active_host_pane_id);
+                    if session_moved {
+                        // swap_panes exchanged content between active_host_pane
+                        // and the display position. The session pane's content
+                        // is now at the old display position.
+                        self.set_session_pane(&workspace, &qualified_target, &previous_main_pane)?;
+                        workspace_main_pane = previous_main_pane;
+                    } else {
+                        workspace_main_pane = TmuxPaneId::new(active_host_pane_id);
+                    }
                 } else {
                     ERROR_LOG.log(format!(
                         "[diag][{}] infer_target_main_pane returned None, skipping host swap",
