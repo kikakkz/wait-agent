@@ -10,6 +10,7 @@ use crate::cli::{
     UiPaneCommand,
 };
 use crate::domain::workspace::WorkspaceInstanceId;
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
     TmuxSocketName, TmuxWorkspaceHandle,
@@ -122,16 +123,36 @@ impl WorkspaceLayoutRuntime {
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
+        ERROR_LOG.log(format!(
+            "[diag] refresh_workspace_chrome: session={:?}, native_fullscreen_active={:?}",
+            workspace.session_name,
+            self.native_fullscreen_active(workspace)
+        ));
         if self.native_fullscreen_active(workspace)? {
-            return self
+            let r = self
                 .backend
                 .signal_chrome_refresh_on_socket(
                     workspace.socket_name.as_str(),
                     workspace.session_name.as_str(),
                 )
                 .map_err(tmux_layout_error);
+            ERROR_LOG.log(format!(
+                "[diag] refresh_workspace_chrome: native_fullscreen path, result={:?}",
+                r.is_ok()
+            ));
+            return r;
         }
-        if self.notify_existing_chrome_panes(workspace)? {
+        let notified = self.notify_existing_chrome_panes(workspace)?;
+        ERROR_LOG.log(format!(
+            "[diag] refresh_workspace_chrome: notify_existing={}, will {}",
+            notified,
+            if notified {
+                "return Ok"
+            } else {
+                "call refresh_chrome"
+            }
+        ));
+        if notified {
             Ok(())
         } else {
             self.refresh_chrome(workspace, workspace_dir)
@@ -793,28 +814,55 @@ fn resolve_effective_main_pane(
     suggested: &TmuxPaneId,
 ) -> TmuxPaneId {
     let Some(previous) = previous else {
+        ERROR_LOG.log(format!(
+            "[diag] resolve_effective_main_pane: no previous, using suggested={:?}",
+            suggested
+        ));
         return suggested.clone();
     };
     if previous == suggested {
         return suggested.clone();
     }
+    ERROR_LOG.log(format!(
+        "[diag] resolve_effective_main_pane: previous={:?} != suggested={:?}, checking validity",
+        previous, suggested
+    ));
     // The previously-configured main pane differs from main_pane_id()'s
     // suggestion. Check if it's still a valid non-chrome pane — if so,
     // prefer it to prevent a stale leftover pane (e.g., the 1-cell pane
     // from create_remote_session_pane which has a lower pane index than
     // the display pane after swap-pane) from being designated as main.
     let Ok(window) = backend.current_window(workspace) else {
+        ERROR_LOG.log(format!(
+			"[diag] resolve_effective_main_pane: current_window failed, falling back to suggested={:?}",
+			suggested
+		));
         return suggested.clone();
     };
     let Ok(panes) = backend.list_panes(workspace, &window) else {
+        ERROR_LOG.log(format!(
+            "[diag] resolve_effective_main_pane: list_panes failed, falling back to suggested={:?}",
+            suggested
+        ));
         return suggested.clone();
     };
-    if panes.iter().any(|p| {
+    let previous_valid = panes.iter().any(|p| {
         p.pane_id == *previous
             && !p.is_dead
             && p.title != SIDEBAR_PANE_TITLE
             && p.title != FOOTER_PANE_TITLE
-    }) {
+    });
+    ERROR_LOG.log(format!(
+        "[diag] resolve_effective_main_pane: previous={:?} valid={}, going with {}",
+        previous,
+        previous_valid,
+        if previous_valid {
+            "previous"
+        } else {
+            "suggested"
+        }
+    ));
+    if previous_valid {
         previous.clone()
     } else {
         suggested.clone()

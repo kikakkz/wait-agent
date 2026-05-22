@@ -7,6 +7,7 @@ use crate::cli::{ActivateTargetCommand, MainPaneDiedCommand, NewTargetCommand};
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxProgram,
     TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
@@ -334,13 +335,22 @@ impl MainSlotRuntime {
         current_workspace: &CurrentWorkspace,
         target: &crate::domain::session_catalog::ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
+        let target_id = target.address.id().as_str().to_string();
+        let qualified_target = target.address.qualified_target();
+        ERROR_LOG.log(format!(
+            "[diag][{}] activate_remote_target_in_workspace: start",
+            target_id
+        ));
+
         let workspace = workspace_handle(
             &current_workspace.socket_name,
             &current_workspace.session_name,
         );
-        if self.active_target(&workspace)?.as_deref()
-            == Some(target.address.qualified_target().as_str())
-        {
+        if self.active_target(&workspace)?.as_deref() == Some(qualified_target.as_str()) {
+            ERROR_LOG.log(format!(
+                "[diag][{}] already active target, re-syncing bindings",
+                target_id
+            ));
             self.layout_runtime
                 .disable_main_pane_output_bridge(&workspace)?;
             self.layout_runtime
@@ -349,10 +359,18 @@ impl MainSlotRuntime {
         }
 
         let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] workspace_main_pane={:?}",
+            target_id, workspace_main_pane
+        ));
 
         // If switching from a local target host on the same socket, swap its
         // pane back to its own position before swapping in the remote session.
         if let Some(active_target) = self.active_target(&workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag][{}] active_target={:?}",
+                target_id, active_target
+            ));
             if let Some((_, target_session)) = split_qualified_target(&active_target)
                 .filter(|(sock, _)| *sock == workspace.socket_name.as_str())
             {
@@ -361,7 +379,15 @@ impl MainSlotRuntime {
                     socket_name: TmuxSocketName::new(workspace.socket_name.as_str()),
                     session_name: TmuxSessionName::new(target_session),
                 };
+                ERROR_LOG.log(format!(
+                    "[diag][{}] swapping local host pane back for target_workspace={:?}",
+                    target_id, target_workspace.session_name
+                ));
                 if let Some(active_host_pane_id) = self.infer_target_main_pane(&target_workspace) {
+                    ERROR_LOG.log(format!(
+                        "[diag][{}] swapping pane {:?} with workspace_main_pane {:?}",
+                        target_id, active_host_pane_id, workspace_main_pane
+                    ));
                     self.backend
                         .swap_panes(
                             &workspace,
@@ -370,41 +396,101 @@ impl MainSlotRuntime {
                         )
                         .map_err(main_slot_error)?;
                     workspace_main_pane = TmuxPaneId::new(active_host_pane_id);
+                } else {
+                    ERROR_LOG.log(format!(
+                        "[diag][{}] infer_target_main_pane returned None, skipping host swap",
+                        target_id
+                    ));
                 }
             }
         }
 
         // One-time migration: clean up stale isolation panes from old architecture
         self.cleanup_stale_isolation_pane(&workspace, &workspace_main_pane)?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] after cleanup_stale_isolation_pane, workspace_main_pane={:?}",
+            target_id, workspace_main_pane
+        ));
 
         // Find or create a persistent per-session pane for this remote target
-        let qualified_target = target.address.qualified_target();
         let session_pane = match self.find_session_pane(&workspace, &qualified_target)? {
-            Some(existing_pane) => existing_pane,
+            Some(existing_pane) => {
+                ERROR_LOG.log(format!(
+                    "[diag][{}] found existing session_pane={:?}",
+                    target_id, existing_pane
+                ));
+                existing_pane
+            }
             None => {
+                ERROR_LOG.log(format!(
+                    "[diag][{}] creating new remote session pane",
+                    target_id
+                ));
                 let new_pane = self.create_remote_session_pane(
                     &workspace,
                     &workspace_main_pane,
                     current_workspace,
                     target.address.id().as_str(),
                 )?;
+                ERROR_LOG.log(format!(
+                    "[diag][{}] new remote session pane={:?}",
+                    target_id, new_pane
+                ));
                 self.set_session_pane(&workspace, &qualified_target, &new_pane)?;
                 new_pane
             }
         };
 
         // Swap the session pane into the display position
+        ERROR_LOG.log(format!(
+            "[diag][{}] swapping session_pane={:?} with workspace_main_pane={:?}",
+            target_id, session_pane, workspace_main_pane
+        ));
         self.backend
             .swap_panes(&workspace, &session_pane, &workspace_main_pane)
-            .map_err(main_slot_error)?;
+            .map_err(|e| {
+                ERROR_LOG.log(format!("[diag][{}] swap_panes FAILED: {:?}", target_id, e));
+                main_slot_error(e)
+            })?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] swap_panes succeeded, setting workspace main pane",
+            target_id
+        ));
+
         self.set_workspace_main_pane(&workspace, &session_pane)?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] set_workspace_main_pane done, setting active_target",
+            target_id
+        ));
+
         self.set_active_target(&workspace, Some(&qualified_target))?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] set_active_target done, disabling bridge",
+            target_id
+        ));
+
         self.layout_runtime
             .disable_main_pane_output_bridge(&workspace)?;
+        ERROR_LOG.log(format!(
+            "[diag][{}] bridge disabled, syncing main slot bindings",
+            target_id
+        ));
+
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
-        self.layout_runtime
-            .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir)
+        ERROR_LOG.log(format!(
+            "[diag][{}] bindings synced, refreshing chrome",
+            target_id
+        ));
+
+        let result = self
+            .layout_runtime
+            .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir);
+        ERROR_LOG.log(format!(
+            "[diag][{}] refresh_workspace_chrome result={:?}",
+            target_id, result
+        ));
+        result
     }
 
     fn activate_target_after_main_pane_exit(
