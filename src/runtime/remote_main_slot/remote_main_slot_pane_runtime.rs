@@ -304,12 +304,53 @@ impl RemoteMainSlotPaneRuntime {
                     &observer.snapshot(),
                     &authority_status,
                     None,
+                    None,
                     0,
                 )?;
             }
 
+            // Track initial connecting time so we can show
+            // "connecting to remote... Xs" animation while the
+            // gRPC bridge establishes (instead of a static placeholder).
+            let mut initial_connecting_since: Option<Instant> = if matches!(
+                authority_status,
+                AuthorityTransportStatus::WaitingForRemoteAuthority
+            ) && binding.is_some()
+            {
+                Some(Instant::now())
+            } else {
+                None
+            };
+
             loop {
-                let event = if reconnecting_since.is_some() {
+                let event = if let Some(started) = initial_connecting_since {
+                    match event_rx.recv_timeout(slot_pane_helpers::RECONNECT_ANIMATION_INTERVAL) {
+                        Ok(event) => {
+                            initial_connecting_since = None;
+                            event
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            let elapsed = started.elapsed();
+                            if elapsed > slot_pane_helpers::INITIAL_CONNECT_TIMEOUT {
+                                return Ok(());
+                            }
+                            reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
+                            let _ = observer.sync();
+                            draw_remote_snapshot(
+                                &terminal,
+                                &target,
+                                binding.as_ref(),
+                                &observer.snapshot(),
+                                &authority_status,
+                                Some(elapsed),
+                                None,
+                                reconnect_animation_frame,
+                            )?;
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                } else if reconnecting_since.is_some() {
                     match event_rx.recv_timeout(slot_pane_helpers::RECONNECT_ANIMATION_INTERVAL) {
                         Ok(event) => event,
                         Err(RecvTimeoutError::Timeout) => {
@@ -325,6 +366,7 @@ impl RemoteMainSlotPaneRuntime {
                                 binding.as_ref(),
                                 &observer.snapshot(),
                                 &authority_status,
+                                None,
                                 Some(elapsed),
                                 reconnect_animation_frame,
                             )?;
@@ -380,6 +422,7 @@ impl RemoteMainSlotPaneRuntime {
                                 None,
                                 &observer.snapshot(),
                                 &authority_status,
+                                None,
                                 reconnecting_since.map(|s| s.elapsed()),
                                 reconnect_animation_frame,
                             )?;
@@ -455,6 +498,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &observer.snapshot(),
                                     &authority_status,
                                     None,
+                                    None,
                                     0,
                                 )?;
                             }
@@ -479,6 +523,7 @@ impl RemoteMainSlotPaneRuntime {
                                 binding.as_ref(),
                                 &observer.snapshot(),
                                 &authority_status,
+                                None,
                                 Some(Duration::ZERO),
                                 0,
                             )?;
@@ -491,6 +536,7 @@ impl RemoteMainSlotPaneRuntime {
                                 binding.as_ref(),
                                 &observer.snapshot(),
                                 &authority_status,
+                                None,
                                 None,
                                 0,
                             )?;
@@ -620,6 +666,7 @@ impl RemoteMainSlotPaneRuntime {
                                 binding.as_ref(),
                                 &observer.snapshot(),
                                 &authority_status,
+                                None,
                                 reconnecting_since.map(|i| i.elapsed()),
                                 reconnect_animation_frame,
                             )?;

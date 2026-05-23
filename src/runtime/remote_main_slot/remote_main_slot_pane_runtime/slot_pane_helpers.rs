@@ -36,6 +36,7 @@ pub(super) const CLEAR_SCREEN_HOME_ESCAPE: &str = "\x1b[2J\x1b[H";
 const TARGET_PRESENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET_PRESENCE_MISS_GRACE_POLLS: usize = 4;
 pub(crate) const RECONNECT_ANIMATION_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const RECONNECT_SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠸', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -721,6 +722,7 @@ pub(super) fn draw_remote_snapshot(
     binding: Option<&RemoteAttachmentBinding>,
     snapshot: &RemoteObserverSnapshot,
     authority_status: &AuthorityTransportStatus,
+    initial_connecting_elapsed: Option<Duration>,
     reconnecting_elapsed: Option<Duration>,
     reconnect_animation_frame: u8,
 ) -> Result<(), LifecycleError> {
@@ -761,6 +763,12 @@ pub(super) fn draw_remote_snapshot(
             )
             .to_string()
         });
+    }
+    // Overlay initial connecting status bar on the last row
+    if let Some(elapsed) = initial_connecting_elapsed {
+        let last_row = rendered_lines.len().saturating_sub(1);
+        rendered_lines[last_row] =
+            render_initial_connecting_status(viewport, elapsed, reconnect_animation_frame);
     }
     // Overlay reconnecting status bar on the last row when reconnecting
     if let Some(elapsed) = reconnecting_elapsed {
@@ -832,6 +840,24 @@ fn render_reconnecting_status(
     let padded = format!("{text:<width$}");
     // Use amber background with black text for visibility
     format!("\x1b[48;5;220m\x1b[30m{padded}\x1b[0m")
+}
+
+fn render_initial_connecting_status(
+    viewport: TerminalSize,
+    elapsed: Duration,
+    animation_frame: u8,
+) -> String {
+    let spinner =
+        RECONNECT_SPINNER_FRAMES[animation_frame as usize % RECONNECT_SPINNER_FRAMES.len()];
+    let secs = elapsed.as_secs();
+    let text = format!(" {} connecting to remote... {}s ", spinner, secs);
+    let width = usize::from(viewport.cols.max(1));
+    if text.chars().count() >= width {
+        return text.chars().take(width).collect();
+    }
+    let padded = format!("{text:<width$}");
+    // Use blue background with black text for visibility
+    format!("\x1b[48;5;33m\x1b[30m{padded}\x1b[0m")
 }
 
 fn render_remote_cursor(

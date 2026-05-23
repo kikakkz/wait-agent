@@ -409,11 +409,14 @@ impl MainSlotRuntime {
                         )
                         .map_err(main_slot_error)?;
                     if session_moved {
-                        // swap_panes exchanged content between active_host_pane
-                        // and the display position. The session pane's content
-                        // is now at the old display position.
-                        self.set_session_pane(&workspace, &qualified_target, &previous_main_pane)?;
-                        workspace_main_pane = previous_main_pane;
+                        // The session pane IS the active_host_pane, so
+                        // swap_panes moved it to the display position.
+                        // The session pane mapping (pointing to
+                        // active_host_pane_id) is already correct — do not
+                        // change it to previous_main_pane, which would
+                        // cause find_session_pane to later kill the wrong
+                        // pane (the local target's main pane).
+                        workspace_main_pane = TmuxPaneId::new(active_host_pane_id.clone());
                     } else {
                         workspace_main_pane = TmuxPaneId::new(active_host_pane_id);
                     }
@@ -464,38 +467,42 @@ impl MainSlotRuntime {
 
         // Swap the session pane into the display position
         ERROR_LOG.log(format!(
-            "[diag][{}] swapping session_pane={:?} with workspace_main_pane={:?}",
+            "[diag][{}] session_pane={:?}, workspace_main_pane={:?}",
             target_id, session_pane, workspace_main_pane
         ));
-        self.backend
-            .swap_panes(&workspace, &session_pane, &workspace_main_pane)
-            .map_err(|e| {
-                ERROR_LOG.log(format!("[diag][{}] swap_panes FAILED: {:?}", target_id, e));
-                main_slot_error(e)
-            })?;
-        ERROR_LOG.log(format!(
-            "[diag][{}] swap_panes succeeded, setting workspace main pane",
-            target_id
-        ));
 
-        // Move the leftover 1-cell pane to a detached helper window so the
-        // process stays alive but the workspace layout stays clean. After
-        // swap_panes, workspace_main_pane holds the old content at the 1-cell
-        // position where split_pane_bottom created the session pane.
-        let _ = self.backend.run_on_socket(
-            &workspace.socket_name,
-            &[
-                "break-pane".to_string(),
-                "-d".to_string(),
-                "-s".to_string(),
-                workspace_main_pane.as_str().to_string(),
-                "-n".to_string(),
-                format!(
-                    "wa-orphan-{}",
-                    workspace_main_pane.as_str().trim_start_matches('%')
-                ),
-            ],
-        );
+        if session_pane != workspace_main_pane {
+            self.backend
+                .swap_panes(&workspace, &session_pane, &workspace_main_pane)
+                .map_err(|e| {
+                    ERROR_LOG.log(format!("[diag][{}] swap_panes FAILED: {:?}", target_id, e));
+                    main_slot_error(e)
+                })?;
+
+            // Move the leftover 1-cell pane to a detached helper window so
+            // the process stays alive but the workspace layout stays clean.
+            // After swap_panes, workspace_main_pane holds the old content at
+            // the 1-cell position where split_pane_bottom created the pane.
+            let _ = self.backend.run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "break-pane".to_string(),
+                    "-d".to_string(),
+                    "-s".to_string(),
+                    workspace_main_pane.as_str().to_string(),
+                    "-n".to_string(),
+                    format!(
+                        "wa-orphan-{}",
+                        workspace_main_pane.as_str().trim_start_matches('%')
+                    ),
+                ],
+            );
+        } else {
+            ERROR_LOG.log(format!(
+                "[diag][{}] session pane already at display position",
+                target_id
+            ));
+        }
 
         self.set_workspace_main_pane(&workspace, &session_pane)?;
         ERROR_LOG.log(format!(
