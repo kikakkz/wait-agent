@@ -16,7 +16,8 @@ use crate::infra::remote_protocol::{
     TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, write_control_plane_envelope, write_registration_frame,
+    read_authority_transport_frame, read_control_plane_envelope, write_authority_transport_frame,
+    write_control_plane_envelope, write_registration_frame, AuthorityTransportFrame,
 };
 use crate::runtime::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
 use crate::runtime::remote_authority_transport_runtime::spawn_authority_transport_listener;
@@ -24,7 +25,7 @@ use crate::runtime::remote_node_session_runtime::{
     spawn_remote_node_session_listener, RemoteNodePublicationSink, RemoteNodeSessionListenerGuard,
 };
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -606,12 +607,30 @@ fn forward_local_authority_outbound(
     session: RemoteNodeSessionHandle,
 ) -> Result<(), io::Error> {
     loop {
-        let envelope = read_control_plane_envelope(&mut local_stream)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
-        if let Some(envelope) = map_outbound_control_plane_envelope(&session, envelope)? {
-            session
-                .send(envelope)
-                .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
+        match read_authority_transport_frame(&mut local_stream)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
+        {
+            AuthorityTransportFrame::Ping => {
+                let mut buf = Vec::new();
+                let _ = write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong);
+                let _ = local_stream.write_all(&buf);
+            }
+            AuthorityTransportFrame::Pong => {
+                // Consume silently.
+            }
+            AuthorityTransportFrame::ControlPlane(envelope) => {
+                if let Some(grpc_envelope) =
+                    map_outbound_control_plane_envelope(&session, envelope)?
+                {
+                    session.send(grpc_envelope).map_err(|error| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+                    })?;
+                }
+            }
+            _ => {
+                // RawPtyInput, RawPtyOutput, SyncRequest, SyncResponse are
+                // not expected on the outbound path — consume silently.
+            }
         }
     }
 }

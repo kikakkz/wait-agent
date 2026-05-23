@@ -3,6 +3,7 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
+use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::{
     AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
@@ -317,6 +318,8 @@ impl RemoteMainSlotPaneRuntime {
                 AuthorityTransportStatus::WaitingForRemoteAuthority
             ) && binding.is_some()
             {
+                let _ = ERROR_LOG
+                    .log("[diag] event loop starting initial connecting phase".to_string());
                 Some(Instant::now())
             } else {
                 None
@@ -430,6 +433,11 @@ impl RemoteMainSlotPaneRuntime {
                     }
                     RemotePaneEvent::AuthorityTransport(event) => match event {
                         AuthorityTransportEvent::Connected => {
+                            ERROR_LOG.log(
+                                "[diag] event loop received AuthorityTransportEvent::Connected"
+                                    .to_string(),
+                            );
+                            let t_conn = std::time::Instant::now();
                             let is_present = target_is_present(&target_presence);
                             // Only clear reconnect when target is also present.
                             // Otherwise, keep reconnecting_since to prevent an
@@ -470,6 +478,10 @@ impl RemoteMainSlotPaneRuntime {
                                         )?;
                                         binding = Some(result.0);
                                         activated = true;
+                                        ERROR_LOG.log(format!(
+                                            "[diag] Connected: activation succeeded ({:?})",
+                                            t_conn.elapsed()
+                                        ));
                                         flush_paused_input(
                                             &remote_runtime,
                                             &target,

@@ -1,4 +1,5 @@
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, OutboundNodeSessionRequest, RemoteNodeTransport,
 };
@@ -137,6 +138,7 @@ impl RemoteMainSlotIngressRuntime {
             .spawn(move || {
                 let transport = GrpcRemoteNodeTransport::new();
                 let (event_tx, event_rx) = std::sync::mpsc::channel();
+                let t_bridge = std::time::Instant::now();
 
                 match transport.connect_outbound(
                     OutboundNodeSessionRequest {
@@ -145,17 +147,29 @@ impl RemoteMainSlotIngressRuntime {
                     },
                     event_tx,
                 ) {
-                    Ok(_transport_guard) => {
+                    Ok(guard) => {
+                        ERROR_LOG.log(format!(
+                            "[diag] spawn_background_grpc_bridge connect OK ({:?}), starting worker",
+                            t_bridge.elapsed()
+                        ));
+                        let t_worker = std::time::Instant::now();
                         run_grpc_node_ingress_worker(
                             event_rx,
                             authority_sink,
                             Arc::new(NoopPublicationSink),
                         );
-                        // transport_guard dropped here — signals gRPC shutdown
+                        ERROR_LOG.log(format!(
+                            "[diag] spawn_background_grpc_bridge worker exited ({:?})",
+                            t_worker.elapsed()
+                        ));
+                        drop(guard);
                     }
-                    Err(_) => {
-                        // Connection to remote authority failed.
-                        // UI is already running, so no error propagation needed.
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
+                            "[diag] spawn_background_grpc_bridge connect FAILED after {:?}: {}",
+                            t_bridge.elapsed(),
+                            error
+                        ));
                     }
                 }
             })

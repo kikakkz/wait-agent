@@ -12,7 +12,9 @@ use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::infra::error_log::ERROR_LOG;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
@@ -166,13 +168,21 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         let endpoint = self.endpoint(&request.endpoint_uri)?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (started_tx, started_rx) = mpsc::channel();
+        let t_start = Instant::now();
+        let endpoint_uri = request.endpoint_uri.clone();
+        ERROR_LOG.log(format!("[diag] connect_outbound begin: {}", endpoint_uri));
         let worker = thread::Builder::new()
             .spawn(move || {
                 let runtime = Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .expect("grpc outbound node transport runtime should build");
-            runtime.block_on(async move {
+                let t_runtime = t_start.elapsed();
+                ERROR_LOG.log(format!(
+                    "[diag] connect_outbound tokio runtime ready: {:?}",
+                    t_runtime
+                ));
+                runtime.block_on(async move {
                 let session_instance_id = format!("client-session-{}", now_millis());
                 let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
                 let outbound_session = RemoteNodeSessionHandle {
@@ -188,9 +198,22 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     return;
                 }
 
+                let tcp_start = Instant::now();
                 let channel = match endpoint.connect().await {
-                    Ok(channel) => channel,
+                    Ok(channel) => {
+                        let t_tcp = tcp_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound TCP connect: {:?}",
+                            t_tcp
+                        ));
+                        channel
+                    }
                     Err(error) => {
+                        let t_fail = tcp_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound TCP connect FAILED after {:?}: {}",
+                            t_fail, error
+                        ));
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -203,12 +226,25 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     }
                 };
                 let mut client = NodeSessionServiceClient::new(channel);
+                let grpc_start = Instant::now();
                 let response = client
                     .open_node_session(Request::new(UnboundedReceiverStream::new(outbound_rx)))
                     .await;
                 let mut inbound = match response {
-                    Ok(response) => response.into_inner(),
+                    Ok(response) => {
+                        let t_grpc = grpc_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound gRPC stream opened: {:?}",
+                            t_grpc
+                        ));
+                        response.into_inner()
+                    }
                     Err(error) => {
+                        let t_fail = grpc_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound gRPC stream FAILED after {:?}: {}",
+                            t_fail, error
+                        ));
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -220,8 +256,16 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         return;
                     }
                 };
+                let server_hello_start = Instant::now();
                 let first_envelope = match inbound.message().await {
-                    Ok(Some(envelope)) => envelope,
+                    Ok(Some(envelope)) => {
+                        let t_hello = server_hello_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound ServerHello received: {:?}",
+                            t_hello
+                        ));
+                        envelope
+                    }
                     Ok(None) => {
                         let transport_error = RemoteNodeTransportError::new(
                             "grpc node session closed before server hello arrived",
@@ -235,6 +279,11 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         return;
                     }
                     Err(error) => {
+                        let t_fail = server_hello_start.elapsed();
+                        ERROR_LOG.log(format!(
+                            "[diag] connect_outbound ServerHello error after {:?}: {}",
+                            t_fail, error
+                        ));
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -247,6 +296,11 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     }
                 };
                 let Some(Body::ServerHello(server_hello)) = first_envelope.body.as_ref() else {
+                    let t_fail = server_hello_start.elapsed();
+                    ERROR_LOG.log(format!(
+                        "[diag] connect_outbound unexpected first message after {:?}",
+                        t_fail
+                    ));
                     let transport_error = RemoteNodeTransportError::new(
                         "grpc node session did not start with server_hello",
                     );
@@ -262,6 +316,11 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     session_instance_id: server_hello.session_instance_id.clone(),
                     outbound_tx: outbound_session.outbound_tx.clone(),
                 };
+                let t_done = t_start.elapsed();
+                ERROR_LOG.log(format!(
+                    "[diag] connect_outbound handshake complete: {:?}",
+                    t_done
+                ));
                 let _ = event_tx.send(RemoteNodeTransportEvent::SessionOpened {
                     session: session.clone(),
                 });
@@ -308,17 +367,34 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
             format!("failed to spawn grpc outbound node-session thread: {error}")
         ))?;
         match started_rx.recv() {
-            Ok(Ok(())) => Ok(GrpcRemoteNodeTransportGuard {
-                shutdown_tx: Some(shutdown_tx),
-                worker: Some(worker),
-                local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
-            }),
+            Ok(Ok(())) => {
+                let t_total = t_start.elapsed();
+                ERROR_LOG.log(format!(
+                    "[diag] connect_outbound returned Ok: {:?}",
+                    t_total
+                ));
+                Ok(GrpcRemoteNodeTransportGuard {
+                    shutdown_tx: Some(shutdown_tx),
+                    worker: Some(worker),
+                    local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+                })
+            }
             Ok(Err(error)) => {
+                let t_fail = t_start.elapsed();
+                ERROR_LOG.log(format!(
+                    "[diag] connect_outbound FAILED (started err) after {:?}: {}",
+                    t_fail, error
+                ));
                 let _ = shutdown_tx.send(());
                 let _ = worker.join();
                 Err(error)
             }
             Err(_) => {
+                let t_fail = t_start.elapsed();
+                ERROR_LOG.log(format!(
+                    "[diag] connect_outbound FAILED (channel closed) after {:?}",
+                    t_fail
+                ));
                 let _ = shutdown_tx.send(());
                 let _ = worker.join();
                 Err(RemoteNodeTransportError::new(
