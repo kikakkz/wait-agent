@@ -16,8 +16,8 @@ use crate::infra::remote_protocol::{
     TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
-    read_authority_transport_frame, read_control_plane_envelope, write_authority_transport_frame,
-    write_control_plane_envelope, write_registration_frame, AuthorityTransportFrame,
+    read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
+    write_registration_frame, AuthorityTransportFrame,
 };
 use crate::runtime::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
 use crate::runtime::remote_authority_transport_runtime::spawn_authority_transport_listener;
