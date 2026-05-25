@@ -247,6 +247,16 @@ impl RemoteTransportCodecError {
     pub fn is_timed_out(&self) -> bool {
         self.io_kind == Some(io::ErrorKind::TimedOut)
     }
+
+    /// On Linux `SO_RCVTIMEO` produces `EAGAIN` (WouldBlock), not `TimedOut`.
+    /// This check covers both so the reader thread correctly enters the
+    /// Ping / Pong keepalive path instead of exiting on a socket timeout.
+    pub fn is_read_timeout(&self) -> bool {
+        matches!(
+            self.io_kind,
+            Some(io::ErrorKind::TimedOut) | Some(io::ErrorKind::WouldBlock)
+        )
+    }
 }
 
 impl fmt::Display for RemoteTransportCodecError {

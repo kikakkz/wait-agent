@@ -20,6 +20,7 @@ use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRu
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 // Remote main-slot authority ingress belongs to the pane process lifecycle.
 // It accepts authority-side transport connections on the scoped socket path
@@ -126,9 +127,11 @@ impl RemoteMainSlotIngressRuntime {
     /// etc.) into the authority stream queue. Returns immediately so the
     /// caller can start the pane UI without delay.
     ///
-    /// Both the `connect_outbound()` call (which blocks on TCP+gRPC handshake)
-    /// and the subsequent event-processing loop run inside the background thread,
-    /// preventing UI startup from being blocked by network timeouts.
+    /// The thread reconnects automatically when the gRPC stream closes or the
+    /// initial connection fails, using exponential backoff (1s → 30s max).
+    /// Each successful connection submits a fresh authority stream to the
+    /// sink, which triggers a new `Connected` event in the pane event loop
+    /// so the reconnecting phase can recover without user intervention.
     fn spawn_background_grpc_bridge(
         &self,
         authority_id: String,
@@ -145,45 +148,54 @@ impl RemoteMainSlotIngressRuntime {
             .name("grpc-bridge".into())
             .spawn(move || {
                 let transport = GrpcRemoteNodeTransport::new();
-                let (event_tx, event_rx) = std::sync::mpsc::channel();
-                let t_bridge = std::time::Instant::now();
-                ERROR_LOG.log(format!(
-                    "[diag-timing] grpc-bridge thread: starting connect_outbound to {}",
-                    endpoint_uri
-                ));
+                let mut reconnect_delay = Duration::from_secs(1);
+                const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+                loop {
+                    let (event_tx, event_rx) = std::sync::mpsc::channel();
+                    let t_bridge = std::time::Instant::now();
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] grpc-bridge thread: starting connect_outbound to {}",
+                        endpoint_uri
+                    ));
 
-                match transport.connect_outbound(
-                    OutboundNodeSessionRequest {
-                        node_id: authority_id,
-                        endpoint_uri,
-                    },
-                    event_tx,
-                ) {
-                    Ok(guard) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] grpc-bridge: connect_outbound OK ({:?}), starting ingress worker",
-                            t_bridge.elapsed()
-                        ));
-                        let t_worker = std::time::Instant::now();
-                        run_grpc_node_ingress_worker(
-                            event_rx,
-                            authority_sink,
-                            Arc::new(NoopPublicationSink),
-                        );
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] grpc-bridge: ingress worker exited (worker={:?}, total={:?})",
-                            t_worker.elapsed(),
-                            t_bridge.elapsed()
-                        ));
-                        drop(guard);
+                    match transport.connect_outbound(
+                        OutboundNodeSessionRequest {
+                            node_id: authority_id.clone(),
+                            endpoint_uri: endpoint_uri.clone(),
+                        },
+                        event_tx,
+                    ) {
+                        Ok(guard) => {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] grpc-bridge: connect_outbound OK ({:?}), starting ingress worker",
+                                t_bridge.elapsed()
+                            ));
+                            reconnect_delay = Duration::from_secs(1);
+                            let t_worker = std::time::Instant::now();
+                            run_grpc_node_ingress_worker(
+                                event_rx,
+                                authority_sink.clone(),
+                                Arc::new(NoopPublicationSink),
+                            );
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] grpc-bridge: ingress worker exited (worker={:?}, total={:?}), reconnecting in {:?}",
+                                t_worker.elapsed(),
+                                t_bridge.elapsed(),
+                                reconnect_delay
+                            ));
+                            drop(guard);
+                        }
+                        Err(error) => {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] grpc-bridge: connect_outbound FAILED after {:?}: {}, reconnecting in {:?}",
+                                t_bridge.elapsed(),
+                                error,
+                                reconnect_delay
+                            ));
+                        }
                     }
-                    Err(error) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] grpc-bridge: connect_outbound FAILED after {:?}: {}",
-                            t_bridge.elapsed(),
-                            error
-                        ));
-                    }
+                    std::thread::sleep(reconnect_delay);
+                    reconnect_delay = std::cmp::min(reconnect_delay * 2, MAX_RECONNECT_DELAY);
                 }
             })
             .map_err(|error| {

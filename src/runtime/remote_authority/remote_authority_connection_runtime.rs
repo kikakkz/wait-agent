@@ -291,7 +291,12 @@ pub fn register_authority_stream(
                         break;
                     }
                 }
-                Ok(AuthorityTransportFrame::RawPtyInput(_)) => break,
+                Ok(AuthorityTransportFrame::RawPtyInput(_)) => {
+                    // RawPtyInput flows from client to authority; if it appears
+                    // here the frame was misrouted. Consume silently rather than
+                    // crashing the reader thread.
+                    last_received = Instant::now();
+                }
                 Ok(AuthorityTransportFrame::SyncRequest { .. }) => {
                     // Remote peer is requesting replay from our output cache.
                     // The cache is managed by the authority target host runtime,
@@ -324,10 +329,16 @@ pub fn register_authority_stream(
                         break;
                     }
                 }
-                Err(ref e) if e.is_timed_out() => {
+                Err(ref e) if e.is_read_timeout() => {
                     // Read timed out — check total idle duration. If the remote
                     // has been silent past the timeout, consider it dead.
+                    // is_read_timeout covers both TimedOut and WouldBlock
+                    // because Linux SO_RCVTIMEO produces EAGAIN (WouldBlock).
                     if last_received.elapsed() > AUTHORITY_TRANSPORT_READ_TIMEOUT {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] reader thread: idle timeout reached ({:?}), exiting",
+                            last_received.elapsed()
+                        ));
                         break;
                     }
                     // Probe liveness: send Ping to check if remote is still there.
@@ -335,14 +346,34 @@ pub fn register_authority_stream(
                     if write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Ping)
                         .is_ok()
                     {
-                        let _ = pong_writer.write_all(&buf);
+                        if pong_writer.write_all(&buf).is_err() {
+                            ERROR_LOG.log(
+                                "[diag-timing] reader thread: pong_writer.write_all failed, exiting"
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                    } else {
+                        ERROR_LOG.log(
+                            "[diag-timing] reader thread: write_authority_transport_frame(Ping) failed, exiting"
+                                .to_string(),
+                        );
+                        break;
                     }
                 }
-                Err(_) => break,
+                Err(ref e) => {
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] reader thread: read error, exiting: {e}"
+                    ));
+                    break;
+                }
             }
         }
         connected.store(false, Ordering::Relaxed);
         registry.unregister_connection(&node_id);
+        ERROR_LOG.log(format!(
+            "[diag-timing] reader thread: loop exited, sending Disconnected for node={node_id}"
+        ));
         let _ = reader_tx.send(AuthorityTransportEvent::Disconnected);
     });
 
