@@ -636,8 +636,36 @@ fn forward_local_authority_outbound(
                     })?;
                 }
             }
+            AuthorityTransportFrame::RawPtyInput(payload) => {
+                // Raw input from the stdin fast path — convert to a gRPC
+                // RawPtyInput envelope and forward to the authority.
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let envelope = ProtocolEnvelope {
+                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                    message_id: format!("raw-input-{ts}"),
+                    message_type: "raw_pty_input",
+                    timestamp: format!("{ts}"),
+                    sender_id: session.node_id().to_string(),
+                    correlation_id: None,
+                    session_id: Some(payload.session_id.clone()),
+                    target_id: Some(payload.target_id.clone()),
+                    attachment_id: Some(payload.attachment_id.clone()),
+                    console_id: Some(payload.console_id.clone()),
+                    payload: ControlPlanePayload::RawPtyInput(payload),
+                };
+                if let Some(grpc_envelope) =
+                    map_outbound_control_plane_envelope(&session, envelope)?
+                {
+                    session.send(grpc_envelope).map_err(|error| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, error.to_string())
+                    })?;
+                }
+            }
             _ => {
-                // RawPtyInput, RawPtyOutput, SyncRequest, SyncResponse are
+                // RawPtyOutput, SyncRequest, SyncResponse are
                 // not expected on the outbound path — consume silently.
             }
         }
