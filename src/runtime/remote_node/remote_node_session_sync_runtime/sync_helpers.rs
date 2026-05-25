@@ -617,7 +617,9 @@ fn bridge_live_authority_stream(
     writer_ready.notify_all();
     // Flush any commands that were queued while the bridge was starting up.
     flush_pending_authority_commands(&writer, &pending_commands);
+    ERROR_LOG.log("[diag-timing] bridge_live_authority_stream: writer set, pending flushed, starting forward_host_output_to_session".to_string());
     let result = forward_host_output_to_session(host_reader, session_handle, running.clone());
+    ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_session exited, result={:?}", result));
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
         Ok(mut guard) => guard.take(),
@@ -638,8 +640,15 @@ fn forward_host_output_to_session(
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
     while running.load(Ordering::Relaxed) {
-        let envelope =
-            read_control_plane_envelope(&mut host_reader).map_err(remote_session_sync_error)?;
+        let envelope = match read_control_plane_envelope(&mut host_reader) {
+            Ok(env) => env,
+            Err(e) => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] forward_host_output_to_session: read_control_plane_envelope failed: {e}, exiting"
+                ));
+                return Err(remote_session_sync_error(e));
+            }
+        };
         let grpc = map_outbound_grpc_envelope(
             session_handle.node_id(),
             NodeSessionChannel::Authority,
@@ -709,8 +718,12 @@ pub(super) fn send_command_to_host(
 
     if let Some(writer) = guard.as_mut() {
         // Fast path: bridge ready, send immediately
-        write_control_plane_envelope(writer, &authority_command_envelope(command))
-            .map_err(remote_session_sync_error)?;
+        let target_id = authority_command_target_id(&command).to_string();
+        let envelope = authority_command_envelope(command);
+        write_control_plane_envelope(writer, &envelope).map_err(remote_session_sync_error)?;
+        ERROR_LOG.log(format!(
+            "[diag-timing] send_command_to_host: sent command to target={target_id}"
+        ));
         Ok(())
     } else if !host.running.load(Ordering::Relaxed) {
         // Bridge has already stopped — host is stale
@@ -719,9 +732,13 @@ pub(super) fn send_command_to_host(
             authority_command_target_id(&command)
         )))
     } else {
-        // Bridge still starting up — queue the command for later delivery.
-        // flush_pending_authority_commands() will drain these when the
-        // bridge completes.
+        // Bridge still starting up (or has already shut down) — queue the
+        // command for later delivery. flush_pending_authority_commands()
+        // will drain these when the bridge completes.
+        ERROR_LOG.log(format!(
+            "[diag-timing] send_command_to_host: writer not ready for target={}, queuing",
+            authority_command_target_id(&command)
+        ));
         drop(guard);
         match host.pending_commands.lock() {
             Ok(mut pending) => pending.push(command),

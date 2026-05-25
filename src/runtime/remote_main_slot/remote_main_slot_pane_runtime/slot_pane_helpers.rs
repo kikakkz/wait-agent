@@ -3,6 +3,7 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::RemoteMainSlotCommand;
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord};
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
     RemoteConsoleDescriptor,
@@ -482,6 +483,10 @@ impl RawPtyInputRoute {
             return Ok(false);
         };
         let Some(connection) = registry.connection_for(&route.authority_node_id) else {
+            ERROR_LOG.log(format!(
+                "[diag-timing] raw_input_route.send: no connection for authority_node_id={}",
+                route.authority_node_id
+            ));
             return Ok(false);
         };
         let input_seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -510,16 +515,28 @@ pub(super) fn spawn_input_thread(tx: mpsc::Sender<RemotePaneEvent>, raw_input: R
                 Ok(0) => break,
                 Ok(read) => {
                     let bytes = buffer[..read].to_vec();
-                    let raw_forwarded =
-                        match raw_input.route.send(&raw_input.registry, bytes.clone()) {
-                            Ok(forwarded) => forwarded,
-                            Err(_) => {
-                                let _ = tx.send(RemotePaneEvent::AuthorityTransport(
-                                    AuthorityTransportEvent::Disconnected,
-                                ));
-                                true
-                            }
-                        };
+                    let raw_forwarded = match raw_input
+                        .route
+                        .send(&raw_input.registry, bytes.clone())
+                    {
+                        Ok(forwarded) => {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] input thread: read {} bytes, forwarded={}",
+                                read, forwarded
+                            ));
+                            forwarded
+                        }
+                        Err(_) => {
+                            ERROR_LOG.log(
+                                    "[diag-timing] input thread: route.send failed, sending Disconnected"
+                                        .to_string(),
+                                );
+                            let _ = tx.send(RemotePaneEvent::AuthorityTransport(
+                                AuthorityTransportEvent::Disconnected,
+                            ));
+                            true
+                        }
+                    };
                     if tx
                         .send(RemotePaneEvent::Input {
                             bytes,

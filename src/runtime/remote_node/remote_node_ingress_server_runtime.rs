@@ -1,4 +1,5 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
@@ -333,8 +334,15 @@ fn run_node_ingress_server_loop(
                     if is_command {
                         if let Some(active) = sessions.get(&node_id) {
                             if let Some(event) = map_inbound_grpc_authority_event(envelope) {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] ingress server: routing command via authority_manager node={node_id}"
+                                ));
                                 authority_manager.handle_event(&active.session, event);
                             }
+                        } else {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] ingress server: no session for command node={node_id}, dropping"
+                            ));
                         }
                         while let Ok(event) = internal_rx.try_recv() {
                             match event {

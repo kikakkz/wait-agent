@@ -79,24 +79,36 @@ impl RemoteAuthorityTransportRuntime {
             .reader
             .lock()
             .expect("authority transport reader mutex should not be poisoned");
-        let envelope = read_control_plane_envelope(&mut *reader)?;
-        match envelope.payload {
-            ControlPlanePayload::OpenMirrorRequest(payload) => {
-                Ok(RemoteAuthorityCommand::OpenMirror(payload))
+        loop {
+            match read_control_plane_envelope(&mut *reader) {
+                Ok(envelope) => {
+                    return match envelope.payload {
+                        ControlPlanePayload::OpenMirrorRequest(payload) => {
+                            Ok(RemoteAuthorityCommand::OpenMirror(payload))
+                        }
+                        ControlPlanePayload::CloseMirrorRequest(payload) => {
+                            Ok(RemoteAuthorityCommand::CloseMirror(payload))
+                        }
+                        ControlPlanePayload::RawPtyInput(payload) => {
+                            Ok(RemoteAuthorityCommand::RawPtyInput(payload))
+                        }
+                        ControlPlanePayload::ApplyResize(payload) => {
+                            Ok(RemoteAuthorityCommand::ApplyResize(payload))
+                        }
+                        other => Err(RemoteAuthorityTransportError::new(format!(
+                            "unexpected authority command `{}`",
+                            other.message_type()
+                        ))),
+                    };
+                }
+                Err(ref e) if e.is_read_timeout() => {
+                    // SO_RCVTIMEO triggered — no command available yet, keep waiting.
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RemoteAuthorityTransportError::from(e));
+                }
             }
-            ControlPlanePayload::CloseMirrorRequest(payload) => {
-                Ok(RemoteAuthorityCommand::CloseMirror(payload))
-            }
-            ControlPlanePayload::RawPtyInput(payload) => {
-                Ok(RemoteAuthorityCommand::RawPtyInput(payload))
-            }
-            ControlPlanePayload::ApplyResize(payload) => {
-                Ok(RemoteAuthorityCommand::ApplyResize(payload))
-            }
-            other => Err(RemoteAuthorityTransportError::new(format!(
-                "unexpected authority command `{}`",
-                other.message_type()
-            ))),
         }
     }
 
