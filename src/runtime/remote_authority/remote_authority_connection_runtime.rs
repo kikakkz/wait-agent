@@ -1,3 +1,4 @@
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
 };
@@ -205,6 +206,7 @@ pub fn register_authority_stream(
     authority_id: String,
     tx: mpsc::Sender<AuthorityTransportEvent>,
 ) -> Result<(), RemoteAuthorityConnectionError> {
+    let t_register = std::time::Instant::now();
     let node_id = read_registration_frame(&mut stream)?;
     if node_id != authority_id {
         return Err(RemoteAuthorityConnectionError::new(format!(
@@ -224,6 +226,11 @@ pub fn register_authority_stream(
             connected: connected.clone(),
         }),
     );
+    ERROR_LOG.log(format!(
+        "[diag-timing] register_authority_stream: registered node={}, sending Connected ({:?})",
+        node_id,
+        t_register.elapsed()
+    ));
 
     // Clone a stream handle for sending Ping/Pong frames from the reader loop.
     // The reader loop needs its own write handle because `stream` is borrowed

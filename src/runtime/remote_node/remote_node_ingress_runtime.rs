@@ -1,3 +1,4 @@
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
@@ -197,13 +198,21 @@ pub(crate) fn run_grpc_node_ingress_worker(
     authority_sink: QueuedAuthorityStreamSink,
     publication_sink: Arc<dyn RemoteNodePublicationSink>,
 ) {
+    let t_worker = std::time::Instant::now();
     let mut sessions = HashMap::new();
     while let Ok(event) = event_rx.recv() {
         match event {
             RemoteNodeTransportEvent::SessionOpened { session } => {
+                let t_session = std::time::Instant::now();
                 if let Ok(bridge) =
                     ActiveGrpcNodeSession::new(session.clone(), authority_sink.clone())
                 {
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] ingress worker: SessionOpened -> ActiveGrpcNodeSession created for node {} (worker_elapsed={:?}, session_new={:?})",
+                        session.node_id(),
+                        t_worker.elapsed(),
+                        t_session.elapsed()
+                    ));
                     sessions.insert(session.node_id().to_string(), bridge);
                 }
             }

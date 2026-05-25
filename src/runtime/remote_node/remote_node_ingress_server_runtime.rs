@@ -18,6 +18,10 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
+use crate::runtime::remote_node_session_runtime::{
+    map_inbound_grpc_authority_event, GrpcAuthorityEvent,
+};
+use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
@@ -298,6 +302,7 @@ fn run_node_ingress_server_loop(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
+    let mut authority_manager = SessionSyncAuthorityManager::new();
 
     // Start the inotify watcher to detect new authority socket files without polling.
     let _watcher = start_socket_watcher(internal_tx.clone()).ok();
@@ -315,6 +320,41 @@ fn run_node_ingress_server_loop(
                     sessions.insert(node_id, active);
                 }
                 RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
+                    // Forward authority commands (OpenMirrorRequest, etc.) through
+                    // the session sync authority manager so target hosts are created
+                    // on-demand and commands reach the local PTY owner.
+                    let is_command = matches!(
+                        envelope.body.as_ref(),
+                        Some(Body::OpenMirrorRequest(_))
+                            | Some(Body::CloseMirrorRequest(_))
+                            | Some(Body::ApplyPtyResize(_))
+                            | Some(Body::RawPtyInput(_))
+                    );
+                    if is_command {
+                        if let Some(active) = sessions.get(&node_id) {
+                            if let Some(event) = map_inbound_grpc_authority_event(envelope) {
+                                authority_manager.handle_event(&active.session, event);
+                            }
+                        }
+                        while let Ok(event) = internal_rx.try_recv() {
+                            match event {
+                                InternalEvent::BridgeClosed {
+                                    node_id,
+                                    socket_path,
+                                } => {
+                                    if let Some(active) = sessions.get_mut(&node_id) {
+                                        active.bridges.remove(&socket_path);
+                                    }
+                                }
+                                InternalEvent::SocketDirChanged => {
+                                    for (nid, active) in &mut sessions {
+                                        refresh_authority_bridges(nid, active, internal_tx.clone());
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if !matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_))) {
                         if let Some(active) = sessions.get_mut(&node_id) {
                             refresh_authority_bridges(&node_id, active, internal_tx.clone());
@@ -472,6 +512,97 @@ fn route_transport_envelope(
                         payload.alternate_screen_active,
                         payload.application_cursor_keys,
                         payload.cursor_visible,
+                    )
+                },
+            )
+        }
+        Some(Body::OpenMirrorRequest(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_open_mirror_request(
+                        &session_id,
+                        &target_id,
+                        &payload.console_id,
+                        payload.cols as usize,
+                        payload.rows as usize,
+                        payload.raw_pty_passthrough,
+                        if payload.bootstrap_mode_visible_only {
+                            BootstrapMode::VisibleOnly
+                        } else {
+                            BootstrapMode::Full
+                        },
+                    )
+                },
+            )
+        }
+        Some(Body::CloseMirrorRequest(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_close_mirror_request(&session_id, &target_id)
+                },
+            )
+        }
+        Some(Body::ApplyPtyResize(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_apply_resize(
+                        &session_id,
+                        &target_id,
+                        payload.cols as usize,
+                        payload.rows as usize,
+                        payload.resize_epoch,
+                        payload.resize_authority_console_id.clone(),
+                    )
+                },
+            )
+        }
+        Some(Body::RawPtyInput(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_raw_pty_input(
+                        &session_id,
+                        &target_id,
+                        &payload.console_id,
+                        &payload.attachment_id,
+                        &payload.console_host_id,
+                        payload.input_seq,
+                        payload.input_bytes.clone(),
                     )
                 },
             )

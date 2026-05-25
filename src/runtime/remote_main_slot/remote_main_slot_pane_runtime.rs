@@ -196,6 +196,11 @@ impl RemoteMainSlotPaneRuntime {
     where
         F: FnMut(RemoteInteractSignal),
     {
+        let t_surface = std::time::Instant::now();
+        ERROR_LOG.log(format!(
+            "[diag-timing] run_surface_with_signal_sink start target={}",
+            spec.target
+        ));
         let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let mut terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
@@ -262,12 +267,17 @@ impl RemoteMainSlotPaneRuntime {
         let mut console_seq = 0u64;
         let mut input_signal_decoder = RemoteInteractInputSignalDecoder::default();
         let mut paused_input_buffer: Vec<Vec<u8>> = Vec::new();
+        ERROR_LOG.log(format!(
+            "[diag-timing] pane setup complete (threads+authority started), attempting initial activation ({:?})",
+            t_surface.elapsed()
+        ));
         let mut binding = None;
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
         let mut authority_status = waiting_authority_status.clone();
         // Always attempt activation — output_log replay comes from the
         // local mailbox; no need to wait for authority transport.
+        let t_before_activate = std::time::Instant::now();
         let activated = activate_surface_target_with_mode(
             &remote_runtime,
             &target,
@@ -277,6 +287,10 @@ impl RemoteMainSlotPaneRuntime {
         )
         .map(Some)?;
         if let Some((activated_binding, raw)) = activated {
+            ERROR_LOG.log(format!(
+                "[diag-timing] initial activation got binding ({:?})",
+                t_before_activate.elapsed()
+            ));
             raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
             write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
             binding = Some(activated_binding);
@@ -287,6 +301,11 @@ impl RemoteMainSlotPaneRuntime {
                 &paused_input_buffer,
                 &mut console_seq,
             )?;
+        } else {
+            ERROR_LOG.log(format!(
+                "[diag-timing] initial activation returned None ({:?})",
+                t_before_activate.elapsed()
+            ));
         }
         let run_result = (|| -> Result<(), LifecycleError> {
             let mut reconnecting_since: Option<Instant> = None;
@@ -318,8 +337,10 @@ impl RemoteMainSlotPaneRuntime {
                 AuthorityTransportStatus::WaitingForRemoteAuthority
             ) && binding.is_some()
             {
-                let _ = ERROR_LOG
-                    .log("[diag] event loop starting initial connecting phase".to_string());
+                ERROR_LOG.log(format!(
+                    "[diag-timing] event loop entering initial connecting phase (surface_setup={:?})",
+                    t_surface.elapsed()
+                ));
                 Some(Instant::now())
             } else {
                 None
@@ -386,6 +407,7 @@ impl RemoteMainSlotPaneRuntime {
 
                 match event {
                     RemotePaneEvent::MailboxUpdated => {
+                        let t_mailbox = std::time::Instant::now();
                         let raw = raw_output_reader
                             .sync_and_collect_raw()
                             .map_err(remote_protocol_error)?;
@@ -397,10 +419,24 @@ impl RemoteMainSlotPaneRuntime {
                         if raw.is_empty() {
                             continue;
                         }
+                        let is_first_output = !raw_screen_initialized;
+                        if is_first_output {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] FIRST OUTPUT received ({} bytes, surface_total={:?})",
+                                raw.len(),
+                                t_surface.elapsed()
+                            ));
+                        }
                         write_remote_raw_output_with_initial_clear(
                             &raw,
                             &mut raw_screen_initialized,
                         )?;
+                        if is_first_output {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] FIRST OUTPUT written to screen (mailbox_handler={:?})",
+                                t_mailbox.elapsed()
+                            ));
+                        }
                     }
                     RemotePaneEvent::Resize => {
                         if let Ok(Some(size)) = terminal.capture_resize() {
@@ -433,11 +469,11 @@ impl RemoteMainSlotPaneRuntime {
                     }
                     RemotePaneEvent::AuthorityTransport(event) => match event {
                         AuthorityTransportEvent::Connected => {
-                            ERROR_LOG.log(
-                                "[diag] event loop received AuthorityTransportEvent::Connected"
-                                    .to_string(),
-                            );
                             let t_conn = std::time::Instant::now();
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] AuthorityTransportEvent::Connected (elapsed_since_surface_start={:?})",
+                                t_surface.elapsed()
+                            ));
                             let is_present = target_is_present(&target_presence);
                             // Only clear reconnect when target is also present.
                             // Otherwise, keep reconnecting_since to prevent an
@@ -479,8 +515,9 @@ impl RemoteMainSlotPaneRuntime {
                                         binding = Some(result.0);
                                         activated = true;
                                         ERROR_LOG.log(format!(
-                                            "[diag] Connected: activation succeeded ({:?})",
-                                            t_conn.elapsed()
+                                            "[diag-timing] Connected: reactivation succeeded (handler_elapsed={:?}, surface_total={:?})",
+                                            t_conn.elapsed(),
+                                            t_surface.elapsed()
                                         ));
                                         flush_paused_input(
                                             &remote_runtime,
@@ -516,6 +553,10 @@ impl RemoteMainSlotPaneRuntime {
                             }
                         }
                         AuthorityTransportEvent::Disconnected => {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] AuthorityTransportEvent::Disconnected (elapsed_since_surface_start={:?})",
+                                t_surface.elapsed()
+                            ));
                             remote_runtime
                                 .handle_authority_disconnect(target.address.authority_id());
                             let _is_present = target_is_present(&target_presence);

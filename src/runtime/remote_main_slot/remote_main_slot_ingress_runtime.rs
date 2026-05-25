@@ -102,7 +102,11 @@ impl RemoteMainSlotIngressRuntime {
     }
 
     pub fn run(&self, command: RemoteMainSlotCommand) -> Result<(), LifecycleError> {
-        let _authority_ingress = self.start_ingress_for_command(&command)?;
+        let t_run = std::time::Instant::now();
+        ERROR_LOG.log(format!(
+            "[diag-timing] RemoteMainSlotIngressRuntime::run start target={}",
+            command.target
+        ));
         let authority_sink = self.pane_runtime.external_authority_stream_submitter()?;
         // Start gRPC bridge in background so the UI (run_surface) starts
         // immediately instead of blocking on gRPC connection establishment.
@@ -110,6 +114,10 @@ impl RemoteMainSlotIngressRuntime {
             extract_authority_id_from_target(&command.target),
             authority_sink,
         )?;
+        ERROR_LOG.log(format!(
+            "[diag-timing] grpc bridge spawned, entering pane_runtime.run ({:?})",
+            t_run.elapsed()
+        ));
         self.pane_runtime.run(command)
     }
 
@@ -139,6 +147,10 @@ impl RemoteMainSlotIngressRuntime {
                 let transport = GrpcRemoteNodeTransport::new();
                 let (event_tx, event_rx) = std::sync::mpsc::channel();
                 let t_bridge = std::time::Instant::now();
+                ERROR_LOG.log(format!(
+                    "[diag-timing] grpc-bridge thread: starting connect_outbound to {}",
+                    endpoint_uri
+                ));
 
                 match transport.connect_outbound(
                     OutboundNodeSessionRequest {
@@ -149,7 +161,7 @@ impl RemoteMainSlotIngressRuntime {
                 ) {
                     Ok(guard) => {
                         ERROR_LOG.log(format!(
-                            "[diag] spawn_background_grpc_bridge connect OK ({:?}), starting worker",
+                            "[diag-timing] grpc-bridge: connect_outbound OK ({:?}), starting ingress worker",
                             t_bridge.elapsed()
                         ));
                         let t_worker = std::time::Instant::now();
@@ -159,14 +171,15 @@ impl RemoteMainSlotIngressRuntime {
                             Arc::new(NoopPublicationSink),
                         );
                         ERROR_LOG.log(format!(
-                            "[diag] spawn_background_grpc_bridge worker exited ({:?})",
-                            t_worker.elapsed()
+                            "[diag-timing] grpc-bridge: ingress worker exited (worker={:?}, total={:?})",
+                            t_worker.elapsed(),
+                            t_bridge.elapsed()
                         ));
                         drop(guard);
                     }
                     Err(error) => {
                         ERROR_LOG.log(format!(
-                            "[diag] spawn_background_grpc_bridge connect FAILED after {:?}: {}",
+                            "[diag-timing] grpc-bridge: connect_outbound FAILED after {:?}: {}",
                             t_bridge.elapsed(),
                             error
                         ));

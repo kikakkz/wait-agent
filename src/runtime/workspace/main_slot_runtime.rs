@@ -56,8 +56,9 @@ impl MainSlotRuntime {
         &self,
         command: ActivateTargetCommand,
     ) -> Result<(), LifecycleError> {
+        let t_activate = std::time::Instant::now();
         ERROR_LOG.log(format!(
-            "[diag] run_activate_target: target={}, socket={}, session={}",
+            "[diag-timing] run_activate_target: target={}, socket={}, session={}",
             command.target, command.current_socket_name, command.current_session_name
         ));
         let current_workspace = self.current_workspace(&command)?;
@@ -82,6 +83,10 @@ impl MainSlotRuntime {
         match session.address.transport() {
             SessionTransport::LocalTmux => {}
             SessionTransport::RemotePeer => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] run_activate_target: dispatching to remote ({:?})",
+                    t_activate.elapsed()
+                ));
                 return self.activate_remote_target_in_workspace(&current_workspace, &session);
             }
         }
@@ -339,10 +344,11 @@ impl MainSlotRuntime {
         current_workspace: &CurrentWorkspace,
         target: &crate::domain::session_catalog::ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
+        let t_start = std::time::Instant::now();
         let target_id = target.address.id().as_str().to_string();
         let qualified_target = target.address.qualified_target();
         ERROR_LOG.log(format!(
-            "[diag][{}] activate_remote_target_in_workspace: start",
+            "[diag-timing][{}] activate_remote_target_in_workspace: start",
             target_id
         ));
 
@@ -352,8 +358,9 @@ impl MainSlotRuntime {
         );
         if self.active_target(&workspace)?.as_deref() == Some(qualified_target.as_str()) {
             ERROR_LOG.log(format!(
-                "[diag][{}] already active target, re-syncing bindings",
-                target_id
+                "[diag-timing][{}] already active target, re-syncing bindings ({:?})",
+                target_id,
+                t_start.elapsed()
             ));
             self.layout_runtime
                 .disable_main_pane_output_bridge(&workspace)?;
@@ -364,8 +371,10 @@ impl MainSlotRuntime {
 
         let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
         ERROR_LOG.log(format!(
-            "[diag][{}] workspace_main_pane={:?}",
-            target_id, workspace_main_pane
+            "[diag-timing][{}] got workspace_main_pane={:?} ({:?})",
+            target_id,
+            workspace_main_pane,
+            t_start.elapsed()
         ));
 
         // If switching from a local target host on the same socket, swap its
@@ -430,26 +439,31 @@ impl MainSlotRuntime {
         }
 
         // One-time migration: clean up stale isolation panes from old architecture
+        let t_before_cleanup = std::time::Instant::now();
         self.cleanup_stale_isolation_pane(&workspace, &workspace_main_pane)?;
         ERROR_LOG.log(format!(
-            "[diag][{}] after cleanup_stale_isolation_pane, workspace_main_pane={:?}",
-            target_id, workspace_main_pane
+            "[diag-timing][{}] after cleanup_stale_isolation_pane, workspace_main_pane={:?} (cleanup={:?}, total={:?})",
+            target_id, workspace_main_pane, t_before_cleanup.elapsed(), t_start.elapsed()
         ));
 
         // Find or create a persistent per-session pane for this remote target
+        let t_before_find = std::time::Instant::now();
         let session_pane = match self.find_session_pane(&workspace, &qualified_target)? {
             Some(existing_pane) => {
                 ERROR_LOG.log(format!(
-                    "[diag][{}] found existing session_pane={:?}",
-                    target_id, existing_pane
+                    "[diag-timing][{}] found existing session_pane={:?} ({:?})",
+                    target_id,
+                    existing_pane,
+                    t_start.elapsed()
                 ));
                 existing_pane
             }
             None => {
                 ERROR_LOG.log(format!(
-                    "[diag][{}] creating new remote session pane",
-                    target_id
+                    "[diag-timing][{}] creating new remote session pane (find took {:?}, total {:?})",
+                    target_id, t_before_find.elapsed(), t_start.elapsed()
                 ));
+                let t_before_create = std::time::Instant::now();
                 let new_pane = self.create_remote_session_pane(
                     &workspace,
                     &workspace_main_pane,
@@ -457,8 +471,11 @@ impl MainSlotRuntime {
                     target.address.id().as_str(),
                 )?;
                 ERROR_LOG.log(format!(
-                    "[diag][{}] new remote session pane={:?}",
-                    target_id, new_pane
+                    "[diag-timing][{}] new remote session pane={:?} (create={:?}, total={:?})",
+                    target_id,
+                    new_pane,
+                    t_before_create.elapsed(),
+                    t_start.elapsed()
                 ));
                 self.set_session_pane(&workspace, &qualified_target, &new_pane)?;
                 new_pane
@@ -471,13 +488,24 @@ impl MainSlotRuntime {
             target_id, session_pane, workspace_main_pane
         ));
 
+        let t_before_swap = std::time::Instant::now();
         if session_pane != workspace_main_pane {
             self.backend
                 .swap_panes(&workspace, &session_pane, &workspace_main_pane)
                 .map_err(|e| {
-                    ERROR_LOG.log(format!("[diag][{}] swap_panes FAILED: {:?}", target_id, e));
+                    ERROR_LOG.log(format!(
+                        "[diag-timing][{}] swap_panes FAILED: {:?} ({:?})",
+                        target_id,
+                        e,
+                        t_start.elapsed()
+                    ));
                     main_slot_error(e)
                 })?;
+            ERROR_LOG.log(format!(
+                "[diag-timing][{}] swap_panes done ({:?})",
+                target_id,
+                t_before_swap.elapsed()
+            ));
 
             // Move the leftover 1-cell pane to a detached helper window so
             // the process stays alive but the workspace layout stays clean.
@@ -499,43 +527,44 @@ impl MainSlotRuntime {
             );
         } else {
             ERROR_LOG.log(format!(
-                "[diag][{}] session pane already at display position",
-                target_id
+                "[diag-timing][{}] session pane already at display position ({:?})",
+                target_id,
+                t_start.elapsed()
             ));
         }
 
         self.set_workspace_main_pane(&workspace, &session_pane)?;
-        ERROR_LOG.log(format!(
-            "[diag][{}] set_workspace_main_pane done, setting active_target",
-            target_id
-        ));
-
         self.set_active_target(&workspace, Some(&qualified_target))?;
         ERROR_LOG.log(format!(
-            "[diag][{}] set_active_target done, disabling bridge",
-            target_id
+            "[diag-timing][{}] set_workspace_main_pane + set_active_target done ({:?})",
+            target_id,
+            t_start.elapsed()
         ));
 
         self.layout_runtime
             .disable_main_pane_output_bridge(&workspace)?;
         ERROR_LOG.log(format!(
-            "[diag][{}] bridge disabled, syncing main slot bindings",
-            target_id
+            "[diag-timing][{}] bridge disabled ({:?})",
+            target_id,
+            t_start.elapsed()
         ));
 
         self.layout_runtime
             .sync_main_slot_bindings(&workspace, &current_workspace.workspace_dir)?;
         ERROR_LOG.log(format!(
-            "[diag][{}] bindings synced, refreshing chrome",
-            target_id
+            "[diag-timing][{}] bindings synced ({:?})",
+            target_id,
+            t_start.elapsed()
         ));
 
         let result = self
             .layout_runtime
             .refresh_workspace_chrome(&workspace, &current_workspace.workspace_dir);
         ERROR_LOG.log(format!(
-            "[diag][{}] refresh_workspace_chrome result={:?}",
-            target_id, result
+            "[diag-timing][{}] refresh_workspace_chrome done result={:?} (total={:?})",
+            target_id,
+            result,
+            t_start.elapsed()
         ));
         result
     }

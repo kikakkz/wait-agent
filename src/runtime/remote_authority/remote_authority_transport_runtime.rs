@@ -258,6 +258,94 @@ impl RemoteAuthorityTransportRuntime {
         )
     }
 
+    pub fn send_open_mirror_request(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        console_id: &str,
+        cols: usize,
+        rows: usize,
+        raw_pty_passthrough: bool,
+        bootstrap_mode: crate::infra::remote_protocol::BootstrapMode,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                console_id: console_id.to_string(),
+                cols,
+                rows,
+                raw_pty_passthrough,
+                bootstrap_mode,
+            }),
+        )
+    }
+
+    pub fn send_close_mirror_request(
+        &self,
+        session_id: &str,
+        target_id: &str,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+            }),
+        )
+    }
+
+    pub fn send_apply_resize(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        cols: usize,
+        rows: usize,
+        resize_epoch: u64,
+        resize_authority_console_id: String,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::ApplyResize(ApplyResizePayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                cols,
+                rows,
+                resize_epoch,
+                resize_authority_console_id,
+            }),
+        )
+    }
+
+    pub fn send_raw_pty_input(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        console_id: &str,
+        attachment_id: &str,
+        console_host_id: &str,
+        input_seq: u64,
+        input_bytes: Vec<u8>,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::RawPtyInput(RawPtyInputPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                console_id: console_id.to_string(),
+                attachment_id: attachment_id.to_string(),
+                console_host_id: console_host_id.to_string(),
+                input_seq,
+                input_bytes,
+            }),
+        )
+    }
+
     fn send_payload(
         &self,
         session_id: &str,

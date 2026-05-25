@@ -116,6 +116,7 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
                 &mut synced_sessions,
                 &mut next_message_id,
             ) {
+                ERROR_LOG.log("[diag-sync] sync_local_sessions failed, will reconnect".to_string());
                 should_reconnect = true;
             }
             next_sync_at = Instant::now() + poll_interval;
@@ -154,8 +155,20 @@ pub(super) fn handle_transport_event(
                 should_reconnect: false,
             }
         }
-        RemoteNodeTransportEvent::SessionClosed { .. }
-        | RemoteNodeTransportEvent::TransportFailed { .. } => {
+        RemoteNodeTransportEvent::SessionClosed { node_id } => {
+            ERROR_LOG.log(format!(
+                "[diag-sync] SessionClosed for node {node_id}, will reconnect"
+            ));
+            authority_manager.shutdown();
+            *active_session = None;
+            TransportEventOutcome {
+                should_reconnect: true,
+            }
+        }
+        RemoteNodeTransportEvent::TransportFailed { node_id, message } => {
+            ERROR_LOG.log(format!(
+                "[diag-sync] TransportFailed node={node_id:?} msg={message}, will reconnect"
+            ));
             authority_manager.shutdown();
             *active_session = None;
             TransportEventOutcome {
@@ -176,22 +189,38 @@ where
     G: LocalSessionCatalog,
 {
     let local_sessions = match gateway.list_local_sessions() {
-        Ok(sessions) => sessions,
-        Err(_) => return Ok(()),
+        Ok(sessions) => {
+            ERROR_LOG.log(format!(
+                "[diag-timing] sync_local_sessions: found {} local sessions",
+                sessions.len()
+            ));
+            sessions
+        }
+        Err(_) => {
+            ERROR_LOG
+                .log("[diag-timing] sync_local_sessions: list_local_sessions FAILED".to_string());
+            return Ok(());
+        }
     };
     let current_sessions = local_sessions_by_local_id(local_sessions);
     let delta = compute_session_sync_delta(synced_sessions, &current_sessions);
+    ERROR_LOG.log(format!(
+        "[diag-timing] sync_local_sessions: delta publish={} exit={}",
+        delta.publish.len(),
+        delta.exit.len()
+    ));
 
     for session in &delta.publish {
         next_message_id_increment(next_message_id);
-        session_handle
-            .send(remote_session_published_envelope(
-                node_id,
-                session_handle.session_instance_id(),
-                *next_message_id,
-                session,
-            ))
-            .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
+        if let Err(error) = session_handle.send(remote_session_published_envelope(
+            node_id,
+            session_handle.session_instance_id(),
+            *next_message_id,
+            session,
+        )) {
+            ERROR_LOG.log(format!("[diag-sync] session_handle.send failed: {error}"));
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()));
+        }
     }
 
     for previous in &delta.exit {
