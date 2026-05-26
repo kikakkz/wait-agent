@@ -1023,7 +1023,6 @@ fn pump_capture_pane_to_ingest_socket(
                 &tmux_socket_path(socket_name),
                 "capture-pane",
                 "-p",
-                "-e",
                 "-t",
                 pane,
             ])
@@ -1034,22 +1033,32 @@ fn pump_capture_pane_to_ingest_socket(
             continue;
         }
         let content = String::from_utf8_lossy(&output.stdout).into_owned();
-        // Compare text content (strip ANSI) to detect changes, but send
-        // the full ANSI-included capture for correct terminal rendering.
-        let text = strip_ansi_escape_sequences(&content);
-        if text != last_text {
-            let full_bytes = content.as_bytes().to_vec();
-            if !full_bytes.is_empty() {
+        if content != last_text {
+            let new_bytes = extract_new_output(&last_text, &content);
+            if !new_bytes.is_empty() {
                 ERROR_LOG.log(format!(
                     "[diag-timing] output pump: capture detected change, sending {} bytes",
-                    full_bytes.len()
+                    new_bytes.len()
                 ));
-                write_output_chunk_frame(&mut stream, &full_bytes)?;
+                // Prepend \r\n so output starts on a fresh line on the client.
+                let framed: Vec<u8> = b"\r\n".iter().chain(&new_bytes).cloned().collect();
+                write_output_chunk_frame(&mut stream, &framed)?;
             }
-            last_text = text;
+            last_text = content;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// Returns the suffix of `current` that differs from `previous`,
+/// skipping any common prefix. Used for plain-text diff of screen captures.
+fn extract_new_output(previous: &str, current: &str) -> Vec<u8> {
+    let common_len = previous
+        .chars()
+        .zip(current.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    current[common_len..].as_bytes().to_vec()
 }
 
 /// Strips ANSI escape sequences (CSI, OSC, etc.) from a string, returning
