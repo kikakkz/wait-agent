@@ -7,7 +7,8 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::{
     AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
-    AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
+    AuthorityTransportEvent, LocalAuthoritySocketBridgeStarter, QueuedAuthorityStreamSink,
+    QueuedAuthorityStreamStarter,
 };
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
@@ -83,6 +84,31 @@ impl RemoteMainSlotPaneRuntime {
             target_registry,
             current_executable,
             network,
+        ))
+    }
+
+    /// Builds the pane runtime with a socket-based authority connection
+    /// starter instead of the queued-stream starter. Used when the local
+    /// ingress server bridges the gRPC session to authority transport
+    /// sockets — the __remote-main-slot process does not need its own
+    /// gRPC connection to the remote peer.
+    pub fn from_build_env_with_local_socket_bridge(
+        _network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
+        let current_executable = std::env::current_exe().map_err(|error| {
+            LifecycleError::Io(
+                "failed to locate current waitagent executable".to_string(),
+                error,
+            )
+        })?;
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
+        );
+        Ok(Self::new_with_optional_external_authority_streams(
+            target_registry,
+            Box::new(LocalAuthoritySocketBridgeStarter),
+            None,
+            current_executable,
         ))
     }
 

@@ -55,10 +55,20 @@ impl RemoteMainSlotIngressRuntime {
     pub fn from_build_env_with_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
-        Ok(Self::new(
+        // When a --connect endpoint is configured, use socket-based authority
+        // bridging. The local ingress server already maintains the gRPC session
+        // and bridges it to authority transport sockets; the __remote-main-slot
+        // process does not need its own gRPC connection (which would hang as a
+        // second open_node_session call on the same HTTP/2 server).
+        let pane_runtime = if network.connect_endpoint_uri().is_some() {
+            RemoteMainSlotPaneRuntime::from_build_env_with_local_socket_bridge(network.clone())?
+        } else {
             RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams_and_network(
                 network.clone(),
-            )?,
+            )?
+        };
+        Ok(Self::new(
+            pane_runtime,
             RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
             Box::new(RemoteNodeIngressRuntime::new(
                 AuthoritySocketRemoteNodeIngressSource,
@@ -108,17 +118,26 @@ impl RemoteMainSlotIngressRuntime {
             "[diag-timing] RemoteMainSlotIngressRuntime::run start target={}",
             command.target
         ));
-        let authority_sink = self.pane_runtime.external_authority_stream_submitter()?;
-        // Start gRPC bridge in background so the UI (run_surface) starts
-        // immediately instead of blocking on gRPC connection establishment.
-        let _grpc_guard = self.spawn_background_grpc_bridge(
-            extract_authority_id_from_target(&command.target),
-            authority_sink,
-        )?;
-        ERROR_LOG.log(format!(
-            "[diag-timing] grpc bridge spawned, entering pane_runtime.run ({:?})",
-            t_run.elapsed()
-        ));
+        // When a socket-based authority bridge is configured (local ingress
+        // server bridges the gRPC session), skip the background gRPC bridge.
+        // The authority connection listener is created by the pane runtime
+        // via LocalAuthoritySocketBridgeStarter, and the local ingress server
+        // discovers and bridges it through refresh_authority_bridges.
+        if let Ok(authority_sink) = self.pane_runtime.external_authority_stream_submitter() {
+            let _grpc_guard = self.spawn_background_grpc_bridge(
+                extract_authority_id_from_target(&command.target),
+                authority_sink,
+            )?;
+            ERROR_LOG.log(format!(
+                "[diag-timing] grpc bridge spawned, entering pane_runtime.run ({:?})",
+                t_run.elapsed()
+            ));
+        } else {
+            ERROR_LOG.log(format!(
+                "[diag-timing] socket bridge mode, skipping grpc bridge ({:?})",
+                t_run.elapsed()
+            ));
+        }
         self.pane_runtime.run(command)
     }
 

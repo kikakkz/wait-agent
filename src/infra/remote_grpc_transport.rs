@@ -27,7 +27,6 @@ const HEARTBEAT_INTERVAL_SECONDS: i64 = 15;
 const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNodeSessionRequest {
@@ -99,7 +98,6 @@ impl GrpcRemoteNodeTransport {
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?
             .tcp_nodelay(true)
             .tcp_keepalive(Some(TCP_KEEPALIVE_IDLE))
-            .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
             .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
             .keep_alive_while_idle(true))
@@ -204,10 +202,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 }
 
                 let tcp_start = Instant::now();
-                ERROR_LOG.log(format!(
-                    "[diag-timing] connect_outbound endpoint created, calling connect (timeout={:?})",
-                    CONNECT_TIMEOUT
-                ));
                 let channel = match endpoint.connect().await {
                     Ok(channel) => {
                         let t_tcp = tcp_start.elapsed();
