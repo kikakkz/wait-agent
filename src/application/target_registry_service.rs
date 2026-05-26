@@ -1,5 +1,6 @@
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionTransport;
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
@@ -64,12 +65,13 @@ impl TargetCatalogGateway for DefaultTargetCatalogGateway {
             Some(socket_name) => self
                 .remote_runtime_owner
                 .try_snapshot(socket_name)
-                .map_err(|error| {
-                    TmuxError::new(format!(
-                        "failed to read remote runtime owner snapshot for socket `{socket_name}`: {error}"
-                    ))
-                })?
-                .sessions,
+                .map(|snapshot| snapshot.sessions)
+                .unwrap_or_else(|error| {
+                    ERROR_LOG.log(format!(
+                        "[diag] list_targets: remote snapshot failed for `{socket_name}`: {error}"
+                    ));
+                    Vec::new()
+                }),
             None => Vec::new(),
         };
         Ok(merge_targets_by_identity([

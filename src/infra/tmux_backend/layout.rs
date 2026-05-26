@@ -57,6 +57,24 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    pub(crate) fn pane_is_alive(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_id: &TmuxPaneId,
+    ) -> Result<bool, TmuxError> {
+        let output = self.run_workspace_command(
+            workspace,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane_id.as_str().to_string(),
+                "#{pane_dead}".to_string(),
+            ],
+        )?;
+        Ok(output.stdout.trim() == "0")
+    }
+
     #[allow(dead_code)]
     pub(crate) fn kill_pane(
         &self,

@@ -942,15 +942,9 @@ impl MainSlotRuntime {
     }
 
     fn pane_is_live(&self, workspace: &TmuxWorkspaceHandle, pane_id: &str) -> bool {
-        let Ok(window) = self.backend.current_window(workspace) else {
-            return false;
-        };
-        let Ok(panes) = self.backend.list_panes(workspace, &window) else {
-            return false;
-        };
-        panes
-            .iter()
-            .any(|pane| pane.pane_id.as_str() == pane_id && !pane.is_dead)
+        self.backend
+            .pane_is_alive(workspace, &TmuxPaneId::new(pane_id))
+            .unwrap_or(false)
     }
 
     fn find_session_matching_on_socket(
