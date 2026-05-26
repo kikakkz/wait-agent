@@ -507,10 +507,6 @@ impl MainSlotRuntime {
                 t_before_swap.elapsed()
             ));
 
-            // Select the session pane so keyboard focus follows the swap.
-            // Without this, keystrokes may still land on the previous pane.
-            let _ = self.backend.select_pane(&workspace, &session_pane);
-
             // Move the leftover 1-cell pane to a detached helper window so
             // the process stays alive but the workspace layout stays clean.
             // After swap_panes, workspace_main_pane holds the old content at
@@ -536,6 +532,14 @@ impl MainSlotRuntime {
                 t_start.elapsed()
             ));
         }
+
+        // Select the session pane so keyboard focus follows the swap.
+        // Without this, keystrokes may still land on the previous pane.
+        // Must happen unconditionally: the session_pane != workspace_main_pane
+        // check skips the swap when the remote pane is already at the display
+        // position (e.g. on second activation), but keyboard focus was
+        // never set there either.
+        let _ = self.backend.select_pane(&workspace, &session_pane);
 
         self.set_workspace_main_pane(&workspace, &session_pane)?;
         self.set_active_target(&workspace, Some(&qualified_target))?;
