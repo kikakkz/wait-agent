@@ -626,6 +626,19 @@ impl RemoteMainSlotPaneRuntime {
                             }
                             apply_authority_envelope(&remote_runtime, &target, &envelope)
                                 .map_err(remote_protocol_error)?;
+                            // Drain observer mailbox immediately: the mailbox
+                            // watcher may never fire because sync() below
+                            // consumes envelopes via try_recv(), making the
+                            // snapshot appear empty.
+                            let output = raw_output_reader
+                                .sync_and_collect_raw()
+                                .map_err(remote_protocol_error)?;
+                            if !output.is_empty() {
+                                write_remote_raw_output_with_initial_clear(
+                                    &output,
+                                    &mut raw_screen_initialized,
+                                )?;
+                            }
                         }
                     },
                     RemotePaneEvent::TargetPresenceChanged(is_present) => {

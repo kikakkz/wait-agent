@@ -655,9 +655,19 @@ fn forward_host_output_to_session(
             &envelope,
         )
         .map_err(remote_session_sync_error)?;
-        session_handle
-            .send(grpc)
-            .map_err(remote_session_sync_error)?;
+        ERROR_LOG.log(format!(
+            "[diag-timing] forward_host_output_to_session: forwarding envelope type={} to gRPC",
+            envelope.payload.message_type()
+        ));
+        if let Err(e) = session_handle.send(grpc) {
+            ERROR_LOG.log(format!(
+                "[diag-timing] forward_host_output_to_session: session_handle.send failed: {e}, exiting"
+            ));
+            return Err(remote_session_sync_error(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                e.to_string(),
+            )));
+        }
     }
     Ok(())
 }

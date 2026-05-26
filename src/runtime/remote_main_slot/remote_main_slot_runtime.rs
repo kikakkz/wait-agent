@@ -1,5 +1,6 @@
 use crate::application::remote_control_plane_service::RemoteControlPlaneService;
 use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ControlPlaneDestination, ControlPlanePayload, NodeBoundControlPlaneMessage,
     RemoteConsoleDescriptor, RoutedControlPlaneMessage,
@@ -275,12 +276,24 @@ impl RemoteMainSlotRuntime {
         stream: &'static str,
         output_bytes: Vec<u8>,
     ) -> Result<(), LifecycleError> {
+        let byte_count = output_bytes.len();
         let message = self
             .control_plane
             .borrow_mut()
             .route_target_output(target, output_seq, stream, output_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-        self.send_messages(&[message])
+        let result = self.send_messages(&[message]);
+        match &result {
+            Ok(()) => ERROR_LOG.log(format!(
+                "[diag-timing] send_target_output: seq={} ({} bytes) delivered OK",
+                output_seq, byte_count
+            )),
+            Err(e) => ERROR_LOG.log(format!(
+                "[diag-timing] send_target_output: seq={} ({} bytes) FAILED: {e}",
+                output_seq, byte_count
+            )),
+        }
+        result
     }
 
     pub fn send_raw_pty_output(
