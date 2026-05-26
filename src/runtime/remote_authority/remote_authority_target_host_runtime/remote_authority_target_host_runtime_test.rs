@@ -212,11 +212,13 @@ mod tests {
             "/tmp/wait agent",
             Path::new("/tmp/output path.sock"),
             Path::new("/tmp/input path.fifo"),
+            "wa-test-socket",
+            "%42",
         );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--input-fifo-path' '/tmp/input path.fifo'"
+            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--input-fifo-path' '/tmp/input path.fifo' '--socket-name' 'wa-test-socket' '--pane' '%42'"
         );
     }
 

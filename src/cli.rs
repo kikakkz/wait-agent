@@ -1474,12 +1474,18 @@ mod tests {
             "/tmp/output.sock",
             "--input-fifo-path",
             "/tmp/input.fifo",
+            "--socket-name",
+            "wa-test",
+            "--pane",
+            "%42",
         ])
         .command
         {
             Command::RemoteAuthorityOutputPump(command) => {
                 assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
                 assert_eq!(command.input_fifo_path, "/tmp/input.fifo");
+                assert_eq!(command.socket_name, "wa-test");
+                assert_eq!(command.pane, "%42");
             }
             other => panic!("unexpected command: {other:?}"),
         }
