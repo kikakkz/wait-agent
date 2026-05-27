@@ -583,31 +583,38 @@ impl RemoteMainSlotPaneRuntime {
                             ));
                             remote_runtime
                                 .handle_authority_disconnect(target.address.authority_id());
-                            // Query the catalog directly instead of relying on
-                            // the cached target-presence flag (which has ~1 s
-                            // watcher latency).  If the target is gone from the
-                            // catalog the session exited — exit cleanly.
-                            let in_catalog = self
-                                .target_registry
-                                .find_target(&spec.target)
-                                .ok()
-                                .flatten()
-                                .is_some();
-                            if !in_catalog
-                                && !remote_runtime.has_connection(target.address.authority_id())
-                            {
-                                ERROR_LOG.log(
-                                    "[diag-timing] Disconnected: target not in catalog, exiting cleanly"
-                                        .to_string(),
-                                );
-                                // Clear the screen so tmux doesn't flash
-                                // "Pane is dead" before the workspace swap.
-                                let _ = std::io::Write::write_all(
-                                    &mut io::stdout(),
-                                    CLEAR_SCREEN_HOME_ESCAPE.as_bytes(),
-                                );
-                                let _ = std::io::Write::flush(&mut io::stdout());
-                                return Ok(());
+                            // Poll the catalog directly for a short window.
+                            // The publication runtime updates it within
+                            // tens of milliseconds after the target host
+                            // sends TargetExited via the main gRPC channel.
+                            // If the target disappears, the session exited
+                            // cleanly — shut down without ever drawing
+                            // "reconnecting".
+                            for _ in 0..10 {
+                                let in_catalog = self
+                                    .target_registry
+                                    .find_target(&spec.target)
+                                    .ok()
+                                    .flatten()
+                                    .is_some();
+                                if !in_catalog
+                                    && !remote_runtime.has_connection(target.address.authority_id())
+                                {
+                                    ERROR_LOG.log(
+                                        "[diag-timing] Disconnected: target not in catalog after poll, exiting cleanly"
+                                            .to_string(),
+                                    );
+                                    let _ = std::io::Write::write_all(
+                                        &mut io::stdout(),
+                                        CLEAR_SCREEN_HOME_ESCAPE.as_bytes(),
+                                    );
+                                    let _ = std::io::Write::flush(&mut io::stdout());
+                                    return Ok(());
+                                }
+                                if !in_catalog {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(10));
                             }
                             authority_status = AuthorityTransportStatus::Disconnected;
                             // Reset screen_initialized so that the recovery
