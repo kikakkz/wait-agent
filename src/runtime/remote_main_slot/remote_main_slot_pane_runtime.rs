@@ -379,7 +379,18 @@ impl RemoteMainSlotPaneRuntime {
                         Ok(event) => event,
                         Err(RecvTimeoutError::Timeout) => {
                             let elapsed = reconnecting_since.unwrap().elapsed();
-                            if elapsed > slot_pane_helpers::RECONNECT_TIMEOUT {
+                            // Clean exit: the target is gone from the catalog
+                            // AND no connection remains — the session exited,
+                            // this is not a transient network blip.
+                            let target_gone = !target_is_present(&target_presence)
+                                && !remote_runtime.has_connection(target.address.authority_id());
+                            if elapsed > slot_pane_helpers::RECONNECT_TIMEOUT || target_gone {
+                                if target_gone {
+                                    ERROR_LOG.log(
+                                        "[diag-timing] target gone during reconnect, shutting down"
+                                            .to_string(),
+                                    );
+                                }
                                 return Ok(());
                             }
                             reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
