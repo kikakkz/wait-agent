@@ -394,17 +394,25 @@ impl RemoteMainSlotPaneRuntime {
                                 return Ok(());
                             }
                             reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
-                            let _ = observer.sync();
-                            draw_remote_snapshot(
-                                &terminal,
-                                &target,
-                                binding.as_ref(),
-                                &observer.snapshot(),
-                                &authority_status,
-                                None,
-                                Some(elapsed),
-                                reconnect_animation_frame,
-                            )?;
+                            // Defer the reconnecting overlay for the first
+                            // second — clean session exits are detected by
+                            // the target-presence watcher within ~1 s, so we
+                            // keep the last content visible instead of
+                            // flashing "reconnecting" and immediately
+                            // exiting.
+                            if elapsed > Duration::from_secs(1) {
+                                let _ = observer.sync();
+                                draw_remote_snapshot(
+                                    &terminal,
+                                    &target,
+                                    binding.as_ref(),
+                                    &observer.snapshot(),
+                                    &authority_status,
+                                    None,
+                                    Some(elapsed),
+                                    reconnect_animation_frame,
+                                )?;
+                            }
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => return Ok(()),
