@@ -375,14 +375,36 @@ impl RemoteMainSlotPaneRuntime {
                         Err(RecvTimeoutError::Disconnected) => return Ok(()),
                     }
                 } else if reconnecting_since.is_some() {
-                    match event_rx.recv_timeout(slot_pane_helpers::RECONNECT_ANIMATION_INTERVAL) {
+                    // ── reconnecting / verifying-exit state machine ──────────
+                    // Phase 1 (0 – 500 ms):  "verifying exit" — short-poll the
+                    //     catalog directly to confirm whether the session truly
+                    //     exited.  Draw *nothing*; keep the last content visible.
+                    // Phase 2 (> 500 ms):     genuine reconnect — the target is
+                    //     still in the catalog, so this is a network blip.  Draw
+                    //     the reconnecting indicator while waiting.
+                    // ──────────────────────────────────────────────────────────
+                    const VERIFY_EXIT_PHASE: Duration = Duration::from_millis(500);
+                    let elapsed = reconnecting_since.unwrap().elapsed();
+                    let phase1_timeout = if elapsed < VERIFY_EXIT_PHASE {
+                        Duration::from_millis(10)
+                    } else {
+                        slot_pane_helpers::RECONNECT_ANIMATION_INTERVAL
+                    };
+                    match event_rx.recv_timeout(phase1_timeout) {
                         Ok(event) => event,
                         Err(RecvTimeoutError::Timeout) => {
                             let elapsed = reconnecting_since.unwrap().elapsed();
-                            // Clean exit: the target is gone from the catalog
-                            // AND no connection remains — the session exited,
-                            // this is not a transient network blip.
-                            let target_gone = !target_is_present(&target_presence)
+                            // Check catalog directly (not the cached watcher
+                            // flag).  The publication runtime updates the
+                            // catalog within tens of milliseconds after the
+                            // target host sends TargetExited.
+                            let in_catalog = self
+                                .target_registry
+                                .find_target(&spec.target)
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            let target_gone = !in_catalog
                                 && !remote_runtime.has_connection(target.address.authority_id());
                             if elapsed > slot_pane_helpers::RECONNECT_TIMEOUT || target_gone {
                                 if target_gone {
@@ -398,14 +420,8 @@ impl RemoteMainSlotPaneRuntime {
                                 let _ = std::io::Write::flush(&mut io::stdout());
                                 return Ok(());
                             }
-                            reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
-                            // Defer the reconnecting overlay for the first
-                            // second — clean session exits are detected by
-                            // the target-presence watcher within ~1 s, so we
-                            // keep the last content visible instead of
-                            // flashing "reconnecting" and immediately
-                            // exiting.
-                            if elapsed > Duration::from_secs(1) {
+                            if elapsed >= VERIFY_EXIT_PHASE {
+                                reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
                                 let _ = observer.sync();
                                 draw_remote_snapshot(
                                     &terminal,
@@ -583,51 +599,16 @@ impl RemoteMainSlotPaneRuntime {
                             ));
                             remote_runtime
                                 .handle_authority_disconnect(target.address.authority_id());
-                            // Poll the catalog directly for a short window.
-                            // The publication runtime updates it within
-                            // tens of milliseconds after the target host
-                            // sends TargetExited via the main gRPC channel.
-                            // If the target disappears, the session exited
-                            // cleanly — shut down without ever drawing
-                            // "reconnecting".
-                            for _ in 0..10 {
-                                let in_catalog = self
-                                    .target_registry
-                                    .find_target(&spec.target)
-                                    .ok()
-                                    .flatten()
-                                    .is_some();
-                                if !in_catalog
-                                    && !remote_runtime.has_connection(target.address.authority_id())
-                                {
-                                    ERROR_LOG.log(
-                                        "[diag-timing] Disconnected: target not in catalog after poll, exiting cleanly"
-                                            .to_string(),
-                                    );
-                                    let _ = std::io::Write::write_all(
-                                        &mut io::stdout(),
-                                        CLEAR_SCREEN_HOME_ESCAPE.as_bytes(),
-                                    );
-                                    let _ = std::io::Write::flush(&mut io::stdout());
-                                    return Ok(());
-                                }
-                                if !in_catalog {
-                                    break;
-                                }
-                                std::thread::sleep(Duration::from_millis(10));
-                            }
                             authority_status = AuthorityTransportStatus::Disconnected;
-                            // Reset screen_initialized so that the recovery
-                            // path sends a full clear-screen before writing
-                            // new raw PTY output, rather than writing on top
-                            // of whatever draw_remote_snapshot left on screen.
                             raw_screen_initialized = false;
-                            // Keep binding and last content visible; start reconnecting.
-                            // Do NOT draw the reconnecting indicator yet — the target
-                            // may be exiting cleanly and we will detect that on the
-                            // next timeout before the user ever sees "reconnecting".
                             reconnecting_since = Some(Instant::now());
                             reconnect_animation_frame = 0;
+                            // Fall through to the reconnecting branch below.
+                            // The first ~500 ms are a "verifying exit" phase
+                            // that polls the catalog every 10 ms without
+                            // drawing anything; after that we switch to the
+                            // full reconnecting indicator.
+                            continue;
                         }
                         AuthorityTransportEvent::Failed(message) => {
                             authority_status = AuthorityTransportStatus::Failed(message);
