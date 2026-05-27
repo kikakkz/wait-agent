@@ -304,12 +304,13 @@ pub(crate) fn route_grpc_envelope(
             .publish(map_target_published_envelope(node_id, &envelope, payload)?)
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string())),
         Some(Body::TargetExited(payload)) => {
+            ERROR_LOG.log(format!(
+                "[diag-input] route_grpc_envelope: TargetExited node={node_id} session={}",
+                session.is_some()
+            ));
             // Also forward to the authority session so the pane runtime can
             // perform a clean shutdown instead of entering reconnection.
             if let Some(session) = session {
-                ERROR_LOG.log(format!(
-                    "[diag-input] route_grpc_envelope: writing TargetExited to authority session node={node_id}"
-                ));
                 let _ = session.write_authority_envelope(&ProtocolEnvelope {
                     protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
                     message_id: envelope.message_id.clone(),
