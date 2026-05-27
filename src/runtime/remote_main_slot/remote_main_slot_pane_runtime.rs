@@ -570,7 +570,20 @@ impl RemoteMainSlotPaneRuntime {
                             ));
                             remote_runtime
                                 .handle_authority_disconnect(target.address.authority_id());
-                            let _is_present = target_is_present(&target_presence);
+                            let is_present = target_is_present(&target_presence);
+                            // If the target already disappeared from the
+                            // catalog AND no connection remains, the session
+                            // exited cleanly — shut down immediately without
+                            // drawing the reconnecting indicator.
+                            if !is_present
+                                && !remote_runtime.has_connection(target.address.authority_id())
+                            {
+                                ERROR_LOG.log(
+                                    "[diag-timing] Disconnected with target already gone, exiting cleanly"
+                                        .to_string(),
+                                );
+                                return Ok(());
+                            }
                             authority_status = AuthorityTransportStatus::Disconnected;
                             // Reset screen_initialized so that the recovery
                             // path sends a full clear-screen before writing
