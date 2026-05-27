@@ -578,16 +578,21 @@ impl RemoteMainSlotPaneRuntime {
                             ));
                             remote_runtime
                                 .handle_authority_disconnect(target.address.authority_id());
-                            let is_present = target_is_present(&target_presence);
-                            // If the target already disappeared from the
-                            // catalog AND no connection remains, the session
-                            // exited cleanly — shut down immediately without
-                            // drawing the reconnecting indicator.
-                            if !is_present
+                            // Query the catalog directly instead of relying on
+                            // the cached target-presence flag (which has ~1 s
+                            // watcher latency).  If the target is gone from the
+                            // catalog the session exited — exit cleanly.
+                            let in_catalog = self
+                                .target_registry
+                                .find_target(&spec.target)
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            if !in_catalog
                                 && !remote_runtime.has_connection(target.address.authority_id())
                             {
                                 ERROR_LOG.log(
-                                    "[diag-timing] Disconnected with target already gone, exiting cleanly"
+                                    "[diag-timing] Disconnected: target not in catalog, exiting cleanly"
                                         .to_string(),
                                 );
                                 return Ok(());
