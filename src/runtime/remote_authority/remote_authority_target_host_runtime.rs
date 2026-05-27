@@ -779,6 +779,13 @@ where
         drop(output_tx);
         let _ = output_sender_thread.join();
 
+        // Signal the remote side that this session is exiting cleanly.
+        // Must happen *before* deactivate_mirror so the TargetExited envelope
+        // reaches the __remote-main-slot event loop before the gRPC stream
+        // is torn down.  Otherwise the remote sees a bare Disconnected and
+        // enters the reconnecting loop.
+        let _ = transport
+            .send_target_exited(&command.transport_session_id, &command.target_session_name);
         if matches!(mirror_state, MirrorState::Active { .. }) {
             let _ = deactivate_mirror(self, &command, &pane);
         }

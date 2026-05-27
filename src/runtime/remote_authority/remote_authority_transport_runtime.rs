@@ -2,7 +2,7 @@ use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
     OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    RawPtyOutputPayload, TargetExitedPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, read_control_plane_envelope, write_authority_transport_frame,
@@ -306,6 +306,21 @@ impl RemoteAuthorityTransportRuntime {
             ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
                 session_id: session_id.to_string(),
                 target_id: target_id.to_string(),
+            }),
+        )
+    }
+
+    pub fn send_target_exited(
+        &self,
+        transport_session_id: &str,
+        source_session_name: &str,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            transport_session_id,
+            source_session_name,
+            ControlPlanePayload::TargetExited(TargetExitedPayload {
+                transport_session_id: transport_session_id.to_string(),
+                source_session_name: Some(source_session_name.to_string()),
             }),
         )
     }
