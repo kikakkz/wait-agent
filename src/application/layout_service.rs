@@ -145,7 +145,9 @@ fn pane_with_title<'a>(panes: &'a [TmuxPaneInfo], title: &str) -> Option<&'a Tmu
 fn main_pane_id(panes: &[TmuxPaneInfo]) -> Option<TmuxPaneId> {
     panes
         .iter()
-        .find(|pane| pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE)
+        .find(|pane| {
+            !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
+        })
         .map(|pane| pane.pane_id.clone())
 }
 
@@ -649,6 +651,54 @@ mod tests {
                 Call::SetHeight("%3".to_string(), 1),
                 Call::SelectMain("%1".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn layout_service_skips_dead_main_pane_when_returning_focus_to_main() {
+        let gateway = FakeGateway::new(vec![
+            TmuxPaneInfo {
+                pane_id: TmuxPaneId::new("%1"),
+                pane_pid: None,
+                title: "main".to_string(),
+                current_command: Some("waitagent".to_string()),
+                current_path: None,
+                is_dead: true,
+                in_mode: false,
+            },
+            TmuxPaneInfo {
+                pane_id: TmuxPaneId::new("%2"),
+                pane_pid: None,
+                title: "main".to_string(),
+                current_command: Some("bash".to_string()),
+                current_path: None,
+                is_dead: false,
+                in_mode: false,
+            },
+        ]);
+        let service = LayoutService::new(gateway.clone());
+        let program = TmuxProgram::new("/tmp/waitagent");
+
+        service
+            .ensure_workspace_layout(
+                &workspace(),
+                &program,
+                &program,
+                LayoutFocusBehavior::ReturnToMain,
+            )
+            .expect("layout should succeed");
+
+        assert!(
+            gateway
+                .calls()
+                .contains(&Call::SelectMain("%2".to_string())),
+            "focus should return to the live main pane, not a dead pane"
+        );
+        assert!(
+            !gateway
+                .calls()
+                .contains(&Call::SelectMain("%1".to_string())),
+            "dead pane must not be selected as main"
         );
     }
 

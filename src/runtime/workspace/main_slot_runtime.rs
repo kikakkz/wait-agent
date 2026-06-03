@@ -853,7 +853,7 @@ impl MainSlotRuntime {
             .unset_pane_hook(workspace, recovery_pane, "pane-died");
         let _ = self
             .backend
-            .unset_pane_option(workspace, recovery_pane, "remain-on-exit");
+            .set_pane_option(workspace, recovery_pane, "remain-on-exit", "off");
     }
 
     fn restore_workspace_main_pane(
@@ -863,6 +863,23 @@ impl MainSlotRuntime {
         pane: &TmuxPaneId,
         active_target: Option<&str>,
     ) -> Result<(), LifecycleError> {
+        let previous_main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(main_slot_error)?
+            .filter(|previous| previous != pane.as_str())
+            .map(TmuxPaneId::new);
+        if let Some(previous_main_pane) = previous_main_pane.as_ref() {
+            let _ = self
+                .backend
+                .unset_pane_hook(workspace, previous_main_pane, "pane-died");
+            let _ = self.backend.set_pane_option(
+                workspace,
+                previous_main_pane,
+                "remain-on-exit",
+                "off",
+            );
+        }
         let _ = self.backend.select_pane(workspace, pane);
         self.set_workspace_main_pane(workspace, pane)?;
         self.set_active_target(workspace, active_target)?;
@@ -1244,7 +1261,7 @@ impl MainSlotRuntime {
             let _ = self.backend.unset_pane_hook(workspace, pane, "pane-died");
             let _ = self
                 .backend
-                .unset_pane_option(workspace, pane, "remain-on-exit");
+                .set_pane_option(workspace, pane, "remain-on-exit", "off");
             let _ = self.backend.kill_pane(workspace, pane);
         }
         self.clear_session_pane(workspace, qualified_target)
