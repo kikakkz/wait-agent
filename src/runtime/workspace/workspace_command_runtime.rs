@@ -44,11 +44,6 @@ pub struct WorkspaceCommandRuntime {
 }
 
 impl WorkspaceCommandRuntime {
-    #[cfg(test)]
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
-        Self::from_build_env_with_network(RemoteNetworkConfig::default())
-    }
-
     pub fn from_build_env_with_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {

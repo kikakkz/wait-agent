@@ -3,7 +3,7 @@ use crate::cli::{
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSocketName};
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
@@ -13,12 +13,10 @@ use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_registered,
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
-use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -210,13 +208,6 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         pane: &TmuxPaneId,
         command: &str,
     ) -> Result<(), Self::Error>;
-
-    fn send_keys_to_pane(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        keys: &str,
-    ) -> Result<(), Self::Error>;
 }
 
 impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
@@ -280,25 +271,6 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         command: &str,
     ) -> Result<(), Self::Error> {
         self.set_pane_pipe_on_socket(socket_name, pane, command)
-    }
-
-    fn send_keys_to_pane(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        keys: &str,
-    ) -> Result<(), Self::Error> {
-        self.run_on_socket(
-            &TmuxSocketName::new(socket_name),
-            &[
-                "send-keys".to_string(),
-                "-l".to_string(),
-                "-t".to_string(),
-                pane.as_str().to_string(),
-                keys.to_string(),
-            ],
-        )
-        .map(|_| ())
     }
 }
 
@@ -381,22 +353,9 @@ enum AuthorityHostEvent {
 }
 
 const OUTPUT_CHANNEL_BOUND: usize = 8192;
-const OUTPUT_CACHE_CAPACITY: usize = 1024;
-
-#[derive(Clone)]
-struct OutputFrame {
-    sequence: u64,
-    msg: AuthorityOutputMessage,
-}
 
 #[derive(Clone)]
 enum AuthorityOutputMessage {
-    RawPtyOutput {
-        session_id: String,
-        target_id: String,
-        output_seq: u64,
-        bytes: Vec<u8>,
-    },
     TargetOutput {
         session_id: String,
         target_id: String,
@@ -507,22 +466,10 @@ where
                 ERROR_LOG.log(format!(
                     "[diag-timing] target host: output sender sending (seq={})",
                     match &msg {
-                        AuthorityOutputMessage::RawPtyOutput { output_seq, .. } => *output_seq,
                         AuthorityOutputMessage::TargetOutput { output_seq, .. } => *output_seq,
                     }
                 ));
                 let result = match msg {
-                    AuthorityOutputMessage::RawPtyOutput {
-                        session_id,
-                        target_id,
-                        output_seq,
-                        bytes,
-                    } => sender_transport.send_raw_pty_output(
-                        &session_id,
-                        &target_id,
-                        output_seq,
-                        bytes,
-                    ),
                     AuthorityOutputMessage::TargetOutput {
                         session_id,
                         target_id,
@@ -561,8 +508,6 @@ where
 
         let health = Arc::new(EventLoopHealth::new());
         let mut pending_input: Vec<u8> = Vec::new();
-        let mut output_cache: VecDeque<OutputFrame> =
-            VecDeque::with_capacity(OUTPUT_CACHE_CAPACITY);
         let mut last_event_or_input_time = Instant::now();
 
         let loop_result = loop {
@@ -830,15 +775,8 @@ where
                     // dropped. Backpressure propagates to the PTY capture
                     // source when the network is congested, which is correct:
                     // slowing the producer is better than losing data.
-                    if output_tx.send(msg.clone()).is_err() {
+                    if output_tx.send(msg).is_err() {
                         break Ok(());
-                    }
-                    output_cache.push_back(OutputFrame {
-                        sequence: output_seq,
-                        msg,
-                    });
-                    if output_cache.len() > OUTPUT_CACHE_CAPACITY {
-                        output_cache.pop_front();
                     }
                 }
                 AuthorityHostEvent::TransportClosed => {
@@ -1069,6 +1007,14 @@ fn spawn_output_ingest_thread(
 /// replay already painted the initial screen, so this only needs to handle
 /// ongoing output.
 fn pump_stdin_to_ingest_socket(ingest_socket_path: &str) -> Result<(), RemoteAuthorityHostError> {
+    let mut stdin = io::stdin().lock();
+    pump_reader_to_ingest_socket(&mut stdin, ingest_socket_path)
+}
+
+fn pump_reader_to_ingest_socket<R: Read>(
+    reader: &mut R,
+    ingest_socket_path: &str,
+) -> Result<(), RemoteAuthorityHostError> {
     let mut stream = UnixStream::connect(ingest_socket_path).map_err(|e| {
         ERROR_LOG.log(format!(
             "[diag-timing] output pump: UnixStream::connect({}) failed: {e}",
@@ -1080,12 +1026,10 @@ fn pump_stdin_to_ingest_socket(ingest_socket_path: &str) -> Result<(), RemoteAut
         "[diag-timing] output pump: connected to ingest socket, reading from pipe-pane -O stdin"
             .to_string(),
     );
-    let mut stdin = io::stdin().lock();
     let mut buffer = [0_u8; 4096];
     loop {
-        match stdin.read(&mut buffer) {
+        match reader.read(&mut buffer) {
             Ok(0) => {
-                // pipe-pane closed — pane was destroyed or tmux shut down
                 ERROR_LOG.log("[diag-timing] output pump: stdin EOF, exiting".to_string());
                 break;
             }

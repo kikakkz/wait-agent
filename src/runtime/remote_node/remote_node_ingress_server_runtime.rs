@@ -19,9 +19,7 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
-use crate::runtime::remote_node_session_runtime::{
-    map_inbound_grpc_authority_event, GrpcAuthorityEvent,
-};
+use crate::runtime::remote_node_session_runtime::map_inbound_grpc_authority_event;
 use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;

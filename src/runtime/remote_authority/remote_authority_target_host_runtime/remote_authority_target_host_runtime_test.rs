@@ -1,7 +1,7 @@
 mod tests {
     use super::super::{
         authority_input_fifo_path, authority_output_ingest_socket_path,
-        pump_stdin_to_ingest_socket, read_output_chunk_frame, remote_authority_error,
+        pump_reader_to_ingest_socket, read_output_chunk_frame, remote_authority_error,
         remote_authority_output_pump_shell_command, remote_authority_target_host_args,
         render_bootstrap_replay, write_output_chunk_frame, LifecycleError,
         RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
@@ -129,15 +129,6 @@ mod tests {
                 .lock()
                 .expect("pipe calls mutex should not be poisoned")
                 .push(command.to_string());
-            Ok(())
-        }
-
-        fn send_keys_to_pane(
-            &self,
-            _socket_name: &str,
-            _pane: &TmuxPaneId,
-            _keys: &str,
-        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -278,11 +269,9 @@ mod tests {
             read_output_chunk_frame(&mut stream).expect("frame should decode")
         });
 
-        pump_stdin_to_ingest_socket(
-            Cursor::new(b"hello".to_vec()),
-            socket_path.to_string_lossy().as_ref(),
-        )
-        .expect("pump should forward bytes");
+        let mut reader = Cursor::new(b"hello".to_vec());
+        pump_reader_to_ingest_socket(&mut reader, socket_path.to_string_lossy().as_ref())
+            .expect("pump should forward bytes");
 
         let bytes = server.join().expect("server should join cleanly");
         assert_eq!(bytes, b"hello");

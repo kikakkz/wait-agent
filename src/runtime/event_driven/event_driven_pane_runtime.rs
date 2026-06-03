@@ -1,7 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::{RemoteNetworkConfig, UiPaneCommand};
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, UiPaneCommand};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
@@ -42,11 +42,6 @@ pub struct EventDrivenPaneRuntime {
 }
 
 impl EventDrivenPaneRuntime {
-    #[cfg(test)]
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
-        Self::from_build_env_with_network(RemoteNetworkConfig::default())
-    }
-
     pub fn from_build_env_with_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
@@ -99,8 +94,31 @@ impl EventDrivenPaneRuntime {
                     }
                     if let Some(activation) = outcome.activation {
                         ERROR_LOG.log(format!("[diag] sidebar input: activation={:?}", activation));
-                        if let Err(error) = self.apply_sidebar_activation(&command, activation) {
-                            ERROR_LOG.log(format!("[diag] sidebar activation error: {error}"));
+                        match self.apply_sidebar_activation(&command, activation) {
+                            Ok(true) => {
+                                match chrome.refresh_sidebar_for_pane(
+                                    &command,
+                                    pane_target.as_deref().unwrap_or(""),
+                                ) {
+                                    Ok(update) => {
+                                        if let Err(error) = redraw_sidebar(update, &mut last_buffer)
+                                        {
+                                            ERROR_LOG.log(format!(
+                                                "[diag] sidebar redraw error after activation: {error}"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        ERROR_LOG.log(format!(
+                                            "[diag] sidebar refresh error after activation: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                ERROR_LOG.log(format!("[diag] sidebar activation error: {error}"));
+                            }
                         }
                     }
                 }
@@ -198,8 +216,8 @@ impl EventDrivenPaneRuntime {
         &self,
         command: &UiPaneCommand,
         activation: EventDrivenSidebarActivation,
-    ) -> Result<(), LifecycleError> {
-        match &activation {
+    ) -> Result<bool, LifecycleError> {
+        match activation {
             EventDrivenSidebarActivation::SelectMainPane => {
                 ERROR_LOG.log(format!(
                     "[diag] apply_sidebar_activation: SelectMainPane socket={}",
@@ -210,30 +228,17 @@ impl EventDrivenPaneRuntime {
                         &TmuxSocketName::new(&command.socket_name),
                         &["select-pane".to_string(), "-L".to_string()],
                     )
-                    .map_err(event_pane_error)
+                    .map_err(event_pane_error)?;
+                Ok(false)
             }
             EventDrivenSidebarActivation::ActivateTarget { target } => {
                 ERROR_LOG.log(format!(
                     "[diag] apply_sidebar_activation: ActivateTarget target={} socket={}",
                     target, command.socket_name
                 ));
-                let result = self
-                    .backend
-                    .run_socket_command(
-                        &TmuxSocketName::new(&command.socket_name),
-                        &activate_target_run_shell_args(
-                            &current_executable_string()?,
-                            &command.socket_name,
-                            &command.session_name,
-                            &target,
-                        ),
-                    )
-                    .map_err(event_pane_error);
-                ERROR_LOG.log(format!(
-                    "[diag] apply_sidebar_activation: result={:?}",
-                    result.is_ok()
-                ));
-                result
+                self.run_activate_target_sync(command, &target)?;
+                ERROR_LOG.log("[diag] apply_sidebar_activation: result=true".to_string());
+                Ok(true)
             }
         }
     }
@@ -262,6 +267,36 @@ impl EventDrivenPaneRuntime {
         self.backend
             .mark_footer_ready(&workspace_handle(command), pane_target)
             .map_err(event_pane_error)
+    }
+
+    fn run_activate_target_sync(
+        &self,
+        command: &UiPaneCommand,
+        target: &str,
+    ) -> Result<(), LifecycleError> {
+        let executable = current_executable_path()?;
+        let args = activate_target_command_args(
+            &self.network,
+            &command.socket_name,
+            &command.session_name,
+            target,
+        );
+        let status = std::process::Command::new(&executable)
+            .args(&args)
+            .status()
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to execute waitagent activate-target command".to_string(),
+                    error,
+                )
+            })?;
+        if status.success() {
+            return Ok(());
+        }
+
+        Err(LifecycleError::Protocol(format!(
+            "waitagent __activate-target exited with status {status}"
+        )))
     }
 }
 
@@ -464,41 +499,24 @@ fn current_tmux_pane_target() -> Option<String> {
     std::env::var("TMUX_PANE").ok()
 }
 
-fn activate_target_shell_command(
-    executable: &str,
-    current_socket_name: &str,
-    current_session_name: &str,
-    target: &str,
-) -> String {
-    [
-        shell_escape(executable),
-        shell_escape("__activate-target"),
-        shell_escape("--current-socket-name"),
-        shell_escape(current_socket_name),
-        shell_escape("--current-session-name"),
-        shell_escape(current_session_name),
-        shell_escape("--target"),
-        shell_escape(target),
-    ]
-    .join(" ")
-}
-
-fn activate_target_run_shell_args(
-    executable: &str,
+fn activate_target_command_args(
+    network: &RemoteNetworkConfig,
     current_socket_name: &str,
     current_session_name: &str,
     target: &str,
 ) -> Vec<String> {
-    vec![
-        "run-shell".to_string(),
-        "-b".to_string(),
-        activate_target_shell_command(
-            executable,
-            current_socket_name,
-            current_session_name,
-            target,
-        ),
-    ]
+    prepend_global_network_args(
+        vec![
+            "__activate-target".to_string(),
+            "--current-socket-name".to_string(),
+            current_socket_name.to_string(),
+            "--current-session-name".to_string(),
+            current_session_name.to_string(),
+            "--target".to_string(),
+            target.to_string(),
+        ],
+        network,
+    )
 }
 
 fn spawn_resize_watcher(tx: mpsc::Sender<PaneEvent>) -> io::Result<PaneResizeWatcher> {
@@ -534,16 +552,10 @@ fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
     }
 }
 
-fn current_executable_string() -> Result<String, LifecycleError> {
-    std::env::current_exe()
-        .map(|path| path.display().to_string())
-        .map_err(|error| {
-            LifecycleError::Io("failed to locate waitagent executable".to_string(), error)
-        })
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+fn current_executable_path() -> Result<std::path::PathBuf, LifecycleError> {
+    std::env::current_exe().map_err(|error| {
+        LifecycleError::Io("failed to locate waitagent executable".to_string(), error)
+    })
 }
 
 fn event_pane_error<E>(error: E) -> LifecycleError
@@ -571,9 +583,9 @@ extern "C" fn pane_sigwinch_handler(_signal: c_int) {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_target_run_shell_args, write_buffer, ENTER_ALT_SCREEN_ESCAPE,
-        EXIT_ALT_SCREEN_ESCAPE,
+        activate_target_command_args, write_buffer, ENTER_ALT_SCREEN_ESCAPE, EXIT_ALT_SCREEN_ESCAPE,
     };
+    use crate::cli::RemoteNetworkConfig;
 
     #[test]
     fn single_line_pane_render_clears_screen_then_draws_first_row() {
@@ -599,9 +611,12 @@ mod tests {
     }
 
     #[test]
-    fn activate_target_run_shell_args_pass_shell_command_without_tmux_layer_requoting() {
-        let args = activate_target_run_shell_args(
-            "/tmp/wait agent",
+    fn activate_target_command_args_include_network_prefix_and_target() {
+        let args = activate_target_command_args(
+            &RemoteNetworkConfig {
+                port: 7474,
+                connect: Some("10.1.29.130:7474".to_string()),
+            },
             "wa-1",
             "session-1",
             "wa-1:session-2",
@@ -610,10 +625,17 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "run-shell".to_string(),
-                "-b".to_string(),
-                "'/tmp/wait agent' '__activate-target' '--current-socket-name' 'wa-1' '--current-session-name' 'session-1' '--target' 'wa-1:session-2'"
-                    .to_string(),
+                "--port".to_string(),
+                "7474".to_string(),
+                "--connect".to_string(),
+                "10.1.29.130:7474".to_string(),
+                "__activate-target".to_string(),
+                "--current-socket-name".to_string(),
+                "wa-1".to_string(),
+                "--current-session-name".to_string(),
+                "session-1".to_string(),
+                "--target".to_string(),
+                "wa-1:session-2".to_string(),
             ]
         );
     }

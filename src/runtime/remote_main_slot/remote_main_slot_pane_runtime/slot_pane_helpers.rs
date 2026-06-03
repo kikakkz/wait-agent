@@ -20,7 +20,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::raw::{c_int, c_void};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -44,15 +44,11 @@ const RECONNECT_SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠸', '⠴', '⠦', '
 static REMOTE_PANE_SIGWINCH_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static REMOTE_DRAW_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Thread-local override for session output. When set, remote session
-/// content is written to this file (a session-specific tmux pane TTY)
-/// instead of stdout. This gives each session its own scrollback buffer.
+// Thread-local override for session output. When set, remote session
+// content is written to this file (a session-specific tmux pane TTY)
+// instead of stdout. This gives each session its own scrollback buffer.
 thread_local! {
     static SESSION_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
-}
-
-pub(super) fn set_session_output(file: Option<File>) {
-    SESSION_OUTPUT.with(|o| *o.borrow_mut() = file);
 }
 
 fn with_session_output<R>(f: impl FnOnce(&mut File) -> R) -> Option<R> {

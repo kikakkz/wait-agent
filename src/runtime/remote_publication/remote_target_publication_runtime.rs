@@ -36,6 +36,7 @@ pub struct RemoteTargetPublicationRuntime {
 }
 
 impl RemoteTargetPublicationRuntime {
+    #[cfg(test)]
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         Self::from_build_env_with_network(RemoteNetworkConfig::default())
     }
@@ -371,7 +372,6 @@ impl RemoteTargetPublicationRuntime {
                     &snapshot.transport_session_id,
                     Some(&command.target_session_name),
                 )?;
-                last_snapshot = Some(snapshot);
                 break;
             }
 

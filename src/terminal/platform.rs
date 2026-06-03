@@ -153,7 +153,7 @@ mod tests {
         let raw = make_raw(termios);
 
         assert_eq!(raw.c_iflag & (BRKINT | ICRNL | INPCK | ISTRIP | IXON), 0);
-        assert_eq!(raw.c_oflag & OPOST, 0);
+        assert_eq!(raw.c_oflag & OPOST, OPOST);
         assert_eq!(raw.c_lflag & (ECHO | ICANON | IEXTEN | ISIG), 0);
         assert_eq!(raw.c_cc[VMIN], 1);
         assert_eq!(raw.c_cc[VTIME], 0);

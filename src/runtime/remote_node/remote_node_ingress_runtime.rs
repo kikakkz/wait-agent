@@ -3,9 +3,8 @@ use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, RawPtyInput, RawPtyOutput as GrpcRawPtyOutput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetOutput as GrpcTargetOutput,
-    TargetPublished as GrpcTargetPublished,
+    OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
+    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,

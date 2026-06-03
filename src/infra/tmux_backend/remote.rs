@@ -4,8 +4,6 @@ use std::str;
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
-const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
-const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 impl EmbeddedTmuxBackend {
     pub(crate) fn target_presentation_pane_on_socket(
@@ -309,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             set_pane_pipe_args(&TmuxPaneId::new("%4"), "echo bridge"),
-            vec!["pipe-pane", "-t", "%4", "echo bridge"]
+            vec!["pipe-pane", "-O", "-t", "%4", "echo bridge"]
         );
         assert_eq!(
             set_session_environment_args("shell-1", "WAITAGENT_X", "value"),

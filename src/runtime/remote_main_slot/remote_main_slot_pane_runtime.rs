@@ -60,13 +60,6 @@ pub(super) enum AuthorityTransportStatus {
 }
 
 impl RemoteMainSlotPaneRuntime {
-    #[cfg(test)]
-    pub fn from_build_env_with_external_authority_streams() -> Result<Self, LifecycleError> {
-        Self::from_build_env_with_external_authority_streams_and_network(
-            RemoteNetworkConfig::default(),
-        )
-    }
-
     pub fn from_build_env_with_external_authority_streams_and_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {

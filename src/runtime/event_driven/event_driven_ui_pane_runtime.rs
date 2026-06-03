@@ -191,17 +191,6 @@ impl EventDrivenUiPaneState {
             return;
         }
 
-        if let Some(active_target) = self.active_target.as_ref() {
-            let active_is_present = self
-                .sessions
-                .iter()
-                .any(|session| session.address.qualified_target() == *active_target);
-            if active_is_present && self.selected_target.as_ref() != Some(active_target) {
-                self.selected_target = Some(active_target.clone());
-                return;
-            }
-        }
-
         let selection_is_still_valid = self.selected_target.as_ref().map(|target| {
             self.sessions
                 .iter()
@@ -536,6 +525,46 @@ mod tests {
             .as_ref()
             .map(|buffer| buffer.contains("codex@local"))
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn unchanged_snapshot_preserves_user_selection_for_follow_up_submit() {
+        let mut runtime = EventDrivenUiPaneRuntime::new();
+        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
+        runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("wa-1:sess-1"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                session("wa-1", "sess-2", "codex"),
+            ],
+            None,
+            None,
+        );
+
+        runtime.apply_sidebar_input_bytes(b"\x1b[B");
+        runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("wa-1:sess-1"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                session("wa-1", "sess-2", "codex"),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-2"));
+
+        let outcome = runtime.apply_sidebar_input_bytes(b"\r");
+        assert_eq!(
+            outcome.activation,
+            Some(EventDrivenSidebarActivation::ActivateTarget {
+                target: "wa-1:sess-2".to_string(),
+            })
+        );
     }
 
     fn session(socket: &str, session: &str, command: &str) -> ManagedSessionRecord {

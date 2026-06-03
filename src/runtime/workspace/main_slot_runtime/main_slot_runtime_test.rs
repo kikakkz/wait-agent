@@ -86,14 +86,10 @@ mod tests {
             remote_session("10.1.29.130#7474", "remote-b"),
         ];
 
-        let next =
-            next_remote_fallback_target(&sessions, Some("remote-peer:10.1.29.130#7474:remote-a"))
-                .expect("remote fallback target should exist");
+        let next = next_remote_fallback_target(&sessions, Some("10.1.29.130#7474:remote-a"))
+            .expect("remote fallback target should exist");
 
-        assert_eq!(
-            next.address.qualified_target(),
-            "remote-peer:10.1.29.130#7474:remote-b"
-        );
+        assert_eq!(next.address.qualified_target(), "10.1.29.130#7474:remote-b");
     }
 
     #[test]
@@ -104,11 +100,9 @@ mod tests {
             remote_session("10.1.29.130#7474", "remote-a"),
         ];
 
-        assert!(next_remote_fallback_target(
-            &sessions,
-            Some("remote-peer:10.1.29.130#7474:remote-a")
-        )
-        .is_none());
+        assert!(
+            next_remote_fallback_target(&sessions, Some("10.1.29.130#7474:remote-a")).is_none()
+        );
     }
 
     #[test]
@@ -174,7 +168,7 @@ mod tests {
                 "--session-name".to_string(),
                 "workspace-1".to_string(),
                 "--target".to_string(),
-                "remote-peer:peer-a:shell-1".to_string(),
+                "peer-a:shell-1".to_string(),
             ]
         );
         assert_eq!(program.start_directory, Some(PathBuf::from("/tmp/demo")));
@@ -530,8 +524,14 @@ mod tests {
             .expect("local main pane exit should recover workspace");
 
         wait_for_condition(|| {
-            workspace_main_pane_command(&backend, &workspace.workspace_handle).as_deref()
-                == Some("waitagent")
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+                .ok()
+                .flatten()
+                .and_then(|pane_id| {
+                    pane_hook_command(&backend, &workspace.workspace_handle, &pane_id, "pane-died")
+                })
+                .is_some()
         });
 
         let active_target = backend
@@ -539,8 +539,34 @@ mod tests {
             .expect("active target should read after recovery");
         assert!(active_target.is_none() || active_target.as_deref() == Some(""));
 
+        let recovered_main_pane = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read after local recovery")
+            .expect("main pane option should remain populated after local recovery");
+        assert_eq!(
+            pane_option(
+                &backend,
+                &workspace.workspace_handle,
+                &recovered_main_pane,
+                "remain-on-exit",
+            )
+            .as_deref(),
+            Some("on")
+        );
+        let pane_died_hook = pane_hook_command(
+            &backend,
+            &workspace.workspace_handle,
+            &recovered_main_pane,
+            "pane-died",
+        )
+        .expect("local recovery should restore pane-died hook");
+        assert!(pane_died_hook.contains("__main-pane-died"));
+
         let workspace_still_exists = backend.current_window(&workspace.workspace_handle).is_ok();
-        assert!(workspace_still_exists, "workspace session should remain alive");
+        assert!(
+            workspace_still_exists,
+            "workspace session should remain alive"
+        );
 
         let target_handle = TmuxWorkspaceHandle {
             workspace_id: WorkspaceInstanceId::new(target_host.session_name.as_str().to_string()),
@@ -713,13 +739,13 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read after recovery")
             .expect("main pane option should remain populated after recovery");
-        let pane_died_hook = pane_hook_option(
+        let pane_died_hook = pane_hook_command(
             &backend,
             &workspace.workspace_handle,
             &recovered_main_pane,
             "pane-died",
         )
-        .expect("recovered remote pane should restore pane-died hook");
+        .expect("recovered main pane should restore pane-died hook");
         assert!(pane_died_hook.contains("__main-pane-died"));
         assert_eq!(
             pane_option(
@@ -1019,10 +1045,19 @@ mod tests {
         pane_id: &str,
         option_name: &str,
     ) -> Option<String> {
-        let value = backend
-            .show_pane_option(workspace, &crate::infra::tmux::TmuxPaneId::new(pane_id), option_name)
-            .ok()??;
-        let value = value.trim();
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "show-options".to_string(),
+                    "-pqv".to_string(),
+                    "-t".to_string(),
+                    pane_id.to_string(),
+                    option_name.to_string(),
+                ],
+            )
+            .ok()?;
+        let value = output.stdout.trim();
         if value.is_empty() {
             None
         } else {
@@ -1030,13 +1065,29 @@ mod tests {
         }
     }
 
-    fn pane_hook_option(
+    fn pane_hook_command(
         backend: &EmbeddedTmuxBackend,
         workspace: &TmuxWorkspaceHandle,
         pane_id: &str,
         hook_name: &str,
     ) -> Option<String> {
-        pane_option(backend, workspace, pane_id, &format!("@{hook_name}"))
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "show-hooks".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane_id.to_string(),
+                ],
+            )
+            .ok()?;
+        output.stdout.lines().find_map(|line| {
+            let prefix = format!("{hook_name}[");
+            line.strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once(']'))
+                .map(|(_, command)| command.trim().to_string())
+        })
     }
 
     fn wait_for_condition(predicate: impl Fn() -> bool) {

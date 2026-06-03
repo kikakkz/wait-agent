@@ -3,15 +3,10 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, OutboundNodeSessionRequest, RemoteNodeTransport,
 };
-use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::QueuedAuthorityStreamSink;
-use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_main_slot_pane_runtime::RemoteMainSlotPaneRuntime;
-use crate::runtime::remote_node_ingress_runtime::{
-    run_grpc_node_ingress_worker, AuthoritySocketRemoteNodeIngressSource, RemoteNodeIngressGuard,
-    RemoteNodeIngressRuntime, RemoteNodeIngressStarter,
-};
+use crate::runtime::remote_node_ingress_runtime::run_grpc_node_ingress_worker;
 use crate::runtime::remote_node_session_runtime::{
     RemoteNodePublicationSink, RemoteNodeSessionError,
 };
@@ -28,7 +23,6 @@ use std::time::Duration;
 pub struct RemoteMainSlotIngressRuntime {
     pane_runtime: RemoteMainSlotPaneRuntime,
     publication_runtime: RemoteTargetPublicationRuntime,
-    node_ingress: Box<dyn RemoteNodeIngressStarter>,
     network: RemoteNetworkConfig,
 }
 
@@ -36,13 +30,11 @@ impl RemoteMainSlotIngressRuntime {
     pub(crate) fn new(
         pane_runtime: RemoteMainSlotPaneRuntime,
         publication_runtime: RemoteTargetPublicationRuntime,
-        node_ingress: Box<dyn RemoteNodeIngressStarter>,
         network: RemoteNetworkConfig,
     ) -> Self {
         Self {
             pane_runtime,
             publication_runtime,
-            node_ingress,
             network,
         }
     }
@@ -60,9 +52,6 @@ impl RemoteMainSlotIngressRuntime {
                 network.clone(),
             )?,
             RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
-            Box::new(RemoteNodeIngressRuntime::new(
-                AuthoritySocketRemoteNodeIngressSource,
-            )),
             network,
         ))
     }
@@ -73,33 +62,6 @@ impl RemoteMainSlotIngressRuntime {
         stream: UnixStream,
     ) -> Result<(), LifecycleError> {
         self.pane_runtime.submit_external_authority_stream(stream)
-    }
-
-    pub(crate) fn start_ingress_for_command(
-        &self,
-        command: &RemoteMainSlotCommand,
-    ) -> Result<Box<dyn RemoteNodeIngressGuard>, LifecycleError> {
-        let socket_path = authority_transport_socket_path(
-            &command.socket_name,
-            &command.session_name,
-            &command.target,
-        );
-        let submitter = self.pane_runtime.external_authority_stream_submitter()?;
-        let publication_sink: Arc<dyn RemoteNodePublicationSink> =
-            Arc::new(LiveRemotePublicationSink {
-                runtime: self.publication_runtime.clone(),
-                socket_name: command.socket_name.clone(),
-            });
-        let _authority_ingress = self
-            .node_ingress
-            .start_ingress(socket_path, submitter, publication_sink)
-            .map_err(|error| {
-                LifecycleError::Io(
-                    "failed to start remote main-slot authority ingress".to_string(),
-                    error,
-                )
-            })?;
-        Ok(_authority_ingress)
     }
 
     pub fn run(&self, command: RemoteMainSlotCommand) -> Result<(), LifecycleError> {
@@ -243,11 +205,11 @@ fn extract_authority_id_from_target(target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteMainSlotIngressRuntime;
+    use super::{LiveRemotePublicationSink, RemoteMainSlotIngressRuntime};
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
     };
-    use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
+    use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ConsoleLocation, ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
         SessionAvailability,
@@ -274,6 +236,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::mpsc;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Builder;
     use tokio::sync::mpsc as tokio_mpsc;
@@ -316,7 +279,6 @@ mod tests {
             pane_runtime,
             RemoteTargetPublicationRuntime::from_build_env()
                 .expect("publication runtime should build from env"),
-            Box::new(RemoteNodeIngressRuntime::with_grpc_source(bind_addr)),
             RemoteNetworkConfig::default(),
         );
         let target = remote_target();
@@ -350,12 +312,18 @@ mod tests {
                 tx,
             )
             .expect("pane runtime should start queued authority connection");
-        let _ingress_guard = runtime
-            .start_ingress_for_command(&RemoteMainSlotCommand {
-                socket_name: "wa-1".to_string(),
-                session_name: "workspace-1".to_string(),
-                target: "peer-a:shell-1".to_string(),
-            })
+        let _ingress_guard = RemoteNodeIngressRuntime::with_grpc_source(bind_addr)
+            .start_with_source(
+                authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1"),
+                runtime
+                    .pane_runtime
+                    .external_authority_stream_submitter()
+                    .expect("authority submitter should exist"),
+                Arc::new(LiveRemotePublicationSink {
+                    runtime: runtime.publication_runtime.clone(),
+                    socket_name: "wa-1".to_string(),
+                }),
+            )
             .expect("grpc ingress should start");
 
         let async_runtime = Builder::new_multi_thread()
@@ -423,7 +391,6 @@ mod tests {
             pane_runtime,
             RemoteTargetPublicationRuntime::from_build_env()
                 .expect("publication runtime should build from env"),
-            Box::new(RemoteNodeIngressRuntime::with_grpc_source(bind_addr)),
             RemoteNetworkConfig::default(),
         );
         let target = remote_target();
@@ -457,12 +424,18 @@ mod tests {
                 tx,
             )
             .expect("pane runtime should start queued authority connection");
-        let _ingress_guard = runtime
-            .start_ingress_for_command(&RemoteMainSlotCommand {
-                socket_name: "wa-1".to_string(),
-                session_name: "workspace-1".to_string(),
-                target: "peer-a:shell-1".to_string(),
-            })
+        let _ingress_guard = RemoteNodeIngressRuntime::with_grpc_source(bind_addr)
+            .start_with_source(
+                authority_transport_socket_path("wa-1", "workspace-1", "peer-a:shell-1"),
+                runtime
+                    .pane_runtime
+                    .external_authority_stream_submitter()
+                    .expect("authority submitter should exist"),
+                Arc::new(LiveRemotePublicationSink {
+                    runtime: runtime.publication_runtime.clone(),
+                    socket_name: "wa-1".to_string(),
+                }),
+            )
             .expect("grpc ingress should start");
 
         let async_runtime = Builder::new_multi_thread()

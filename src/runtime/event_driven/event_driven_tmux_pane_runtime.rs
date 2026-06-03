@@ -43,15 +43,6 @@ where
     G::Error: ToString,
     R::Error: ToString,
 {
-    #[cfg(test)]
-    pub fn new_with_target_registry(gateway: G, target_registry: TargetRegistryService<R>) -> Self {
-        Self::new_with_target_registry_and_network(
-            gateway,
-            target_registry,
-            RemoteNetworkConfig::default(),
-        )
-    }
-
     pub fn new_with_target_registry_and_network(
         gateway: G,
         target_registry: TargetRegistryService<R>,
