@@ -414,11 +414,15 @@ mod tests {
 
     #[test]
     fn publication_socket_hook_tmux_command_targets_reconcile_and_socket_refresh() {
-        let command = publication_socket_hook_tmux_command("/tmp/wait agent", "wa-local");
+        let command = publication_socket_hook_tmux_command(
+            "/tmp/wait agent",
+            "wa-local",
+            &RemoteNetworkConfig::default(),
+        );
 
         assert_eq!(
             command,
-            "run-shell -b \"'/tmp/wait agent' '__socket-lifecycle-hook' '--socket-name' 'wa-local' '--hook-name' '#{hook}' '--session-name' '#{hook_session_name}' >/dev/null 2>&1\""
+            "run-shell -b \"'/tmp/wait agent' '--port' '7474' '__socket-lifecycle-hook' '--socket-name' 'wa-local' '--hook-name' '#{hook}' '--session-name' '#{hook_session_name}' >/dev/null 2>&1\""
         );
     }
 

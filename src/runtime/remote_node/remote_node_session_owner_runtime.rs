@@ -1,5 +1,6 @@
 use crate::cli::{RemoteNetworkConfig, RemoteTargetPublicationSenderCommand};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node_ingress_server_runtime::remote_node_ingress_owner_socket_path;
 use crate::runtime::remote_target_publication_runtime::{
     drain_pending_publication_sender_commands, read_publication_sender_command,
@@ -31,12 +32,7 @@ impl RemoteNodeSessionOwnerRuntime {
                 network.clone(),
             )?,
             network,
-            current_executable: std::env::current_exe().map_err(|error| {
-                LifecycleError::Io(
-                    "failed to locate current waitagent executable".to_string(),
-                    error,
-                )
-            })?,
+            current_executable: current_waitagent_executable()?,
         })
     }
 

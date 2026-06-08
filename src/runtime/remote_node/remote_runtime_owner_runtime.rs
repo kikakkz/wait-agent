@@ -5,6 +5,7 @@ use crate::domain::session_catalog::{
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
@@ -70,12 +71,7 @@ impl RemoteRuntimeOwnerRuntime {
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
-            current_executable: std::env::current_exe().map_err(|error| {
-                LifecycleError::Io(
-                    "failed to locate current waitagent executable".to_string(),
-                    error,
-                )
-            })?,
+            current_executable: current_waitagent_executable()?,
             network,
         })
     }

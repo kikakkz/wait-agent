@@ -345,7 +345,7 @@ pub(crate) fn spawn_live_authority_session_bridge(
     socket_path: PathBuf,
     session: Arc<RemoteNodeSessionRuntime>,
     running: Arc<AtomicBool>,
-) {
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let Ok(listener) = bind_live_authority_listener(&socket_path) else {
             return;
@@ -353,6 +353,7 @@ pub(crate) fn spawn_live_authority_session_bridge(
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let _ = bridge_live_authority_stream(stream, session.clone(), running.clone());
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -362,7 +363,7 @@ pub(crate) fn spawn_live_authority_session_bridge(
             }
         }
         let _ = fs::remove_file(&socket_path);
-    });
+    })
 }
 
 pub(super) fn ensure_live_session_route(
@@ -376,6 +377,94 @@ pub(super) fn ensure_live_session_route(
     publication_runtime: &RemoteTargetPublicationRuntime,
     live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
     authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
+) -> Result<(), LifecycleError> {
+    ensure_live_session_route_with_target_host_mode(
+        current_executable,
+        socket_name,
+        target_session_name,
+        authority_id,
+        target_id,
+        transport_socket_path,
+        network,
+        publication_runtime,
+        live_sessions,
+        authority_sessions,
+        true,
+        true,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn ensure_live_session_route_without_target_host_sidecar(
+    current_executable: &Path,
+    socket_name: &str,
+    target_session_name: &str,
+    authority_id: &str,
+    target_id: &str,
+    transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
+    publication_runtime: &RemoteTargetPublicationRuntime,
+    live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
+    authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
+) -> Result<(), LifecycleError> {
+    ensure_live_session_route_with_target_host_mode(
+        current_executable,
+        socket_name,
+        target_session_name,
+        authority_id,
+        target_id,
+        transport_socket_path,
+        network,
+        publication_runtime,
+        live_sessions,
+        authority_sessions,
+        false,
+        true,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn ensure_live_session_route_without_target_host_or_dispatcher(
+    current_executable: &Path,
+    socket_name: &str,
+    target_session_name: &str,
+    authority_id: &str,
+    target_id: &str,
+    transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
+    publication_runtime: &RemoteTargetPublicationRuntime,
+    live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
+    authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
+) -> Result<(), LifecycleError> {
+    ensure_live_session_route_with_target_host_mode(
+        current_executable,
+        socket_name,
+        target_session_name,
+        authority_id,
+        target_id,
+        transport_socket_path,
+        network,
+        publication_runtime,
+        live_sessions,
+        authority_sessions,
+        false,
+        false,
+    )
+}
+
+fn ensure_live_session_route_with_target_host_mode(
+    current_executable: &Path,
+    socket_name: &str,
+    target_session_name: &str,
+    authority_id: &str,
+    target_id: &str,
+    transport_socket_path: &str,
+    network: &RemoteNetworkConfig,
+    publication_runtime: &RemoteTargetPublicationRuntime,
+    live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
+    authority_sessions: &mut HashMap<String, SharedAuthoritySession>,
+    start_target_host_sidecar: bool,
+    start_shared_dispatcher: bool,
 ) -> Result<(), LifecycleError> {
     if let Some(existing) = live_sessions.get(target_session_name) {
         let transport_session_id = target_id
@@ -400,7 +489,9 @@ pub(super) fn ensure_live_session_route(
             let shared_session = authority_sessions
                 .get(authority_id)
                 .expect("authority session should exist after ensure");
-            start_shared_authority_command_dispatcher(shared_session.clone());
+            if start_shared_dispatcher {
+                start_shared_authority_command_dispatcher(shared_session.clone());
+            }
             return Ok(());
         }
     }
@@ -435,13 +526,22 @@ pub(super) fn ensure_live_session_route(
         pending_commands: Arc::new(Mutex::new(Vec::new())),
     });
     spawn_live_authority_route_listener(shared_session.clone(), route.clone());
-    spawn_remote_authority_target_host(current_executable, &route, transport_socket_path, network)?;
+    if start_target_host_sidecar {
+        spawn_remote_authority_target_host(
+            current_executable,
+            &route,
+            transport_socket_path,
+            network,
+        )?;
+    }
     shared_session
         .routes
         .lock()
         .expect("shared authority routes mutex should not be poisoned")
         .insert(target_session_name.to_string(), route.clone());
-    start_shared_authority_command_dispatcher(shared_session.clone());
+    if start_shared_dispatcher {
+        start_shared_authority_command_dispatcher(shared_session.clone());
+    }
     live_sessions.insert(target_session_name.to_string(), route);
     Ok(())
 }
@@ -461,11 +561,12 @@ pub(super) fn stop_live_session_route(
         {
             let _ = writer.shutdown(Shutdown::Both);
         }
-        let _ = UnixStream::connect(&route.socket_path);
         let _ = fs::remove_file(&route.socket_path);
         let mut remove_authority = false;
         if let Some(shared_session) = authority_sessions.get(&route.authority_id) {
-            if shared_session.current_session().is_none() {
+            if shared_session.current_session().is_none()
+                && shared_session.owner_started.load(Ordering::Relaxed)
+            {
                 shared_session.queue_pending_exit(&route);
             }
             let mut routes = shared_session
@@ -784,7 +885,6 @@ fn shutdown_live_routes(routes: &Arc<Mutex<HashMap<String, Arc<LiveSessionRoute>
         {
             let _ = writer.shutdown(Shutdown::Both);
         }
-        let _ = UnixStream::connect(&route.socket_path);
         let _ = fs::remove_file(&route.socket_path);
     }
 }
@@ -898,15 +998,18 @@ fn bridge_live_authority_stream(
         let command = match session.recv_authority_command() {
             Ok(command) => command,
             Err(error) => {
-                let _ = host_stream.shutdown(Shutdown::Both);
+                running.store(false, Ordering::Relaxed);
+                let _ = host_stream.shutdown(Shutdown::Write);
                 let _ = forward_host.join();
+                let _ = host_stream.shutdown(Shutdown::Both);
                 return Err(error);
             }
         };
         write_control_plane_envelope(&mut host_stream, &authority_command_envelope(command))?;
     }
-    let _ = host_stream.shutdown(Shutdown::Both);
+    let _ = host_stream.shutdown(Shutdown::Write);
     let _ = forward_host.join();
+    let _ = host_stream.shutdown(Shutdown::Both);
     Ok(())
 }
 
@@ -916,7 +1019,8 @@ fn forward_host_output_to_session(
     session: Arc<RemoteNodeSessionRuntime>,
     running: Arc<AtomicBool>,
 ) -> Result<(), RemoteNodeSessionError> {
-    while running.load(Ordering::Relaxed) {
+    let _ = running;
+    loop {
         let envelope = read_control_plane_envelope(&mut host_reader)?;
         match envelope.payload {
             ControlPlanePayload::OpenMirrorAccepted(payload) => {
@@ -972,6 +1076,13 @@ fn forward_host_output_to_session(
                     payload.output_bytes,
                 )?;
             }
+            ControlPlanePayload::TargetExited(payload) => {
+                session.send_target_exited(
+                    &payload.transport_session_id,
+                    payload.source_session_name.as_deref(),
+                )?;
+                return Ok(());
+            }
             other => {
                 return Err(RemoteNodeSessionError::new(format!(
                     "unexpected live authority host payload `{}`",
@@ -980,7 +1091,6 @@ fn forward_host_output_to_session(
             }
         }
     }
-    Ok(())
 }
 
 fn flush_pending_live_route_commands(

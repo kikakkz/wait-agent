@@ -16,6 +16,7 @@ use crate::infra::remote_protocol::{
 };
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
@@ -33,8 +34,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BRIDGE_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
-const WATCHER_SLEEP_ON_EMPTY: Duration = Duration::from_millis(200);
-const BRIDGE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const REMOTE_NODE_INGRESS_OWNER_READY_RETRIES: usize = 20;
 const REMOTE_NODE_INGRESS_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 
@@ -64,6 +63,8 @@ enum InternalEvent {
         socket_path: PathBuf,
     },
     SocketDirChanged,
+    #[cfg(test)]
+    Shutdown,
 }
 
 impl RemoteNodeIngressServerRuntime {
@@ -109,12 +110,7 @@ impl RemoteNodeIngressServerRuntime {
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
         spawn_waitagent_sidecar(&current_executable, remote_node_ingress_owner_args(network))
             .map_err(remote_node_ingress_error)?;
         for _ in 0..REMOTE_NODE_INGRESS_OWNER_READY_RETRIES {
@@ -143,6 +139,7 @@ impl RemoteNodeIngressServerRuntime {
                 transport_rx,
                 internal_rx,
                 internal_tx,
+                true,
             );
         });
         Ok(RemoteNodeIngressServerGuard {
@@ -200,25 +197,31 @@ fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
 /// Watches the temp directory for new authority socket files and sends
 /// [`InternalEvent::SocketDirChanged`] through the channel when one appears.
 ///
-/// On Linux this uses inotify for zero-wakeup event-driven discovery. On other
-/// platforms (macOS, BSD) it falls back to a low-frequency polling loop since
-/// those are development-only targets; production deployment is Linux-only.
+/// Linux production uses a blocking inotify fd so bridge discovery is driven by
+/// kernel filesystem events, not periodic refresh scans.
 fn start_socket_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> io::Result<thread::JoinHandle<()>> {
     #[cfg(target_os = "linux")]
-    return start_inotify_watcher(internal_tx);
+    {
+        start_inotify_watcher(internal_tx)
+    }
 
     #[cfg(not(target_os = "linux"))]
-    Ok(start_periodic_watcher(internal_tx))
+    {
+        let _ = internal_tx;
+        Err(io::Error::other(
+            "remote node ingress server requires Linux inotify for event-driven authority discovery",
+        ))
+    }
 }
 
-/// Linux inotify-based watcher — zero wakeups when the directory is idle.
+/// Linux inotify-based watcher.
 #[cfg(target_os = "linux")]
 fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> io::Result<thread::JoinHandle<()>> {
-    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK) };
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
     if fd == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -242,11 +245,6 @@ fn start_inotify_watcher(
         loop {
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    thread::sleep(WATCHER_SLEEP_ON_EMPTY);
-                    continue;
-                }
                 break;
             }
 
@@ -275,16 +273,6 @@ fn start_inotify_watcher(
     }))
 }
 
-/// Fallback periodic watcher for non-Linux platforms (macOS, BSD). Polls the
-/// temp directory at a low frequency since these are dev-only targets.
-#[cfg(not(target_os = "linux"))]
-fn start_periodic_watcher(internal_tx: mpsc::Sender<InternalEvent>) -> thread::JoinHandle<()> {
-    thread::spawn(move || loop {
-        let _ = internal_tx.send(InternalEvent::SocketDirChanged);
-        thread::sleep(Duration::from_secs(1));
-    })
-}
-
 impl Drop for RemoteNodeIngressServerGuard {
     fn drop(&mut self) {
         let _ = self.transport_guard.take();
@@ -294,123 +282,185 @@ impl Drop for RemoteNodeIngressServerGuard {
     }
 }
 
+enum IngressServerEvent {
+    Transport(RemoteNodeTransportEvent),
+    Internal(InternalEvent),
+}
+
 fn run_node_ingress_server_loop(
     publication_runtime: RemoteTargetPublicationRuntime,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
+    start_authority_socket_watcher: bool,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
     let mut authority_manager = SessionSyncAuthorityManager::new();
+    let (event_tx, event_rx) = mpsc::channel::<IngressServerEvent>();
 
-    // Start the inotify watcher to detect new authority socket files without polling.
-    let _watcher = start_socket_watcher(internal_tx.clone()).ok();
+    let _transport_bridge = {
+        let event_tx = event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(event) = transport_rx.recv() {
+                if event_tx.send(IngressServerEvent::Transport(event)).is_err() {
+                    return;
+                }
+            }
+        })
+    };
+    let _internal_bridge = {
+        let event_tx = event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(event) = internal_rx.recv() {
+                if event_tx.send(IngressServerEvent::Internal(event)).is_err() {
+                    return;
+                }
+            }
+        })
+    };
+    drop(event_tx);
+    let _watcher = if start_authority_socket_watcher {
+        match start_socket_watcher(internal_tx.clone()) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] authority socket watcher failed: {error}"
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
-    loop {
-        match transport_rx.recv_timeout(BRIDGE_HEALTH_CHECK_INTERVAL) {
-            Ok(event) => match event {
-                RemoteNodeTransportEvent::SessionOpened { session } => {
-                    let node_id = session.node_id().to_string();
-                    let mut active = ActiveNodeIngressSession {
-                        session,
-                        bridges: HashMap::new(),
-                    };
-                    refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
-                    sessions.insert(node_id, active);
-                }
-                RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
-                    // Forward authority commands (OpenMirrorRequest, etc.) through
-                    // the session sync authority manager so target hosts are created
-                    // on-demand and commands reach the local PTY owner.
-                    let is_command = matches!(
-                        envelope.body.as_ref(),
-                        Some(Body::OpenMirrorRequest(_))
-                            | Some(Body::CloseMirrorRequest(_))
-                            | Some(Body::ApplyPtyResize(_))
-                            | Some(Body::RawPtyInput(_))
-                    );
-                    if is_command {
-                        if let Some(active) = sessions.get(&node_id) {
-                            if let Some(event) = map_inbound_grpc_authority_event(envelope) {
-                                ERROR_LOG.log(format!(
-                                    "[diag-timing] ingress server: routing command via authority_manager node={node_id}"
-                                ));
-                                authority_manager.handle_event(&active.session, event);
-                            }
-                        } else {
-                            ERROR_LOG.log(format!(
-                                "[diag-timing] ingress server: no session for command node={node_id}, dropping"
-                            ));
-                        }
-                        while let Ok(event) = internal_rx.try_recv() {
-                            match event {
-                                InternalEvent::BridgeClosed {
-                                    node_id,
-                                    socket_path,
-                                } => {
-                                    if let Some(active) = sessions.get_mut(&node_id) {
-                                        active.bridges.remove(&socket_path);
-                                    }
-                                }
-                                InternalEvent::SocketDirChanged => {
-                                    for (nid, active) in &mut sessions {
-                                        refresh_authority_bridges(nid, active, internal_tx.clone());
-                                    }
-                                }
-                            }
-                        }
-                        continue;
+    while let Ok(event) = event_rx.recv() {
+        match event {
+            IngressServerEvent::Transport(event) => handle_transport_event(
+                &publication_runtime,
+                &mut authority_manager,
+                &mut sessions,
+                internal_tx.clone(),
+                event,
+            ),
+            #[cfg(test)]
+            IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
+            IngressServerEvent::Internal(event) => {
+                handle_internal_event(&mut sessions, internal_tx.clone(), event);
+            }
+        }
+    }
+}
+
+fn handle_transport_event(
+    publication_runtime: &RemoteTargetPublicationRuntime,
+    authority_manager: &mut SessionSyncAuthorityManager,
+    sessions: &mut HashMap<String, ActiveNodeIngressSession>,
+    internal_tx: mpsc::Sender<InternalEvent>,
+    event: RemoteNodeTransportEvent,
+) {
+    match event {
+        RemoteNodeTransportEvent::SessionOpened { session } => {
+            let node_id = session.node_id().to_string();
+            let session_instance_id = session.session_instance_id().to_string();
+            let mut active = ActiveNodeIngressSession {
+                session,
+                bridges: HashMap::new(),
+            };
+            refresh_authority_bridges(&node_id, &mut active, internal_tx);
+            sessions.insert(session_instance_id, active);
+        }
+        RemoteNodeTransportEvent::EnvelopeReceived {
+            node_id,
+            session_instance_id,
+            envelope,
+        } => {
+            let is_command = matches!(
+                envelope.body.as_ref(),
+                Some(Body::OpenMirrorRequest(_))
+                    | Some(Body::CloseMirrorRequest(_))
+                    | Some(Body::ApplyPtyResize(_))
+                    | Some(Body::RawPtyInput(_))
+            );
+            if is_command {
+                if let Some(active) = sessions.get(&session_instance_id) {
+                    if let Some(event) = map_inbound_grpc_authority_event(envelope) {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] ingress server: routing command via authority_manager node={node_id}"
+                        ));
+                        authority_manager.handle_event(&active.session, event);
                     }
-                    if !matches!(envelope.body.as_ref(), Some(Body::RawPtyInput(_))) {
-                        if let Some(active) = sessions.get_mut(&node_id) {
-                            refresh_authority_bridges(&node_id, active, internal_tx.clone());
-                        }
-                    }
-                    let _ = route_transport_envelope(
-                        &publication_runtime,
-                        &node_id,
-                        envelope,
-                        sessions.get_mut(&node_id),
-                    );
+                } else {
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] ingress server: no session for command node={node_id}, dropping"
+                    ));
                 }
-                RemoteNodeTransportEvent::SessionClosed { node_id } => {
+                return;
+            }
+            if let Some(active) = sessions.get_mut(&session_instance_id) {
+                let _ =
+                    route_transport_envelope(publication_runtime, &node_id, envelope, Some(active));
+            } else {
+                let _ = route_transport_envelope(publication_runtime, &node_id, envelope, None);
+            }
+        }
+        RemoteNodeTransportEvent::SessionClosed {
+            node_id,
+            session_instance_id,
+        } => {
+            sessions.remove(&session_instance_id);
+            if !sessions
+                .values()
+                .any(|active| active.session.node_id() == node_id)
+            {
+                let _ =
+                    publication_runtime.remove_discovered_remote_node_on_live_workspaces(&node_id);
+            }
+        }
+        RemoteNodeTransportEvent::TransportFailed {
+            node_id,
+            session_instance_id,
+            ..
+        } => {
+            if let Some(session_instance_id) = session_instance_id {
+                sessions.remove(&session_instance_id);
+            }
+            if let Some(node_id) = node_id {
+                if !sessions
+                    .values()
+                    .any(|active| active.session.node_id() == node_id)
+                {
                     let _ = publication_runtime
                         .remove_discovered_remote_node_on_live_workspaces(&node_id);
-                    sessions.remove(&node_id);
-                }
-                RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
-                    if let Some(node_id) = node_id {
-                        let _ = publication_runtime
-                            .remove_discovered_remote_node_on_live_workspaces(&node_id);
-                        sessions.remove(&node_id);
-                    }
-                }
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                for (node_id, active) in &mut sessions {
-                    refresh_authority_bridges(node_id, active, internal_tx.clone());
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
 
-        while let Ok(event) = internal_rx.try_recv() {
-            match event {
-                InternalEvent::BridgeClosed {
-                    node_id,
-                    socket_path,
-                } => {
-                    if let Some(active) = sessions.get_mut(&node_id) {
-                        active.bridges.remove(&socket_path);
-                    }
-                }
-                InternalEvent::SocketDirChanged => {
-                    for (node_id, active) in &mut sessions {
-                        refresh_authority_bridges(node_id, active, internal_tx.clone());
-                    }
+fn handle_internal_event(
+    sessions: &mut HashMap<String, ActiveNodeIngressSession>,
+    internal_tx: mpsc::Sender<InternalEvent>,
+    event: InternalEvent,
+) {
+    match event {
+        InternalEvent::BridgeClosed {
+            node_id,
+            socket_path,
+        } => {
+            for active in sessions.values_mut() {
+                if active.session.node_id() == node_id {
+                    active.bridges.remove(&socket_path);
                 }
             }
         }
+        InternalEvent::SocketDirChanged => {
+            for active in sessions.values_mut() {
+                let node_id = active.session.node_id().to_string();
+                refresh_authority_bridges(&node_id, active, internal_tx.clone());
+            }
+        }
+        #[cfg(test)]
+        InternalEvent::Shutdown => {}
     }
 }
 
@@ -442,29 +492,26 @@ fn route_transport_envelope(
             let Some(session) = session else {
                 return Ok(());
             };
-            let session_id = payload.transport_session_id.clone();
-            let target_id = format!("remote-peer:{node_id}:{session_id}");
-            let mut stale = Vec::new();
-            for (path, bridge) in &session.bridges {
-                if bridge
-                    .transport
-                    .send_payload(
-                        &session_id,
-                        &target_id,
+            let session_id = route_session_id(&envelope)
+                .or_else(|| payload_session_id(&payload.transport_session_id, &payload.target_id))
+                .unwrap_or_else(|| payload.transport_session_id.clone());
+            let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                session_id,
+                target_id,
+                |transport, session_id, target_id| {
+                    transport.send_payload(
+                        session_id,
+                        target_id,
                         ControlPlanePayload::TargetExited(TargetExitedPayload {
-                            transport_session_id: session_id.clone(),
+                            transport_session_id: payload.transport_session_id.clone(),
                             source_session_name: None,
                         }),
                     )
-                    .is_err()
-                {
-                    stale.push(path.clone());
-                }
-            }
-            for path in stale {
-                session.bridges.remove(&path);
-            }
-            Ok(())
+                },
+            )
         }
         Some(Body::TargetOutput(payload)) => {
             let Some(session) = session else {
@@ -1016,10 +1063,12 @@ fn payload_session_id(payload_session_id: &str, target_id: &str) -> Option<Strin
 }
 
 fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
-    let mut parts = target_id.splitn(3, ':');
-    let _transport = parts.next()?;
-    let _authority = parts.next()?;
-    let session_id = parts.next()?;
+    let target_id = target_id
+        .strip_prefix("remote-peer:")
+        .or_else(|| target_id.strip_prefix("local-tmux:"))
+        .or_else(|| target_id.strip_prefix("remote:"))
+        .unwrap_or(target_id);
+    let (_, session_id) = target_id.rsplit_once(':')?;
     if session_id.is_empty() {
         None
     } else {

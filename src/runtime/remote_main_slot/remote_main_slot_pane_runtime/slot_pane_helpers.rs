@@ -1,5 +1,5 @@
 use crate::application::target_registry_service::{
-    DefaultTargetCatalogGateway, TargetRegistryService,
+    DefaultTargetCatalogGateway, TargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::RemoteMainSlotCommand;
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord};
@@ -221,12 +221,34 @@ pub(super) fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, byte
     spec.console_location == ConsoleLocation::ServerConsole && bytes.contains(&0x1d)
 }
 
+pub(super) fn should_exit_surface_for_target_presence_loss(
+    target_exists_in_catalog: bool,
+    authority_connected: bool,
+    reconnecting: bool,
+) -> bool {
+    if !target_exists_in_catalog {
+        return true;
+    }
+    if reconnecting {
+        return false;
+    }
+    !authority_connected
+}
+
 #[cfg(test)]
 pub(super) fn should_exit_surface_for_target_presence(
     _spec: &RemoteInteractSurfaceSpec,
     is_present: bool,
+    target_exists_in_catalog: bool,
+    authority_connected: bool,
+    reconnecting: bool,
 ) -> bool {
     !is_present
+        && should_exit_surface_for_target_presence_loss(
+            target_exists_in_catalog,
+            authority_connected,
+            reconnecting,
+        )
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -659,6 +681,20 @@ pub(super) fn target_is_present(state: &Arc<Mutex<bool>>) -> bool {
     *state
         .lock()
         .expect("target presence mutex should not be poisoned")
+}
+
+pub(super) fn target_exists_in_catalog<G>(
+    target_registry: &TargetRegistryService<G>,
+    target_id: &str,
+) -> bool
+where
+    G: TargetCatalogGateway,
+{
+    target_registry
+        .find_target(target_id)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 pub(crate) fn apply_authority_envelope(

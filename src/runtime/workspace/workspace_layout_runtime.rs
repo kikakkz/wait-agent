@@ -16,6 +16,7 @@ use crate::infra::tmux::{
     TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -26,6 +27,8 @@ const STARTUP_CHROME_READY_TIMEOUT: Duration = Duration::from_millis(300);
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
 const WAITAGENT_MAIN_PANE_PIPE_OPTION: &str = "@waitagent_main_pane_pipe_id";
 const WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION: &str = "@waitagent_main_pane_output_bridge";
+const WAITAGENT_MAIN_PANE_GENERATION_OPTION: &str = "@waitagent_main_pane_generation";
+const WAITAGENT_MAIN_PANE_TRANSITION_OPTION: &str = "@waitagent_main_pane_transition";
 const MAIN_PANE_OUTPUT_BRIDGE_DISABLED: &str = "disabled";
 #[allow(dead_code)]
 const MAIN_PANE_OUTPUT_BRIDGE_ENABLED: &str = "enabled";
@@ -50,12 +53,7 @@ impl WorkspaceLayoutRuntime {
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_layout_error)?;
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
 
         Ok(Self {
             control_service: ControlService::new(backend.clone()),
@@ -370,11 +368,24 @@ impl WorkspaceLayoutRuntime {
         let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
         let main_pane_pipe_command =
             self.main_pane_output_bridge_shell_command(workspace, workspace_dir);
-        let pane_died_command = self.main_pane_died_hook_command(workspace);
+        let pane_generation = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_GENERATION_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|generation| !generation.is_empty())
+            .unwrap_or_else(|| "0".to_string());
+        let pane_died_command = self.main_pane_died_hook_command(workspace, &pane_generation);
+        let transition_active = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_TRANSITION_OPTION)
+            .map_err(tmux_layout_error)?
+            .as_deref()
+            == Some("1");
         let previous_main_pane = self
             .backend
             .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
             .map_err(tmux_layout_error)?
+            .filter(|pane| !pane.is_empty())
             .map(TmuxPaneId::new);
         let layout = self
             .layout_service
@@ -390,6 +401,13 @@ impl WorkspaceLayoutRuntime {
                 Some(&footer_bindings),
             )
             .map_err(tmux_layout_error)?;
+        if transition_active && previous_main_pane.is_none() {
+            ERROR_LOG.log(format!(
+                "[diag] ensure_layout_topology: skipped main pane metadata while transition is active for session={:?}",
+                workspace.session_name
+            ));
+            return Ok(layout);
+        }
         // Resolve the effective main pane. When the pane designated by
         // @waitagent_main_pane_id (previous_main_pane) is still alive and
         // is not a chrome pane, prefer it over layout.main_pane (which
@@ -598,10 +616,12 @@ impl WorkspaceLayoutRuntime {
         let create_target_shell_command = new_target_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
+            &self.network,
         );
         let shell_command = footer_menu_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
+            &self.network,
             &self.network.advertised_listener_label(),
             self.network.connect.as_deref(),
         );
@@ -628,6 +648,7 @@ impl WorkspaceLayoutRuntime {
         fullscreen_toggle_tmux_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
+            &self.network,
         )
     }
 
@@ -640,6 +661,7 @@ impl WorkspaceLayoutRuntime {
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
             &workspace_dir.display().to_string(),
+            &self.network,
         );
         format!(
             "run-shell -b {}",
@@ -647,11 +669,17 @@ impl WorkspaceLayoutRuntime {
         )
     }
 
-    pub(crate) fn main_pane_died_hook_command(&self, workspace: &TmuxWorkspaceHandle) -> String {
+    pub(crate) fn main_pane_died_hook_command(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_generation: &str,
+    ) -> String {
         let shell_command = main_pane_died_hook_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace.socket_name.as_str(),
             workspace.session_name.as_str(),
+            pane_generation,
+            &self.network,
         );
         format!(
             "run-shell -b {}",
@@ -668,6 +696,7 @@ impl WorkspaceLayoutRuntime {
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
             &workspace_dir.display().to_string(),
+            &self.network,
         )
     }
 
@@ -691,107 +720,143 @@ impl WorkspaceLayoutRuntime {
     }
 }
 
-fn fullscreen_toggle_tmux_command(executable: &str, workspace: &TmuxWorkspaceHandle) -> String {
-    let shell_command = [
-        shell_escape(executable),
-        shell_escape("__toggle-fullscreen"),
-        shell_escape("--socket-name"),
-        shell_escape(workspace.socket_name.as_str()),
-        shell_escape("--session-name"),
-        shell_escape(workspace.session_name.as_str()),
-    ]
-    .join(" ");
+fn fullscreen_toggle_tmux_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
+) -> String {
+    let shell_command = shell_command_with_network(
+        executable,
+        vec![
+            "__toggle-fullscreen".to_string(),
+            "--socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    );
     format!("run-shell -b {}", tmux_quote_argument(&shell_command))
 }
 
 fn footer_menu_shell_command(
     executable: &str,
     workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
     listener_label: &str,
     connect_endpoint: Option<&str>,
 ) -> String {
-    let mut parts = vec![
-        shell_escape(executable),
-        shell_escape("__footer-menu"),
-        shell_escape("--socket-name"),
-        shell_escape(workspace.socket_name.as_str()),
-        shell_escape("--session-name"),
-        shell_escape(workspace.session_name.as_str()),
-        shell_escape("--client-tty"),
-        shell_escape("#{client_tty}"),
-        shell_escape("--listener-display"),
-        shell_escape(listener_label),
+    let mut args = vec![
+        "__footer-menu".to_string(),
+        "--socket-name".to_string(),
+        workspace.socket_name.as_str().to_string(),
+        "--session-name".to_string(),
+        workspace.session_name.as_str().to_string(),
+        "--client-tty".to_string(),
+        "#{client_tty}".to_string(),
+        "--listener-display".to_string(),
+        listener_label.to_string(),
     ];
     if let Some(endpoint) = connect_endpoint {
-        parts.push(shell_escape("--connect-endpoint"));
-        parts.push(shell_escape(endpoint));
+        args.push("--connect-endpoint".to_string());
+        args.push(endpoint.to_string());
     }
-    parts.join(" ")
+    shell_command_with_network(executable, args, network)
 }
 
-fn new_target_shell_command(executable: &str, workspace: &TmuxWorkspaceHandle) -> String {
-    [
-        shell_escape(executable),
-        shell_escape("__new-target"),
-        shell_escape("--current-socket-name"),
-        shell_escape(workspace.socket_name.as_str()),
-        shell_escape("--current-session-name"),
-        shell_escape(workspace.session_name.as_str()),
-    ]
-    .join(" ")
+fn new_target_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
+) -> String {
+    shell_command_with_network(
+        executable,
+        vec![
+            "__new-target".to_string(),
+            "--current-socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--current-session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    )
 }
 
 fn layout_reconcile_hook_shell_command(
     executable: &str,
     workspace: &TmuxWorkspaceHandle,
     workspace_dir: &str,
+    network: &RemoteNetworkConfig,
 ) -> String {
-    [
-        shell_escape(executable),
-        shell_escape("__layout-reconcile"),
-        shell_escape("--socket-name"),
-        shell_escape(workspace.socket_name.as_str()),
-        shell_escape("--session-name"),
-        shell_escape(workspace.session_name.as_str()),
-        shell_escape("--workspace-dir"),
-        shell_escape(workspace_dir),
-    ]
-    .join(" ")
+    shell_command_with_network(
+        executable,
+        vec![
+            "__layout-reconcile".to_string(),
+            "--socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+            "--workspace-dir".to_string(),
+            workspace_dir.to_string(),
+        ],
+        network,
+    )
 }
 
 fn main_pane_died_hook_shell_command(
     executable: &str,
     socket_name: &str,
     session_name: &str,
+    pane_generation: &str,
+    network: &RemoteNetworkConfig,
 ) -> String {
-    [
-        shell_escape(executable),
-        shell_escape("__main-pane-died"),
-        shell_escape("--socket-name"),
-        shell_escape(socket_name),
-        shell_escape("--session-name"),
-        shell_escape(session_name),
-        shell_escape("--pane-id"),
-        "#{hook_pane}".to_string(),
-    ]
-    .join(" ")
+    shell_command_with_network(
+        executable,
+        vec![
+            "__main-pane-died".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+            "--session-name".to_string(),
+            session_name.to_string(),
+            "--pane-id".to_string(),
+            "#{hook_pane}".to_string(),
+            "--pane-generation".to_string(),
+            pane_generation.to_string(),
+        ],
+        network,
+    )
 }
 
 fn main_pane_output_bridge_shell_command(
     executable: &str,
     workspace: &TmuxWorkspaceHandle,
     _workspace_dir: &str,
+    network: &RemoteNetworkConfig,
 ) -> String {
-    let signal_command = [
-        shell_escape(executable),
-        shell_escape("__chrome-refresh-signal"),
-        shell_escape("--socket-name"),
-        shell_escape(workspace.socket_name.as_str()),
-        shell_escape("--session-name"),
-        shell_escape(workspace.session_name.as_str()),
-    ]
-    .join(" ");
+    let signal_command = shell_command_with_network(
+        executable,
+        vec![
+            "__chrome-refresh-signal".to_string(),
+            "--socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    );
     format!("while IFS= read -r _; do {signal_command}; done")
+}
+
+fn shell_command_with_network(
+    executable: &str,
+    command_args: Vec<String>,
+    network: &RemoteNetworkConfig,
+) -> String {
+    std::iter::once(executable.to_string())
+        .chain(prepend_global_network_args(command_args, network))
+        .map(|arg| shell_escape(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_escape(value: &str) -> String {
@@ -889,6 +954,7 @@ mod tests {
         main_pane_output_bridge_shell_command, should_refresh_workspace_chrome,
         tmux_quote_argument,
     };
+    use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
@@ -901,12 +967,17 @@ mod tests {
     fn footer_menu_shell_command_quotes_shell_arguments_but_not_tmux_layer() {
         let workspace = workspace();
 
-        let command =
-            footer_menu_shell_command("/tmp/wait agent", &workspace, "192.168.1.22:7474", None);
+        let command = footer_menu_shell_command(
+            "/tmp/wait agent",
+            &workspace,
+            &RemoteNetworkConfig::default(),
+            "192.168.1.22:7474",
+            None,
+        );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__footer-menu' '--socket-name' 'wa-1' '--session-name' 'session-1' '--client-tty' '#{client_tty}' '--listener-display' '192.168.1.22:7474'"
+            "'/tmp/wait agent' '--port' '7474' '__footer-menu' '--socket-name' 'wa-1' '--session-name' 'session-1' '--client-tty' '#{client_tty}' '--listener-display' '192.168.1.22:7474'"
         );
     }
 
@@ -917,10 +988,16 @@ mod tests {
         let command = footer_menu_shell_command(
             "/tmp/waitagent",
             &workspace,
+            &RemoteNetworkConfig {
+                port: 9001,
+                connect: Some("10.0.0.8:7474".to_string()),
+            },
             "192.168.1.22:7474",
             Some("10.0.0.5:7474"),
         );
 
+        assert!(command.contains("'--port' '9001'"));
+        assert!(command.contains("'--connect' '10.0.0.8:7474'"));
         assert!(command.contains("'--connect-endpoint'"));
         assert!(command.contains("'10.0.0.5:7474'"));
         assert!(command.contains("'--listener-display'"));
@@ -941,8 +1018,12 @@ mod tests {
     fn fullscreen_toggle_tmux_command_targets_current_workspace() {
         let workspace = workspace();
 
-        let command = fullscreen_toggle_tmux_command("/tmp/wait agent", &workspace);
-        let expected_shell = "'/tmp/wait agent' '__toggle-fullscreen' '--socket-name' 'wa-1' '--session-name' 'session-1'";
+        let command = fullscreen_toggle_tmux_command(
+            "/tmp/wait agent",
+            &workspace,
+            &RemoteNetworkConfig::default(),
+        );
+        let expected_shell = "'/tmp/wait agent' '--port' '7474' '__toggle-fullscreen' '--socket-name' 'wa-1' '--session-name' 'session-1'";
 
         assert_eq!(
             command,
@@ -954,22 +1035,32 @@ mod tests {
     fn layout_reconcile_hook_shell_command_preserves_workspace_directory_as_shell_argument() {
         let workspace = workspace();
 
-        let command =
-            layout_reconcile_hook_shell_command("/tmp/wait agent", &workspace, "/tmp/demo path");
+        let command = layout_reconcile_hook_shell_command(
+            "/tmp/wait agent",
+            &workspace,
+            "/tmp/demo path",
+            &RemoteNetworkConfig::default(),
+        );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path'"
+            "'/tmp/wait agent' '--port' '7474' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path'"
         );
     }
 
     #[test]
     fn main_pane_died_hook_shell_command_targets_current_session() {
-        let command = main_pane_died_hook_shell_command("/tmp/wait agent", "wa-1", "session-1");
+        let command = main_pane_died_hook_shell_command(
+            "/tmp/wait agent",
+            "wa-1",
+            "session-1",
+            "7",
+            &RemoteNetworkConfig::default(),
+        );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' #{hook_pane}"
+            "'/tmp/wait agent' '--port' '7474' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}' '--pane-generation' '7'"
         );
     }
 
@@ -977,12 +1068,16 @@ mod tests {
     fn main_pane_output_bridge_shell_command_refreshes_on_output_lines() {
         let workspace = workspace();
 
-        let command =
-            main_pane_output_bridge_shell_command("/tmp/wait agent", &workspace, "/tmp/demo path");
+        let command = main_pane_output_bridge_shell_command(
+            "/tmp/wait agent",
+            &workspace,
+            "/tmp/demo path",
+            &RemoteNetworkConfig::default(),
+        );
 
         assert_eq!(
             command,
-            "while IFS= read -r _; do '/tmp/wait agent' '__chrome-refresh-signal' '--socket-name' 'wa-1' '--session-name' 'session-1'; done"
+            "while IFS= read -r _; do '/tmp/wait agent' '--port' '7474' '__chrome-refresh-signal' '--socket-name' 'wa-1' '--session-name' 'session-1'; done"
         );
     }
 

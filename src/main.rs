@@ -9,6 +9,8 @@ mod infra;
 mod lifecycle;
 mod runtime;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod ui;
 
 use std::process::ExitCode;

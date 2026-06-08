@@ -183,18 +183,27 @@ pub(super) fn remote_target_publication_owner_args(
     )
 }
 
-pub(super) fn publication_socket_hook_tmux_command(executable: &str, socket_name: &str) -> String {
-    let hook_command = [
-        shell_escape(executable),
-        shell_escape("__socket-lifecycle-hook"),
-        shell_escape("--socket-name"),
-        shell_escape(socket_name),
-        shell_escape("--hook-name"),
-        shell_escape("#{hook}"),
-        shell_escape("--session-name"),
-        shell_escape("#{hook_session_name}"),
-    ]
-    .join(" ");
+pub(super) fn publication_socket_hook_tmux_command(
+    executable: &str,
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> String {
+    let hook_command = std::iter::once(executable.to_string())
+        .chain(prepend_global_network_args(
+            vec![
+                "__socket-lifecycle-hook".to_string(),
+                "--socket-name".to_string(),
+                socket_name.to_string(),
+                "--hook-name".to_string(),
+                "#{hook}".to_string(),
+                "--session-name".to_string(),
+                "#{hook_session_name}".to_string(),
+            ],
+            network,
+        ))
+        .map(|arg| shell_escape(&arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "run-shell -b {}",
         tmux_quote_argument(&format!("{hook_command} >/dev/null 2>&1"))

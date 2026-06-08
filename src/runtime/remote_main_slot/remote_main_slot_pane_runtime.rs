@@ -4,7 +4,9 @@ use crate::application::target_registry_service::{
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::tmux::TmuxLayoutGateway;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_connection_runtime::{
     AuthorityConnectionGuard, AuthorityConnectionRequest, AuthorityConnectionStarter,
     AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
@@ -16,6 +18,7 @@ use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
 use crate::terminal::TerminalRuntime;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -63,12 +66,7 @@ impl RemoteMainSlotPaneRuntime {
     pub fn from_build_env_with_external_authority_streams_and_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
         let target_registry = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
         );
@@ -391,14 +389,9 @@ impl RemoteMainSlotPaneRuntime {
                             // flag).  The publication runtime updates the
                             // catalog within tens of milliseconds after the
                             // target host sends TargetExited.
-                            let in_catalog = self
-                                .target_registry
-                                .find_target(&spec.target)
-                                .ok()
-                                .flatten()
-                                .is_some();
-                            let target_gone = !in_catalog
-                                && !remote_runtime.has_connection(target.address.authority_id());
+                            let in_catalog =
+                                target_exists_in_catalog(&self.target_registry, &spec.target);
+                            let target_gone = !in_catalog;
                             if elapsed > slot_pane_helpers::RECONNECT_TIMEOUT || target_gone {
                                 if target_gone {
                                     ERROR_LOG.log(
@@ -673,41 +666,7 @@ impl RemoteMainSlotPaneRuntime {
                                         spec.socket_name,
                                         spec.target
                                     ));
-                                    let home = std::env::var("HOME")
-                                        .unwrap_or_else(|_| "/tmp".to_string());
-                                    let tmux = std::path::PathBuf::from(home)
-                                        .join(".local/share/waitagent/tmux");
-                                    let waitagent = std::env::current_exe()
-                                        .map(|p| p.display().to_string())
-                                        .unwrap_or_else(|_| "waitagent".to_string());
-                                    let shell_cmd = format!(
-                                        "'{}' __remote-target-exited --socket-name '{}' --session-name '{}' --target '{}' --pane-id '{}'",
-                                        waitagent,
-                                        spec.socket_name,
-                                        spec.surface_scope,
-                                        spec.target,
-                                        pane_id,
-                                    );
-                                    ERROR_LOG.log(format!(
-                                        "[diag-native] session exit: run-shell cmd={shell_cmd}"
-                                    ));
-                                    match std::process::Command::new(&tmux)
-                                        .args(["-L", &spec.socket_name, "run-shell", &shell_cmd])
-                                        .output()
-                                    {
-                                        Ok(o) => {
-                                            ERROR_LOG.log(format!(
-                                                "[diag-native] session exit: run-shell ok status={}",
-                                                o.status
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            ERROR_LOG.log(format!(
-                                                "[diag-native] session exit: run-shell FAILED: {e}"
-                                            ));
-                                        }
-                                    }
-
+                                    signal_clean_remote_target_exit(&spec, &pane_id)?;
                                     return Ok(());
                                 }
                                 return Err(remote_protocol_error(e));
@@ -732,28 +691,21 @@ impl RemoteMainSlotPaneRuntime {
                         }
                     },
                     RemotePaneEvent::TargetPresenceChanged(is_present) => {
-                        if !is_present && reconnecting_since.is_none() {
-                            // The target presence watcher polls at 250ms with a
-                            // 4-miss grace (1 second latency). If the authority
-                            // transport reconnected during this window, a stale
-                            // false event can arrive after `reconnecting_since`
-                            // was already cleared. In that case the session must
-                            // NOT exit — the watcher will correct on the next poll.
-                            if !remote_runtime.has_connection(target.address.authority_id()) {
-                                return Ok(());
-                            }
-                            // Connection is active; the false event is stale.
-                            // Skip it — the next poll will send the correct state.
-                        }
-                        if !is_present && reconnecting_since.is_some() {
-                            // The target has disappeared while we are trying to
-                            // reconnect.  If no connection exists either, this is
-                            // a clean session exit, not a transient network blip.
-                            if !remote_runtime.has_connection(target.address.authority_id()) {
-                                ERROR_LOG.log(
-                                    "[diag-timing] target exited during reconnect, shutting down"
-                                        .to_string(),
-                                );
+                        if !is_present {
+                            let in_catalog =
+                                target_exists_in_catalog(&self.target_registry, &spec.target);
+                            let should_exit = should_exit_surface_for_target_presence_loss(
+                                in_catalog,
+                                remote_runtime.has_connection(target.address.authority_id()),
+                                reconnecting_since.is_some(),
+                            );
+                            if should_exit {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] target presence loss classified as exit: in_catalog={} authority_connected={} reconnecting={}",
+                                    in_catalog,
+                                    remote_runtime.has_connection(target.address.authority_id()),
+                                    reconnecting_since.is_some(),
+                                ));
                                 return Ok(());
                             }
                         }
@@ -910,6 +862,55 @@ impl RemoteMainSlotPaneRuntime {
         }
         Ok(session)
     }
+}
+
+fn signal_clean_remote_target_exit(
+    spec: &RemoteInteractSurfaceSpec,
+    pane_id: &str,
+) -> Result<(), LifecycleError> {
+    if pane_id.is_empty() {
+        return Ok(());
+    }
+
+    let backend =
+        crate::infra::tmux::EmbeddedTmuxBackend::from_build_env().map_err(remote_pane_error)?;
+    let workspace = crate::infra::tmux::TmuxWorkspaceHandle {
+        workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
+            spec.surface_scope.clone(),
+        ),
+        socket_name: crate::infra::tmux::TmuxSocketName::new(spec.socket_name.clone()),
+        session_name: crate::infra::tmux::TmuxSessionName::new(spec.surface_scope.clone()),
+    };
+    let pane = crate::infra::tmux::TmuxPaneId::new(pane_id);
+    let _ = backend.unset_pane_hook(&workspace, &pane, "pane-died");
+    let _ = backend.set_pane_option(&workspace, &pane, "remain-on-exit", "off");
+
+    let waitagent = current_waitagent_executable()?;
+    let status = Command::new(waitagent)
+        .args([
+            "__remote-target-exited",
+            "--socket-name",
+            &spec.socket_name,
+            "--session-name",
+            &spec.surface_scope,
+            "--target",
+            &spec.target,
+            "--pane-id",
+            pane_id,
+        ])
+        .status()
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to signal clean remote target exit".to_string(),
+                error,
+            )
+        })?;
+    if !status.success() {
+        return Err(LifecycleError::Protocol(format!(
+            "remote target exit command failed with status {status}"
+        )));
+    }
+    Ok(())
 }
 
 /// Flush any input that was buffered during a reconnection period.

@@ -1,6 +1,7 @@
 use crate::cli::Cli;
 use crate::error::AppError;
 use crate::infra::error_log::ERROR_LOG;
+use crate::runtime::network_state_runtime::command_network_config;
 
 // The accepted local default route is: bootstrap -> command dispatch ->
 // workspace command runtime. Event-r4 keeps that path explicit so new local
@@ -13,11 +14,19 @@ pub fn run() -> Result<(), AppError> {
         args
     ));
     let cli = Cli::parse(std::env::args_os())?;
+    let network = command_network_config(cli.network.clone(), cli.network_explicit, &cli.command);
     let dispatcher =
         crate::command::dispatch::CommandDispatcher::from_build_env_with_network_and_command(
-            cli.network.clone(),
+            network,
             &cli.command,
         )?;
 
-    dispatcher.dispatch(cli.command)
+    let command = cli.command.clone();
+    let result = dispatcher.dispatch(cli.command);
+    if let Err(error) = &result {
+        ERROR_LOG.log(format!(
+            "[diag-error] dispatch failed: command={command:?} error={error:?}"
+        ));
+    }
+    result
 }

@@ -138,6 +138,17 @@ mod tests {
     }
 
     #[test]
+    fn target_session_name_from_target_id_uses_last_colon_for_host_port_authority() {
+        assert_eq!(
+            super::super::target_session_name_from_target_id(
+                "remote-peer:10.1.26.84:7474:6a1b816eb1111435"
+            )
+            .as_deref(),
+            Some("6a1b816eb1111435")
+        );
+    }
+
+    #[test]
     fn runtime_start_publishes_local_sessions_after_session_open() {
         let receiver_slot = Arc::new(Mutex::new(None));
         let runtime = RemoteNodeSessionSyncRuntime {

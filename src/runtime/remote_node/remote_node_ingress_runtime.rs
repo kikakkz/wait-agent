@@ -199,7 +199,7 @@ pub(crate) fn run_grpc_node_ingress_worker(
     publication_sink: Arc<dyn RemoteNodePublicationSink>,
 ) {
     let t_worker = std::time::Instant::now();
-    let mut sessions = HashMap::new();
+    let mut sessions = HashMap::<String, ActiveGrpcNodeSession>::new();
     while let Ok(event) = event_rx.recv() {
         match event {
             RemoteNodeTransportEvent::SessionOpened { session } => {
@@ -213,25 +213,35 @@ pub(crate) fn run_grpc_node_ingress_worker(
                         t_worker.elapsed(),
                         t_session.elapsed()
                     ));
-                    sessions.insert(session.node_id().to_string(), bridge);
+                    sessions.insert(session.session_instance_id().to_string(), bridge);
                 }
             }
-            RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
+            RemoteNodeTransportEvent::EnvelopeReceived {
+                node_id,
+                session_instance_id,
+                envelope,
+            } => {
                 let _ = route_grpc_envelope(
                     &node_id,
                     envelope,
-                    sessions.get_mut(&node_id),
+                    sessions.get_mut(&session_instance_id),
                     publication_sink.as_ref(),
                 );
             }
-            RemoteNodeTransportEvent::SessionClosed { node_id, .. } => {
-                if let Some(session) = sessions.remove(&node_id) {
+            RemoteNodeTransportEvent::SessionClosed {
+                session_instance_id,
+                ..
+            } => {
+                if let Some(session) = sessions.remove(&session_instance_id) {
                     session.shutdown();
                 }
             }
-            RemoteNodeTransportEvent::TransportFailed { node_id, .. } => {
-                if let Some(node_id) = node_id {
-                    if let Some(session) = sessions.remove(&node_id) {
+            RemoteNodeTransportEvent::TransportFailed {
+                session_instance_id,
+                ..
+            } => {
+                if let Some(session_instance_id) = session_instance_id {
+                    if let Some(session) = sessions.remove(&session_instance_id) {
                         session.shutdown();
                     }
                 }
@@ -885,10 +895,12 @@ fn grpc_payload_session_id(payload_session_id: &str, target_id: &str) -> Option<
 }
 
 fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
-    let mut parts = target_id.splitn(3, ':');
-    let _transport = parts.next()?;
-    let _authority = parts.next()?;
-    let session_id = parts.next()?;
+    let target_id = target_id
+        .strip_prefix("remote-peer:")
+        .or_else(|| target_id.strip_prefix("local-tmux:"))
+        .or_else(|| target_id.strip_prefix("remote:"))
+        .unwrap_or(target_id);
+    let (_, session_id) = target_id.rsplit_once(':')?;
     if session_id.is_empty() {
         None
     } else {

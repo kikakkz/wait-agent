@@ -1,11 +1,11 @@
 mod tests {
     use super::super::{
-        authority_input_fifo_path, authority_output_ingest_socket_path,
-        pump_reader_to_ingest_socket, read_output_chunk_frame, remote_authority_error,
-        remote_authority_output_pump_shell_command, remote_authority_target_host_args,
-        render_bootstrap_replay, write_output_chunk_frame, LifecycleError,
-        RemoteAuthorityPublicationGateway, RemoteAuthorityTargetHostRuntime,
-        RemoteTargetPtyGateway, RemoteTargetTerminalFlags,
+        authority_event_socket_path, authority_output_ingest_socket_path,
+        pump_reader_to_ingest_socket, read_output_chunk_frame, read_stream_id_frame,
+        remote_authority_error, remote_authority_output_pump_shell_command,
+        remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame,
+        write_stream_id_frame, LifecycleError, RemoteAuthorityPublicationGateway,
+        RemoteAuthorityTargetHostRuntime, RemoteTargetPtyGateway, RemoteTargetTerminalFlags,
     };
     use crate::cli::RemoteAuthorityTargetHostCommand;
     use crate::cli::RemoteNetworkConfig;
@@ -24,9 +24,7 @@ mod tests {
     use crate::runtime::remote_node_session_runtime::RemoteNodeSessionRuntime;
     use crate::runtime::remote_node_transport_runtime::write_server_hello;
     use std::fs;
-    use std::fs::OpenOptions;
-    use std::io::Cursor;
-    use std::io::Read;
+    use std::io::{Cursor, Write};
     use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -41,6 +39,9 @@ mod tests {
         resize_calls: Arc<Mutex<Vec<(usize, usize)>>>,
         pipe_calls: Arc<Mutex<Vec<String>>>,
         clear_calls: Arc<Mutex<usize>>,
+        input_calls: Arc<Mutex<Vec<Vec<u8>>>>,
+        hook_calls: Arc<Mutex<Vec<String>>>,
+        clear_hook_calls: Arc<Mutex<usize>>,
         capture_bootstrap_screen: Arc<Mutex<String>>,
         cursor_position: Arc<Mutex<(usize, usize)>>,
         terminal_flags: Arc<Mutex<RemoteTargetTerminalFlags>>,
@@ -131,17 +132,58 @@ mod tests {
                 .push(command.to_string());
             Ok(())
         }
+
+        fn send_input(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+            bytes: &[u8],
+        ) -> Result<(), Self::Error> {
+            self.input_calls
+                .lock()
+                .expect("input calls mutex should not be poisoned")
+                .push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn set_pane_died_hook(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.hook_calls
+                .lock()
+                .expect("hook calls mutex should not be poisoned")
+                .push(command.to_string());
+            Ok(())
+        }
+
+        fn clear_pane_died_hook(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<(), Self::Error> {
+            let mut clear_hook_calls = self
+                .clear_hook_calls
+                .lock()
+                .expect("clear hook calls mutex should not be poisoned");
+            *clear_hook_calls += 1;
+            Ok(())
+        }
     }
 
     struct FakeLiveSession {
         session: Arc<RemoteNodeSessionRuntime>,
         socket_path: PathBuf,
         running: Arc<AtomicBool>,
+        worker: thread::JoinHandle<()>,
     }
 
     #[derive(Clone, Default)]
     struct FakePublicationGateway {
         live_session: Arc<Mutex<Option<FakeLiveSession>>>,
+        closed_sessions: Arc<Mutex<Vec<String>>>,
     }
 
     impl RemoteAuthorityPublicationGateway for FakePublicationGateway {
@@ -159,7 +201,7 @@ mod tests {
             );
             let running = Arc::new(AtomicBool::new(true));
             let socket_path = live_authority_session_socket_path(socket_name, target_session_name);
-            spawn_live_authority_session_bridge(
+            let worker = spawn_live_authority_session_bridge(
                 socket_path.clone(),
                 session.clone(),
                 running.clone(),
@@ -172,6 +214,7 @@ mod tests {
                 session,
                 socket_path: socket_path.clone(),
                 running,
+                worker,
             });
             Ok(socket_path)
         }
@@ -181,7 +224,7 @@ mod tests {
             _socket_name: &str,
             target_session_name: &str,
         ) -> Result<(), LifecycleError> {
-            assert_eq!(target_session_name, "target-1");
+            assert!(target_session_name.starts_with("target-"));
             if let Some(live_session) = self
                 .live_session
                 .lock()
@@ -189,8 +232,9 @@ mod tests {
                 .take()
             {
                 live_session.running.store(false, Ordering::Relaxed);
-                live_session.session.shutdown();
                 let _ = UnixStream::connect(&live_session.socket_path);
+                let _ = live_session.worker.join();
+                live_session.session.shutdown();
                 let _ = fs::remove_file(live_session.socket_path);
             }
             Ok(())
@@ -201,7 +245,12 @@ mod tests {
             socket_name: &str,
             target_session_name: &str,
         ) -> Result<(), LifecycleError> {
-            self.ensure_live_session_unregistered(socket_name, target_session_name)
+            let _ = socket_name;
+            self.closed_sessions
+                .lock()
+                .expect("closed sessions mutex should not be poisoned")
+                .push(target_session_name.to_string());
+            Ok(())
         }
     }
 
@@ -210,14 +259,13 @@ mod tests {
         let command = remote_authority_output_pump_shell_command(
             "/tmp/wait agent",
             Path::new("/tmp/output path.sock"),
-            Path::new("/tmp/input path.fifo"),
             "wa-test-socket",
-            "%42",
+            42,
         );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--input-fifo-path' '/tmp/input path.fifo' '--socket-name' 'wa-test-socket' '--pane' '%42'"
+            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--socket-name' 'wa-test-socket' '--stream-id' '42'"
         );
     }
 
@@ -266,14 +314,17 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("listener should bind");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("listener should accept");
-            read_output_chunk_frame(&mut stream).expect("frame should decode")
+            let stream_id = read_stream_id_frame(&mut stream).expect("stream id should decode");
+            let bytes = read_output_chunk_frame(&mut stream).expect("frame should decode");
+            (stream_id, bytes)
         });
 
         let mut reader = Cursor::new(b"hello".to_vec());
-        pump_reader_to_ingest_socket(&mut reader, socket_path.to_string_lossy().as_ref())
+        pump_reader_to_ingest_socket(&mut reader, socket_path.to_string_lossy().as_ref(), 42)
             .expect("pump should forward bytes");
 
-        let bytes = server.join().expect("server should join cleanly");
+        let (stream_id, bytes) = server.join().expect("server should join cleanly");
+        assert_eq!(stream_id, 42);
         assert_eq!(bytes, b"hello");
         let _ = fs::remove_file(&socket_path);
     }
@@ -311,25 +362,8 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
-        let input_fifo_path =
-            authority_input_fifo_path(command.transport_socket_path.as_str(), &command.target_id);
         let server_ingest_socket_path = ingest_socket_path.clone();
         let (server_tx, server_rx) = std::sync::mpsc::channel();
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
-        let input_reader_path = input_fifo_path.clone();
-        thread::spawn(move || {
-            wait_for_path(&input_reader_path);
-            let mut fifo = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&input_reader_path)
-                .expect("input fifo should open");
-            let mut bytes = [0_u8; 1];
-            fifo.read_exact(&mut bytes)
-                .expect("input fifo should receive target input");
-            let _ = input_tx.send(bytes.to_vec());
-        });
-        let server_input_fifo_path = input_fifo_path.clone();
         thread::spawn(move || {
             let (mut stream, _) = transport_listener
                 .accept()
@@ -353,7 +387,6 @@ mod tests {
                 },
             )
             .expect("open mirror should encode");
-            wait_for_path(&server_input_fifo_path);
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -393,6 +426,8 @@ mod tests {
                             wait_for_path(&server_ingest_socket_path);
                             let mut output_stream = UnixStream::connect(&server_ingest_socket_path)
                                 .expect("ingest socket should accept");
+                            write_stream_id_frame(&mut output_stream, 1)
+                                .expect("stream id should encode");
                             write_output_chunk_frame(&mut output_stream, b"hello")
                                 .expect("output chunk should encode");
                             drop(output_stream);
@@ -425,7 +460,7 @@ mod tests {
                 }
             }
             stream
-                .shutdown(Shutdown::Write)
+                .shutdown(Shutdown::Both)
                 .expect("server shutdown should succeed");
             let _ = server_tx.send((
                 accepted_payload.expect("accepted payload should be collected"),
@@ -449,10 +484,12 @@ mod tests {
             .expect("runtime should finish cleanly");
 
         assert_eq!(
-            input_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("input fifo should receive target input"),
-            b"a".to_vec()
+            fake_gateway
+                .input_calls
+                .lock()
+                .expect("input calls mutex should not be poisoned")
+                .clone(),
+            vec![b"a".to_vec()]
         );
         assert_eq!(
             fake_gateway
@@ -513,6 +550,97 @@ mod tests {
             .lock()
             .expect("pipe calls mutex should not be poisoned")[0]
             .contains("__remote-authority-output-pump"));
+        let _ = fs::remove_file(&transport_socket_path);
+    }
+
+    #[test]
+    fn authority_host_runtime_exits_from_pane_died_event_without_active_mirror() {
+        let socket_name = unique_test_socket_name("wa-pane-died");
+        let transport_socket_path = transport_socket_path("host-pane-died");
+        let transport_listener =
+            UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
+        let fake_gateway = FakeGateway::default();
+        let runtime = RemoteAuthorityTargetHostRuntime::new(
+            fake_gateway.clone(),
+            FakePublicationGateway::default(),
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let command = RemoteAuthorityTargetHostCommand {
+            socket_name: socket_name.clone(),
+            target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-1".to_string(),
+            transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+        };
+        let event_socket_path =
+            authority_event_socket_path(command.transport_socket_path.as_str(), &command.target_id);
+
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = transport_listener
+                .accept()
+                .expect("transport should accept");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("transport stream should accept read timeout");
+            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
+            match hello.payload {
+                ControlPlanePayload::ClientHello(ClientHelloPayload { .. }) => {}
+                other => panic!("unexpected hello payload: {other:?}"),
+            }
+            write_server_hello(&mut stream, "waitagent-remote-node-session")
+                .expect("server hello should encode");
+            ready_tx.send(()).expect("server readiness should send");
+
+            let envelope = read_node_session_envelope(&mut stream)
+                .expect("pane-died should produce TargetExited");
+            let payload = match envelope.envelope.payload {
+                ControlPlanePayload::TargetExited(payload) => payload,
+                other => panic!("unexpected node-session payload: {other:?}"),
+            };
+            server_tx.send(payload).expect("payload should send");
+        });
+
+        let (runtime_tx, runtime_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = runtime_tx.send(runtime.run_target_host(command));
+        });
+
+        wait_for_path(&event_socket_path);
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server hello should complete before pane event");
+        let mut event_stream =
+            UnixStream::connect(&event_socket_path).expect("event socket should accept");
+        event_stream
+            .write_all(b"%7\n")
+            .expect("pane event should write");
+        drop(event_stream);
+
+        let payload = server_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("TargetExited should arrive");
+        runtime_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("runtime should complete within timeout")
+            .expect("runtime should finish cleanly");
+
+        assert_eq!(payload.transport_session_id, "target-1");
+        assert_eq!(payload.source_session_name.as_deref(), Some("target-1"));
+        assert!(fake_gateway
+            .hook_calls
+            .lock()
+            .expect("hook calls mutex should not be poisoned")[0]
+            .contains("__remote-authority-pane-died"));
+        assert_eq!(
+            *fake_gateway
+                .clear_hook_calls
+                .lock()
+                .expect("clear hook calls mutex should not be poisoned"),
+            1
+        );
         let _ = fs::remove_file(&transport_socket_path);
     }
 
@@ -594,7 +722,7 @@ mod tests {
                 }
             }
             stream
-                .shutdown(Shutdown::Write)
+                .shutdown(Shutdown::Both)
                 .expect("server shutdown should succeed");
             server_tx
                 .send((
@@ -733,7 +861,7 @@ mod tests {
                 }
             }
             stream
-                .shutdown(Shutdown::Write)
+                .shutdown(Shutdown::Both)
                 .expect("server shutdown should succeed");
             server_tx
                 .send((
@@ -786,6 +914,19 @@ mod tests {
         let rendered = path.to_string_lossy();
         assert!(rendered.contains("waitagent-authority-output-"));
         assert!(rendered.ends_with(".sock"));
+    }
+
+    #[test]
+    fn authority_output_ingest_socket_path_preserves_host_port_authority_session_boundary() {
+        let path = authority_output_ingest_socket_path(
+            "/tmp/waitagent-remote-wa-1-workspace-1-10.1.26.84_7474_target.sock",
+            "remote-peer:10.1.26.84:7474:6a1b816eb1111435",
+        );
+
+        let rendered = path.to_string_lossy();
+        assert!(rendered.contains("waitagent-authority-output-"));
+        assert!(rendered.ends_with(".sock"));
+        assert!(!rendered.contains("7474:6a1b816eb1111435"));
     }
 
     fn wait_for_path(path: &Path) {

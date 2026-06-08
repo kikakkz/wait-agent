@@ -15,6 +15,10 @@ where
         Self { workspace_service }
     }
 
+    pub fn backend(&self) -> &G {
+        self.workspace_service.backend()
+    }
+
     pub fn ensure_workspace_for_dir_with_size(
         &self,
         workspace_dir: &Path,

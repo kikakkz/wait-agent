@@ -10,6 +10,7 @@ use crate::infra::remote_grpc_transport::{
 };
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
@@ -207,12 +208,7 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
         spawn_waitagent_sidecar(
             &current_executable,
             remote_session_sync_owner_args(socket_name, network),
@@ -358,11 +354,8 @@ impl SessionSyncAuthorityManager {
             RemoteAuthorityTargetHostCommand {
                 socket_name: socket_name.clone(),
                 target_session_name: session_name.clone(),
-                transport_session_id: target_id
-                    .splitn(3, ':')
-                    .nth(2)
-                    .unwrap_or(target_id)
-                    .to_string(),
+                transport_session_id: target_session_name_from_target_id(target_id)
+                    .unwrap_or_else(|| target_id.to_string()),
                 authority_id: session_handle.node_id().to_string(),
                 target_id: target_id.to_string(),
                 transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),

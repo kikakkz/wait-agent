@@ -8,6 +8,7 @@ use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use std::io;
 use std::path::PathBuf;
 
@@ -24,12 +25,7 @@ pub struct FooterMenuRuntime {
 impl FooterMenuRuntime {
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(footer_menu_error)?;
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
 
         Ok(Self {
             target_registry: TargetRegistryService::new(

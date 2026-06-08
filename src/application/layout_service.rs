@@ -769,7 +769,7 @@ mod tests {
                 &TmuxPaneId::new("%1"),
                 None,
                 "run-shell -b 'waitagent __layout-reconcile'",
-                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'",
+                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'",
             )
             .expect("hook registration should succeed");
 
@@ -788,7 +788,7 @@ mod tests {
                 Call::SetPaneHook(
                     "%1".to_string(),
                     "pane-died".to_string(),
-                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'".to_string(),
+                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ]
         );
@@ -805,7 +805,7 @@ mod tests {
                 &TmuxPaneId::new("%3"),
                 Some(&TmuxPaneId::new("%1")),
                 "run-shell -b 'waitagent __layout-reconcile'",
-                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'",
+                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'",
             )
             .expect("hook migration should succeed");
 
@@ -829,7 +829,7 @@ mod tests {
                 Call::SetPaneHook(
                     "%3".to_string(),
                     "pane-died".to_string(),
-                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane}'".to_string(),
+                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ]
         );

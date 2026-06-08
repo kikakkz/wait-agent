@@ -20,6 +20,7 @@ use crate::infra::tmux::{
     TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
@@ -155,7 +156,7 @@ pub(super) fn handle_transport_event(
                 should_reconnect: false,
             }
         }
-        RemoteNodeTransportEvent::SessionClosed { node_id } => {
+        RemoteNodeTransportEvent::SessionClosed { node_id, .. } => {
             ERROR_LOG.log(format!(
                 "[diag-sync] SessionClosed for node {node_id}, will reconnect"
             ));
@@ -165,7 +166,9 @@ pub(super) fn handle_transport_event(
                 should_reconnect: true,
             }
         }
-        RemoteNodeTransportEvent::TransportFailed { node_id, message } => {
+        RemoteNodeTransportEvent::TransportFailed {
+            node_id, message, ..
+        } => {
             ERROR_LOG.log(format!(
                 "[diag-sync] TransportFailed node={node_id:?} msg={message}, will reconnect"
             ));
@@ -484,10 +487,12 @@ pub(super) fn wait_for_live_authority_socket(socket_path: &Path) -> Result<(), L
 }
 
 pub(super) fn target_session_name_from_target_id(target_id: &str) -> Option<String> {
-    let mut parts = target_id.splitn(3, ':');
-    let _transport = parts.next()?;
-    let _authority = parts.next()?;
-    let session_name = parts.next()?;
+    let target_id = target_id
+        .strip_prefix("remote-peer:")
+        .or_else(|| target_id.strip_prefix("local-tmux:"))
+        .or_else(|| target_id.strip_prefix("remote:"))
+        .unwrap_or(target_id);
+    let (_, session_name) = target_id.rsplit_once(':')?;
     if session_name.is_empty() {
         None
     } else {
@@ -517,12 +522,7 @@ pub(super) fn spawn_in_process_authority_target_host(
     command: RemoteAuthorityTargetHostCommand,
 ) -> Result<(), LifecycleError> {
     let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?;
-    let current_executable = std::env::current_exe().map_err(|error| {
-        LifecycleError::Io(
-            "failed to locate current waitagent executable".to_string(),
-            error,
-        )
-    })?;
+    let current_executable = current_waitagent_executable()?;
     let runtime = RemoteAuthorityTargetHostRuntime::new(
         gateway,
         NoopAuthorityPublicationGateway,

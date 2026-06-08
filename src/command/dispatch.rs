@@ -2,7 +2,9 @@ use crate::cli::{Command, RemoteNetworkConfig};
 use crate::error::AppError;
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
-use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
+use crate::runtime::remote_authority_target_host_runtime::{
+    run_pane_died_event, RemoteAuthorityTargetHostRuntime,
+};
 use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
 use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
 use crate::runtime::remote_node_session_sync_runtime::RemoteNodeSessionSyncRuntime;
@@ -102,6 +104,9 @@ impl CommandDispatcher {
                 .remote_authority_target_host_runtime
                 .run_output_pump(command)
                 .map_err(AppError::from),
+            Command::RemoteAuthorityPaneDied(command) => {
+                run_pane_died_event(command).map_err(AppError::from)
+            }
             Command::RemoteTargetPublicationServer(command) => self
                 .remote_target_publication_runtime
                 .run_publication_server(command)
@@ -167,10 +172,6 @@ impl CommandDispatcher {
             Command::RemoteTargetExited(command) => self
                 .workspace_runtime
                 .run_remote_target_exited(command)
-                .map_err(AppError::from),
-            Command::MainPaneWatchdog(command) => self
-                .workspace_runtime
-                .run_main_pane_watchdog(command)
                 .map_err(AppError::from),
             Command::FooterMenu(command) => self
                 .footer_menu_runtime

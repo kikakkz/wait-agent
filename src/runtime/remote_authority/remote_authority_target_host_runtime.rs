@@ -1,10 +1,11 @@
 use crate::cli::{
-    prepend_global_network_args, RemoteAuthorityOutputPumpCommand,
+    prepend_global_network_args, RemoteAuthorityOutputPumpCommand, RemoteAuthorityPaneDiedCommand,
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
@@ -14,35 +15,32 @@ use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirrorState {
     Inactive,
-    Active { raw_pty_passthrough: bool },
+    Active {
+        stream_id: u64,
+        raw_pty_passthrough: bool,
+    },
 }
 
-/// Tracks event-loop health and transport/FIFO stalls for diagnostic output.
-/// Writes a stall summary to a temp file when a stall is detected so that
-/// operators can inspect it after the session becomes unresponsive.
+/// Tracks target-host event-loop counters for diagnostic output.
 struct EventLoopHealth {
     last_event_time: Mutex<SystemTime>,
     events_processed: AtomicU64,
     total_input_bytes: AtomicU64,
     total_output_chunks: AtomicU64,
-    fifo_stall_count: AtomicU64,
-    fifo_stalled_bytes: AtomicU64,
     mirror_active: AtomicBool,
     started_at: SystemTime,
-    last_stall_warn: Mutex<SystemTime>,
 }
 
 impl EventLoopHealth {
@@ -52,11 +50,8 @@ impl EventLoopHealth {
             events_processed: AtomicU64::new(0),
             total_input_bytes: AtomicU64::new(0),
             total_output_chunks: AtomicU64::new(0),
-            fifo_stall_count: AtomicU64::new(0),
-            fifo_stalled_bytes: AtomicU64::new(0),
             mirror_active: AtomicBool::new(false),
             started_at: SystemTime::now(),
-            last_stall_warn: Mutex::new(SystemTime::now()),
         }
     }
 
@@ -73,38 +68,6 @@ impl EventLoopHealth {
 
     fn record_output(&self) {
         self.total_output_chunks.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_fifo_stall(&self, n: u64) {
-        self.fifo_stall_count.fetch_add(1, Ordering::Relaxed);
-        self.fifo_stalled_bytes.fetch_add(n, Ordering::Relaxed);
-    }
-
-    fn maybe_log_stall(&self, transport_socket_path: &str, target_id: &str) {
-        let now = SystemTime::now();
-        let should_warn = self
-            .last_stall_warn
-            .lock()
-            .map(|mut t| {
-                let elapsed = now.duration_since(*t).ok();
-                if elapsed.map_or(true, |d| d > Duration::from_secs(5)) {
-                    *t = now;
-                    true
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-        if should_warn {
-            let diag_path = authority_diag_path(transport_socket_path, target_id);
-            let _ = self.write_diag(&diag_path);
-            eprintln!(
-                "[waitagent-diag] FIFO stall: count={} bytes={} path={}",
-                self.fifo_stall_count.load(Ordering::Relaxed),
-                self.fifo_stalled_bytes.load(Ordering::Relaxed),
-                diag_path.display(),
-            );
-        }
     }
 
     fn write_diag(&self, path: &Path) -> std::io::Result<()> {
@@ -128,8 +91,6 @@ uptime={}
 events_processed={}
 total_input_bytes={}
 total_output_chunks={}
-fifo_stall_count={}
-fifo_stalled_bytes={}
 mirror_active={}
 time_since_last_event={}
 ",
@@ -138,8 +99,6 @@ time_since_last_event={}
             self.events_processed.load(Ordering::Relaxed),
             self.total_input_bytes.load(Ordering::Relaxed),
             self.total_output_chunks.load(Ordering::Relaxed),
-            self.fifo_stall_count.load(Ordering::Relaxed),
-            self.fifo_stalled_bytes.load(Ordering::Relaxed),
             self.mirror_active.load(Ordering::Relaxed),
             last_event,
         );
@@ -208,6 +167,23 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         pane: &TmuxPaneId,
         command: &str,
     ) -> Result<(), Self::Error>;
+
+    fn send_input(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error>;
+
+    fn set_pane_died_hook(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn clear_pane_died_hook(&self, socket_name: &str, pane: &TmuxPaneId)
+        -> Result<(), Self::Error>;
 }
 
 impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
@@ -271,6 +247,32 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         command: &str,
     ) -> Result<(), Self::Error> {
         self.set_pane_pipe_on_socket(socket_name, pane, command)
+    }
+
+    fn send_input(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error> {
+        self.send_input_to_pane_on_socket(socket_name, pane, bytes)
+    }
+
+    fn set_pane_died_hook(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        self.set_pane_hook_on_socket(socket_name, pane, "pane-died", command)
+    }
+
+    fn clear_pane_died_hook(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(), Self::Error> {
+        self.unset_pane_hook_on_socket(socket_name, pane, "pane-died")
     }
 }
 
@@ -348,7 +350,9 @@ pub struct RemoteAuthorityTargetHostRuntime<
 
 enum AuthorityHostEvent {
     TransportCommand(RemoteAuthorityCommand),
-    OutputChunk(Vec<u8>),
+    OutputChunk { stream_id: u64, bytes: Vec<u8> },
+    OutputClosed { stream_id: u64 },
+    PaneDied { pane_id: String },
     TransportClosed,
 }
 
@@ -373,7 +377,7 @@ where
     socket_name: String,
     pane: TmuxPaneId,
     ingest_socket_path: PathBuf,
-    input_fifo_path: PathBuf,
+    event_socket_path: PathBuf,
 }
 
 pub struct RemoteAuthorityOutputPumpRuntime;
@@ -383,12 +387,7 @@ impl RemoteAuthorityTargetHostRuntime<EmbeddedTmuxBackend, RemoteTargetPublicati
         let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_authority_error)?;
         let publication_gateway =
             RemoteTargetPublicationRuntime::from_build_env_with_network(network)?;
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
         Ok(Self::new(gateway, publication_gateway, current_executable))
     }
 }
@@ -430,17 +429,26 @@ where
         );
         let ingest_socket_path =
             authority_output_ingest_socket_path(&command.transport_socket_path, &command.target_id);
-        let input_fifo_path =
-            authority_input_fifo_path(&command.transport_socket_path, &command.target_id);
-        let listener =
+        let event_socket_path =
+            authority_event_socket_path(&command.transport_socket_path, &command.target_id);
+        let output_listener =
             bind_output_ingest_listener(&ingest_socket_path).map_err(remote_authority_error)?;
-        create_input_fifo(&input_fifo_path).map_err(remote_authority_error)?;
+        let event_listener =
+            bind_output_ingest_listener(&event_socket_path).map_err(remote_authority_error)?;
+        let pane_died_hook = remote_authority_pane_died_hook_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            &event_socket_path,
+            pane.as_str(),
+        );
+        self.gateway
+            .set_pane_died_hook(&command.socket_name, &pane, &pane_died_hook)
+            .map_err(remote_authority_error)?;
         let _output_guard = OutputPipeGuard {
             gateway: self.gateway.clone(),
             socket_name: command.socket_name.clone(),
             pane: pane.clone(),
             ingest_socket_path: ingest_socket_path.clone(),
-            input_fifo_path: input_fifo_path.clone(),
+            event_socket_path: event_socket_path.clone(),
         };
 
         let (event_tx, event_rx) = mpsc::channel();
@@ -493,125 +501,20 @@ where
         });
 
         let running = Arc::new(AtomicBool::new(true));
-        let output_thread = spawn_output_ingest_thread(listener, running.clone(), event_tx);
+        let output_thread =
+            spawn_output_ingest_thread(output_listener, running.clone(), event_tx.clone());
+        let pane_event_thread =
+            spawn_pane_event_thread(event_listener, running.clone(), event_tx.clone());
         let mut output_seq = 0_u64;
+        let mut next_stream_id = 0_u64;
         let mut mirror_state = MirrorState::Inactive;
 
-        let mut input_fifo = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&input_fifo_path)
-            .map_err(remote_authority_error)?;
-
-        const PANE_LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-        const MAX_IDLE_WITHOUT_PANE_CHECK: Duration = Duration::from_secs(1);
-
         let health = Arc::new(EventLoopHealth::new());
-        let mut pending_input: Vec<u8> = Vec::new();
-        let mut last_event_or_input_time = Instant::now();
 
         let loop_result = loop {
-            // Drain queued input bytes to the FIFO. The FIFO is blocking so
-            // the write completes once the output pump reads the data.  This
-            // ensures no input is silently dropped — backpressure propagates
-            // naturally through the FIFO buffer.
-            if !pending_input.is_empty() {
-                match input_fifo.write(&pending_input) {
-                    Ok(n) if n > 0 => {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] target host: fifo wrote {} bytes (was pending {})",
-                            n,
-                            pending_input.len()
-                        ));
-                        pending_input.drain(..n);
-                        health.record_input(n as u64);
-                        last_event_or_input_time = Instant::now();
-                    }
-                    Ok(_) => {} // no progress, retry next iteration
-                    Err(error) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] target host: fifo write error: {error}"
-                        ));
-                        break Err(remote_authority_error(error));
-                    }
-                }
-                if !pending_input.is_empty() {
-                    let stuck = pending_input.len() as u64;
-                    health.record_fifo_stall(stuck);
-                    health.maybe_log_stall(&command.transport_socket_path, &command.target_id);
-                }
-            }
-
-            // Use a timeout so we can periodically check whether the pane is
-            // still alive.  A blocking recv() would stall forever after the
-            // pane dies because no more OutputChunk or TransportCommand events
-            // will arrive, yet the shared gRPC stream keeps the transport
-            // alive.  The watchdog detects the dead pane and exits the event
-            // loop so TargetExited is sent upstream.
-            let recv_timeout = if pending_input.is_empty() {
-                PANE_LIVENESS_CHECK_INTERVAL
-            } else {
-                Duration::from_millis(10)
-            };
-            let event = match event_rx.recv_timeout(recv_timeout) {
-                Ok(e) => {
-                    last_event_or_input_time = Instant::now();
-                    e
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // No event within the window — check whether the pane
-                    // is still alive.  If it died, exit cleanly so that
-                    // TargetExited is sent and the remote side can tear
-                    // down its per-session pane.
-                    let idle = last_event_or_input_time.elapsed();
-                    if idle > MAX_IDLE_WITHOUT_PANE_CHECK {
-                        // Use display-message to check if the pane is dead.
-                        // capture-pane succeeds for dead panes (it returns
-                        // buffered content), so it cannot detect liveness.
-                        let pane = self
-                            .gateway
-                            .target_presentation_pane(
-                                &command.socket_name,
-                                &command.target_session_name,
-                            )
-                            .ok();
-                        let pane_alive = pane.as_ref().map_or(true, |p| {
-                            let tmux_bin = tmux_binary_path();
-                            let tmux_sock = tmux_socket_path(&command.socket_name);
-                            match std::process::Command::new(&tmux_bin)
-                                .args([
-                                    "-S",
-                                    &tmux_sock,
-                                    "display-message",
-                                    "-p",
-                                    "-t",
-                                    p.as_str(),
-                                    "-F",
-                                    "#{pane_dead}",
-                                ])
-                                .output()
-                            {
-                                Ok(o) if o.status.success() => o.stdout.first() != Some(&b'1'),
-                                _ => true, // assume alive if command fails
-                            }
-                        });
-                        if !pane_alive {
-                            ERROR_LOG.log(format!(
-                                "[diag-timing] target host: pane DEAD detected (idle={:?}), exiting event loop to send TargetExited (target={})",
-                                idle,
-                                command.target_id
-                            ));
-                            break Ok(());
-                        }
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] target host: pane still alive, idle={:?}, target={}",
-                            idle, command.target_id
-                        ));
-                        last_event_or_input_time = Instant::now();
-                    }
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+            let event = match event_rx.recv() {
+                Ok(event) => event,
+                Err(_) => break Ok(()),
             };
             match event {
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::OpenMirror(
@@ -666,9 +569,16 @@ where
                         }
                         continue;
                     }
-                    if let Err(error) =
-                        activate_mirror(self, &command, &pane, &ingest_socket_path, &payload)
-                    {
+                    next_stream_id = next_stream_id.saturating_add(1);
+                    let stream_id = next_stream_id;
+                    if let Err(error) = activate_mirror(
+                        self,
+                        &command,
+                        &pane,
+                        &ingest_socket_path,
+                        stream_id,
+                        &payload,
+                    ) {
                         if transport
                             .send_open_mirror_rejected(
                                 &payload.session_id,
@@ -683,6 +593,7 @@ where
                         continue;
                     }
                     mirror_state = MirrorState::Active {
+                        stream_id,
                         raw_pty_passthrough: payload.raw_pty_passthrough,
                     };
                     health.mirror_active.store(true, Ordering::Relaxed);
@@ -713,16 +624,18 @@ where
                     payload,
                 )) => {
                     health.record_event();
-                    const PENDING_INPUT_MAX: usize = 256 * 1024;
-                    let input = &payload.input_bytes;
-                    if pending_input.len() + input.len() <= PENDING_INPUT_MAX {
-                        pending_input.extend_from_slice(input);
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] target host: buffered RawPtyInput ({} bytes), pending={}",
-                            input.len(),
-                            pending_input.len()
-                        ));
+                    if let Err(error) = self
+                        .gateway
+                        .send_input(&command.socket_name, &pane, &payload.input_bytes)
+                        .map_err(remote_authority_error)
+                    {
+                        break Err(error);
                     }
+                    health.record_input(payload.input_bytes.len() as u64);
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] target host: delivered RawPtyInput ({} bytes)",
+                        payload.input_bytes.len()
+                    ));
                 }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
@@ -748,14 +661,16 @@ where
                         health.mirror_active.store(false, Ordering::Relaxed);
                     }
                 }
-                AuthorityHostEvent::OutputChunk(bytes) => {
+                AuthorityHostEvent::OutputChunk { stream_id, bytes } => {
                     health.record_event();
                     health.record_output();
                     ERROR_LOG.log(format!(
-                        "[diag-timing] target host: received OutputChunk ({} bytes)",
+                        "[diag-timing] target host: received OutputChunk stream={} ({} bytes)",
+                        stream_id,
                         bytes.len()
                     ));
-                    if matches!(mirror_state, MirrorState::Inactive) {
+                    if !matches!(mirror_state, MirrorState::Active { stream_id: active_stream_id, .. } if active_stream_id == stream_id)
+                    {
                         continue;
                     };
                     output_seq += 1;
@@ -778,6 +693,26 @@ where
                     if output_tx.send(msg).is_err() {
                         break Ok(());
                     }
+                }
+                AuthorityHostEvent::OutputClosed { stream_id } => {
+                    health.record_event();
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] target host: output stream closed stream={} target={}",
+                        stream_id, command.target_id
+                    ));
+                    if matches!(mirror_state, MirrorState::Active { stream_id: active_stream_id, .. } if active_stream_id == stream_id)
+                    {
+                        mirror_state = MirrorState::Inactive;
+                        health.mirror_active.store(false, Ordering::Relaxed);
+                    }
+                }
+                AuthorityHostEvent::PaneDied { pane_id } => {
+                    health.record_event();
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] target host: pane-died event pane={} target={}",
+                        pane_id, command.target_id
+                    ));
+                    break Ok(());
                 }
                 AuthorityHostEvent::TransportClosed => {
                     health.record_event();
@@ -816,13 +751,15 @@ where
         }
         running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&ingest_socket_path);
+        let _ = UnixStream::connect(&event_socket_path);
         let _ = self
             .publication_gateway
             .ensure_live_session_unregistered(&command.socket_name, &command.target_session_name);
         let _ = command_thread.join();
         let _ = output_thread.join();
-        // Write final diagnostics before exiting so the operator can inspect
-        // health counters after a freeze.
+        let _ = pane_event_thread.join();
+        // Write final diagnostics before exiting so operators can inspect
+        // event counters for this target host.
         let _ = health.write_diag(&authority_diag_path(
             &command.transport_socket_path,
             &command.target_id,
@@ -836,6 +773,11 @@ where
     ) -> Result<(), LifecycleError> {
         RemoteAuthorityOutputPumpRuntime::run(command)
     }
+}
+
+pub fn run_pane_died_event(command: RemoteAuthorityPaneDiedCommand) -> Result<(), LifecycleError> {
+    send_pane_died_event(&command.event_socket_path, &command.pane_id);
+    Ok(())
 }
 
 pub(crate) fn remote_authority_target_host_args(
@@ -870,60 +812,11 @@ pub(crate) fn remote_authority_target_host_args(
 impl RemoteAuthorityOutputPumpRuntime {
     pub fn run(command: RemoteAuthorityOutputPumpCommand) -> Result<(), LifecycleError> {
         ERROR_LOG.log(format!(
-            "[diag-timing] output pump: starting, ingest={}, fifo={}, socket={}, pane={}",
-            command.ingest_socket_path, command.input_fifo_path, command.socket_name, command.pane
+            "[diag-timing] output pump: starting, ingest={}, socket={}, stream={}",
+            command.ingest_socket_path, command.socket_name, command.stream_id
         ));
-        let input_fifo_path = command.input_fifo_path.clone();
-        let socket = command.socket_name.clone();
-        let pane = command.pane.trim().to_string();
-        let tmux_bin = tmux_binary_path();
-        let tmux_sock = tmux_socket_path(&socket);
-        let input_thread = thread::spawn(move || -> Result<(), RemoteAuthorityHostError> {
-            let mut fifo = OpenOptions::new().read(true).open(&input_fifo_path)?;
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = fifo.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                // Use send-keys to deliver input to the PTY.  pipe-pane -I is
-                // unreliable: if pipe-pane -O sends stdin EOF (empty pane),
-                // tmux may close the stdout pipe as well.
-                // send-keys -H expects each byte as a separate hex argument.
-                let mut args: Vec<String> = vec![
-                    "-S".to_string(),
-                    tmux_sock.clone(),
-                    "send-keys".to_string(),
-                    "-H".to_string(),
-                    "-t".to_string(),
-                    pane.clone(),
-                ];
-                for b in &buffer[..read] {
-                    args.push(format!("{b:02x}"));
-                }
-                let result = std::process::Command::new(&tmux_bin).args(&args).output();
-                if let Err(e) = result {
-                    ERROR_LOG.log(format!("[diag-timing] output pump: send-keys failed: {e}"));
-                    break;
-                }
-            }
-            Ok(())
-        });
-
         let ingest = command.ingest_socket_path.clone();
-        let pump_result = pump_stdin_to_ingest_socket(&ingest);
-        match input_thread.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) if pump_result.is_ok() => return Err(remote_authority_error(error)),
-            Ok(Err(_)) => {}
-            Err(_) if pump_result.is_ok() => {
-                return Err(remote_authority_error(RemoteAuthorityHostError::new(
-                    "remote authority input pump panicked",
-                )))
-            }
-            Err(_) => {}
-        }
-        pump_result.map_err(remote_authority_error)
+        pump_stdin_to_ingest_socket(&ingest, command.stream_id).map_err(remote_authority_error)
     }
 }
 
@@ -936,7 +829,10 @@ where
             .gateway
             .clear_output_pipe(&self.socket_name, &self.pane);
         let _ = fs::remove_file(&self.ingest_socket_path);
-        let _ = fs::remove_file(&self.input_fifo_path);
+        let _ = self
+            .gateway
+            .clear_pane_died_hook(&self.socket_name, &self.pane);
+        let _ = fs::remove_file(&self.event_socket_path);
     }
 }
 
@@ -950,23 +846,6 @@ fn bind_output_ingest_listener(
     Ok(listener)
 }
 
-fn create_input_fifo(fifo_path: &Path) -> Result<(), RemoteAuthorityHostError> {
-    if fifo_path.exists() {
-        let _ = fs::remove_file(fifo_path);
-    }
-    let c_path = std::ffi::CString::new(fifo_path.as_os_str().as_bytes())
-        .map_err(|_| RemoteAuthorityHostError::new("input fifo path contains interior NUL"))?;
-    let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
-    if result == -1 {
-        return Err(RemoteAuthorityHostError::new(format!(
-            "failed to create input fifo {}: {}",
-            fifo_path.display(),
-            io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
 fn spawn_output_ingest_thread(
     listener: UnixListener,
     running: Arc<AtomicBool>,
@@ -975,25 +854,72 @@ fn spawn_output_ingest_thread(
     thread::spawn(move || {
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((mut stream, _)) => loop {
-                    match read_output_chunk_frame(&mut stream) {
-                        Ok(bytes) => {
+                Ok((mut stream, _)) => {
+                    let stream_id = match read_stream_id_frame(&mut stream) {
+                        Ok(stream_id) => stream_id,
+                        Err(error) => {
                             ERROR_LOG.log(format!(
-                                "[diag-timing] ingest thread: received chunk ({} bytes)",
-                                bytes.len()
+                                "[diag-timing] ingest thread: stream id read error: {error}"
                             ));
-                            if tx.send(AuthorityHostEvent::OutputChunk(bytes)).is_err() {
-                                return;
+                            continue;
+                        }
+                    };
+                    loop {
+                        match read_output_chunk_frame(&mut stream) {
+                            Ok(bytes) => {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] ingest thread: received chunk stream={} ({} bytes)",
+                                    stream_id,
+                                    bytes.len()
+                                ));
+                                if tx
+                                    .send(AuthorityHostEvent::OutputChunk { stream_id, bytes })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Err(error) if error.is_unexpected_eof() => {
+                                let _ = tx.send(AuthorityHostEvent::OutputClosed { stream_id });
+                                break;
+                            }
+                            Err(error) => {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] ingest thread: read error stream={stream_id}: {error}"
+                                ));
+                                let _ = tx.send(AuthorityHostEvent::OutputClosed { stream_id });
+                                break;
                             }
                         }
-                        Err(error) if error.is_unexpected_eof() => break,
-                        Err(error) => {
-                            ERROR_LOG
-                                .log(format!("[diag-timing] ingest thread: read error: {error}"));
-                            break;
-                        }
                     }
-                },
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn spawn_pane_event_thread(
+    listener: UnixListener,
+    running: Arc<AtomicBool>,
+    tx: mpsc::Sender<AuthorityHostEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut pane_id = String::new();
+                    if stream.read_to_string(&mut pane_id).is_err() {
+                        continue;
+                    }
+                    let pane_id = pane_id.trim().to_string();
+                    if pane_id.is_empty() {
+                        continue;
+                    }
+                    if tx.send(AuthorityHostEvent::PaneDied { pane_id }).is_err() {
+                        return;
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -1006,14 +932,18 @@ fn spawn_output_ingest_thread(
 /// movement, and incremental output are preserved faithfully.  The bootstrap
 /// replay already painted the initial screen, so this only needs to handle
 /// ongoing output.
-fn pump_stdin_to_ingest_socket(ingest_socket_path: &str) -> Result<(), RemoteAuthorityHostError> {
+fn pump_stdin_to_ingest_socket(
+    ingest_socket_path: &str,
+    stream_id: u64,
+) -> Result<(), RemoteAuthorityHostError> {
     let mut stdin = io::stdin().lock();
-    pump_reader_to_ingest_socket(&mut stdin, ingest_socket_path)
+    pump_reader_to_ingest_socket(&mut stdin, ingest_socket_path, stream_id)
 }
 
 fn pump_reader_to_ingest_socket<R: Read>(
     reader: &mut R,
     ingest_socket_path: &str,
+    stream_id: u64,
 ) -> Result<(), RemoteAuthorityHostError> {
     let mut stream = UnixStream::connect(ingest_socket_path).map_err(|e| {
         ERROR_LOG.log(format!(
@@ -1022,10 +952,11 @@ fn pump_reader_to_ingest_socket<R: Read>(
         ));
         e
     })?;
-    ERROR_LOG.log(
-        "[diag-timing] output pump: connected to ingest socket, reading from pipe-pane -O stdin"
-            .to_string(),
-    );
+    write_stream_id_frame(&mut stream, stream_id)?;
+    ERROR_LOG.log(format!(
+        "[diag-timing] output pump: connected to ingest socket, stream={}, reading from pipe-pane -O stdin",
+        stream_id
+    ));
     let mut buffer = [0_u8; 4096];
     loop {
         match reader.read(&mut buffer) {
@@ -1047,15 +978,19 @@ fn pump_reader_to_ingest_socket<R: Read>(
     Ok(())
 }
 
-/// Path to the vendored tmux binary in the waitagent data directory.
-fn tmux_binary_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/waitagent/tmux")
+fn write_stream_id_frame(
+    writer: &mut impl Write,
+    stream_id: u64,
+) -> Result<(), RemoteAuthorityHostError> {
+    writer.write_all(&stream_id.to_le_bytes())?;
+    writer.flush()?;
+    Ok(())
 }
 
-/// Path to the tmux socket for a waitagent workspace.
-fn tmux_socket_path(socket_name: &str) -> String {
-    format!("/tmp/tmux-1000/{socket_name}")
+fn read_stream_id_frame(reader: &mut impl Read) -> Result<u64, RemoteAuthorityHostError> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn write_output_chunk_frame(
@@ -1087,13 +1022,12 @@ pub fn authority_output_ingest_socket_path(
     std::env::temp_dir().join(format!("waitagent-authority-output-{hash}.sock"))
 }
 
-pub fn authority_input_fifo_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
+pub fn authority_event_socket_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
     let hash = stable_socket_hash(&[transport_socket_path, target_id]);
-    std::env::temp_dir().join(format!("waitagent-authority-input-{hash}.fifo"))
+    std::env::temp_dir().join(format!("waitagent-authority-event-{hash}.sock"))
 }
 
-/// Path for the per-session diagnostic file written on FIFO stall.
-/// Survives the target-host process so it can be inspected after a freeze.
+/// Path for the per-session diagnostic file written when the target host exits.
 pub fn authority_diag_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
     let hash = stable_socket_hash(&[transport_socket_path, target_id]);
     std::env::temp_dir().join(format!("waitagent-diag-{hash}.diag"))
@@ -1102,23 +1036,51 @@ pub fn authority_diag_path(transport_socket_path: &str, target_id: &str) -> Path
 fn remote_authority_output_pump_shell_command(
     executable: &str,
     ingest_socket_path: &Path,
-    input_fifo_path: &Path,
     socket_name: &str,
-    pane: &str,
+    stream_id: u64,
 ) -> String {
     [
         shell_escape(executable),
         shell_escape("__remote-authority-output-pump"),
         shell_escape("--ingest-socket-path"),
         shell_escape(&ingest_socket_path.display().to_string()),
-        shell_escape("--input-fifo-path"),
-        shell_escape(&input_fifo_path.display().to_string()),
         shell_escape("--socket-name"),
         shell_escape(socket_name),
-        shell_escape("--pane"),
-        shell_escape(pane),
+        shell_escape("--stream-id"),
+        shell_escape(&stream_id.to_string()),
     ]
     .join(" ")
+}
+
+fn remote_authority_pane_died_hook_command(
+    executable: &str,
+    event_socket_path: &Path,
+    pane: &str,
+) -> String {
+    let shell_command = [
+        shell_escape(executable),
+        shell_escape("__remote-authority-pane-died"),
+        shell_escape("--event-socket-path"),
+        shell_escape(&event_socket_path.display().to_string()),
+        shell_escape("--pane-id"),
+        shell_escape(pane),
+    ]
+    .join(" ");
+    format!(
+        "run-shell -b {}",
+        tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
+    )
+}
+
+fn tmux_quote_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+fn send_pane_died_event(event_socket_path: &str, pane_id: &str) {
+    if let Ok(mut stream) = UnixStream::connect(event_socket_path) {
+        let _ = stream.write_all(pane_id.as_bytes());
+        let _ = stream.write_all(b"\n");
+        let _ = stream.flush();
+    }
 }
 
 fn activate_mirror<G, P>(
@@ -1126,6 +1088,7 @@ fn activate_mirror<G, P>(
     command: &RemoteAuthorityTargetHostCommand,
     pane: &TmuxPaneId,
     ingest_socket_path: &Path,
+    stream_id: u64,
     payload: &crate::infra::remote_protocol::OpenMirrorRequestPayload,
 ) -> Result<(), LifecycleError>
 where
@@ -1135,9 +1098,8 @@ where
     let pipe_command = remote_authority_output_pump_shell_command(
         runtime.current_executable.to_string_lossy().as_ref(),
         ingest_socket_path,
-        &authority_input_fifo_path(&command.transport_socket_path, &command.target_id),
         &command.socket_name,
-        pane.as_str().trim(),
+        stream_id,
     );
     runtime
         .gateway

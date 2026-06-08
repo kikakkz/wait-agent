@@ -2,8 +2,9 @@ mod tests {
     use super::super::{
         authority_command_envelope, bridge_shared_live_authority_stream,
         dispatch_authority_command_to_live_route, dispatch_publication_sender_command,
-        ensure_live_session_route, live_authority_session_socket_path, stop_live_session_route,
-        LiveSessionRoute, SharedAuthoritySession,
+        ensure_live_session_route_without_target_host_or_dispatcher,
+        ensure_live_session_route_without_target_host_sidecar, live_authority_session_socket_path,
+        stop_live_session_route, LiveSessionRoute, SharedAuthoritySession,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_protocol::{
@@ -15,6 +16,7 @@ mod tests {
         read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
         write_node_session_envelope,
     };
+    use crate::runtime::current_executable::waitagent_test_executable;
     use crate::runtime::remote_authority_transport_runtime::{
         RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
     };
@@ -38,6 +40,7 @@ mod tests {
 
     #[test]
     fn live_route_buffers_authority_commands_until_host_connects() {
+        let _guard = crate::test_support::integration_test_lock();
         let route = Arc::new(LiveSessionRoute {
             socket_name: "wa-1".to_string(),
             target_session_name: "target-1".to_string(),
@@ -137,6 +140,7 @@ mod tests {
 
     #[test]
     fn owner_runtime_reuses_cached_publication_transport_for_publish_and_exit() {
+        let _guard = crate::test_support::integration_test_lock();
         let socket_path = test_socket_path("owner-publication-cache");
         let listener = UnixListener::bind(&socket_path).expect("listener should bind");
         let accept_thread = thread::spawn(move || {
@@ -243,6 +247,7 @@ mod tests {
 
     #[test]
     fn shared_authority_session_reuses_one_node_connection_and_routes_by_target_id() {
+        let _guard = crate::test_support::integration_test_lock();
         let socket_name = "wa-shared";
         let target_session_a = "target-sa";
         let target_session_b = "target-sb";
@@ -294,9 +299,8 @@ mod tests {
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
-        let current_executable =
-            std::env::current_exe().expect("current test executable should exist");
-        ensure_live_session_route(
+        let current_executable = waitagent_test_executable();
+        ensure_live_session_route_without_target_host_sidecar(
             &current_executable,
             socket_name,
             target_session_a,
@@ -309,7 +313,7 @@ mod tests {
             &mut authority_sessions,
         )
         .expect("first live session route should register");
-        ensure_live_session_route(
+        ensure_live_session_route_without_target_host_sidecar(
             &current_executable,
             socket_name,
             target_session_b,
@@ -401,18 +405,24 @@ mod tests {
             other => panic!("unexpected target-b authority command: {other:?}"),
         }
 
-        // This harness intentionally avoids joining the background bridge threads.
-        // The test only needs to prove one shared authority session and target-id routing.
-        drop((
-            live_sessions,
-            authority_sessions,
-            server_running,
-            server_thread,
-        ));
+        stop_live_session_route(
+            target_session_a,
+            &mut live_sessions,
+            &mut authority_sessions,
+        );
+        stop_live_session_route(
+            target_session_b,
+            &mut live_sessions,
+            &mut authority_sessions,
+        );
+        server_running.store(false, Ordering::Relaxed);
+        let _ = server_thread.join();
+        let _ = fs::remove_file(&transport_socket_path);
     }
 
     #[test]
     fn ensure_live_session_route_reuses_existing_session_route_for_same_target() {
+        let _guard = crate::test_support::integration_test_lock();
         let socket_name = "wa-reuse";
         let target_session_name = "target-reuse";
         let target_id = "remote-peer:peer-a:target-reuse";
@@ -421,10 +431,9 @@ mod tests {
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
-        let current_executable =
-            std::env::current_exe().expect("current test executable should exist");
+        let current_executable = waitagent_test_executable();
 
-        ensure_live_session_route(
+        ensure_live_session_route_without_target_host_or_dispatcher(
             &current_executable,
             socket_name,
             target_session_name,
@@ -443,7 +452,7 @@ mod tests {
             .expect("route should exist after first register")
             .clone();
 
-        ensure_live_session_route(
+        ensure_live_session_route_without_target_host_or_dispatcher(
             &current_executable,
             socket_name,
             target_session_name,
@@ -474,6 +483,7 @@ mod tests {
 
     #[test]
     fn shared_authority_session_reconnects_without_dropping_local_authority_bridge() {
+        let _guard = crate::test_support::integration_test_lock();
         let socket_name = "wa-reconnect";
         let target_session_name = "target-r";
         let target_id = "remote-peer:peer-a:target-r";
@@ -521,9 +531,8 @@ mod tests {
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
         let publication_runtime =
             RemoteTargetPublicationRuntime::from_build_env().expect("publication runtime");
-        let current_executable =
-            std::env::current_exe().expect("current test executable should exist");
-        ensure_live_session_route(
+        let current_executable = waitagent_test_executable();
+        ensure_live_session_route_without_target_host_sidecar(
             &current_executable,
             socket_name,
             target_session_name,
@@ -636,12 +645,14 @@ mod tests {
             other => panic!("unexpected reconnected authority command: {other:?}"),
         }
 
-        drop((
-            live_sessions,
-            authority_sessions,
-            server_running,
-            server_thread,
-        ));
+        stop_live_session_route(
+            target_session_name,
+            &mut live_sessions,
+            &mut authority_sessions,
+        );
+        server_running.store(false, Ordering::Relaxed);
+        let _ = server_thread.join();
+        let _ = fs::remove_file(&transport_socket_path);
     }
 
     fn test_socket_path(label: &str) -> PathBuf {

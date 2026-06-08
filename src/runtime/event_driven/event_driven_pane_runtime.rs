@@ -8,6 +8,7 @@ use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::event_driven_chrome_runtime::EventDrivenChromeRenderUpdate;
 use crate::runtime::event_driven_tmux_pane_runtime::EventDrivenTmuxPaneRuntime;
 use crate::runtime::event_driven_ui_pane_runtime::EventDrivenSidebarActivation;
@@ -553,9 +554,7 @@ fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
 }
 
 fn current_executable_path() -> Result<std::path::PathBuf, LifecycleError> {
-    std::env::current_exe().map_err(|error| {
-        LifecycleError::Io("failed to locate waitagent executable".to_string(), error)
-    })
+    current_waitagent_executable()
 }
 
 fn event_pane_error<E>(error: E) -> LifecycleError

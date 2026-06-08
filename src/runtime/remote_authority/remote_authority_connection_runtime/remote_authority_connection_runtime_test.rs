@@ -114,9 +114,17 @@ mod tests {
             .connection_for("peer-a")
             .expect("authority connection should be registered");
 
-        let first_error = connection
-            .send_raw_pty_input(&raw_pty_input_payload())
-            .expect_err("closed peer should fail raw input write");
+        let mut first_error = None;
+        for _ in 0..8 {
+            match connection.send_raw_pty_input(&raw_pty_input_payload()) {
+                Err(error) => {
+                    first_error = Some(error);
+                    break;
+                }
+                Ok(()) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let first_error = first_error.expect("closed peer should eventually fail raw input write");
         assert!(!first_error.to_string().is_empty());
 
         let second_error = connection

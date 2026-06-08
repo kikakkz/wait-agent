@@ -8,6 +8,7 @@ pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
 #[derive(Debug, Clone)]
 pub struct Cli {
     pub network: RemoteNetworkConfig,
+    pub network_explicit: bool,
     pub command: Command,
 }
 
@@ -116,6 +117,7 @@ pub enum Command {
     RemoteServerConsole(RemoteServerConsoleCommand),
     RemoteAuthorityTargetHost(RemoteAuthorityTargetHostCommand),
     RemoteAuthorityOutputPump(RemoteAuthorityOutputPumpCommand),
+    RemoteAuthorityPaneDied(RemoteAuthorityPaneDiedCommand),
     RemoteTargetPublicationServer(RemoteTargetPublicationServerCommand),
     RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
     RemoteTargetPublicationSender(RemoteTargetPublicationSenderCommand),
@@ -131,7 +133,6 @@ pub enum Command {
     NewTarget(NewTargetCommand),
     MainPaneDied(MainPaneDiedCommand),
     RemoteTargetExited(RemoteTargetExitedCommand),
-    MainPaneWatchdog(MainPaneWatchdogCommand),
     FooterMenu(FooterMenuCommand),
     ToggleFullscreen(ToggleFullscreenCommand),
     CloseSession(CloseSessionCommand),
@@ -221,9 +222,14 @@ pub struct RemoteAuthorityTargetHostCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteAuthorityOutputPumpCommand {
     pub ingest_socket_path: String,
-    pub input_fifo_path: String,
     pub socket_name: String,
-    pub pane: String,
+    pub stream_id: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteAuthorityPaneDiedCommand {
+    pub event_socket_path: String,
+    pub pane_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,6 +328,7 @@ pub struct MainPaneDiedCommand {
     pub socket_name: String,
     pub session_name: String,
     pub pane_id: String,
+    pub pane_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -330,13 +337,6 @@ pub struct RemoteTargetExitedCommand {
     pub session_name: String,
     pub target: String,
     pub pane_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MainPaneWatchdogCommand {
-    pub socket_name: String,
-    pub session_name: String,
-    pub pane_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -358,16 +358,18 @@ impl Cli {
         if args.is_empty() {
             return Ok(Self {
                 network: RemoteNetworkConfig::default(),
+                network_explicit: false,
                 command: Command::Help(help_text()),
             });
         }
 
         args.remove(0);
-        let network = parse_global_network_config(&mut args)?;
+        let (network, network_explicit) = parse_global_network_config(&mut args)?;
 
         if args.is_empty() {
             return Ok(Self {
                 network,
+                network_explicit,
                 command: Command::Workspace,
             });
         }
@@ -408,6 +410,10 @@ impl Cli {
             "__remote-authority-output-pump" => {
                 args.remove(0);
                 Command::RemoteAuthorityOutputPump(parse_remote_authority_output_pump(args)?)
+            }
+            "__remote-authority-pane-died" => {
+                args.remove(0);
+                Command::RemoteAuthorityPaneDied(parse_remote_authority_pane_died(args)?)
             }
             "__remote-target-publication-server" => {
                 args.remove(0);
@@ -477,10 +483,6 @@ impl Cli {
                 args.remove(0);
                 Command::RemoteTargetExited(parse_remote_target_exited(args)?)
             }
-            "__main-pane-watchdog" => {
-                args.remove(0);
-                Command::MainPaneWatchdog(parse_main_pane_watchdog(args)?)
-            }
             "__footer-menu" => {
                 args.remove(0);
                 Command::FooterMenu(parse_footer_menu(args)?)
@@ -546,12 +548,19 @@ impl Cli {
             }
         };
 
-        Ok(Self { network, command })
+        Ok(Self {
+            network,
+            network_explicit,
+            command,
+        })
     }
 }
 
-fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkConfig, CliError> {
+fn parse_global_network_config(
+    args: &mut Vec<String>,
+) -> Result<(RemoteNetworkConfig, bool), CliError> {
     let mut network = RemoteNetworkConfig::default();
+    let mut explicit = false;
 
     loop {
         let Some(flag) = args.first().cloned() else {
@@ -559,6 +568,7 @@ fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkCo
         };
         match flag.as_str() {
             "--port" => {
+                explicit = true;
                 args.remove(0);
                 let value = args
                     .first()
@@ -570,6 +580,7 @@ fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkCo
                     .map_err(|_| CliError::InvalidValue("--port".to_string(), value.clone()))?;
             }
             "--connect" => {
+                explicit = true;
                 args.remove(0);
                 let value = args
                     .first()
@@ -585,7 +596,7 @@ fn parse_global_network_config(args: &mut Vec<String>) -> Result<RemoteNetworkCo
         }
     }
 
-    Ok(network)
+    Ok((network, explicit))
 }
 
 fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
@@ -802,20 +813,23 @@ fn parse_remote_authority_output_pump(
 ) -> Result<RemoteAuthorityOutputPumpCommand, CliError> {
     let mut iter = args.into_iter();
     let mut ingest_socket_path = None;
-    let mut input_fifo_path = None;
     let mut socket_name = None;
-    let mut pane = None;
+    let mut stream_id = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--ingest-socket-path" => {
                 ingest_socket_path = Some(expect_value("--ingest-socket-path", &mut iter)?)
             }
-            "--input-fifo-path" => {
-                input_fifo_path = Some(expect_value("--input-fifo-path", &mut iter)?)
-            }
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
-            "--pane" => pane = Some(expect_value("--pane", &mut iter)?),
+            "--stream-id" => {
+                let value = expect_value("--stream-id", &mut iter)?;
+                stream_id = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| CliError::InvalidValue("--stream-id".to_string(), value))?,
+                );
+            }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -824,11 +838,34 @@ fn parse_remote_authority_output_pump(
     Ok(RemoteAuthorityOutputPumpCommand {
         ingest_socket_path: ingest_socket_path
             .ok_or_else(|| CliError::MissingValue("--ingest-socket-path".to_string()))?,
-        input_fifo_path: input_fifo_path
-            .ok_or_else(|| CliError::MissingValue("--input-fifo-path".to_string()))?,
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
-        pane: pane.ok_or_else(|| CliError::MissingValue("--pane".to_string()))?,
+        stream_id: stream_id.ok_or_else(|| CliError::MissingValue("--stream-id".to_string()))?,
+    })
+}
+
+fn parse_remote_authority_pane_died(
+    args: Vec<String>,
+) -> Result<RemoteAuthorityPaneDiedCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut event_socket_path = None;
+    let mut pane_id = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--event-socket-path" => {
+                event_socket_path = Some(expect_value("--event-socket-path", &mut iter)?)
+            }
+            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteAuthorityPaneDiedCommand {
+        event_socket_path: event_socket_path
+            .ok_or_else(|| CliError::MissingValue("--event-socket-path".to_string()))?,
+        pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
     })
 }
 
@@ -1204,12 +1241,16 @@ fn parse_main_pane_died(args: Vec<String>) -> Result<MainPaneDiedCommand, CliErr
     let mut socket_name = None;
     let mut session_name = None;
     let mut pane_id = None;
+    let mut pane_generation = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
             "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
             "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
+            "--pane-generation" => {
+                pane_generation = Some(expect_value("--pane-generation", &mut iter)?)
+            }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1221,6 +1262,7 @@ fn parse_main_pane_died(args: Vec<String>) -> Result<MainPaneDiedCommand, CliErr
         session_name: session_name
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
+        pane_generation,
     })
 }
 
@@ -1300,31 +1342,6 @@ fn parse_remote_target_exited(args: Vec<String>) -> Result<RemoteTargetExitedCom
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         target: target.ok_or_else(|| CliError::MissingValue("--target".to_string()))?,
         pane_id,
-    })
-}
-
-fn parse_main_pane_watchdog(args: Vec<String>) -> Result<MainPaneWatchdogCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut socket_name = None;
-    let mut session_name = None;
-    let mut pane_id = None;
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
-            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
-            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
-            "--help" | "-h" => {}
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(MainPaneWatchdogCommand {
-        socket_name: socket_name
-            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
-        session_name: session_name
-            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
-        pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
     })
 }
 
@@ -1624,20 +1641,37 @@ mod tests {
             "__remote-authority-output-pump",
             "--ingest-socket-path",
             "/tmp/output.sock",
-            "--input-fifo-path",
-            "/tmp/input.fifo",
             "--socket-name",
             "wa-test",
-            "--pane",
-            "%42",
+            "--stream-id",
+            "42",
         ])
         .command
         {
             Command::RemoteAuthorityOutputPump(command) => {
                 assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
-                assert_eq!(command.input_fifo_path, "/tmp/input.fifo");
                 assert_eq!(command.socket_name, "wa-test");
-                assert_eq!(command.pane, "%42");
+                assert_eq!(command.stream_id, 42);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_authority_pane_died_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-authority-pane-died",
+            "--event-socket-path",
+            "/tmp/event.sock",
+            "--pane-id",
+            "%42",
+        ])
+        .command
+        {
+            Command::RemoteAuthorityPaneDied(command) => {
+                assert_eq!(command.event_socket_path, "/tmp/event.sock");
+                assert_eq!(command.pane_id, "%42");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1808,6 +1842,8 @@ mod tests {
             "waitagent-1",
             "--pane-id",
             "%9",
+            "--pane-generation",
+            "gen-1",
         ])
         .command
         {
@@ -1815,6 +1851,31 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.pane_id, "%9");
+                assert_eq!(command.pane_generation.as_deref(), Some("gen-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_legacy_hidden_main_pane_died_command_without_generation() {
+        match parse(&[
+            "waitagent",
+            "__main-pane-died",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--pane-id",
+            "%9",
+        ])
+        .command
+        {
+            Command::MainPaneDied(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.pane_id, "%9");
+                assert_eq!(command.pane_generation, None);
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -21,6 +21,10 @@ where
         Self { tmux }
     }
 
+    pub fn backend(&self) -> &G {
+        &self.tmux
+    }
+
     pub fn ensure_workspace(
         &self,
         config: &WorkspaceInstanceConfig,

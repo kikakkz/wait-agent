@@ -6,6 +6,8 @@ use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+#[cfg(test)]
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::local_target_host_runtime::local_target_host_program;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
@@ -24,12 +26,7 @@ pub struct TargetHostRuntime {
 impl TargetHostRuntime {
     #[cfg(test)]
     pub fn from_build_env(backend: EmbeddedTmuxBackend) -> Result<Self, LifecycleError> {
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
+        let current_executable = current_waitagent_executable()?;
         Self::from_build_env_with_network_and_executable(
             backend,
             crate::cli::RemoteNetworkConfig::default(),
@@ -174,7 +171,7 @@ impl TargetHostRuntime {
 }
 
 fn split_qualified_target(target: &str) -> Option<(&str, &str)> {
-    let (socket_name, session_name) = target.split_once(':')?;
+    let (socket_name, session_name) = target.rsplit_once(':')?;
     if socket_name.is_empty() || session_name.is_empty() {
         return None;
     }

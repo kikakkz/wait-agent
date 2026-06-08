@@ -62,6 +62,22 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    pub(crate) fn pane_session_name_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<String, TmuxError> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "#{session_name}".to_string(),
+        ];
+        let output = self.run_on_socket(&TmuxSocketName::new(socket_name), &args)?;
+        Ok(output.stdout.trim().to_string())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn pane_tty_path_on_socket(
         &self,
@@ -114,6 +130,33 @@ impl EmbeddedTmuxBackend {
         self.run_on_socket(
             &TmuxSocketName::new(socket_name),
             &set_pane_pipe_args(pane, command),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_pane_hook_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &set_pane_hook_args(pane, hook_name, command),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn unset_pane_hook_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        hook_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &unset_pane_hook_args(pane, hook_name),
         )?;
         Ok(())
     }
@@ -243,6 +286,32 @@ fn set_pane_pipe_args(pane: &TmuxPaneId, command: &str) -> Vec<String> {
     ]
 }
 
+fn set_pane_hook_args(pane: &TmuxPaneId, hook_name: &str, command: &str) -> Vec<String> {
+    let target = pane.as_str();
+    let session_target = target.split(':').next().unwrap_or(target);
+    vec![
+        "set-hook".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        session_target.to_string(),
+        hook_name.to_string(),
+        command.to_string(),
+    ]
+}
+
+fn unset_pane_hook_args(pane: &TmuxPaneId, hook_name: &str) -> Vec<String> {
+    let target = pane.as_str();
+    let session_target = target.split(':').next().unwrap_or(target);
+    vec![
+        "set-hook".to_string(),
+        "-u".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        session_target.to_string(),
+        hook_name.to_string(),
+    ]
+}
+
 #[allow(dead_code)]
 fn set_session_environment_args(session_name: &str, key: &str, value: &str) -> Vec<String> {
     vec![
@@ -269,8 +338,8 @@ fn unset_session_environment_args(session_name: &str, key: &str) -> Vec<String> 
 mod tests {
     use super::{
         clear_pane_pipe_args, resize_pane_args, send_hex_keys_args, send_literal_keys_args,
-        set_pane_pipe_args, set_session_environment_args, split_tmux_input,
-        unset_session_environment_args, TmuxInputChunk,
+        set_pane_hook_args, set_pane_pipe_args, set_session_environment_args, split_tmux_input,
+        unset_pane_hook_args, unset_session_environment_args, TmuxInputChunk,
     };
     use crate::infra::tmux::TmuxPaneId;
 
@@ -308,6 +377,25 @@ mod tests {
         assert_eq!(
             set_pane_pipe_args(&TmuxPaneId::new("%4"), "echo bridge"),
             vec!["pipe-pane", "-O", "-t", "%4", "echo bridge"]
+        );
+        assert_eq!(
+            set_pane_hook_args(
+                &TmuxPaneId::new("shell-1:0.0"),
+                "pane-died",
+                "run-shell true"
+            ),
+            vec![
+                "set-hook",
+                "-p",
+                "-t",
+                "shell-1",
+                "pane-died",
+                "run-shell true"
+            ]
+        );
+        assert_eq!(
+            unset_pane_hook_args(&TmuxPaneId::new("shell-1:0.0"), "pane-died"),
+            vec!["set-hook", "-u", "-p", "-t", "shell-1", "pane-died"]
         );
         assert_eq!(
             set_session_environment_args("shell-1", "WAITAGENT_X", "value"),

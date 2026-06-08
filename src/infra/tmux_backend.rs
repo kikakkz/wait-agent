@@ -258,6 +258,45 @@ impl EmbeddedTmuxBackend {
         }
     }
 
+    pub(crate) fn set_global_option_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            socket_name,
+            &[
+                "set-option".to_string(),
+                "-gq".to_string(),
+                option_name.to_string(),
+                value.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn show_global_option_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+        option_name: &str,
+    ) -> Result<Option<String>, TmuxError> {
+        let output = self.run_on_socket(
+            socket_name,
+            &[
+                "show-options".to_string(),
+                "-gqv".to_string(),
+                option_name.to_string(),
+            ],
+        )?;
+        let value = output.stdout.trim();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(value.to_string()))
+        }
+    }
+
     /// Queries just the workspace directory for a session, without doing a full
     /// session listing. Used by the activation path to avoid redundant listings.
     pub(crate) fn session_workspace_dir(

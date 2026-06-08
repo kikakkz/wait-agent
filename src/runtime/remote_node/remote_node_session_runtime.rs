@@ -30,7 +30,7 @@ use crate::runtime::remote_node_transport_runtime::{
 use crate::runtime::remote_target_publication_runtime::PublicationSenderCommand;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,7 @@ enum RemoteNodeSessionTransport {
 struct LocalRemoteNodeSessionTransport {
     reader: Mutex<UnixStream>,
     writer: Mutex<UnixStream>,
+    shutdown: UnixStream,
 }
 
 struct GrpcRemoteNodeSessionTransport {
@@ -352,16 +353,10 @@ impl RemoteNodeSessionRuntime {
     pub fn shutdown(&self) {
         match &self.transport {
             RemoteNodeSessionTransport::Local(transport) => {
-                let _ = transport
-                    .reader
-                    .lock()
-                    .expect("node session reader mutex should not be poisoned")
-                    .shutdown(Shutdown::Both);
-                let _ = transport
-                    .writer
-                    .lock()
-                    .expect("node session writer mutex should not be poisoned")
-                    .shutdown(Shutdown::Both);
+                let _ = transport.shutdown.shutdown(Shutdown::Both);
+                if let Ok(writer) = transport.writer.lock() {
+                    let _ = writer.shutdown(Shutdown::Both);
+                }
             }
             RemoteNodeSessionTransport::Grpc(transport) => {
                 let _ = transport
@@ -425,6 +420,7 @@ impl RemoteNodeSessionRuntime {
                     &mut *writer,
                     &NodeSessionEnvelope { channel, envelope },
                 )?;
+                writer.flush()?;
                 Ok(())
             }
             RemoteNodeSessionTransport::Grpc(transport) => transport
@@ -447,9 +443,11 @@ fn connect_local_node_session(
     write_client_hello(&mut stream, node_id)?;
     let _server_hello = read_server_hello(&mut stream)?;
     let writer = stream.try_clone()?;
+    let shutdown = stream.try_clone()?;
     Ok(LocalRemoteNodeSessionTransport {
         reader: Mutex::new(stream),
         writer: Mutex::new(writer),
+        shutdown,
     })
 }
 
@@ -844,10 +842,12 @@ fn grpc_session_id(
 }
 
 fn derive_session_id_from_target_id(target_id: &str) -> Option<String> {
-    let mut parts = target_id.splitn(3, ':');
-    let _transport = parts.next()?;
-    let _authority = parts.next()?;
-    let session_id = parts.next()?;
+    let target_id = target_id
+        .strip_prefix("remote-peer:")
+        .or_else(|| target_id.strip_prefix("local-tmux:"))
+        .or_else(|| target_id.strip_prefix("remote:"))
+        .unwrap_or(target_id);
+    let (_, session_id) = target_id.rsplit_once(':')?;
     if session_id.is_empty() {
         None
     } else {

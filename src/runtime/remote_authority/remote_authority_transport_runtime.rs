@@ -491,20 +491,16 @@ fn target_session_component(target: &str) -> String {
 }
 
 fn split_target_identity(target: &str) -> Option<(&str, &str)> {
-    let mut parts = target.splitn(3, ':');
-    let first = parts.next()?;
-    let second = parts.next()?;
-    let third = parts.next();
-
-    match third {
-        Some(session_id)
-            if first == "remote-peer" || first == "local-tmux" || first == "remote" =>
-        {
-            Some((second, session_id))
-        }
-        Some(session_id) => Some((second, session_id)),
-        None => Some((first, second)),
+    let target = target
+        .strip_prefix("remote-peer:")
+        .or_else(|| target.strip_prefix("local-tmux:"))
+        .or_else(|| target.strip_prefix("remote:"))
+        .unwrap_or(target);
+    let (authority_id, session_id) = target.rsplit_once(':')?;
+    if authority_id.is_empty() || session_id.is_empty() {
+        return None;
     }
+    Some((authority_id, session_id))
 }
 
 fn stable_socket_hash(values: &[&str]) -> String {

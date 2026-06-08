@@ -49,13 +49,16 @@ pub enum RemoteNodeTransportEvent {
     },
     SessionClosed {
         node_id: String,
+        session_instance_id: String,
     },
     EnvelopeReceived {
         node_id: String,
+        session_instance_id: String,
         envelope: NodeSessionEnvelope,
     },
     TransportFailed {
         node_id: Option<String>,
+        session_instance_id: Option<String>,
         message: String,
     },
 }
@@ -227,7 +230,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
-
+                            session_instance_id: None,
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -258,7 +261,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
-
+                            session_instance_id: None,
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -281,7 +284,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         );
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
-
+                            session_instance_id: None,
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -297,7 +300,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(request.node_id.clone()),
-
+                            session_instance_id: None,
                             message: transport_error.to_string(),
                         });
                         let _ = started_tx.send(Err(transport_error));
@@ -315,6 +318,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     );
                     let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                         node_id: Some(request.node_id.clone()),
+                        session_instance_id: None,
                         message: transport_error.to_string(),
                     });
                     let _ = started_tx.send(Err(transport_error));
@@ -325,6 +329,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     session_instance_id: server_hello.session_instance_id.clone(),
                     outbound_tx: outbound_session.outbound_tx.clone(),
                 };
+                let session_instance_id = session.session_instance_id().to_string();
                 let t_done = t_start.elapsed();
                 ERROR_LOG.log(format!(
                     "[diag-timing] connect_outbound handshake complete: {:?}",
@@ -337,6 +342,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
 
                 let _ = event_tx.send(RemoteNodeTransportEvent::EnvelopeReceived {
                     node_id: request.node_id.clone(),
+                    session_instance_id: session_instance_id.clone(),
                     envelope: first_envelope,
                 });
 
@@ -355,6 +361,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                 Ok(Some(envelope)) => {
                                     if event_tx.send(RemoteNodeTransportEvent::EnvelopeReceived {
                                         node_id: request.node_id.clone(),
+                                        session_instance_id: session_instance_id.clone(),
                                         envelope,
                                     }).is_err() {
                                         ERROR_LOG.log(format!(
@@ -378,6 +385,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                     ));
                                     let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                                         node_id: Some(request.node_id.clone()),
+                                        session_instance_id: Some(session_instance_id.clone()),
                                         message: error.to_string(),
                                     });
                                     break;
@@ -388,6 +396,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 }
                 let _ = event_tx.send(RemoteNodeTransportEvent::SessionClosed {
                     node_id: request.node_id,
+                    session_instance_id,
                 });
             });
         }).map_err(|error| RemoteNodeTransportError::new(
@@ -480,6 +489,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     if let Err(error) = server.await {
                         let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: None,
+                            session_instance_id: None,
                             message: error.to_string(),
                         });
                     }
@@ -578,6 +588,7 @@ impl NodeSessionService for TransportNodeSessionService {
                         if event_tx
                             .send(RemoteNodeTransportEvent::EnvelopeReceived {
                                 node_id: node_id.clone(),
+                                session_instance_id: session_instance_id.clone(),
                                 envelope,
                             })
                             .is_err()
@@ -603,13 +614,17 @@ impl NodeSessionService for TransportNodeSessionService {
                         ));
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                             node_id: Some(node_id.clone()),
+                            session_instance_id: Some(session_instance_id.clone()),
                             message: error.to_string(),
                         });
                         break;
                     }
                 }
             }
-            let _ = event_tx.send(RemoteNodeTransportEvent::SessionClosed { node_id });
+            let _ = event_tx.send(RemoteNodeTransportEvent::SessionClosed {
+                node_id,
+                session_instance_id,
+            });
         });
 
         let (response_tx, response_rx) = tokio_mpsc::unbounded_channel();
@@ -789,7 +804,9 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("envelope received event should arrive");
             match received {
-                RemoteNodeTransportEvent::EnvelopeReceived { node_id, envelope } => {
+                RemoteNodeTransportEvent::EnvelopeReceived {
+                    node_id, envelope, ..
+                } => {
                     assert_eq!(node_id, "peer-a");
                     assert!(matches!(envelope.body, Some(Body::Heartbeat(_))));
                 }

@@ -6,13 +6,14 @@ use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
     ActivateTargetCommand, AttachCommand, DetachCommand, LocalTargetExitedCommand,
-    LocalTargetHostCommand, MainPaneDiedCommand, MainPaneWatchdogCommand, NewTargetCommand,
-    RemoteNetworkConfig, RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
+    LocalTargetHostCommand, MainPaneDiedCommand, NewTargetCommand, RemoteNetworkConfig,
+    RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
     ToggleFullscreenCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::local_target_host_runtime::LocalTargetHostRuntime;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
@@ -40,6 +41,7 @@ pub struct WorkspaceCommandRuntime {
     target_host_runtime: TargetHostRuntime,
     session_service: SessionService<EmbeddedTmuxBackend>,
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+    backend: EmbeddedTmuxBackend,
     network: RemoteNetworkConfig,
 }
 
@@ -48,15 +50,11 @@ impl WorkspaceCommandRuntime {
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_runtime_error)?;
-        let current_executable = std::env::current_exe().map_err(|error| {
-            LifecycleError::Io(
-                "failed to locate current waitagent executable".to_string(),
-                error,
-            )
-        })?;
-        let entry_runtime = WorkspaceEntryRuntime::new(
+        let current_executable = current_waitagent_executable()?;
+        let entry_runtime = WorkspaceEntryRuntime::new_with_network(
             WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
             WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
+            network.clone(),
         );
         let session_service = SessionService::new(backend.clone());
         let target_registry = TargetRegistryService::new(
@@ -111,6 +109,7 @@ impl WorkspaceCommandRuntime {
             target_host_runtime: command_target_host_runtime,
             session_service,
             target_registry,
+            backend,
             network,
         })
     }
@@ -130,9 +129,20 @@ impl WorkspaceCommandRuntime {
             )?;
         self.start_remote_node_ingress(workspace.workspace_handle.socket_name.as_str())?;
         self.start_remote_session_sync(workspace.workspace_handle.socket_name.as_str())?;
-        self.session_service
+        match self
+            .session_service
             .attach_workspace(&workspace.workspace_handle)
-            .map_err(tmux_runtime_error)
+        {
+            Ok(()) => Ok(()),
+            Err(_error)
+                if !self
+                    .backend
+                    .socket_is_live(&workspace.workspace_handle.socket_name) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(tmux_runtime_error(error)),
+        }
     }
 
     pub fn run_attach(&self, command: AttachCommand) -> Result<(), LifecycleError> {
@@ -197,13 +207,6 @@ impl WorkspaceCommandRuntime {
         command: RemoteTargetExitedCommand,
     ) -> Result<(), LifecycleError> {
         self.main_slot_runtime.run_remote_target_exited(command)
-    }
-
-    pub fn run_main_pane_watchdog(
-        &self,
-        command: MainPaneWatchdogCommand,
-    ) -> Result<(), LifecycleError> {
-        self.main_slot_runtime.run_main_pane_watchdog(command)
     }
 
     pub fn run_toggle_fullscreen(

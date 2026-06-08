@@ -12,6 +12,7 @@ use crate::infra::tmux::{
     EmbeddedTmuxBackend, RemoteTargetPublicationBinding, TmuxSessionGateway, TmuxSocketName,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
@@ -51,12 +52,7 @@ impl RemoteTargetPublicationRuntime {
             )?,
             local_tmux: EmbeddedTmuxBackend::from_build_env()
                 .map_err(remote_target_publication_error)?,
-            current_executable: std::env::current_exe().map_err(|error| {
-                LifecycleError::Io(
-                    "failed to locate current waitagent executable".to_string(),
-                    error,
-                )
-            })?,
+            current_executable: current_waitagent_executable()?,
             network,
         })
     }
@@ -548,6 +544,9 @@ impl RemoteTargetPublicationRuntime {
         &self,
         command: SocketLifecycleHookCommand,
     ) -> Result<(), LifecycleError> {
+        if !self.socket_is_live(&command.socket_name) {
+            return Ok(());
+        }
         self.ensure_publication_hooks_on_socket(&command.socket_name)?;
         let hook_name = command
             .hook_name
@@ -644,10 +643,20 @@ impl RemoteTargetPublicationRuntime {
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
-        self.ensure_publication_hooks_on_socket(socket_name)?;
         let socket = TmuxSocketName::new(socket_name);
-        let bindings = list_publication_bindings_on_socket(&self.local_tmux, &socket)
-            .map_err(remote_target_publication_error)?;
+        if !self.local_tmux.socket_is_live(&socket) {
+            return Ok(());
+        }
+        self.ensure_publication_hooks_on_socket(socket_name)?;
+        let bindings = match list_publication_bindings_on_socket(&self.local_tmux, &socket) {
+            Ok(bindings) => bindings,
+            Err(error)
+                if error.is_command_failure() && !self.local_tmux.socket_is_live(&socket) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(remote_target_publication_error(error)),
+        };
         let has_published_records = !self
             .store
             .list_records_for_source_socket(socket_name)
@@ -664,16 +673,35 @@ impl RemoteTargetPublicationRuntime {
     }
 
     fn ensure_publication_hooks_on_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        let socket = TmuxSocketName::new(socket_name);
+        if !self.local_tmux.socket_is_live(&socket) {
+            return Ok(());
+        }
         let hook_command = publication_socket_hook_tmux_command(
             self.current_executable.to_string_lossy().as_ref(),
             socket_name,
+            &self.network,
         );
         for hook_name in PUBLICATION_GLOBAL_HOOKS {
-            self.local_tmux
+            match self
+                .local_tmux
                 .set_global_hook_on_socket(socket_name, hook_name, &hook_command)
-                .map_err(remote_target_publication_error)?;
+            {
+                Ok(()) => {}
+                Err(error)
+                    if error.is_command_failure() && !self.local_tmux.socket_is_live(&socket) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(remote_target_publication_error(error)),
+            }
         }
         Ok(())
+    }
+
+    fn socket_is_live(&self, socket_name: &str) -> bool {
+        self.local_tmux
+            .socket_is_live(&TmuxSocketName::new(socket_name))
     }
 
     fn publish_bound_target_with_cache(

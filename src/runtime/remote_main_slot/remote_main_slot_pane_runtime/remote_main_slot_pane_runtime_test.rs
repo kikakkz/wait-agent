@@ -5,7 +5,8 @@ mod tests {
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
         main_slot_console_id, main_slot_surface_spec, placeholder_lines,
         should_draw_remote_snapshot, should_exit_surface_for_target_presence,
-        should_exit_surface_locally, spawn_mailbox_watcher,
+        should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
+        spawn_mailbox_watcher, target_exists_in_catalog,
         write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, RawPtyInputRoute,
         RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
         RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
@@ -837,6 +838,57 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct StaticTargetCatalogGateway {
+        targets: Vec<ManagedSessionRecord>,
+    }
+
+    impl crate::application::target_registry_service::TargetCatalogGateway
+        for StaticTargetCatalogGateway
+    {
+        type Error = std::io::Error;
+
+        fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+            Ok(self.targets.clone())
+        }
+    }
+
+    #[test]
+    fn target_presence_loss_exits_when_target_is_removed_even_if_authority_stays_connected() {
+        assert!(should_exit_surface_for_target_presence_loss(
+            true == false,
+            true,
+            false
+        ));
+        assert!(should_exit_surface_for_target_presence_loss(
+            false, true, true
+        ));
+    }
+
+    #[test]
+    fn target_presence_loss_waits_during_reconnect_when_target_still_exists() {
+        assert!(!should_exit_surface_for_target_presence_loss(
+            true, true, true
+        ));
+        assert!(!should_exit_surface_for_target_presence_loss(
+            true, false, true
+        ));
+    }
+
+    #[test]
+    fn target_exists_in_catalog_reports_presence_by_target_id() {
+        let target = remote_target();
+        let registry = TargetRegistryService::new(StaticTargetCatalogGateway {
+            targets: vec![target.clone()],
+        });
+
+        assert!(target_exists_in_catalog(
+            &registry,
+            &target.address.qualified_target()
+        ));
+        assert!(!target_exists_in_catalog(&registry, "peer-a:missing-shell"));
+    }
+
     #[test]
     fn surfaces_exit_when_remote_target_disappears() {
         let main_slot = RemoteInteractSurfaceSpec {
@@ -852,12 +904,22 @@ mod tests {
             ..main_slot.clone()
         };
 
-        assert!(should_exit_surface_for_target_presence(&main_slot, false));
+        assert!(should_exit_surface_for_target_presence(
+            &main_slot, false, false, true, false
+        ));
         assert!(should_exit_surface_for_target_presence(
             &server_console,
+            false,
+            false,
+            true,
             false
         ));
-        assert!(!should_exit_surface_for_target_presence(&main_slot, true));
+        assert!(!should_exit_surface_for_target_presence(
+            &main_slot, false, true, true, true
+        ));
+        assert!(!should_exit_surface_for_target_presence(
+            &main_slot, true, true, true, false
+        ));
     }
 
     #[test]

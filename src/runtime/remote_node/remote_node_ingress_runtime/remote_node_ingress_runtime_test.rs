@@ -35,6 +35,43 @@ mod tests {
     use tonic::Request;
 
     #[test]
+    fn grpc_source_handles_host_port_authority_in_target_ids() {
+        let event = super::super::map_target_exited_envelope(
+            "10.1.26.84:7474",
+            &NodeSessionEnvelope {
+                message_id: "msg-1".to_string(),
+                sent_at: None,
+                session_instance_id: "client-session-1".to_string(),
+                correlation_id: None,
+                route: Some(RouteContext {
+                    authority_node_id: Some("10.1.26.84:7474".to_string()),
+                    target_id: Some("remote-peer:10.1.26.84:7474:6a1b816eb1111435".to_string()),
+                    attachment_id: None,
+                    console_id: None,
+                    console_host_id: None,
+                    session_id: None,
+                }),
+                body: Some(Body::TargetExited(
+                    crate::infra::remote_grpc_proto::v1::TargetExited {
+                        target_id: "remote-peer:10.1.26.84:7474:6a1b816eb1111435".to_string(),
+                        transport_session_id: "6a1b816eb1111435".to_string(),
+                    },
+                )),
+            },
+            &crate::infra::remote_grpc_proto::v1::TargetExited {
+                target_id: "remote-peer:10.1.26.84:7474:6a1b816eb1111435".to_string(),
+                transport_session_id: "6a1b816eb1111435".to_string(),
+            },
+        );
+
+        assert_eq!(event.session_id.as_deref(), Some("6a1b816eb1111435"));
+        assert_eq!(
+            event.target_id.as_deref(),
+            Some("remote-peer:10.1.26.84:7474:6a1b816eb1111435")
+        );
+    }
+
+    #[test]
     fn grpc_source_bridges_authority_output_and_publication_into_existing_runtime_boundaries() {
         let bind_addr = unused_local_addr();
         let source = GrpcRemoteNodeIngressSource::new(bind_addr);
