@@ -112,7 +112,7 @@ where
                 .set_session_hook(workspace, hook_name, reconcile_command)?;
         }
         if let Some(previous_main_pane) = previous_main_pane {
-            if previous_main_pane != main_pane {
+            if previous_main_pane != main_pane && self.pane_exists(workspace, previous_main_pane) {
                 for hook_name in MAIN_PANE_RECOVERY_HOOKS {
                     self.tmux
                         .unset_pane_hook(workspace, previous_main_pane, hook_name)?;
@@ -135,6 +135,16 @@ where
                 .set_pane_hook(workspace, main_pane, hook_name, pane_died_command)?;
         }
         Ok(())
+    }
+
+    fn pane_exists(&self, workspace: &TmuxWorkspaceHandle, pane_id: &TmuxPaneId) -> bool {
+        let Ok(window) = self.tmux.current_window(workspace) else {
+            return false;
+        };
+        self.tmux
+            .list_panes(workspace, &window)
+            .map(|panes| panes.into_iter().any(|pane| pane.pane_id == *pane_id))
+            .unwrap_or(false)
     }
 }
 
@@ -796,7 +806,15 @@ mod tests {
 
     #[test]
     fn layout_service_clears_stale_main_pane_hooks_before_binding_new_main_pane() {
-        let gateway = FakeGateway::new(vec![]);
+        let gateway = FakeGateway::new(vec![TmuxPaneInfo {
+            pane_id: TmuxPaneId::new("%1"),
+            pane_pid: None,
+            title: String::new(),
+            current_command: Some("bash".to_string()),
+            current_path: None,
+            is_dead: false,
+            in_mode: false,
+        }]);
         let service = LayoutService::new(gateway.clone());
 
         service
@@ -832,6 +850,43 @@ mod tests {
                     "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn layout_service_skips_unhook_for_dead_previous_main_pane() {
+        let gateway = FakeGateway::new(vec![]);
+        let service = LayoutService::new(gateway.clone());
+
+        service
+            .ensure_layout_hooks(
+                &workspace(),
+                &TmuxPaneId::new("%3"),
+                Some(&TmuxPaneId::new("%1")),
+                "run-shell -b 'waitagent __layout-reconcile'",
+                "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'",
+            )
+            .expect("hook migration should succeed when previous pane is dead");
+
+        assert_eq!(
+            gateway.calls(),
+            vec![
+                Call::SetHook(
+                    "client-resized".to_string(),
+                    "run-shell -b 'waitagent __layout-reconcile'".to_string(),
+                ),
+                Call::SetPaneOption(
+                    "%3".to_string(),
+                    "remain-on-exit".to_string(),
+                    "on".to_string(),
+                ),
+                Call::SetPaneHook(
+                    "%3".to_string(),
+                    "pane-died".to_string(),
+                    "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
+                ),
+            ],
+            "dead previous main pane should not trigger unhook"
         );
     }
 }
