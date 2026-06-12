@@ -4,8 +4,9 @@ mod tests {
         exportable_local_sessions_for_socket, local_sessions_by_local_id,
         overlay_workspace_runtime_onto_active_local_target_hosts, remote_session_exited_envelope,
         remote_session_published_envelope, remote_session_sync_owner_available,
-        remote_session_sync_owner_socket_path, AuthorityHostSignal, LocalSessionCatalog,
-        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
+        remote_session_sync_owner_socket_path, sync_local_sessions, AuthorityHostSignal,
+        LocalSessionCatalog, LocalTargetExitObserver, OutboundRemoteNodeTransport,
+        RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -21,6 +22,7 @@ mod tests {
         BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload,
     };
     use crate::infra::remote_transport_codec::read_control_plane_envelope;
+    use crate::lifecycle::LifecycleError;
     use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
     use std::collections::HashMap;
     use std::fs;
@@ -145,6 +147,43 @@ mod tests {
     }
 
     #[test]
+    fn sync_local_sessions_reports_target_exit_to_local_lifecycle() {
+        let (handle, mut receiver) =
+            RemoteNodeSessionHandle::new_for_tests("10.0.0.2", "server-session-1");
+        let observer = RecordingLocalTargetExitObserver::default();
+        let mut synced_sessions = local_sessions_by_local_id(vec![session("wa-1", "shell-1")]);
+        let mut next_message_id = 0;
+
+        sync_local_sessions(
+            &FakeGateway { sessions: vec![] },
+            "10.0.0.2",
+            &handle,
+            &observer,
+            &mut synced_sessions,
+            &mut next_message_id,
+        )
+        .expect("local session sync should succeed");
+
+        assert_eq!(
+            observer
+                .exits
+                .lock()
+                .expect("exit observer mutex should not be poisoned")
+                .as_slice(),
+            &[("wa-1".to_string(), "shell-1".to_string())]
+        );
+        assert!(synced_sessions.is_empty());
+
+        let envelope = receiver
+            .try_recv()
+            .expect("remote target exit envelope should be sent");
+        let Some(Body::TargetExited(payload)) = envelope.body else {
+            panic!("expected target_exited body");
+        };
+        assert_eq!(payload.transport_session_id, "shell-1");
+    }
+
+    #[test]
     fn target_session_name_from_target_id_uses_last_colon_for_host_port_authority() {
         assert_eq!(
             super::super::target_session_name_from_target_id(
@@ -222,6 +261,7 @@ mod tests {
             transport: FakeTransport {
                 receiver_slot: receiver_slot.clone(),
             },
+            local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -396,6 +436,25 @@ mod tests {
         assert!(remote_session_sync_owner_available(&socket_path));
         drop(listener);
         let _ = fs::remove_file(&socket_path);
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingLocalTargetExitObserver {
+        exits: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl LocalTargetExitObserver for RecordingLocalTargetExitObserver {
+        fn observe_local_target_exit(
+            &self,
+            socket_name: &str,
+            target_session_name: &str,
+        ) -> Result<(), LifecycleError> {
+            self.exits
+                .lock()
+                .expect("exit observer mutex should not be poisoned")
+                .push((socket_name.to_string(), target_session_name.to_string()));
+            Ok(())
+        }
     }
 
     #[derive(Clone)]

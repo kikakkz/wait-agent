@@ -865,53 +865,50 @@ impl MainSlotRuntime {
 
         self.remove_remote_target_runtime_record(&command.socket_name, &command.target)?;
         let session_pane = self.read_session_pane(&workspace, &command.target)?;
-        let next_target =
-            self.next_target_after_remote_exit(&workspace, Some(command.target.as_str()))?;
+        let transition =
+            self.remote_target_exit_transition(&workspace, Some(command.target.as_str()))?;
         let mut cleanup_pane = session_pane.clone();
 
-        match next_target {
-            Some(target) => {
-                let is_remote = target.address.transport() == &SessionTransport::RemotePeer
-                    || target.address.authority_id().contains('#');
-                if is_remote {
-                    match self.next_remote_target_pane_after_exit(
-                        &workspace,
-                        &command,
-                        cleanup_pane.as_ref(),
-                        &target,
-                    )? {
-                        RemoteTargetExitPanePlan::ActivateTargetSessionPane => {
-                            self.activate_remote_target_in_workspace(&current_workspace, &target)?;
-                        }
-                        RemoteTargetExitPanePlan::AssignExitedPaneToNextTarget(pane) => {
-                            self.assign_remote_target_to_content_pane(
-                                &current_workspace,
-                                &workspace,
-                                &pane,
-                                &target,
-                            )?;
-                            cleanup_pane = None;
-                        }
+        match transition {
+            RemoteTargetExitTransition::ActivateRemote(target) => {
+                match self.next_remote_target_pane_after_exit(
+                    &workspace,
+                    &command,
+                    cleanup_pane.as_ref(),
+                    &target,
+                )? {
+                    RemoteTargetExitPanePlan::ActivateTargetSessionPane => {
+                        self.activate_remote_target_in_workspace(&current_workspace, &target)?;
                     }
-                } else {
-                    let recovery_pane = self.exited_remote_content_pane(
-                        &workspace,
-                        &command.target,
-                        command.pane_id.as_deref(),
-                        cleanup_pane.as_ref(),
-                    )?;
-                    self.clear_remote_recovery_pane_state(&workspace, &recovery_pane);
-                    self.backend
-                        .respawn_pane(
+                    RemoteTargetExitPanePlan::AssignExitedPaneToNextTarget(pane) => {
+                        self.assign_remote_target_to_content_pane(
+                            &current_workspace,
                             &workspace,
-                            &recovery_pane,
-                            &workspace_shell_program(&current_workspace.workspace_dir),
-                        )
-                        .map_err(main_slot_error)?;
-                    self.activate_target_in_workspace(&current_workspace, &target)?;
+                            &pane,
+                            &target,
+                        )?;
+                        cleanup_pane = None;
+                    }
                 }
             }
-            None => {
+            RemoteTargetExitTransition::ActivateLocal(target) => {
+                let recovery_pane = self.exited_remote_content_pane(
+                    &workspace,
+                    &command.target,
+                    command.pane_id.as_deref(),
+                    cleanup_pane.as_ref(),
+                )?;
+                self.clear_remote_recovery_pane_state(&workspace, &recovery_pane);
+                self.backend
+                    .respawn_pane(
+                        &workspace,
+                        &recovery_pane,
+                        &workspace_shell_program(&current_workspace.workspace_dir),
+                    )
+                    .map_err(main_slot_error)?;
+                self.activate_target_in_workspace(&current_workspace, &target)?;
+            }
+            RemoteTargetExitTransition::CloseWorkspace => {
                 self.cleanup_exited_remote_session_pane(
                     &workspace,
                     &command.target,
@@ -930,6 +927,27 @@ impl MainSlotRuntime {
             cleanup_pane.as_ref(),
         )?;
         Ok(())
+    }
+
+    fn remote_target_exit_transition(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        active_target: Option<&str>,
+    ) -> Result<RemoteTargetExitTransition, LifecycleError> {
+        let sessions = self.workspace_visible_targets(
+            workspace.socket_name.as_str(),
+            workspace.session_name.as_str(),
+            active_target,
+        )?;
+        if let Some(target) = next_remote_target_on_active_authority(&sessions, active_target) {
+            return Ok(RemoteTargetExitTransition::ActivateRemote(target));
+        }
+        if let Some(target) =
+            next_target_host_session(&sessions, workspace.socket_name.as_str(), active_target)
+        {
+            return Ok(RemoteTargetExitTransition::ActivateLocal(target));
+        }
+        Ok(RemoteTargetExitTransition::CloseWorkspace)
     }
 
     fn exited_remote_content_pane(
@@ -1560,19 +1578,6 @@ impl MainSlotRuntime {
         self.close_target_session_identity(Some(target))
     }
 
-    fn next_target_after_remote_exit(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        active_target: Option<&str>,
-    ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
-        let sessions = self.workspace_visible_targets(
-            workspace.socket_name.as_str(),
-            workspace.session_name.as_str(),
-            active_target,
-        )?;
-        Ok(next_remote_target(&sessions, active_target))
-    }
-
     fn current_workspace(
         &self,
         command: &ActivateTargetCommand,
@@ -2041,6 +2046,12 @@ impl MainSlotRuntime {
     }
 }
 
+enum RemoteTargetExitTransition {
+    ActivateRemote(ManagedSessionRecord),
+    ActivateLocal(ManagedSessionRecord),
+    CloseWorkspace,
+}
+
 enum RemoteTargetExitPanePlan {
     ActivateTargetSessionPane,
     AssignExitedPaneToNextTarget(TmuxPaneId),
@@ -2112,15 +2123,36 @@ fn next_target_host_session(
     same_socket_targets.into_iter().next()
 }
 
+fn next_remote_target_on_active_authority(
+    sessions: &[ManagedSessionRecord],
+    active_target: Option<&str>,
+) -> Option<ManagedSessionRecord> {
+    let active_authority = active_target
+        .and_then(split_qualified_target)
+        .map(|(authority, _)| authority);
+    next_remote_target_matching_authority(sessions, active_target, active_authority)
+}
+
 fn next_remote_target(
     sessions: &[ManagedSessionRecord],
     active_target: Option<&str>,
+) -> Option<ManagedSessionRecord> {
+    next_remote_target_matching_authority(sessions, active_target, None)
+}
+
+fn next_remote_target_matching_authority(
+    sessions: &[ManagedSessionRecord],
+    active_target: Option<&str>,
+    authority_id: Option<&str>,
 ) -> Option<ManagedSessionRecord> {
     let active_target = active_target.filter(|target| !target.is_empty());
     sessions
         .iter()
         .filter(|session| {
             session.is_target_host()
+                && authority_id.map_or(true, |authority| {
+                    session.address.authority_id() == authority
+                })
                 && (session.address.transport() == &SessionTransport::RemotePeer
                     || session.address.authority_id().contains('#'))
         })

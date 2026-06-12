@@ -42,15 +42,16 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    LocalSessionCatalog, NoopAuthorityPublicationGateway, OutboundRemoteNodeTransport,
-    SessionSyncAuthorityHost, SessionSyncAuthorityManager, LIVE_AUTHORITY_SERVER_ID,
-    SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
+    LocalSessionCatalog, LocalTargetExitObserver, NoopAuthorityPublicationGateway,
+    OutboundRemoteNodeTransport, SessionSyncAuthorityHost, SessionSyncAuthorityManager,
+    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
 };
 
-pub(super) fn run_remote_session_sync_loop<G, T>(
+pub(super) fn run_remote_session_sync_loop<G, T, O>(
     gateway: G,
     transport: T,
     network: RemoteNetworkConfig,
+    local_target_exit_observer: O,
     node_id: String,
     endpoint_uri: String,
     poll_interval: Duration,
@@ -59,6 +60,7 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
 ) where
     G: LocalSessionCatalog,
     T: OutboundRemoteNodeTransport,
+    O: LocalTargetExitObserver,
 {
     let publication_runtime =
         match RemoteTargetPublicationRuntime::from_build_env_with_network(network) {
@@ -137,6 +139,7 @@ pub(super) fn run_remote_session_sync_loop<G, T>(
                 &gateway,
                 &node_id,
                 session_handle,
+                &local_target_exit_observer,
                 &mut synced_sessions,
                 &mut next_message_id,
             ) {
@@ -219,15 +222,17 @@ pub(super) fn handle_transport_event(
     }
 }
 
-pub(super) fn sync_local_sessions<G>(
+pub(super) fn sync_local_sessions<G, O>(
     gateway: &G,
     node_id: &str,
     session_handle: &RemoteNodeSessionHandle,
+    local_target_exit_observer: &O,
     synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
     next_message_id: &mut u64,
 ) -> Result<(), io::Error>
 where
     G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
 {
     let local_sessions = match gateway.list_local_sessions() {
         Ok(sessions) => {
@@ -273,6 +278,18 @@ where
     }
 
     for previous in &delta.exit {
+        if previous.is_target_host() {
+            if let Err(error) = local_target_exit_observer.observe_local_target_exit(
+                previous.address.server_id(),
+                previous.address.session_id(),
+            ) {
+                ERROR_LOG.log(format!(
+                    "[diag-sync] failed to observe local target exit socket={} target={}: {error}",
+                    previous.address.server_id(),
+                    previous.address.session_id()
+                ));
+            }
+        }
         next_message_id_increment(next_message_id);
         session_handle
             .send(remote_session_exited_envelope(

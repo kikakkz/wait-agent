@@ -1,5 +1,6 @@
 use crate::cli::{
-    RemoteAuthorityTargetHostCommand, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand,
+    prepend_global_network_args, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
+    RemoteSessionSyncOwnerCommand,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
@@ -112,9 +113,59 @@ impl OutboundRemoteNodeTransport for GrpcRemoteNodeTransport {
     }
 }
 
-pub struct RemoteNodeSessionSyncRuntime<G, T = GrpcRemoteNodeTransport> {
+pub trait LocalTargetExitObserver: Clone + Send + 'static {
+    fn observe_local_target_exit(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError>;
+}
+
+#[derive(Clone)]
+pub struct SidecarLocalTargetExitObserver {
+    network: RemoteNetworkConfig,
+    current_executable: PathBuf,
+}
+
+impl SidecarLocalTargetExitObserver {
+    pub fn from_build_env(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            network,
+            current_executable: current_waitagent_executable()?,
+        })
+    }
+}
+
+impl LocalTargetExitObserver for SidecarLocalTargetExitObserver {
+    fn observe_local_target_exit(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        let args = prepend_global_network_args(
+            vec![
+                "__local-target-exited".to_string(),
+                "--socket-name".to_string(),
+                socket_name.to_string(),
+                "--target-session-name".to_string(),
+                target_session_name.to_string(),
+                "--pane-id".to_string(),
+                String::new(),
+            ],
+            &self.network,
+        );
+        spawn_waitagent_sidecar(&self.current_executable, args).map_err(remote_session_sync_error)
+    }
+}
+
+pub struct RemoteNodeSessionSyncRuntime<
+    G,
+    T = GrpcRemoteNodeTransport,
+    O = SidecarLocalTargetExitObserver,
+> {
     gateway: G,
     transport: T,
+    local_target_exit_observer: O,
     network: RemoteNetworkConfig,
     poll_interval: Duration,
     reconnect_delay: Duration,
@@ -143,13 +194,14 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
         network: RemoteNetworkConfig,
         socket_name: &str,
     ) -> Result<Self, LifecycleError> {
-        Ok(Self::new(
+        Ok(Self::new_with_local_target_exit_observer(
             SocketScopedLocalSessionCatalog::new(
                 EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
                 TmuxSocketName::new(socket_name),
                 PublishedTargetStore::new(std::path::PathBuf::from("/dev/null")),
             ),
             GrpcRemoteNodeTransport::new(),
+            SidecarLocalTargetExitObserver::from_build_env(network.clone())?,
             network,
         ))
     }
@@ -229,15 +281,22 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
     }
 }
 
-impl<G, T> RemoteNodeSessionSyncRuntime<G, T>
+impl<G, T, O> RemoteNodeSessionSyncRuntime<G, T, O>
 where
     G: LocalSessionCatalog,
     T: OutboundRemoteNodeTransport,
+    O: LocalTargetExitObserver,
 {
-    pub fn new(gateway: G, transport: T, network: RemoteNetworkConfig) -> Self {
+    pub fn new_with_local_target_exit_observer(
+        gateway: G,
+        transport: T,
+        local_target_exit_observer: O,
+        network: RemoteNetworkConfig,
+    ) -> Self {
         Self {
             gateway,
             transport,
+            local_target_exit_observer,
             network,
             poll_interval: SESSION_SYNC_POLL_INTERVAL,
             reconnect_delay: SESSION_SYNC_RECONNECT_DELAY,
@@ -255,6 +314,7 @@ where
                 self.gateway,
                 self.transport,
                 self.network,
+                self.local_target_exit_observer,
                 node_id,
                 endpoint_uri,
                 self.poll_interval,
