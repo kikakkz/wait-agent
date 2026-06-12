@@ -239,9 +239,9 @@ impl EventDrivenPaneRuntime {
                     "[diag] apply_sidebar_activation: ActivateTarget target={} socket={}",
                     target, command.socket_name
                 ));
-                self.run_activate_target_sync(command, &target)?;
-                ERROR_LOG.log("[diag] apply_sidebar_activation: result=true".to_string());
-                Ok(true)
+                self.dispatch_activate_target_action(command, &target)?;
+                ERROR_LOG.log("[diag] apply_sidebar_activation: dispatched".to_string());
+                Ok(false)
             }
         }
     }
@@ -272,7 +272,7 @@ impl EventDrivenPaneRuntime {
             .map_err(event_pane_error)
     }
 
-    fn run_activate_target_sync(
+    fn dispatch_activate_target_action(
         &self,
         command: &UiPaneCommand,
         target: &str,
@@ -285,30 +285,17 @@ impl EventDrivenPaneRuntime {
             target,
         );
         ERROR_LOG.log(format!(
-            "[diag] run_activate_target_sync: executable={executable:?} args={args:?}"
+            "[diag] dispatch_activate_target_action: executable={executable:?} args={args:?}"
         ));
-        let status = std::process::Command::new(&executable)
-            .args(&args)
-            .status()
-            .map_err(|error| {
-                ERROR_LOG.log(format!(
-                    "[diag] run_activate_target_sync: spawn error={error}"
-                ));
-                LifecycleError::Io(
-                    "failed to execute waitagent activate-target command".to_string(),
-                    error,
-                )
-            })?;
-        ERROR_LOG.log(format!(
-            "[diag] run_activate_target_sync: exit status={status}"
-        ));
-        if status.success() {
-            return Ok(());
-        }
-
-        Err(LifecycleError::Protocol(format!(
-            "waitagent __activate-target exited with status {status}"
-        )))
+        let mut shell_parts = vec![shell_escape(&executable.display().to_string())];
+        shell_parts.extend(args.iter().map(|arg| shell_escape(arg)));
+        let shell_command = shell_parts.join(" ");
+        self.backend
+            .run_socket_command(
+                &TmuxSocketName::new(&command.socket_name),
+                &["run-shell".to_string(), "-b".to_string(), shell_command],
+            )
+            .map_err(event_pane_error)
     }
 }
 
@@ -573,6 +560,10 @@ fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
 
 fn current_executable_path() -> Result<std::path::PathBuf, LifecycleError> {
     current_waitagent_executable()
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn event_pane_error<E>(error: E) -> LifecycleError

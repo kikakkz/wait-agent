@@ -855,25 +855,17 @@ impl MainSlotRuntime {
         &self,
         command: RemoteTargetExitedCommand,
     ) -> Result<(), LifecycleError> {
-        ERROR_LOG.log(format!(
-            "[diag-native] run_remote_target_exited: target={} socket={} session={} pane={:?}",
-            command.target, command.socket_name, command.session_name, command.pane_id
-        ));
         let current_workspace =
             self.current_workspace_from_names(&command.socket_name, &command.session_name)?;
         let workspace = workspace_handle(&command.socket_name, &command.session_name);
         let _state_guard = self.claim_main_pane_state(&workspace)?;
         let active_target = self.active_target(&workspace)?;
         if active_target.as_deref() != Some(command.target.as_str()) {
-            ERROR_LOG.log(format!(
-                "[diag-native] run_remote_target_exited ignored stale event: target={} active_target={active_target:?}",
-                command.target
-            ));
             return Ok(());
         }
 
         self.remove_remote_target_runtime_record(&command.socket_name, &command.target)?;
-        let session_pane = self.find_session_pane(&workspace, &command.target)?;
+        let session_pane = self.read_session_pane(&workspace, &command.target)?;
         let fallback =
             self.next_target_after_remote_exit(&workspace, Some(command.target.as_str()))?;
         let mut cleanup_pane = session_pane.clone();
@@ -883,10 +875,12 @@ impl MainSlotRuntime {
                 let is_remote = target.address.transport() == &SessionTransport::RemotePeer
                     || target.address.authority_id().contains('#');
                 if is_remote {
-                    let recovery_pane = match cleanup_pane.as_ref().cloned() {
-                        Some(pane) => pane,
-                        None => self.workspace_main_pane(&workspace)?,
-                    };
+                    let recovery_pane = self.remote_target_exit_content_pane(
+                        &workspace,
+                        &command.target,
+                        command.pane_id.as_deref(),
+                        cleanup_pane.as_ref(),
+                    )?;
                     self.recover_remote_target_in_workspace(
                         &current_workspace,
                         &workspace,
@@ -895,6 +889,20 @@ impl MainSlotRuntime {
                     )?;
                     cleanup_pane = None;
                 } else {
+                    let recovery_pane = self.remote_target_exit_content_pane(
+                        &workspace,
+                        &command.target,
+                        command.pane_id.as_deref(),
+                        cleanup_pane.as_ref(),
+                    )?;
+                    self.clear_remote_recovery_pane_state(&workspace, &recovery_pane);
+                    self.backend
+                        .respawn_pane(
+                            &workspace,
+                            &recovery_pane,
+                            &workspace_shell_program(&current_workspace.workspace_dir),
+                        )
+                        .map_err(main_slot_error)?;
                     self.activate_target_in_workspace(&current_workspace, &target)?;
                 }
             }
@@ -917,6 +925,29 @@ impl MainSlotRuntime {
             cleanup_pane.as_ref(),
         )?;
         Ok(())
+    }
+
+    fn remote_target_exit_content_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        target: &str,
+        signaled_pane_id: Option<&str>,
+        session_pane: Option<&TmuxPaneId>,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        if let Some(pane_id) = signaled_pane_id.filter(|pane_id| !pane_id.is_empty()) {
+            let pane = TmuxPaneId::new(pane_id);
+            if self.pane_is_recoverable_content_pane(workspace, pane.as_str())? {
+                return Ok(pane);
+            }
+        }
+        if let Some(pane) = session_pane {
+            if self.pane_is_recoverable_content_pane(workspace, pane.as_str())? {
+                return Ok(pane.clone());
+            }
+        }
+        Err(LifecycleError::Protocol(format!(
+            "remote target `{target}` exit has no retained content pane to recover"
+        )))
     }
 
     fn clear_remote_recovery_pane_state(
@@ -960,12 +991,6 @@ impl MainSlotRuntime {
             return Ok(workspace_main_pane.clone());
         }
 
-        ERROR_LOG.log(format!(
-            "[diag-native] remote-to-local parking swap: remote_pane={} parking_pane={} break_remote_after_swap={}",
-            workspace_main_pane.as_str(),
-            parking_pane.as_str(),
-            break_remote_after_swap
-        ));
         self.backend
             .swap_panes(workspace, &parking_pane, workspace_main_pane)
             .map_err(main_slot_error)?;
@@ -1146,9 +1171,16 @@ impl MainSlotRuntime {
         recovery_pane: &TmuxPaneId,
         target: &ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
-        if !self.pane_exists(workspace, recovery_pane.as_str()) {
+        if !self.pane_exists_on_socket(workspace, recovery_pane.as_str())? {
             self.clear_session_pane(workspace, target.address.qualified_target().as_str())?;
             return self.activate_remote_target_in_workspace(current_workspace, target);
+        }
+        if self.pane_is_chrome(workspace, recovery_pane.as_str())? {
+            return Err(LifecycleError::Protocol(format!(
+                "refusing to recover remote target `{}` in chrome pane `{}`",
+                target.address.qualified_target(),
+                recovery_pane.as_str()
+            )));
         }
 
         self.clear_remote_recovery_pane_state(workspace, recovery_pane);
@@ -1677,6 +1709,20 @@ impl MainSlotRuntime {
         )
     }
 
+    fn read_session_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        qualified_target: &str,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let option_name = self.session_pane_option_name(qualified_target);
+        Ok(self
+            .backend
+            .show_session_option(workspace, &option_name)
+            .map_err(main_slot_error)?
+            .filter(|pane| !pane.is_empty())
+            .map(TmuxPaneId::new))
+    }
+
     fn find_session_pane(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -1694,7 +1740,7 @@ impl MainSlotRuntime {
         if self.pane_is_live(workspace, pane_id.as_str()) {
             Ok(Some(pane_id))
         } else {
-            // Pane died — kill it to prevent dead-pane accumulation,
+            // Pane died -- kill it to prevent dead-pane accumulation,
             // then clean up the stale option so a new one is created.
             let _ = self.backend.kill_pane(workspace, &pane_id);
             self.backend
@@ -1862,6 +1908,40 @@ impl MainSlotRuntime {
             )
             .map_err(main_slot_error)?;
         Ok(output.stdout.lines().any(|line| line.trim() == pane_id))
+    }
+
+    fn pane_is_recoverable_content_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_id: &str,
+    ) -> Result<bool, LifecycleError> {
+        Ok(self.pane_exists_on_socket(workspace, pane_id)?
+            && !self.pane_is_chrome(workspace, pane_id)?)
+    }
+
+    fn pane_is_chrome(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_id: &str,
+    ) -> Result<bool, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}	#{pane_title}".to_string(),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        Ok(output.stdout.lines().any(|line| {
+            let mut parts = line.split('\t');
+            let listed_pane_id = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            listed_pane_id == pane_id && (title == SIDEBAR_PANE_TITLE || title == FOOTER_PANE_TITLE)
+        }))
     }
 
     fn pane_is_live(&self, workspace: &TmuxWorkspaceHandle, pane_id: &str) -> bool {

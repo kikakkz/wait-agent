@@ -18,7 +18,6 @@ use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
 use crate::terminal::TerminalRuntime;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -662,11 +661,6 @@ impl RemoteMainSlotPaneRuntime {
                                     // state transition, not a pane-crash fallback.
                                     let pane_id = std::env::var("TMUX_PANE")
                                         .unwrap_or_else(|_| String::new());
-                                    ERROR_LOG.log(format!(
-                                        "[diag-native] session exit: TMUX_PANE={pane_id} socket={} target={}",
-                                        spec.socket_name,
-                                        spec.target
-                                    ));
                                     signal_clean_remote_target_exit(&spec, &pane_id)?;
                                     return Ok(());
                                 }
@@ -884,34 +878,31 @@ fn signal_clean_remote_target_exit(
     };
     let pane = crate::infra::tmux::TmuxPaneId::new(pane_id);
     let _ = backend.unset_pane_hook(&workspace, &pane, "pane-died");
-    let _ = backend.set_pane_option(&workspace, &pane, "remain-on-exit", "off");
 
     let waitagent = current_waitagent_executable()?;
-    let status = Command::new(waitagent)
-        .args([
-            "__remote-target-exited",
-            "--socket-name",
-            &spec.socket_name,
-            "--session-name",
-            &spec.surface_scope,
-            "--target",
-            &spec.target,
-            "--pane-id",
-            pane_id,
-        ])
-        .status()
-        .map_err(|error| {
-            LifecycleError::Io(
-                "failed to signal clean remote target exit".to_string(),
-                error,
-            )
-        })?;
-    if !status.success() {
-        return Err(LifecycleError::Protocol(format!(
-            "remote target exit command failed with status {status}"
-        )));
-    }
-    Ok(())
+    let shell_command = [
+        shell_escape(&waitagent.display().to_string()),
+        shell_escape("__remote-target-exited"),
+        shell_escape("--socket-name"),
+        shell_escape(&spec.socket_name),
+        shell_escape("--session-name"),
+        shell_escape(&spec.surface_scope),
+        shell_escape("--target"),
+        shell_escape(&spec.target),
+        shell_escape("--pane-id"),
+        shell_escape(pane_id),
+    ]
+    .join(" ");
+    backend
+        .run_socket_command(
+            &workspace.socket_name,
+            &["run-shell".to_string(), "-b".to_string(), shell_command],
+        )
+        .map_err(remote_pane_error)
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// Flush any input that was buffered during a reconnection period.
