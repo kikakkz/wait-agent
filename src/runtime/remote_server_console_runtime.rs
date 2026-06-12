@@ -36,7 +36,7 @@ impl RemoteServerConsoleRuntime {
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
             target_registry: TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(target_catalog_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_network(network.clone()).map_err(target_catalog_error)?,
             ),
             surface_runtime:
                 RemoteMainSlotPaneRuntime::from_build_env_with_external_authority_streams_and_network(

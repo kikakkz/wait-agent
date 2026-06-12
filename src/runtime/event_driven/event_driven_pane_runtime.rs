@@ -89,7 +89,9 @@ impl EventDrivenPaneRuntime {
             };
             match event {
                 PaneEvent::Input(bytes) => {
+                    ERROR_LOG.log(format!("[diag] run_sidebar Input: bytes={bytes:?}"));
                     let outcome = chrome.apply_sidebar_input(&bytes);
+                    ERROR_LOG.log(format!("[diag] run_sidebar Input: outcome.render.invalidate_sidebar={} outcome.activation={:?}", outcome.render.invalidate_sidebar, outcome.activation));
                     if let Err(error) = redraw_sidebar(outcome.render, &mut last_buffer) {
                         ERROR_LOG.log(format!("[diag] sidebar redraw error on input: {error}"));
                     }
@@ -282,15 +284,24 @@ impl EventDrivenPaneRuntime {
             &command.session_name,
             target,
         );
+        ERROR_LOG.log(format!(
+            "[diag] run_activate_target_sync: executable={executable:?} args={args:?}"
+        ));
         let status = std::process::Command::new(&executable)
             .args(&args)
             .status()
             .map_err(|error| {
+                ERROR_LOG.log(format!(
+                    "[diag] run_activate_target_sync: spawn error={error}"
+                ));
                 LifecycleError::Io(
                     "failed to execute waitagent activate-target command".to_string(),
                     error,
                 )
             })?;
+        ERROR_LOG.log(format!(
+            "[diag] run_activate_target_sync: exit status={status}"
+        ));
         if status.success() {
             return Ok(());
         }
@@ -458,11 +469,18 @@ fn spawn_input_thread(tx: mpsc::Sender<PaneEvent>) {
             match stdin.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    if tx.send(PaneEvent::Input(buffer[..read].to_vec())).is_err() {
+                    let bytes = buffer[..read].to_vec();
+                    ERROR_LOG.log(format!(
+                        "[diag] spawn_input_thread: read={read} bytes={bytes:?}"
+                    ));
+                    if tx.send(PaneEvent::Input(bytes)).is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    ERROR_LOG.log(format!("[diag] spawn_input_thread: read error={e}"));
+                    break;
+                }
             }
         }
     });

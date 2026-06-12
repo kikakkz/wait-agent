@@ -162,8 +162,10 @@ fn recover_network_config_for_command(
         Command::RemoteNodeIngressServer(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }
-        Command::RemoteRuntimeOwner(command) => {
-            recover_network_config_for_socket(backend, &command.socket_name)
+        Command::RemoteRuntimeOwner(_command) => {
+            // RemoteRuntimeOwner is scoped by listener_addr, not by socket_name.
+            // Network config is passed via global CLI args (prepend_global_network_args).
+            None
         }
         Command::RemoteTargetBindPublication(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)

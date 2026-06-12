@@ -5,7 +5,6 @@ use crate::cli::{
     SocketLifecycleHookCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
-use crate::infra::published_target_store::{PublishedTargetSourceBinding, PublishedTargetStore};
 use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope};
 use crate::infra::remote_transport_codec::read_node_session_envelope;
 use crate::infra::tmux::{
@@ -13,11 +12,12 @@ use crate::infra::tmux::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
-use std::collections::BTreeSet;
+
 use std::fs;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,7 +29,6 @@ pub(crate) use publication_helpers::*;
 
 #[derive(Clone)]
 pub struct RemoteTargetPublicationRuntime {
-    store: PublishedTargetStore,
     remote_runtime_owner: RemoteRuntimeOwnerRuntime,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
@@ -46,7 +45,6 @@ impl RemoteTargetPublicationRuntime {
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
-            store: PublishedTargetStore::default(),
             remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
@@ -70,9 +68,8 @@ impl RemoteTargetPublicationRuntime {
             let Ok(mut stream) = accepted else {
                 break;
             };
-            let store = self.store.clone();
             let source_socket_name = command.socket_name.clone();
-            let current_executable = self.current_executable.clone();
+            let _current_executable = self.current_executable.clone();
             thread::spawn(move || {
                 if read_client_hello(&mut stream).is_err() {
                     return;
@@ -84,20 +81,13 @@ impl RemoteTargetPublicationRuntime {
                     if session_envelope.channel != NodeSessionChannel::Publication {
                         break;
                     }
-                    let changed = match apply_publication_envelope(
-                        &store,
+                    let _changed = match apply_publication_envelope(
                         &source_socket_name,
                         &session_envelope.envelope,
                     ) {
                         Ok(changed) => changed,
                         Err(_) => break,
                     };
-                    if changed
-                        && spawn_socket_chrome_refresh(&current_executable, &source_socket_name)
-                            .is_err()
-                    {
-                        break;
-                    }
                 }
             });
         }
@@ -106,101 +96,48 @@ impl RemoteTargetPublicationRuntime {
 
     pub fn apply_live_publication_envelope(
         &self,
-        socket_name: &str,
-        envelope: ProtocolEnvelope<ControlPlanePayload>,
+        _socket_name: &str,
+        _envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
-        let changed = apply_publication_envelope(&self.store, socket_name, &envelope)?;
-        if changed {
-            spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
-        }
         Ok(())
     }
 
-    pub fn apply_discovered_remote_session_envelope_on_socket(
+    pub fn apply_discovered_remote_session_envelope(
         &self,
-        socket_name: &str,
         node_id: &str,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     ) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = vec![socket_name.to_string()];
         let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
         if let Some(session) = remote_session.published_session {
             if is_publishable_discovered_remote_session(&session) {
-                self.signal_remote_runtime_owner_upsert_live_workspaces(
-                    &live_workspace_sockets,
-                    node_id,
-                    &session,
-                )?;
+                self.signal_remote_runtime_owner_upsert(node_id, &session)?;
             }
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
-            self.signal_remote_runtime_owner_remove_live_workspaces(
-                &live_workspace_sockets,
-                node_id,
-                &authority_id,
-                &transport_session_id,
-            )?;
+            self.signal_remote_runtime_owner_remove(node_id, &authority_id, &transport_session_id)?;
         }
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
         if !live_workspace_sockets.is_empty() {
             self.refresh_live_workspaces(&live_workspace_sockets)?;
         }
         Ok(())
     }
 
-    pub fn remove_discovered_remote_node_on_socket(
-        &self,
-        socket_name: &str,
-        node_id: &str,
-    ) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = vec![socket_name.to_string()];
-        self.signal_remote_runtime_owner_remove_node_live_workspaces(
-            &live_workspace_sockets,
-            node_id,
-        )?;
+    pub fn remove_discovered_remote_node(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.signal_remote_runtime_owner_remove_node(node_id)?;
+        let live_workspace_sockets = self.live_workspace_socket_names()?;
         if !live_workspace_sockets.is_empty() {
             self.refresh_live_workspaces(&live_workspace_sockets)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn apply_discovered_remote_session_envelope_on_live_workspaces(
-        &self,
-        node_id: &str,
-        envelope: ProtocolEnvelope<ControlPlanePayload>,
-    ) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = self.live_workspace_socket_names()?;
-        for socket_name in &live_workspace_sockets {
-            self.apply_discovered_remote_session_envelope_on_socket(
-                socket_name,
-                node_id,
-                envelope.clone(),
-            )?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn remove_discovered_remote_node_on_live_workspaces(
-        &self,
-        node_id: &str,
-    ) -> Result<(), LifecycleError> {
-        let live_workspace_sockets = self.live_workspace_socket_names()?;
-        for socket_name in &live_workspace_sockets {
-            self.remove_discovered_remote_node_on_socket(socket_name, node_id)?;
         }
         Ok(())
     }
 
     pub fn mark_source_target_offline(
         &self,
-        socket_name: &str,
-        session_name: &str,
-        target_id: &str,
+        _socket_name: &str,
+        _session_name: &str,
+        _target_id: &str,
     ) -> Result<(), LifecycleError> {
-        let changed =
-            mark_target_offline_in_store(&self.store, socket_name, session_name, target_id)?;
-        if changed {
-            spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
-        }
         Ok(())
     }
 
@@ -230,61 +167,44 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    fn signal_remote_runtime_owner_upsert_live_workspaces(
+    fn signal_remote_runtime_owner_upsert(
         &self,
-        socket_names: &[String],
         node_id: &str,
         session: &ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
-        for socket_name in socket_names {
-            self.remote_runtime_owner
-                .upsert_session(socket_name, node_id, session)?;
-        }
-        Ok(())
+        self.remote_runtime_owner.upsert_session(node_id, session)
     }
 
-    fn signal_remote_runtime_owner_remove_live_workspaces(
+    fn signal_remote_runtime_owner_remove(
         &self,
-        socket_names: &[String],
         node_id: &str,
         authority_id: &str,
         transport_session_id: &str,
     ) -> Result<(), LifecycleError> {
-        for socket_name in socket_names {
-            self.remote_runtime_owner.remove_session(
-                socket_name,
-                node_id,
-                authority_id,
-                transport_session_id,
-            )?;
-        }
-        Ok(())
+        self.remote_runtime_owner
+            .remove_session(node_id, authority_id, transport_session_id)
     }
 
-    fn signal_remote_runtime_owner_remove_node_live_workspaces(
-        &self,
-        socket_names: &[String],
-        node_id: &str,
-    ) -> Result<(), LifecycleError> {
-        for socket_name in socket_names {
-            self.remote_runtime_owner
-                .remove_node(socket_name, node_id)?;
-        }
-        Ok(())
+    fn signal_remote_runtime_owner_remove_node(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.remote_runtime_owner.remove_node(node_id)
     }
 
     pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
-        let mut all_sessions = self
-            .local_tmux
-            .list_sessions()
-            .map_err(remote_target_publication_error)?;
+        let mut all_sessions = Vec::new();
         if let Ok(managed_sockets) = self.local_tmux.discover_waitagent_sockets() {
             for socket in &managed_sockets {
-                if let Ok(sessions) = self
-                    .local_tmux
-                    .list_sessions_on_socket(socket)
-                    .map_err(remote_target_publication_error)
+                // Only include sockets that belong to this waitagent instance.
+                // Each socket stores its owner's network port in a tmux global
+                // option, so we filter out sockets created by other waitagent
+                // processes on the same machine.
+                if let Some(config) =
+                    recover_network_config_for_socket(&self.local_tmux, socket.as_str())
                 {
+                    if config.port != self.network.port {
+                        continue;
+                    }
+                }
+                if let Ok(sessions) = self.local_tmux.list_sessions_on_socket(socket) {
                     all_sessions.extend(sessions);
                 }
             }
@@ -469,30 +389,11 @@ impl RemoteTargetPublicationRuntime {
         socket_name: &str,
         session_name: &str,
     ) -> Result<(), LifecycleError> {
-        if self
-            .signal_publication_owner_command(
-                socket_name,
-                session_name,
-                PublicationOwnerCommand::Stop,
-            )
-            .is_ok()
-        {
-            return Ok(());
-        }
-        let records = self
-            .store
-            .list_records_for_source_binding(socket_name, session_name)
-            .map_err(remote_target_publication_error)?;
-        for record in records {
-            self.signal_publication_agent_command(
-                socket_name,
-                PublicationAgentCommand::ExitTarget {
-                    authority_id: record.target.address.authority_id().to_string(),
-                    transport_session_id: record.target.address.session_id().to_string(),
-                    source_session_name: Some(session_name.to_string()),
-                },
-            )?;
-        }
+        let _ = self.signal_publication_owner_command(
+            socket_name,
+            session_name,
+            PublicationOwnerCommand::Stop,
+        );
         Ok(())
     }
 
@@ -519,25 +420,10 @@ impl RemoteTargetPublicationRuntime {
 
     pub fn signal_cached_source_session_refresh(
         &self,
-        socket_name: &str,
-        session_name: &str,
+        _socket_name: &str,
+        _session_name: &str,
     ) -> Result<bool, LifecycleError> {
-        let records = self
-            .store
-            .list_records_for_source_binding(socket_name, session_name)
-            .map_err(remote_target_publication_error)?;
-        if records.is_empty() {
-            return Ok(false);
-        }
-        for record in records {
-            signal_publication_target_published(
-                socket_name,
-                record.target.address.authority_id(),
-                &record.target,
-                Some(session_name),
-            )?;
-        }
-        Ok(true)
+        Ok(false)
     }
 
     pub fn run_socket_lifecycle_hook(
@@ -578,28 +464,6 @@ impl RemoteTargetPublicationRuntime {
                     )) {
                         return Ok(());
                     }
-                    let records = self
-                        .store
-                        .list_records_for_source_binding(&command.socket_name, session_name)
-                        .map_err(remote_target_publication_error)?;
-                    if records.is_empty() {
-                        return self.ensure_configured_publications_on_socket(&command.socket_name);
-                    }
-                    for record in records {
-                        self.signal_publication_agent_command(
-                            &command.socket_name,
-                            PublicationAgentCommand::ExitTarget {
-                                authority_id: record.target.address.authority_id().to_string(),
-                                transport_session_id: record
-                                    .target
-                                    .address
-                                    .session_id()
-                                    .to_string(),
-                                source_session_name: Some(session_name.to_string()),
-                            },
-                        )?;
-                    }
-                    return Ok(());
                 }
                 self.ensure_configured_publications_on_socket(&command.socket_name)
             }
@@ -657,17 +521,9 @@ impl RemoteTargetPublicationRuntime {
             }
             Err(error) => return Err(remote_target_publication_error(error)),
         };
-        let has_published_records = !self
-            .store
-            .list_records_for_source_socket(socket_name)
-            .map_err(remote_target_publication_error)?
-            .is_empty();
 
         for binding in &bindings {
             self.ensure_publication_owner_running(socket_name, &binding.target_session_name)?;
-        }
-        if has_published_records {
-            self.signal_publication_reconcile(socket_name)?;
         }
         Ok(())
     }
@@ -873,7 +729,6 @@ impl RemoteTargetPublicationRuntime {
             .local_tmux
             .list_sessions_on_socket(&socket)
             .map_err(remote_target_publication_error)?;
-        let mut keep_source_bindings = BTreeSet::new();
 
         for binding in bindings {
             let Some(local_target) = local_targets.iter().find(|session| {
@@ -884,33 +739,12 @@ impl RemoteTargetPublicationRuntime {
                 continue;
             };
             let published = published_remote_target_from_local(&binding, local_target);
-            keep_source_bindings.insert(PublishedTargetSourceBinding {
-                socket_name: socket_name.to_string(),
-                session_name: Some(binding.target_session_name.clone()),
-            });
             signal_publication_target_published(
                 socket_name,
                 &binding.authority_id,
                 &published,
                 Some(&binding.target_session_name),
             )?;
-        }
-
-        let stale = self
-            .store
-            .list_records_for_source_socket(socket_name)
-            .map_err(remote_target_publication_error)?;
-        for record in stale {
-            for source_binding in record.source_bindings.iter().filter(|binding| {
-                binding.socket_name == socket_name && !keep_source_bindings.contains(binding)
-            }) {
-                signal_publication_target_exited(
-                    socket_name,
-                    record.target.address.authority_id(),
-                    record.target.address.session_id(),
-                    source_binding.session_name.as_deref(),
-                )?;
-            }
         }
         Ok(())
     }

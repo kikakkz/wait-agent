@@ -843,34 +843,10 @@ pub(super) fn drain_publication_owner_commands(
 }
 
 pub(super) fn apply_publication_envelope(
-    store: &PublishedTargetStore,
-    source_socket_name: &str,
-    envelope: &ProtocolEnvelope<ControlPlanePayload>,
+    _source_socket_name: &str,
+    _envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<bool, LifecycleError> {
-    match &envelope.payload {
-        ControlPlanePayload::TargetPublished(payload) => {
-            let target = published_remote_target_record_from_payload(&envelope.sender_id, payload)?;
-            store
-                .upsert_target_from_source(
-                    source_socket_name,
-                    payload.source_session_name.as_deref(),
-                    &target,
-                )
-                .map_err(remote_target_publication_error)
-        }
-        ControlPlanePayload::TargetExited(payload) => store
-            .remove_target_from_source(
-                source_socket_name,
-                payload.source_session_name.as_deref(),
-                &envelope.sender_id,
-                &payload.transport_session_id,
-            )
-            .map_err(remote_target_publication_error),
-        other => Err(LifecycleError::Protocol(format!(
-            "unexpected remote target publication payload `{}`",
-            other.message_type()
-        ))),
-    }
+    Ok(false)
 }
 
 pub(super) fn discovered_remote_session_from_envelope(

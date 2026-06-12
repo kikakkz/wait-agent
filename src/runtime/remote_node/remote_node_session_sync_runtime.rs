@@ -52,11 +52,15 @@ pub struct SocketScopedLocalSessionCatalog<G> {
 }
 
 impl<G> SocketScopedLocalSessionCatalog<G> {
-    pub fn new(gateway: G, socket_name: TmuxSocketName) -> Self {
+    pub fn new(
+        gateway: G,
+        socket_name: TmuxSocketName,
+        published_target_store: PublishedTargetStore,
+    ) -> Self {
         Self {
             gateway,
             socket_name,
-            published_target_store: PublishedTargetStore::default(),
+            published_target_store,
         }
     }
 }
@@ -145,6 +149,7 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             SocketScopedLocalSessionCatalog::new(
                 EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
                 TmuxSocketName::new(socket_name),
+                PublishedTargetStore::new(std::path::PathBuf::from("/dev/null")),
             ),
             GrpcRemoteNodeTransport::new(),
             network,

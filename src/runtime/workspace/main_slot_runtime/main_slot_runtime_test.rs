@@ -263,11 +263,7 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "peer-a",
-                &remote_target,
-            )
+            .upsert_session("peer-a", &remote_target)
             .expect("remote target should be discoverable on workspace socket");
 
         runtime
@@ -383,11 +379,7 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "peer-a",
-                &remote_target,
-            )
+            .upsert_session("peer-a", &remote_target)
             .expect("remote target should be discoverable on workspace socket");
 
         runtime
@@ -1324,11 +1316,7 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target)
             .expect("remote target should be discoverable on workspace socket");
 
         runtime
@@ -1443,11 +1431,7 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target)
             .expect("remote target should be discoverable on workspace socket");
 
         runtime
@@ -1574,18 +1558,10 @@ mod tests {
             ManagedSessionTaskState::Running,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target)
             .expect("first remote target should be discoverable on workspace socket");
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target_2,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target_2)
             .expect("second remote target should be discoverable on workspace socket");
 
         runtime
@@ -1609,7 +1585,6 @@ mod tests {
             .expect("main pane option should be populated");
         remote_runtime_owner
             .remove_session(
-                workspace.workspace_handle.socket_name.as_str(),
                 "10.1.29.130#7474",
                 "10.1.29.130#7474",
                 remote_target.address.session_id(),
@@ -1672,7 +1647,7 @@ mod tests {
         });
 
         let snapshot = remote_runtime_owner
-            .snapshot(workspace.workspace_handle.socket_name.as_str())
+            .snapshot()
             .expect("remote runtime owner snapshot should succeed");
         let remote_sessions = snapshot
             .sessions
@@ -1773,18 +1748,10 @@ mod tests {
             ManagedSessionTaskState::Running,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target)
             .expect("first remote target should be discoverable on workspace socket");
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target_2,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target_2)
             .expect("second remote target should be discoverable on workspace socket");
 
         runtime
@@ -1826,7 +1793,7 @@ mod tests {
             active_target.as_deref() == Some(remote_target_2.address.qualified_target().as_str())
         });
         let snapshot = remote_runtime_owner
-            .snapshot(workspace.workspace_handle.socket_name.as_str())
+            .snapshot()
             .expect("remote runtime owner snapshot should succeed");
         let remote_sessions = snapshot
             .sessions
@@ -1954,18 +1921,10 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target_a,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target_a)
             .expect("first remote target should be discoverable on workspace socket");
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "10.1.29.130#7474",
-                &remote_target_b,
-            )
+            .upsert_session("10.1.29.130#7474", &remote_target_b)
             .expect("second remote target should be discoverable on workspace socket");
 
         runtime
@@ -2143,11 +2102,7 @@ mod tests {
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session(
-                workspace.workspace_handle.socket_name.as_str(),
-                "peer-a",
-                &remote_target,
-            )
+            .upsert_session("peer-a", &remote_target)
             .expect("remote target should be discoverable on workspace socket");
 
         runtime

@@ -59,7 +59,8 @@ impl WorkspaceLayoutRuntime {
             control_service: ControlService::new(backend.clone()),
             layout_service: LayoutService::new(backend.clone()),
             target_registry: TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(tmux_layout_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                    .map_err(tmux_layout_error)?,
             ),
             backend,
             current_executable,
@@ -77,7 +78,8 @@ impl WorkspaceLayoutRuntime {
             control_service: ControlService::new(backend.clone()),
             layout_service: LayoutService::new(backend.clone()),
             target_registry: TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(tmux_layout_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                    .map_err(tmux_layout_error)?,
             ),
             backend,
             current_executable,

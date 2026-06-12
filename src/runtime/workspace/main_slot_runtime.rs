@@ -1448,7 +1448,7 @@ impl MainSlotRuntime {
 
     fn remove_remote_target_runtime_record(
         &self,
-        socket_name: &str,
+        _socket_name: &str,
         qualified_target: &str,
     ) -> Result<(), LifecycleError> {
         let Some((authority_id, transport_session_id)) = split_qualified_target(qualified_target)
@@ -1456,12 +1456,7 @@ impl MainSlotRuntime {
             return Ok(());
         };
         RemoteRuntimeOwnerRuntime::from_build_env_with_network(self.network.clone())?
-            .remove_session(
-                socket_name,
-                authority_id,
-                authority_id,
-                transport_session_id,
-            )
+            .remove_session(authority_id, authority_id, transport_session_id)
     }
 
     fn close_non_remote_target_session_identity(

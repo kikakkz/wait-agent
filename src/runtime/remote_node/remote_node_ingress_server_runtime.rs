@@ -457,8 +457,7 @@ fn route_transport_envelope(
         Some(Body::TargetPublished(payload)) => {
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
-            publication_runtime
-                .apply_discovered_remote_session_envelope_on_live_workspaces(node_id, mapped)
+            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
         }
         Some(Body::TargetExited(payload)) => {
             ERROR_LOG.log(format!(
@@ -466,8 +465,7 @@ fn route_transport_envelope(
                 payload.transport_session_id
             ));
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
-            publication_runtime
-                .apply_discovered_remote_session_envelope_on_live_workspaces(node_id, mapped)?;
+            publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)?;
             ERROR_LOG.log(format!(
                 "[diag-bug] ingress_server: applied TargetExited to live workspaces node={node_id} session={}",
                 payload.transport_session_id

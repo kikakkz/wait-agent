@@ -1,7 +1,9 @@
 use crate::cli::RemoteAuthorityTargetHostCommand;
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::domain::agent_detector::SHELL_NAMES;
-use crate::domain::session_catalog::{ManagedSessionRecord, ManagedSessionTaskState};
+use crate::domain::session_catalog::{
+    ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
+};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -188,8 +190,7 @@ pub(super) fn handle_transport_event(
                 "[diag-sync] SessionClosed for node {node_id}, will reconnect"
             ));
             if let Some(publication_runtime) = publication_runtime {
-                let _ =
-                    publication_runtime.remove_discovered_remote_node_on_live_workspaces(node_id);
+                let _ = publication_runtime.remove_discovered_remote_node(node_id);
             }
             authority_manager.shutdown();
             *active_session = None;
@@ -207,8 +208,7 @@ pub(super) fn handle_transport_event(
                 "[diag-sync] TransportFailed node={node_id} msg={message}, will reconnect"
             ));
             if let Some(publication_runtime) = publication_runtime {
-                let _ =
-                    publication_runtime.remove_discovered_remote_node_on_live_workspaces(node_id);
+                let _ = publication_runtime.remove_discovered_remote_node(node_id);
             }
             authority_manager.shutdown();
             *active_session = None;
@@ -243,6 +243,14 @@ where
             return Ok(());
         }
     };
+    let local_sessions: Vec<ManagedSessionRecord> = local_sessions
+        .into_iter()
+        .filter(|s| *s.address.transport() == SessionTransport::LocalTmux)
+        .collect();
+    ERROR_LOG.log(format!(
+        "[diag-timing] sync_local_sessions: after filter {} local sessions",
+        local_sessions.len()
+    ));
     let current_sessions = local_sessions_by_local_id(local_sessions);
     let delta = compute_session_sync_delta(synced_sessions, &current_sessions);
     ERROR_LOG.log(format!(
@@ -297,6 +305,45 @@ pub(crate) fn exportable_local_sessions_for_socket(
             exported_session_record_for_socket(session, socket_name, published_target_store)
         })
         .collect()
+}
+
+fn exported_session_record_for_socket(
+    session: ManagedSessionRecord,
+    socket_name: &str,
+    published_target_store: &PublishedTargetStore,
+) -> ManagedSessionRecord {
+    if !session.is_target_host() {
+        return session;
+    }
+    let Ok(records) = published_target_store
+        .list_records_for_source_binding(socket_name, session.address.session_id())
+    else {
+        return session;
+    };
+    records
+        .into_iter()
+        .find(|record| record.target.is_target_host())
+        .map(|record| {
+            merge_cached_remote_identity_with_live_target_runtime(record.target, &session)
+        })
+        .unwrap_or(session)
+}
+
+fn merge_cached_remote_identity_with_live_target_runtime(
+    mut cached_remote_target: ManagedSessionRecord,
+    live_target: &ManagedSessionRecord,
+) -> ManagedSessionRecord {
+    cached_remote_target.availability = live_target.availability;
+    cached_remote_target.workspace_key = live_target.workspace_key.clone();
+    cached_remote_target.session_role = live_target.session_role;
+    cached_remote_target.attached_clients = live_target.attached_clients;
+    cached_remote_target.window_count = live_target.window_count;
+    if !live_target_uses_internal_waitagent_runtime(live_target) {
+        cached_remote_target.command_name = live_target.command_name.clone();
+        cached_remote_target.current_path = live_target.current_path.clone();
+        cached_remote_target.task_state = live_target.task_state;
+    }
+    cached_remote_target
 }
 
 pub(super) fn active_workspace_targets_on_socket<G>(
@@ -380,45 +427,6 @@ pub(crate) fn local_sessions_by_local_id(
         .into_iter()
         .map(|session| (session.address.id().as_str().to_string(), session))
         .collect()
-}
-
-fn exported_session_record_for_socket(
-    session: ManagedSessionRecord,
-    socket_name: &str,
-    published_target_store: &PublishedTargetStore,
-) -> ManagedSessionRecord {
-    if !session.is_target_host() {
-        return session;
-    }
-    let Ok(records) = published_target_store
-        .list_records_for_source_binding(socket_name, session.address.session_id())
-    else {
-        return session;
-    };
-    records
-        .into_iter()
-        .find(|record| record.target.is_target_host())
-        .map(|record| {
-            merge_cached_remote_identity_with_live_target_runtime(record.target, &session)
-        })
-        .unwrap_or(session)
-}
-
-fn merge_cached_remote_identity_with_live_target_runtime(
-    mut cached_remote_target: ManagedSessionRecord,
-    live_target: &ManagedSessionRecord,
-) -> ManagedSessionRecord {
-    cached_remote_target.availability = live_target.availability;
-    cached_remote_target.workspace_key = live_target.workspace_key.clone();
-    cached_remote_target.session_role = live_target.session_role;
-    cached_remote_target.attached_clients = live_target.attached_clients;
-    cached_remote_target.window_count = live_target.window_count;
-    if !live_target_uses_internal_waitagent_runtime(live_target) {
-        cached_remote_target.command_name = live_target.command_name.clone();
-        cached_remote_target.current_path = live_target.current_path.clone();
-        cached_remote_target.task_state = live_target.task_state;
-    }
-    cached_remote_target
 }
 
 fn live_target_uses_internal_waitagent_runtime(session: &ManagedSessionRecord) -> bool {

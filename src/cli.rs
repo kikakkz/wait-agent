@@ -264,9 +264,7 @@ pub struct RemoteNodeIngressServerCommand {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RemoteRuntimeOwnerCommand {
-    pub socket_name: String,
-}
+pub struct RemoteRuntimeOwnerCommand;
 
 #[derive(Debug, Clone, Default)]
 pub struct RemoteTargetBindPublicationCommand {
@@ -956,21 +954,8 @@ fn parse_remote_target_publication_sender(
 }
 
 fn parse_remote_runtime_owner(args: Vec<String>) -> Result<RemoteRuntimeOwnerCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut socket_name = None;
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
-            "--help" | "-h" => {}
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(RemoteRuntimeOwnerCommand {
-        socket_name: socket_name
-            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
-    })
+    parse_no_args(args)?;
+    Ok(RemoteRuntimeOwnerCommand)
 }
 
 fn parse_remote_session_sync_owner(

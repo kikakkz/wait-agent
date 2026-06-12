@@ -42,7 +42,7 @@ impl CommandDispatcher {
                 network.clone(),
             )?,
             pane_runtime: EventDrivenPaneRuntime::from_build_env_with_network(network.clone())?,
-            footer_menu_runtime: FooterMenuRuntime::from_build_env()?,
+            footer_menu_runtime: FooterMenuRuntime::from_build_env_with_network(network.clone())?,
             remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime::from_build_env(
                 network.clone(),
             )?,

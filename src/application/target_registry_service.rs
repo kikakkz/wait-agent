@@ -1,9 +1,11 @@
+use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionAvailability;
 use crate::domain::session_catalog::SessionTransport;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
+use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,22 +35,44 @@ pub struct DefaultTargetCatalogGateway {
 }
 
 impl DefaultTargetCatalogGateway {
+    #[cfg(test)]
     pub fn from_build_env() -> Result<Self, TmuxError> {
-        Self::from_build_env_with_current_socket_name(current_tmux_socket_name_from_env())
+        Self::from_build_env_with_current_socket_name_and_network(
+            current_tmux_socket_name_from_env(),
+            None,
+        )
+    }
+
+    pub fn from_build_env_with_network(network: RemoteNetworkConfig) -> Result<Self, TmuxError> {
+        Self::from_build_env_with_current_socket_name_and_network(
+            current_tmux_socket_name_from_env(),
+            Some(network),
+        )
     }
 
     pub fn from_build_env_with_socket_name(
         socket_name: impl Into<String>,
     ) -> Result<Self, TmuxError> {
-        Self::from_build_env_with_current_socket_name(Some(socket_name.into()))
+        Self::from_build_env_with_current_socket_name_and_network(Some(socket_name.into()), None)
     }
 
-    fn from_build_env_with_current_socket_name(
+    fn from_build_env_with_current_socket_name_and_network(
         current_socket_name: Option<String>,
+        network: Option<RemoteNetworkConfig>,
     ) -> Result<Self, TmuxError> {
+        let local_tmux = EmbeddedTmuxBackend::from_build_env()?;
+        let network = network
+            .or_else(|| {
+                current_socket_name.as_deref().and_then(|socket_name| {
+                    recover_network_config_for_socket(&local_tmux, socket_name)
+                })
+            })
+            .unwrap_or_default();
+
         Ok(Self {
-            local_tmux: EmbeddedTmuxBackend::from_build_env()?,
-            remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env().map_err(|error| {
+            local_tmux,
+            remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env_with_network(network)
+                .map_err(|error| {
                 TmuxError::new(format!(
                     "failed to initialize remote runtime owner gateway: {error}"
                 ))
@@ -62,26 +86,22 @@ impl TargetCatalogGateway for DefaultTargetCatalogGateway {
     type Error = TmuxError;
 
     fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        let remote_sessions = match self.current_socket_name.as_deref() {
-            Some(socket_name) => self
-                .remote_runtime_owner
-                .try_snapshot(socket_name)
-                .map(|snapshot| {
-                    ERROR_LOG.log(format!(
-                        "[diag-native] list_targets: socket={} remote_snapshot_sessions={}",
-                        socket_name,
-                        snapshot.sessions.len()
-                    ));
-                    snapshot.sessions
-                })
-                .unwrap_or_else(|error| {
-                    ERROR_LOG.log(format!(
-                        "[diag] list_targets: remote snapshot failed for `{socket_name}`: {error}"
-                    ));
-                    Vec::new()
-                }),
-            None => Vec::new(),
-        };
+        let remote_sessions = self
+            .remote_runtime_owner
+            .try_snapshot()
+            .map(|snapshot| {
+                ERROR_LOG.log(format!(
+                    "[diag-native] list_targets: remote_snapshot_sessions={}",
+                    snapshot.sessions.len()
+                ));
+                snapshot.sessions
+            })
+            .unwrap_or_else(|error| {
+                ERROR_LOG.log(format!(
+                    "[diag] list_targets: remote snapshot failed: {error}"
+                ));
+                Vec::new()
+            });
         let local_sessions = self.local_tmux.list_sessions()?;
         let merged = merge_targets_by_identity([local_sessions, remote_sessions]);
         ERROR_LOG.log(format!(
@@ -232,6 +252,13 @@ where
     }
 }
 
+#[cfg(test)]
+impl DefaultTargetCatalogGateway {
+    fn remote_runtime_owner_network(&self) -> crate::cli::RemoteNetworkConfig {
+        self.remote_runtime_owner.network_config_for_tests()
+    }
+}
+
 pub fn project_visible_targets(
     targets: &[ManagedSessionRecord],
     authority_id: &str,
@@ -328,12 +355,14 @@ fn current_tmux_socket_name_from_env() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_activation_target, project_visible_targets, TargetCatalogGateway, TargetRegistryService,
+        is_activation_target, project_visible_targets, DefaultTargetCatalogGateway,
+        TargetCatalogGateway, TargetRegistryService,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
+    use crate::infra::tmux::{TmuxGateway, TmuxSessionGateway};
     use std::path::PathBuf;
 
     #[derive(Clone)]
@@ -610,6 +639,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn catalog_gateway_uses_socket_scoped_network_config_for_remote_snapshot() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = crate::infra::tmux::EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let socket_name = format!("wa-test-target-catalog-network-{nonce:x}");
+        let network = crate::cli::RemoteNetworkConfig {
+            port: 17575,
+            connect: Some("127.0.0.1:7575".to_string()),
+        };
+
+        backend
+            .ensure_workspace(&crate::domain::workspace::WorkspaceInstanceConfig {
+                workspace_dir: std::env::temp_dir(),
+                workspace_key: format!("target-catalog-network-{nonce:x}"),
+                socket_name: socket_name.clone(),
+                session_name: format!("waitagent-test-target-catalog-network-{nonce:x}"),
+                session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
+                initial_rows: None,
+                initial_cols: None,
+            })
+            .expect("workspace should be created");
+        crate::runtime::network_state_runtime::persist_socket_network_config(
+            &backend,
+            &socket_name,
+            &network,
+        )
+        .expect("network config should persist on socket");
+
+        let gateway =
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.clone())
+                .expect("target catalog should build");
+
+        assert_eq!(gateway.remote_runtime_owner_network(), network);
+        let _ = backend.kill_server(&crate::infra::tmux::TmuxSocketName::new(socket_name));
+    }
     fn remote_session(authority_id: &str, session_id: &str, command: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::remote_peer(authority_id, session_id),

@@ -3,7 +3,7 @@ use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::tmux::{tmux_socket_dir, EmbeddedTmuxBackend, TmuxSocketName};
+use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
@@ -63,10 +63,6 @@ struct RemoteRuntimeOwnerSharedState {
 }
 
 impl RemoteRuntimeOwnerRuntime {
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
-        Self::from_build_env_with_network(RemoteNetworkConfig::default())
-    }
-
     pub fn from_build_env_with_network(
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
@@ -84,8 +80,13 @@ impl RemoteRuntimeOwnerRuntime {
         }
     }
 
-    pub fn run_owner(&self, command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
-        let socket_path = remote_runtime_owner_socket_path(&command.socket_name);
+    #[cfg(test)]
+    pub fn network_config_for_tests(&self) -> RemoteNetworkConfig {
+        self.network.clone()
+    }
+
+    pub fn run_owner(&self, _command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
+        let socket_path = remote_runtime_owner_socket_path(&self.network);
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
@@ -98,7 +99,7 @@ impl RemoteRuntimeOwnerRuntime {
             running: Arc::new(AtomicBool::new(true)),
         };
         while state.running.load(Ordering::Relaxed) {
-            if !backend_socket_still_exists(&command.socket_name) {
+            if !any_backend_socket_still_live() {
                 break;
             }
             let accepted = match listener.accept() {
@@ -129,23 +130,18 @@ impl RemoteRuntimeOwnerRuntime {
         Ok(())
     }
 
-    pub fn ensure_owner_running(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        ensure_remote_runtime_owner_process_running(
-            &self.current_executable,
-            socket_name,
-            &self.network,
-        )
+    pub fn ensure_owner_running(&self) -> Result<(), LifecycleError> {
+        ensure_remote_runtime_owner_process_running(&self.current_executable, &self.network)
     }
 
     pub fn upsert_session(
         &self,
-        socket_name: &str,
         node_id: &str,
         session: &ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
-        self.ensure_owner_running(socket_name)?;
+        self.ensure_owner_running()?;
         signal_remote_runtime_owner_command(
-            socket_name,
+            &self.network,
             RemoteRuntimeOwnerCommandEnvelope::UpsertSession {
                 node_id: node_id.to_string(),
                 session: session.clone(),
@@ -155,14 +151,13 @@ impl RemoteRuntimeOwnerRuntime {
 
     pub fn remove_session(
         &self,
-        socket_name: &str,
         node_id: &str,
         authority_id: &str,
         transport_session_id: &str,
     ) -> Result<(), LifecycleError> {
-        self.ensure_owner_running(socket_name)?;
+        self.ensure_owner_running()?;
         signal_remote_runtime_owner_command(
-            socket_name,
+            &self.network,
             RemoteRuntimeOwnerCommandEnvelope::RemoveSession {
                 node_id: node_id.to_string(),
                 authority_id: authority_id.to_string(),
@@ -171,10 +166,10 @@ impl RemoteRuntimeOwnerRuntime {
         )
     }
 
-    pub fn remove_node(&self, socket_name: &str, node_id: &str) -> Result<(), LifecycleError> {
-        self.ensure_owner_running(socket_name)?;
+    pub fn remove_node(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.ensure_owner_running()?;
         signal_remote_runtime_owner_command(
-            socket_name,
+            &self.network,
             RemoteRuntimeOwnerCommandEnvelope::RemoveNode {
                 node_id: node_id.to_string(),
             },
@@ -182,12 +177,9 @@ impl RemoteRuntimeOwnerRuntime {
     }
 
     #[cfg(test)]
-    pub fn snapshot(
-        &self,
-        socket_name: &str,
-    ) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
-        self.ensure_owner_running(socket_name)?;
-        let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(socket_name))
+    pub fn snapshot(&self) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
+        self.ensure_owner_running()?;
+        let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(&self.network))
             .map_err(remote_runtime_owner_error)?;
         stream
             .write_all(
@@ -206,11 +198,8 @@ impl RemoteRuntimeOwnerRuntime {
         parse_remote_runtime_owner_snapshot(&response)
     }
 
-    pub fn try_snapshot(
-        &self,
-        socket_name: &str,
-    ) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
-        let socket_path = remote_runtime_owner_socket_path(socket_name);
+    pub fn try_snapshot(&self) -> Result<RemoteRuntimeOwnerSnapshot, LifecycleError> {
+        let socket_path = remote_runtime_owner_socket_path(&self.network);
         if !socket_path.exists() {
             return Ok(RemoteRuntimeOwnerSnapshot {
                 sessions: Vec::new(),
@@ -332,10 +321,9 @@ fn handle_remote_runtime_owner_client(
 
 pub(crate) fn ensure_remote_runtime_owner_process_running(
     current_executable: &Path,
-    socket_name: &str,
     network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
-    let socket_path = remote_runtime_owner_socket_path(socket_name);
+    let socket_path = remote_runtime_owner_socket_path(network);
     if remote_runtime_owner_available(&socket_path) {
         return Ok(());
     }
@@ -343,11 +331,8 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
         let _ = fs::remove_file(&socket_path);
     }
 
-    spawn_waitagent_sidecar(
-        current_executable,
-        remote_runtime_owner_args(socket_name, network),
-    )
-    .map_err(remote_runtime_owner_error)?;
+    spawn_waitagent_sidecar(current_executable, remote_runtime_owner_args(network))
+        .map_err(remote_runtime_owner_error)?;
 
     for _ in 0..REMOTE_RUNTIME_OWNER_READY_RETRIES {
         if remote_runtime_owner_available(&socket_path) {
@@ -357,7 +342,8 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
     }
 
     Err(LifecycleError::Protocol(format!(
-        "remote runtime owner for socket `{socket_name}` did not become ready"
+        "remote runtime owner for listener `{}` did not become ready",
+        network.listener_addr()
     )))
 }
 
@@ -365,43 +351,37 @@ fn remote_runtime_owner_available(socket_path: &Path) -> bool {
     UnixStream::connect(socket_path).is_ok()
 }
 
-fn backend_socket_still_exists(socket_name: &str) -> bool {
-    let socket_path = tmux_socket_dir().join(socket_name);
-    if !socket_path.exists() {
-        return false;
-    }
+fn any_backend_socket_still_live() -> bool {
     let Ok(backend) = EmbeddedTmuxBackend::from_build_env() else {
         return false;
     };
-    backend.socket_is_live(&TmuxSocketName::new(socket_name))
+    let Ok(sockets) = backend.discover_waitagent_sockets() else {
+        return false;
+    };
+    for socket in &sockets {
+        if backend.socket_is_live(socket) {
+            return true;
+        }
+    }
+    false
 }
 
-pub(crate) fn remote_runtime_owner_socket_path(socket_name: &str) -> PathBuf {
+pub(crate) fn remote_runtime_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-runtime-owner-{}.sock",
-        sanitize_path_component(socket_name)
+        sanitize_path_component(&network.listener_addr().to_string())
     ))
 }
 
-pub(crate) fn remote_runtime_owner_args(
-    socket_name: &str,
-    network: &RemoteNetworkConfig,
-) -> Vec<String> {
-    prepend_global_network_args(
-        vec![
-            "__remote-runtime-owner".to_string(),
-            "--socket-name".to_string(),
-            socket_name.to_string(),
-        ],
-        network,
-    )
+pub(crate) fn remote_runtime_owner_args(network: &RemoteNetworkConfig) -> Vec<String> {
+    prepend_global_network_args(vec!["__remote-runtime-owner".to_string()], network)
 }
 
 fn signal_remote_runtime_owner_command(
-    socket_name: &str,
+    network: &RemoteNetworkConfig,
     command: RemoteRuntimeOwnerCommandEnvelope,
 ) -> Result<(), LifecycleError> {
-    let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(socket_name))
+    let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(network))
         .map_err(remote_runtime_owner_error)?;
     stream
         .write_all(render_remote_runtime_owner_command(&command).as_bytes())
@@ -709,12 +689,11 @@ fn remote_runtime_owner_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        backend_socket_still_exists, handle_remote_runtime_owner_client,
-        parse_remote_runtime_owner_command, parse_remote_runtime_owner_snapshot,
-        remote_runtime_owner_args, remote_runtime_owner_socket_path,
-        render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
-        OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
-        RemoteRuntimeOwnerSnapshot,
+        handle_remote_runtime_owner_client, parse_remote_runtime_owner_command,
+        parse_remote_runtime_owner_snapshot, remote_runtime_owner_args,
+        remote_runtime_owner_socket_path, render_remote_runtime_owner_command,
+        render_remote_runtime_owner_snapshot, OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope,
+        RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -753,7 +732,7 @@ mod tests {
             connect: Some("10.0.0.8:7474".to_string()),
         };
 
-        let args = remote_runtime_owner_args("wa-1", &network);
+        let args = remote_runtime_owner_args(&network);
 
         assert_eq!(
             args,
@@ -763,19 +742,21 @@ mod tests {
                 "--connect",
                 "10.0.0.8:7474",
                 "__remote-runtime-owner",
-                "--socket-name",
-                "wa-1",
             ]
         );
     }
 
     #[test]
-    fn remote_runtime_owner_socket_path_is_scoped_to_socket_name() {
-        let path = remote_runtime_owner_socket_path("wa/local");
+    fn remote_runtime_owner_socket_path_is_scoped_to_listener_addr() {
+        let network = RemoteNetworkConfig {
+            port: 7575,
+            connect: None,
+        };
+        let path = remote_runtime_owner_socket_path(&network);
 
         assert_eq!(
             path.file_name().and_then(|value| value.to_str()),
-            Some("waitagent-remote-runtime-owner-wa_local.sock")
+            Some("waitagent-remote-runtime-owner-0_0_0_0_7575.sock")
         );
     }
 
@@ -895,22 +876,12 @@ mod tests {
 
     #[test]
     fn remote_runtime_owner_socket_path_lives_in_tmp() {
-        let path = remote_runtime_owner_socket_path("wa-test");
+        let network = RemoteNetworkConfig {
+            port: 7474,
+            connect: None,
+        };
+        let path = remote_runtime_owner_socket_path(&network);
 
         assert_eq!(path.parent(), Some(Path::new("/tmp")));
-    }
-
-    #[test]
-    fn backend_socket_presence_uses_tmux_socket_dir() {
-        let socket_name = format!("wa-owner-test-{}", std::process::id());
-        let socket_path = crate::infra::tmux::tmux_socket_dir().join(&socket_name);
-        let _ = std::fs::remove_file(&socket_path);
-
-        assert!(!backend_socket_still_exists(&socket_name));
-
-        std::fs::write(&socket_path, b"stub").expect("socket marker should be writable");
-        assert!(!backend_socket_still_exists(&socket_name));
-
-        std::fs::remove_file(&socket_path).expect("socket marker should clean up");
     }
 }

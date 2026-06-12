@@ -62,7 +62,8 @@ impl TargetHostRuntime {
             backend,
             RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?,
             TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(target_host_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                    .map_err(target_host_error)?,
             ),
             current_executable,
             network,

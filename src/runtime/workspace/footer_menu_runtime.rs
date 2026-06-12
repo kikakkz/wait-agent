@@ -1,7 +1,7 @@
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
-use crate::cli::FooterMenuCommand;
+use crate::cli::{FooterMenuCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::tmux::{
@@ -23,13 +23,16 @@ pub struct FooterMenuRuntime {
 }
 
 impl FooterMenuRuntime {
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
+    pub fn from_build_env_with_network(
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(footer_menu_error)?;
         let current_executable = current_waitagent_executable()?;
 
         Ok(Self {
             target_registry: TargetRegistryService::new(
-                DefaultTargetCatalogGateway::from_build_env().map_err(footer_menu_error)?,
+                DefaultTargetCatalogGateway::from_build_env_with_network(network)
+                    .map_err(footer_menu_error)?,
             ),
             backend,
             current_executable,

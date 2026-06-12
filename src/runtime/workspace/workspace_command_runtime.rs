@@ -58,7 +58,8 @@ impl WorkspaceCommandRuntime {
         );
         let session_service = SessionService::new(backend.clone());
         let target_registry = TargetRegistryService::new(
-            DefaultTargetCatalogGateway::from_build_env().map_err(tmux_runtime_error)?,
+            DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                .map_err(tmux_runtime_error)?,
         );
         let main_slot_backend = backend.clone();
         let target_host_runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
@@ -91,7 +92,8 @@ impl WorkspaceCommandRuntime {
                 target_host_runtime,
                 WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
                 TargetRegistryService::new(
-                    DefaultTargetCatalogGateway::from_build_env().map_err(tmux_runtime_error)?,
+                    DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                        .map_err(tmux_runtime_error)?,
                 ),
                 current_executable,
                 network.clone(),
@@ -100,7 +102,8 @@ impl WorkspaceCommandRuntime {
             fullscreen_runtime: NativePaneFullscreenRuntime::new(
                 backend.clone(),
                 TargetRegistryService::new(
-                    DefaultTargetCatalogGateway::from_build_env().map_err(tmux_runtime_error)?,
+                    DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                        .map_err(tmux_runtime_error)?,
                 ),
                 WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
             ),
@@ -117,8 +120,7 @@ impl WorkspaceCommandRuntime {
     pub fn run_workspace_entry(&self) -> Result<(), LifecycleError> {
         let workspace_dir = self.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
-        self.remote_runtime_owner_runtime
-            .ensure_owner_running(workspace.workspace_handle.socket_name.as_str())?;
+        self.remote_runtime_owner_runtime.ensure_owner_running()?;
         self.main_slot_runtime.ensure_initial_target_materialized(
             &workspace.workspace_handle,
             &workspace.workspace_dir,
@@ -149,8 +151,7 @@ impl WorkspaceCommandRuntime {
         match command.target.clone() {
             Some(target) => {
                 let session = self.attachable_session(target)?;
-                self.remote_runtime_owner_runtime
-                    .ensure_owner_running(session.address.server_id())?;
+                self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
                 self.start_remote_session_sync(session.address.server_id())?;
                 self.session_service
@@ -162,8 +163,7 @@ impl WorkspaceCommandRuntime {
                     .session_service
                     .resolve_default_attach_session()
                     .map_err(tmux_runtime_error)?;
-                self.remote_runtime_owner_runtime
-                    .ensure_owner_running(session.address.server_id())?;
+                self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
                 self.start_remote_session_sync(session.address.server_id())?;
                 self.session_service

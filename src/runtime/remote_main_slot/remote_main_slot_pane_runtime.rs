@@ -68,7 +68,8 @@ impl RemoteMainSlotPaneRuntime {
     ) -> Result<Self, LifecycleError> {
         let current_executable = current_waitagent_executable()?;
         let target_registry = TargetRegistryService::new(
-            DefaultTargetCatalogGateway::from_build_env().map_err(remote_pane_error)?,
+            DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
+                .map_err(remote_pane_error)?,
         );
         Ok(Self::new_with_external_authority_streams_and_network(
             target_registry,
