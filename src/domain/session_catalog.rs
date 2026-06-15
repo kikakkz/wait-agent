@@ -530,6 +530,85 @@ mod tests {
     }
 
     #[test]
+    fn task_state_infers_input_from_kimi_welcome_prompt() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "Welcome to Kimi Code!\n\
+             Send /help for help information.\n\
+             Directory: /opt/data/workspace/app-insight\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  /model: switch model",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
+    fn task_state_keeps_kimi_running_without_prompt() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "Kimi Code\n\
+             Reading files...\n\
+             Updating implementation\n\
+             K2.7 Code thinking  context: 12.3%",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
+    fn task_state_keeps_kimi_running_when_spinner_and_prompt_are_visible() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "✨ say one short sentence about waitagent\n\
+             ⠼ thinking...\n\
+             No tools needed since it is just a\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  …/data/workspace/wait-agent\n\
+             context: 0.0% (0/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
+    fn task_state_keeps_kimi_running_when_working_spinner_and_prompt_are_visible() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "4. Check the controlling TTY and ioctl/ttyname resolution\n\
+             Reasoning: Detached or nested sessions can return unexpected paths\n\
+             ⠹ working...\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  …/data/workspace/wait-agent\n\
+             context: 0.0% (0/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
+    fn task_state_keeps_kimi_running_when_moon_spinner_and_prompt_are_visible() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "✨ hi\n\
+             🌔\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  …/data/workspace/wait-agent\n\
+             context: 0.0% (0/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
     fn task_state_infers_input_from_claude_prompt_line_case_insensitively() {
         let state = DetectorRegistry::default()
             .infer_task_state(Some("claude"), "Ready\nType your message");

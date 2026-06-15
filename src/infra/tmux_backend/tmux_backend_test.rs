@@ -62,6 +62,17 @@ mod tests {
     }
 
     #[test]
+    fn detector_registry_detects_kimi_from_process_and_pane_text() {
+        let registry = DetectorRegistry::default();
+
+        assert_eq!(registry.detect_command_name("kimi", None, ""), "kimi");
+        assert_eq!(
+            registry.detect_command_name("bash", None, "Welcome to Kimi Code!"),
+            "kimi"
+        );
+    }
+
+    #[test]
     fn parse_process_children_reads_pid_list() {
         assert_eq!(
             process_inspector::parse_process_children("1279695 1279696\n"),

@@ -184,6 +184,7 @@ impl Default for DetectorRegistry {
         let mut registry = Self::new();
         registry.register(Box::new(super::agent_detector_claude::ClaudeDetector));
         registry.register(Box::new(super::agent_detector_codex::CodexDetector));
+        registry.register(Box::new(super::agent_detector_kimi::KimiDetector));
         registry.register(Box::new(super::agent_detector_shell::ShellDetector));
         registry
     }
