@@ -15,7 +15,7 @@ use crate::runtime::remote_authority_transport_runtime::authority_transport_sock
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
-use crate::terminal::TerminalRuntime;
+use crate::terminal::{TerminalRuntime, TerminalSize};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -193,7 +193,7 @@ impl RemoteMainSlotPaneRuntime {
             spec.target
         ));
         let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
-        let mut terminal = TerminalRuntime::stdio();
+        let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
         let _cursor_guard = RemotePaneCursorGuard::hide().map_err(|error| {
             LifecycleError::Io("failed to hide remote interact cursor".to_string(), error)
@@ -221,14 +221,16 @@ impl RemoteMainSlotPaneRuntime {
         let resize_watcher = spawn_resize_watcher(event_tx.clone()).map_err(remote_pane_error)?;
         spawn_mailbox_watcher(mailbox.clone(), event_tx.clone());
 
-        // Capture terminal size after the SIGWINCH handler is active,
-        // so the remote PTY is always sized to match the local display.
-        let initial_size = terminal.current_size_or_default();
+        // Capture terminal size after the SIGWINCH handler is active. Prefer
+        // tmux pane metadata over stdio: the remote-main-slot process can be
+        // spawned before tmux finishes swapping it into the visible main pane.
+        let initial_size = current_remote_surface_size(&spec, &terminal);
         let mut observer = RemoteObserverRuntime::new(
             mailbox.clone(),
             usize::from(initial_size.cols),
             usize::from(initial_size.rows),
         );
+        let mut last_synced_size = initial_size;
         let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox);
         let target_presence = Arc::new(Mutex::new(true));
         spawn_target_presence_watcher(
@@ -283,6 +285,9 @@ impl RemoteMainSlotPaneRuntime {
                 t_before_activate.elapsed()
             ));
             raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
+            schedule_post_activation_resize_probe(event_tx.clone());
+            sync_remote_pty_size(&remote_runtime, &target, &activated_binding, &initial_size)?;
+            last_synced_size = initial_size;
             write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
             binding = Some(activated_binding);
             flush_paused_input(
@@ -465,14 +470,11 @@ impl RemoteMainSlotPaneRuntime {
                         }
                     }
                     RemotePaneEvent::Resize => {
-                        if let Ok(Some(size)) = terminal.capture_resize() {
+                        let size = current_remote_surface_size(&spec, &terminal);
+                        if size != last_synced_size {
                             if let Some(binding) = binding.as_ref() {
-                                remote_runtime.send_pty_resize(
-                                    &target,
-                                    binding,
-                                    usize::from(size.cols),
-                                    usize::from(size.rows),
-                                )?;
+                                sync_remote_pty_size(&remote_runtime, &target, binding, &size)?;
+                                last_synced_size = size;
                             }
                         }
                         // When raw PTY mode is active (binding.is_some()), the
@@ -521,11 +523,12 @@ impl RemoteMainSlotPaneRuntime {
                             if needs_activation
                                 && matches!(authority_status, AuthorityTransportStatus::Connected)
                             {
+                                let size = current_remote_surface_size(&spec, &terminal);
                                 match activate_surface_target_with_mode(
                                     &remote_runtime,
                                     &target,
                                     &spec,
-                                    &terminal.current_size_or_default(),
+                                    &size,
                                     &mut observer,
                                 ) {
                                     Ok(result) => {
@@ -534,6 +537,14 @@ impl RemoteMainSlotPaneRuntime {
                                             &result.0,
                                             &spec.console_host_id,
                                         );
+                                        schedule_post_activation_resize_probe(event_tx.clone());
+                                        sync_remote_pty_size(
+                                            &remote_runtime,
+                                            &target,
+                                            &result.0,
+                                            &size,
+                                        )?;
+                                        last_synced_size = size;
                                         write_remote_raw_output_with_initial_clear(
                                             &result.1,
                                             &mut raw_screen_initialized,
@@ -738,7 +749,7 @@ impl RemoteMainSlotPaneRuntime {
                             && binding.is_none()
                             && matches!(authority_status, AuthorityTransportStatus::Connected)
                         {
-                            let size = terminal.current_size_or_default();
+                            let size = current_remote_surface_size(&spec, &terminal);
                             match activate_surface_target_with_mode(
                                 &remote_runtime,
                                 &target,
@@ -753,6 +764,14 @@ impl RemoteMainSlotPaneRuntime {
                                         &result.0,
                                         &spec.console_host_id,
                                     );
+                                    schedule_post_activation_resize_probe(event_tx.clone());
+                                    sync_remote_pty_size(
+                                        &remote_runtime,
+                                        &target,
+                                        &result.0,
+                                        &size,
+                                    )?;
+                                    last_synced_size = size;
                                     write_remote_raw_output_with_initial_clear(
                                         &result.1,
                                         &mut raw_screen_initialized,
@@ -857,6 +876,54 @@ impl RemoteMainSlotPaneRuntime {
         }
         Ok(session)
     }
+}
+
+fn schedule_post_activation_resize_probe(tx: mpsc::Sender<RemotePaneEvent>) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        let _ = tx.send(RemotePaneEvent::Resize);
+    });
+}
+
+fn current_remote_surface_size(
+    spec: &RemoteInteractSurfaceSpec,
+    terminal: &TerminalRuntime,
+) -> TerminalSize {
+    pane_size_from_tmux(spec).unwrap_or_else(|| terminal.current_size_or_default())
+}
+
+fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize> {
+    let pane_id = std::env::var("TMUX_PANE").ok()?;
+    if pane_id.trim().is_empty() {
+        return None;
+    }
+    let backend = crate::infra::tmux::EmbeddedTmuxBackend::from_build_env().ok()?;
+    let (cols, rows) = backend
+        .pane_dimensions_on_socket(&spec.socket_name, pane_id.trim())
+        .ok()?;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some(TerminalSize {
+        rows: rows.clamp(1, u16::MAX as usize) as u16,
+        cols: cols.clamp(1, u16::MAX as usize) as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+}
+
+fn sync_remote_pty_size(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: &RemoteAttachmentBinding,
+    size: &TerminalSize,
+) -> Result<(), LifecycleError> {
+    remote_runtime.send_pty_resize(
+        target,
+        binding,
+        usize::from(size.cols),
+        usize::from(size.rows),
+    )
 }
 
 fn signal_clean_remote_target_exit(

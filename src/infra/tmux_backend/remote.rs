@@ -102,10 +102,14 @@ impl EmbeddedTmuxBackend {
         cols: usize,
         rows: usize,
     ) -> Result<(), TmuxError> {
-        self.run_on_socket(
-            &TmuxSocketName::new(socket_name),
-            &resize_pane_args(pane, cols, rows),
-        )?;
+        let socket = TmuxSocketName::new(socket_name);
+        self.run_on_socket(&socket, &resize_pane_args(pane, cols, rows))?;
+
+        let window = self.run_on_socket(&socket, &pane_window_id_args(pane))?;
+        let window = window.stdout.trim();
+        if !window.is_empty() {
+            self.run_on_socket(&socket, &resize_window_args(window, cols, rows))?;
+        }
         Ok(())
     }
 
@@ -268,6 +272,28 @@ fn resize_pane_args(pane: &TmuxPaneId, cols: usize, rows: usize) -> Vec<String> 
     ]
 }
 
+fn pane_window_id_args(pane: &TmuxPaneId) -> Vec<String> {
+    vec![
+        "display-message".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        "#{window_id}".to_string(),
+    ]
+}
+
+fn resize_window_args(window_id: &str, cols: usize, rows: usize) -> Vec<String> {
+    vec![
+        "resize-window".to_string(),
+        "-t".to_string(),
+        window_id.to_string(),
+        "-x".to_string(),
+        cols.to_string(),
+        "-y".to_string(),
+        rows.to_string(),
+    ]
+}
+
 fn clear_pane_pipe_args(pane: &TmuxPaneId) -> Vec<String> {
     vec![
         "pipe-pane".to_string(),
@@ -337,9 +363,10 @@ fn unset_session_environment_args(session_name: &str, key: &str) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_pane_pipe_args, resize_pane_args, send_hex_keys_args, send_literal_keys_args,
-        set_pane_hook_args, set_pane_pipe_args, set_session_environment_args, split_tmux_input,
-        unset_pane_hook_args, unset_session_environment_args, TmuxInputChunk,
+        clear_pane_pipe_args, pane_window_id_args, resize_pane_args, resize_window_args,
+        send_hex_keys_args, send_literal_keys_args, set_pane_hook_args, set_pane_pipe_args,
+        set_session_environment_args, split_tmux_input, unset_pane_hook_args,
+        unset_session_environment_args, TmuxInputChunk,
     };
     use crate::infra::tmux::TmuxPaneId;
 
@@ -369,6 +396,14 @@ mod tests {
         assert_eq!(
             resize_pane_args(&TmuxPaneId::new("%4"), 120, 40),
             vec!["resize-pane", "-t", "%4", "-x", "120", "-y", "40"]
+        );
+        assert_eq!(
+            pane_window_id_args(&TmuxPaneId::new("%4")),
+            vec!["display-message", "-p", "-t", "%4", "#{window_id}"]
+        );
+        assert_eq!(
+            resize_window_args("@7", 120, 40),
+            vec!["resize-window", "-t", "@7", "-x", "120", "-y", "40"]
         );
         assert_eq!(
             clear_pane_pipe_args(&TmuxPaneId::new("%4")),
