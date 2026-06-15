@@ -4,19 +4,78 @@ use std::str;
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
+const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
 
 impl EmbeddedTmuxBackend {
     pub(crate) fn target_presentation_pane_on_socket(
         &self,
-        _socket_name: &str,
+        socket_name: &str,
         target_session_name: &str,
     ) -> Result<TmuxPaneId, TmuxError> {
-        // Return a session-qualified pane reference so that tmux commands
-        // (pipe-pane, send-keys, resize-pane, capture-pane) resolve the
-        // pane in the correct session regardless of which session is active.
-        // Target sessions always have exactly one window (index 0) with one
-        // pane (index 0).
+        if let Some(pane) =
+            self.configured_target_presentation_pane_on_socket(socket_name, target_session_name)?
+        {
+            return Ok(pane);
+        }
+
+        // Fallback for target sessions that have not been adopted into a
+        // workspace display slot yet.
         Ok(TmuxPaneId::new(format!("{}:0.0", target_session_name)))
+    }
+
+    fn configured_target_presentation_pane_on_socket(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<Option<TmuxPaneId>, TmuxError> {
+        let socket = TmuxSocketName::new(socket_name);
+        let output = match self.run_on_socket(
+            &socket,
+            &[
+                "show-options".to_string(),
+                "-qv".to_string(),
+                "-t".to_string(),
+                target_session_name.to_string(),
+                WAITAGENT_MAIN_PANE_OPTION.to_string(),
+            ],
+        ) {
+            Ok(output) => output,
+            Err(error) if error.is_command_failure() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let pane = output.stdout.trim();
+        if pane.is_empty() || !self.presentation_pane_is_live_on_socket(socket_name, pane)? {
+            return Ok(None);
+        }
+        Ok(Some(TmuxPaneId::new(pane)))
+    }
+
+    fn presentation_pane_is_live_on_socket(
+        &self,
+        socket_name: &str,
+        pane: &str,
+    ) -> Result<bool, TmuxError> {
+        let socket = TmuxSocketName::new(socket_name);
+        let output = match self.run_on_socket(
+            &socket,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane.to_string(),
+                "#{pane_dead}	#{pane_title}".to_string(),
+            ],
+        ) {
+            Ok(output) => output,
+            Err(error) if error.is_command_failure() => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut parts = output.stdout.trim_end().split('\t');
+        let pane_dead = parts.next().unwrap_or_default();
+        let pane_title = parts.next().unwrap_or_default();
+        Ok(pane_dead == "0"
+            && pane_title != WAITAGENT_SIDEBAR_PANE_TITLE
+            && pane_title != WAITAGENT_FOOTER_PANE_TITLE)
     }
 
     pub(crate) fn target_main_pane_on_socket(

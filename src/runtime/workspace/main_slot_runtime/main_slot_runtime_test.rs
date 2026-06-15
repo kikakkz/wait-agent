@@ -522,7 +522,7 @@ mod tests {
                     &backend,
                     &workspace.workspace_handle,
                     &remote_session_pane,
-                    "pane-died",
+                    "pane-died[10]",
                 )
                 .is_none(),
                 "inactive remote session pane should not keep the workspace pane-died hook"
@@ -966,7 +966,7 @@ mod tests {
             &backend,
             &workspace.workspace_handle,
             &main_pane_id,
-            "pane-died",
+            "pane-died[10]",
         )
         .expect("main pane should have a pane-died hook before reconcile");
         assert!(
@@ -995,7 +995,7 @@ mod tests {
             &backend,
             &workspace.workspace_handle,
             &main_pane_id,
-            "pane-died",
+            "pane-died[10]",
         )
         .expect("main pane should have a pane-died hook after reconcile");
         assert!(
@@ -1518,6 +1518,115 @@ mod tests {
     }
 
     #[test]
+    fn connect_workspace_last_remote_exit_closes_workspace_even_with_local_support_target() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("connect-remote-exit-closes");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+        let mut network = unique_remote_network_config(&workspace_config.workspace_key);
+        network.connect = Some(format!("10.1.29.130:{}", network.port));
+
+        let waitagent_executable = waitagent_test_executable();
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                network.clone(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        persist_workspace_network_config(&backend, &workspace.workspace_handle, &network)
+            .expect("workspace network config should persist");
+        let target_host = backend
+            .ensure_workspace(
+                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                    &workspace_dir,
+                    workspace.workspace_handle.socket_name.as_str(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("local support target host bootstrap should succeed");
+
+        let runtime = MainSlotRuntime::new(
+            backend.clone(),
+            TargetHostRuntime::from_build_env(backend.clone())
+                .expect("target host runtime should build"),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                network.clone(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            network.clone(),
+        );
+
+        let local_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            target_host.session_name.as_str()
+        );
+        let remote_runtime_owner =
+            RemoteRuntimeOwnerRuntime::new_for_tests(waitagent_executable.clone(), network.clone());
+        let remote_target = remote_session_with_selector(
+            "10.1.29.130#7474",
+            "connect-remote-exit-1",
+            &local_target,
+            ManagedSessionTaskState::Input,
+        );
+        remote_runtime_owner
+            .upsert_session("10.1.29.130#7474", &remote_target)
+            .expect("remote target should be discoverable on workspace socket");
+
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: remote_target.address.qualified_target(),
+            })
+            .expect("remote target activation should succeed");
+        wait_for_condition(|| {
+            let active_target = backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read");
+            active_target.as_deref() == Some(remote_target.address.qualified_target().as_str())
+        });
+
+        let exited_pane_id = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read")
+            .expect("main pane option should be populated");
+        runtime
+            .run_remote_target_exited(RemoteTargetExitedCommand {
+                socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: remote_target.address.qualified_target(),
+                pane_id: Some(exited_pane_id),
+            })
+            .expect("last connect remote target exit should close workspace");
+
+        wait_for_condition(|| {
+            !backend.socket_is_live(&TmuxSocketName::new(
+                workspace.workspace_handle.socket_name.as_str().to_string(),
+            ))
+        });
+
+        let _ = fs::remove_dir_all(workspace_dir);
+    }
+
+    #[test]
     fn last_remote_main_pane_exit_closes_workspace_when_no_target_remains() {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()
@@ -2015,7 +2124,7 @@ mod tests {
             &backend,
             &workspace.workspace_handle,
             &recovered_main_pane,
-            "pane-died",
+            "pane-died[10]",
         )
         .expect("recovered main pane should restore pane-died hook");
         assert!(pane_died_hook.contains("__main-pane-died"));
@@ -2427,23 +2536,24 @@ mod tests {
 
         let remote_runtime_owner =
             RemoteRuntimeOwnerRuntime::new_for_tests(waitagent_executable.clone(), network.clone());
+        let remote_authority = format!("10.1.29.130#{}", network.port);
         let remote_target_a = remote_session_with_selector(
-            "10.1.29.130#7474",
+            &remote_authority,
             "remote-exit-focus-a",
             &local_target,
             ManagedSessionTaskState::Input,
         );
         let remote_target_b = remote_session_with_selector(
-            "10.1.29.130#7474",
+            &remote_authority,
             "remote-exit-focus-b",
             &local_target,
             ManagedSessionTaskState::Input,
         );
         remote_runtime_owner
-            .upsert_session("10.1.29.130#7474", &remote_target_a)
+            .upsert_session(&remote_authority, &remote_target_a)
             .expect("first remote target should be discoverable on workspace socket");
         remote_runtime_owner
-            .upsert_session("10.1.29.130#7474", &remote_target_b)
+            .upsert_session(&remote_authority, &remote_target_b)
             .expect("second remote target should be discoverable on workspace socket");
 
         runtime
@@ -2894,6 +3004,9 @@ mod tests {
             )
             .ok()?;
         output.stdout.lines().find_map(|line| {
+            if let Some(command) = line.strip_prefix(&format!("{hook_name} ")) {
+                return Some(command.trim().to_string());
+            }
             let prefix = format!("{hook_name}[");
             line.strip_prefix(&prefix)
                 .and_then(|rest| rest.split_once(']'))

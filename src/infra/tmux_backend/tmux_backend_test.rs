@@ -252,6 +252,71 @@ mod tests {
     }
 
     #[test]
+    fn target_presentation_pane_prefers_configured_live_main_pane() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("presentation-source"))
+            .expect("workspace bootstrap should succeed");
+        let target_config = WorkspaceInstanceConfig {
+            workspace_dir: workspace_config().workspace_dir,
+            workspace_key: "target-key".to_string(),
+            socket_name: workspace.socket_name.as_str().to_string(),
+            session_name: "target-session".to_string(),
+            session_role: WorkspaceSessionRole::TargetHost,
+            initial_rows: None,
+            initial_cols: None,
+        };
+        let target = backend
+            .ensure_workspace(&target_config)
+            .expect("target session should be created");
+        let workspace_main = backend
+            .current_pane(&workspace)
+            .expect("workspace main pane should resolve");
+
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-t".to_string(),
+                    target.session_name.as_str().to_string(),
+                    "@waitagent_main_pane_id".to_string(),
+                    workspace_main.as_str().to_string(),
+                ],
+            )
+            .expect("target main pane option should be set");
+        let resolved = backend
+            .target_presentation_pane_on_socket(
+                workspace.socket_name.as_str(),
+                target.session_name.as_str(),
+            )
+            .expect("presentation pane should resolve");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-t".to_string(),
+                    target.session_name.as_str().to_string(),
+                    "@waitagent_main_pane_id".to_string(),
+                    "%999999".to_string(),
+                ],
+            )
+            .expect("stale target main pane option should be set");
+        let fallback = backend
+            .target_presentation_pane_on_socket(
+                workspace.socket_name.as_str(),
+                target.session_name.as_str(),
+            )
+            .expect("fallback presentation pane should resolve");
+        kill_server(&backend, &workspace);
+
+        assert_eq!(resolved, workspace_main);
+        assert_eq!(fallback.as_str(), "target-session:0.0");
+    }
+
+    #[test]
     fn embedded_backend_sets_new_workspace_history_limit_before_session_creation() {
         let backend = EmbeddedTmuxBackend::from_build_env()
             .expect("vendored tmux backend should discover build env");

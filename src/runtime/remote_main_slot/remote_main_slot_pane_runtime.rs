@@ -30,6 +30,8 @@ use std::os::unix::net::UnixStream;
 mod slot_pane_helpers;
 pub(crate) use slot_pane_helpers::*;
 
+const MAIN_PANE_DIED_HOOK: &str = "pane-died[10]";
+
 pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     authority_connections: Box<dyn AuthorityConnectionStarter>,
@@ -944,7 +946,7 @@ fn signal_clean_remote_target_exit(
         session_name: crate::infra::tmux::TmuxSessionName::new(spec.surface_scope.clone()),
     };
     let pane = crate::infra::tmux::TmuxPaneId::new(pane_id);
-    let _ = backend.unset_pane_hook(&workspace, &pane, "pane-died");
+    let _ = backend.unset_pane_hook(&workspace, &pane, MAIN_PANE_DIED_HOOK);
 
     let waitagent = current_waitagent_executable()?;
     let shell_command = [

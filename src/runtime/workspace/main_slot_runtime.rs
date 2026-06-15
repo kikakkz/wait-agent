@@ -30,6 +30,7 @@ const WAITAGENT_PANE_TARGET_SESSION_OPTION: &str = "@waitagent_target_session_na
 const WAITAGENT_MAIN_PANE_STATE_LOCK_PREFIX: &str = "waitagent-main-pane-state-";
 const WAITAGENT_MAIN_PANE_GENERATION_OPTION: &str = "@waitagent_main_pane_generation";
 const WAITAGENT_MAIN_PANE_TRANSITION_OPTION: &str = "@waitagent_main_pane_transition";
+const MAIN_PANE_DIED_HOOK: &str = "pane-died[10]";
 
 pub struct MainSlotRuntime {
     backend: EmbeddedTmuxBackend,
@@ -942,6 +943,9 @@ impl MainSlotRuntime {
         if let Some(target) = next_remote_target_on_active_authority(&sessions, active_target) {
             return Ok(RemoteTargetExitTransition::ActivateRemote(target));
         }
+        if self.network.connect.is_some() {
+            return Ok(RemoteTargetExitTransition::CloseWorkspace);
+        }
         if let Some(target) =
             next_target_host_session(&sessions, workspace.socket_name.as_str(), active_target)
         {
@@ -980,7 +984,7 @@ impl MainSlotRuntime {
     ) {
         let _ = self
             .backend
-            .unset_pane_hook(workspace, recovery_pane, "pane-died");
+            .unset_pane_hook(workspace, recovery_pane, MAIN_PANE_DIED_HOOK);
         let _ = self
             .backend
             .set_pane_option(workspace, recovery_pane, "remain-on-exit", "off");
@@ -1103,7 +1107,9 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
     ) {
-        let _ = self.backend.unset_pane_hook(workspace, pane, "pane-died");
+        let _ = self
+            .backend
+            .unset_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK);
         let _ = self
             .backend
             .set_pane_option(workspace, pane, "remain-on-exit", "off");
@@ -1142,9 +1148,11 @@ impl MainSlotRuntime {
             .map(TmuxPaneId::new);
         if let Some(previous_main_pane) = previous_main_pane.as_ref() {
             if self.pane_exists(workspace, previous_main_pane.as_str()) {
-                let _ = self
-                    .backend
-                    .unset_pane_hook(workspace, previous_main_pane, "pane-died");
+                let _ = self.backend.unset_pane_hook(
+                    workspace,
+                    previous_main_pane,
+                    MAIN_PANE_DIED_HOOK,
+                );
                 let _ = self.backend.set_pane_option(
                     workspace,
                     previous_main_pane,
@@ -1179,7 +1187,12 @@ impl MainSlotRuntime {
             .layout_runtime
             .main_pane_died_hook_command(workspace, &pane_generation);
         self.backend
-            .set_pane_hook(workspace, &effective_pane, "pane-died", &pane_died_command)
+            .set_pane_hook(
+                workspace,
+                &effective_pane,
+                MAIN_PANE_DIED_HOOK,
+                &pane_died_command,
+            )
             .map_err(main_slot_error)?;
         self.backend
             .set_pane_option(workspace, &effective_pane, "remain-on-exit", "on")
@@ -1331,6 +1344,12 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         qualified_target: &str,
     ) -> Result<TmuxPaneId, LifecycleError> {
+        if let Some(pane) =
+            self.find_local_target_pane_by_identity(workspace, workspace.session_name.as_str())?
+        {
+            self.set_workspace_main_pane(workspace, &pane)?;
+            return Ok(pane);
+        }
         self.backend
             .target_main_pane_on_socket(
                 workspace.socket_name.as_str(),
@@ -1389,7 +1408,8 @@ impl MainSlotRuntime {
             return Ok(None);
         };
         let pane = TmuxPaneId::new(pane_id);
-        if self.pane_is_live(workspace, pane.as_str())
+        if self.pane_exists_on_socket(workspace, pane.as_str())?
+            && self.pane_is_live_on_socket(workspace, pane.as_str())?
             && self.pane_target_identity(workspace, &pane)?.as_deref() == Some(target_session_name)
         {
             return Ok(Some(pane));
@@ -1843,7 +1863,9 @@ impl MainSlotRuntime {
         pane: Option<&TmuxPaneId>,
     ) -> Result<(), LifecycleError> {
         if let Some(pane) = pane {
-            let _ = self.backend.unset_pane_hook(workspace, pane, "pane-died");
+            let _ = self
+                .backend
+                .unset_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK);
             let _ = self
                 .backend
                 .set_pane_option(workspace, pane, "remain-on-exit", "off");
@@ -1971,6 +1993,27 @@ impl MainSlotRuntime {
             )
             .map_err(main_slot_error)?;
         Ok(output.stdout.lines().any(|line| line.trim() == pane_id))
+    }
+
+    fn pane_is_live_on_socket(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane_id: &str,
+    ) -> Result<bool, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane_id.to_string(),
+                    "#{pane_dead}".to_string(),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        Ok(output.stdout.trim() == "0")
     }
 
     fn pane_is_recoverable_content_pane(

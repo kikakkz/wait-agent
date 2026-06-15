@@ -264,7 +264,7 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         pane: &TmuxPaneId,
         command: &str,
     ) -> Result<(), Self::Error> {
-        self.set_pane_hook_on_socket(socket_name, pane, "pane-died", command)
+        self.set_pane_hook_on_socket(socket_name, pane, REMOTE_AUTHORITY_PANE_DIED_HOOK, command)
     }
 
     fn clear_pane_died_hook(
@@ -272,7 +272,7 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         socket_name: &str,
         pane: &TmuxPaneId,
     ) -> Result<(), Self::Error> {
-        self.unset_pane_hook_on_socket(socket_name, pane, "pane-died")
+        self.unset_pane_hook_on_socket(socket_name, pane, REMOTE_AUTHORITY_PANE_DIED_HOOK)
     }
 }
 
@@ -357,6 +357,7 @@ enum AuthorityHostEvent {
 }
 
 const OUTPUT_CHANNEL_BOUND: usize = 8192;
+const REMOTE_AUTHORITY_PANE_DIED_HOOK: &str = "pane-died[20]";
 
 #[derive(Clone)]
 enum AuthorityOutputMessage {

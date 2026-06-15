@@ -8,7 +8,7 @@ pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const MAIN_PANE_REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
 const TMUX_OPTION_ON: &str = "on";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
-const MAIN_PANE_RECOVERY_HOOKS: [&str; 1] = ["pane-died"];
+const MAIN_PANE_RECOVERY_HOOKS: [&str; 1] = ["pane-died[10]"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutFocusBehavior {
@@ -797,7 +797,7 @@ mod tests {
                 ),
                 Call::SetPaneHook(
                     "%1".to_string(),
-                    "pane-died".to_string(),
+                    "pane-died[10]".to_string(),
                     "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ]
@@ -834,7 +834,7 @@ mod tests {
                     "client-resized".to_string(),
                     "run-shell -b 'waitagent __layout-reconcile'".to_string(),
                 ),
-                Call::UnsetPaneHook("%1".to_string(), "pane-died".to_string()),
+                Call::UnsetPaneHook("%1".to_string(), "pane-died[10]".to_string()),
                 Call::UnsetPaneOption(
                     "%1".to_string(),
                     "remain-on-exit".to_string(),
@@ -846,7 +846,7 @@ mod tests {
                 ),
                 Call::SetPaneHook(
                     "%3".to_string(),
-                    "pane-died".to_string(),
+                    "pane-died[10]".to_string(),
                     "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ]
@@ -882,7 +882,7 @@ mod tests {
                 ),
                 Call::SetPaneHook(
                     "%3".to_string(),
-                    "pane-died".to_string(),
+                    "pane-died[10]".to_string(),
                     "run-shell -b 'waitagent __main-pane-died --socket-name wa-wk-1 --session-name waitagent-wk-1 --pane-id #{hook_pane} --pane-generation 0'".to_string(),
                 ),
             ],
