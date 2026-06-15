@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -45,6 +46,7 @@ pub struct RemoteNodeIngressServerRuntime {
 pub struct RemoteNodeIngressServerGuard {
     transport_guard: Option<GrpcRemoteNodeTransportGuard>,
     worker: Option<thread::JoinHandle<()>>,
+    shutdown_tx: Option<mpsc::Sender<InternalEvent>>,
 }
 
 struct ActiveAuthoritySocketBridge {
@@ -63,7 +65,6 @@ enum InternalEvent {
         socket_path: PathBuf,
     },
     SocketDirChanged,
-    #[cfg(test)]
     Shutdown,
 }
 
@@ -133,6 +134,7 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
+        let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
             let _ = run_node_ingress_server_loop(
                 publication_runtime,
@@ -145,6 +147,7 @@ impl RemoteNodeIngressServerRuntime {
         Ok(RemoteNodeIngressServerGuard {
             transport_guard: Some(transport_guard),
             worker: Some(worker),
+            shutdown_tx: Some(shutdown_tx),
         })
     }
 }
@@ -201,15 +204,16 @@ fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
 /// kernel filesystem events, not periodic refresh scans.
 fn start_socket_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
+    shutdown: Arc<AtomicBool>,
 ) -> io::Result<thread::JoinHandle<()>> {
     #[cfg(target_os = "linux")]
     {
-        start_inotify_watcher(internal_tx)
+        start_inotify_watcher(internal_tx, shutdown)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = internal_tx;
+        let _ = (internal_tx, shutdown);
         Err(io::Error::other(
             "remote node ingress server requires Linux inotify for event-driven authority discovery",
         ))
@@ -220,8 +224,9 @@ fn start_socket_watcher(
 #[cfg(target_os = "linux")]
 fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
+    shutdown: Arc<AtomicBool>,
 ) -> io::Result<thread::JoinHandle<()>> {
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
     if fd == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -243,8 +248,16 @@ fn start_inotify_watcher(
         let mut buf = [0u8; 4096];
 
         loop {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    thread::sleep(BRIDGE_REFRESH_INTERVAL);
+                    continue;
+                }
                 break;
             }
 
@@ -275,6 +288,9 @@ fn start_inotify_watcher(
 
 impl Drop for RemoteNodeIngressServerGuard {
     fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(InternalEvent::Shutdown);
+        }
         let _ = self.transport_guard.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -319,8 +335,9 @@ fn run_node_ingress_server_loop(
         })
     };
     drop(event_tx);
-    let _watcher = if start_authority_socket_watcher {
-        match start_socket_watcher(internal_tx.clone()) {
+    let watcher_shutdown = Arc::new(AtomicBool::new(false));
+    let watcher = if start_authority_socket_watcher {
+        match start_socket_watcher(internal_tx.clone(), watcher_shutdown.clone()) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -342,12 +359,15 @@ fn run_node_ingress_server_loop(
                 internal_tx.clone(),
                 event,
             ),
-            #[cfg(test)]
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
             IngressServerEvent::Internal(event) => {
                 handle_internal_event(&mut sessions, internal_tx.clone(), event);
             }
         }
+    }
+    watcher_shutdown.store(true, Ordering::Relaxed);
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
     }
 }
 
@@ -442,7 +462,6 @@ fn handle_internal_event(
                 refresh_authority_bridges(&node_id, active, internal_tx.clone());
             }
         }
-        #[cfg(test)]
         InternalEvent::Shutdown => {}
     }
 }
