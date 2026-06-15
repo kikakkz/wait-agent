@@ -9,11 +9,11 @@ const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
 const CREATE_SESSION_KEY: &str = "C-n";
 const CREATE_SESSION_PREFIX_KEY: &str = "c";
-const FOOTER_SESSIONS_KEY: &str = "s";
+const FOOTER_SESSIONS_KEY: &str = "C-m";
 const ERROR_LOG_KEY: &str = "C-e";
 const ERROR_LOG_PREFIX_KEY: &str = "E";
-// Enter intentionally unbound as no-prefix to avoid globally intercepting
-// ENTER in the main pane. Footer menu is accessible via "s".
+// Ctrl-M opens the footer sessions menu when the footer pane is focused.
+// Outside the footer pane, the key is forwarded to the active program.
 const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
 const TMUX_STATUS_OPTION: &str = "status";
 const TMUX_STATUS_ON: &str = "on";
@@ -158,11 +158,6 @@ where
             workspace,
             FOOTER_SESSIONS_KEY,
             &layout.footer_pane,
-            &footer_bindings.open_sessions_menu_command,
-        )?;
-        self.tmux.bind_command_with_prefix(
-            workspace,
-            FOOTER_SESSIONS_KEY,
             &footer_bindings.open_sessions_menu_command,
         )?;
         self.tmux.bind_key_without_prefix(
@@ -644,12 +639,8 @@ mod tests {
                     "run-shell -b 'waitagent __new-target'".to_string(),
                 ),
                 Call::BindWaitagentFooterAction(
-                    "s".to_string(),
+                    "C-m".to_string(),
                     "%3".to_string(),
-                    "run-shell 'waitagent __footer-menu'".to_string(),
-                ),
-                Call::BindCommandWithPrefix(
-                    "s".to_string(),
                     "run-shell 'waitagent __footer-menu'".to_string(),
                 ),
                 Call::BindWithoutPrefix(

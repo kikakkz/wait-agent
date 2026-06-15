@@ -1,5 +1,8 @@
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BG_BAR: &str = "\x1b[48;5;24m\x1b[38;5;255m";
+const ANSI_FOOTER_KEY: &str = "\x1b[48;5;24m\x1b[1;38;5;159m";
+const ANSI_FOOTER_MUTED: &str = "\x1b[48;5;24m\x1b[38;5;110m";
+const ANSI_FOOTER_NETWORK: &str = "\x1b[48;5;24m\x1b[1;38;5;121m";
 const ANSI_BG_SIDEBAR_HEADER: &str = "\x1b[48;5;236m\x1b[1;38;5;255m";
 const ANSI_BG_SIDEBAR_HINT: &str = "\x1b[48;5;235m\x1b[38;5;246m";
 const ANSI_BG_SIDEBAR_ITEM: &str = "\x1b[48;5;234m\x1b[38;5;250m";
@@ -31,7 +34,8 @@ pub enum SidebarRowStyle {
 }
 
 pub fn style_status_line(line: &str, width: usize) -> String {
-    format!("{ANSI_BG_BAR}{}{ANSI_RESET}", pad_right(line, width))
+    let line = pad_right(line, width);
+    format!("{ANSI_BG_BAR}{}{ANSI_RESET}", style_footer_words(&line))
 }
 
 pub fn style_sidebar_header_line(line: &str, width: usize) -> String {
@@ -125,6 +129,56 @@ fn pad_right(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(padding))
 }
 
+fn style_footer_words(line: &str) -> String {
+    let mut output = String::new();
+    let mut word = String::new();
+
+    for ch in line.chars() {
+        if ch.is_whitespace() {
+            push_styled_footer_word(&mut output, &word);
+            word.clear();
+            output.push(ch);
+        } else {
+            word.push(ch);
+        }
+    }
+    push_styled_footer_word(&mut output, &word);
+    output
+}
+
+fn push_styled_footer_word(output: &mut String, word: &str) {
+    if word.is_empty() {
+        return;
+    }
+    let style = if is_footer_key(word) {
+        ANSI_FOOTER_KEY
+    } else if is_footer_network_label(word) {
+        ANSI_FOOTER_NETWORK
+    } else if is_footer_muted(word) {
+        ANSI_FOOTER_MUTED
+    } else {
+        ANSI_BG_BAR
+    };
+    output.push_str(style);
+    output.push_str(word);
+    output.push_str(ANSI_BG_BAR);
+}
+
+fn is_footer_key(word: &str) -> bool {
+    matches!(
+        word,
+        "Ctrl-N" | "Ctrl-O" | "Ctrl-E" | "Ctrl-M" | "PgUp/PgDn" | "Up/Down" | "q"
+    )
+}
+
+fn is_footer_network_label(word: &str) -> bool {
+    matches!(word, "Listen" | "Connect" | "View")
+}
+
+fn is_footer_muted(word: &str) -> bool {
+    matches!(word, "│" | "·")
+}
+
 fn char_width(ch: char) -> usize {
     if ch.is_ascii() || is_single_width_non_ascii(ch) {
         1
@@ -134,7 +188,7 @@ fn char_width(ch: char) -> usize {
 }
 
 fn is_single_width_non_ascii(ch: char) -> bool {
-    matches!(ch, '\u{2500}'..='\u{257F}')
+    matches!(ch, '\u{2500}'..='\u{257F}' | '·' | '…')
 }
 
 #[cfg(test)]
@@ -161,5 +215,10 @@ mod tests {
     #[test]
     fn box_drawing_characters_are_treated_as_single_width() {
         assert_eq!(display_width("────"), 4);
+    }
+
+    #[test]
+    fn footer_separators_are_treated_as_single_width() {
+        assert_eq!(display_width("·…"), 2);
     }
 }

@@ -134,24 +134,27 @@ fn left_status_text(
     connect_endpoint: Option<&str>,
 ) -> String {
     let base = match projection {
-        FooterProjection::Pane => "keys: ^N new  ^O fullscreen  ^E log  C-b s menu".to_string(),
+        FooterProjection::Pane => {
+            "Ctrl-N New · Ctrl-O Fullscreen · Ctrl-E Logs · Ctrl-M Sessions".to_string()
+        }
         FooterProjection::FullscreenStatus => {
-            "keys: [Ctrl-o] fullscreen off  [PgUp/PgDn] scroll  [Up/Down] line  [q] exit-page  [Ctrl-n] new".to_string()
+            "View  Ctrl-O Exit fullscreen · PgUp/PgDn Page · Up/Down Line · q Close · Ctrl-N New"
+                .to_string()
         }
     };
     let mut parts: Vec<&str> = Vec::new();
     if let Some(listener) = listener_display {
-        parts.push("Listen:");
+        parts.push("Listen");
         parts.push(listener);
     }
     if let Some(connect) = connect_endpoint {
-        parts.push("Connect:");
+        parts.push("Connect");
         parts.push(connect);
     }
     if parts.is_empty() {
         return base;
     }
-    format!("{base}  |  {}", parts.join("  "))
+    format!("{base}  {}", parts.join("  "))
 }
 
 fn join_left_right(left: &str, right: &str, width: usize) -> String {
@@ -222,15 +225,42 @@ mod tests {
             None,
         );
 
-        assert!(output.contains("keys: ^N new"));
-        assert!(output.contains("^O fullscreen"));
-        assert!(output.contains("C-b s menu"));
+        assert!(output.contains("Ctrl-N"));
+        assert!(output.contains("New"));
+        assert!(output.contains("Ctrl-O"));
+        assert!(output.contains("Fullscreen"));
+        assert!(output.contains("Ctrl-M"));
+        assert!(output.contains("Sessions"));
+        assert!(!output.contains("Prefix-s"));
+        assert!(!output.contains("Actions"));
         assert!(!output.contains("listen:"));
         assert!(!output.contains("total:"));
         assert!(!output.contains("R:"));
         assert!(output.contains("/tmp/demo"));
         assert!(!output.contains('\n'));
         assert!(output.starts_with("\u{1b}[48;5;24m"));
+    }
+
+    #[test]
+    fn footer_ui_renders_modern_network_status() {
+        let output = FooterUi::render(
+            "wa-1",
+            "waitagent-1",
+            None,
+            &[],
+            120,
+            Some("10.1.26.84:7474"),
+            None,
+        );
+
+        assert!(output.contains("Ctrl-N"));
+        assert!(output.contains("Listen"));
+        assert!(output.contains("10.1.26.84:7474"));
+        assert!(!output.contains("keys:"));
+        assert!(!output.contains("Listen:"));
+        assert!(!output.contains("Network"));
+        assert!(!output.contains("│"));
+        assert!(!output.contains('\n'));
     }
 
     #[test]
@@ -274,11 +304,13 @@ mod tests {
             None,
         );
 
-        assert!(output.contains("[Ctrl-o] fullscreen off"));
-        assert!(output.contains("[PgUp/PgDn] scroll"));
-        assert!(output.contains("[Up/Down] line"));
-        assert!(output.contains("[q] exit-page"));
-        assert!(output.contains("[Ctrl-n] new"));
+        assert!(output.contains("Ctrl-O"));
+        assert!(output.contains("Exit fullscreen"));
+        assert!(output.contains("PgUp/PgDn"));
+        assert!(output.contains("Up/Down"));
+        assert!(output.contains("q"));
+        assert!(output.contains("Close"));
+        assert!(output.contains("Ctrl-N"));
         assert!(!output.contains("listen:"));
         assert!(!output.contains("total:"));
         assert!(!output.contains("R:0"));
