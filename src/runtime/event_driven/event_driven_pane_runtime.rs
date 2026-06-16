@@ -90,7 +90,7 @@ impl EventDrivenPaneRuntime {
             match event {
                 PaneEvent::Input(bytes) => {
                     ERROR_LOG.log(format!("[diag] run_sidebar Input: bytes={bytes:?}"));
-                    let outcome = chrome.apply_sidebar_input(&bytes);
+                    let outcome = chrome.apply_sidebar_input(&command, &bytes)?;
                     ERROR_LOG.log(format!("[diag] run_sidebar Input: outcome.render.invalidate_sidebar={} outcome.activation={:?}", outcome.render.invalidate_sidebar, outcome.activation));
                     if let Err(error) = redraw_sidebar(outcome.render, &mut last_buffer) {
                         ERROR_LOG.log(format!("[diag] sidebar redraw error on input: {error}"));

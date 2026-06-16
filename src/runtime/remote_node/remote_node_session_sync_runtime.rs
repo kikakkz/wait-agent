@@ -367,7 +367,10 @@ impl SessionSyncAuthorityManager {
                     ));
                 }
             }
-            GrpcAuthorityEvent::MirrorAccepted
+            GrpcAuthorityEvent::CreateSessionRequest { .. }
+            | GrpcAuthorityEvent::CreateSessionAccepted(_)
+            | GrpcAuthorityEvent::CreateSessionRejected(_)
+            | GrpcAuthorityEvent::MirrorAccepted
             | GrpcAuthorityEvent::MirrorRejected(_)
             | GrpcAuthorityEvent::Failed(_)
             | GrpcAuthorityEvent::Closed => {}

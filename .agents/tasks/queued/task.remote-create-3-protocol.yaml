@@ -2,7 +2,7 @@ id: task.remote-create-3-protocol
 kind: task
 version: 1
 title: add create-session messages to the node-session protocol and transport mapping
-status: pending
+status: done
 priority: high
 design_ref:
   doc: docs/remote-host-connect-and-session-creation-design.md

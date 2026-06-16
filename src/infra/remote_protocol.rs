@@ -56,6 +56,9 @@ pub enum ControlPlanePayload {
     TargetOutput(TargetOutputPayload),
     RawPtyOutput(RawPtyOutputPayload),
     ApplyResize(ApplyResizePayload),
+    CreateSessionRequest(CreateSessionRequestPayload),
+    CreateSessionAccepted(CreateSessionAcceptedPayload),
+    CreateSessionRejected(CreateSessionRejectedPayload),
     TargetPublished(TargetPublishedPayload),
     TargetExited(TargetExitedPayload),
     Error(ErrorPayload),
@@ -79,6 +82,9 @@ impl ControlPlanePayload {
             Self::TargetOutput(_) => "target_output",
             Self::RawPtyOutput(_) => "raw_pty_output",
             Self::ApplyResize(_) => "apply_resize",
+            Self::CreateSessionRequest(_) => "create_session_request",
+            Self::CreateSessionAccepted(_) => "create_session_accepted",
+            Self::CreateSessionRejected(_) => "create_session_rejected",
             Self::TargetPublished(_) => "target_published",
             Self::TargetExited(_) => "target_exited",
             Self::Error(_) => "error",
@@ -227,6 +233,29 @@ pub struct ApplyResizePayload {
     pub resize_authority_console_id: String,
     pub cols: usize,
     pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSessionRequestPayload {
+    pub request_id: String,
+    pub authority_node_id: String,
+    pub cwd_hint: Option<String>,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSessionAcceptedPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSessionRejectedPayload {
+    pub request_id: String,
+    pub code: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

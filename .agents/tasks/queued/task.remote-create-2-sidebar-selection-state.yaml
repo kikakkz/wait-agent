@@ -2,7 +2,7 @@ id: task.remote-create-2-sidebar-selection-state
 kind: task
 version: 1
 title: persist sidebar selected target in workspace-scoped tmux state
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-host-connect-and-session-creation-design.md

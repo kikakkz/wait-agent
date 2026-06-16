@@ -2,19 +2,21 @@ use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
-use crate::domain::workspace::WorkspaceSessionRole;
+use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceSessionRole};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
+    ControlPlanePayload, CreateSessionRequestPayload, NodeSessionChannel, ProtocolEnvelope,
+    REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
+use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_target_host_runtime::remote_authority_target_host_args;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_runtime::{
-    RemoteNodeSessionError, RemoteNodeSessionRuntime,
+    RemoteNodeAuthorityEvent, RemoteNodeSessionError, RemoteNodeSessionRuntime,
 };
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_target_publication_runtime::{
@@ -22,6 +24,7 @@ use crate::runtime::remote_target_publication_runtime::{
 };
 use crate::runtime::remote_target_publication_transport_runtime::RemoteTargetPublicationTransportRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -682,12 +685,32 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
                 if shared_session.stop_if_idle() {
                     break;
                 }
-                match session.recv_authority_command() {
-                    Ok(command) => {
+                match session.recv_authority_event() {
+                    Ok(RemoteNodeAuthorityEvent::Command(command)) => {
                         let _ = dispatch_authority_command_to_live_route(
                             &shared_session.routes,
                             &command,
                         );
+                    }
+                    Ok(RemoteNodeAuthorityEvent::CreateSessionRequest {
+                        payload,
+                        correlation_id,
+                    }) => {
+                        if let Err(error) = handle_create_session_request(
+                            &shared_session,
+                            &session,
+                            payload,
+                            correlation_id.as_deref(),
+                        ) {
+                            eprintln!(
+                                "[waitagent-diag] create-session handler failed for {}: {}",
+                                shared_session.authority_id, error
+                            );
+                        }
+                    }
+                    Ok(RemoteNodeAuthorityEvent::CreateSessionAccepted(_))
+                    | Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(_)) => {
+                        // Replies are consumed by the server-side creation service in a later slice.
                     }
                     Err(error) => {
                         eprintln!(
@@ -755,6 +778,82 @@ fn restore_shared_authority_state(
         }
     }
     true
+}
+
+fn handle_create_session_request(
+    shared_session: &SharedAuthoritySession,
+    session: &Arc<RemoteNodeSessionRuntime>,
+    payload: CreateSessionRequestPayload,
+    correlation_id: Option<&str>,
+) -> Result<(), LifecycleError> {
+    let result = create_local_target_for_request(shared_session, &payload);
+    match result {
+        Ok(created) => session
+            .send_create_session_accepted(
+                &payload.request_id,
+                &created.session_id,
+                &created.target_id,
+                correlation_id,
+            )
+            .map_err(publication_owner_error),
+        Err(error) => {
+            let message = error.to_string();
+            session
+                .send_create_session_rejected(
+                    &payload.request_id,
+                    "create_session_failed",
+                    message,
+                    correlation_id,
+                )
+                .map_err(publication_owner_error)
+        }
+    }
+}
+
+struct CreatedRemoteTargetSession {
+    session_id: String,
+    target_id: String,
+}
+
+fn create_local_target_for_request(
+    shared_session: &SharedAuthoritySession,
+    payload: &CreateSessionRequestPayload,
+) -> Result<CreatedRemoteTargetSession, LifecycleError> {
+    if payload.authority_node_id != shared_session.authority_id {
+        return Err(LifecycleError::Protocol(format!(
+            "create-session request for authority `{}` reached `{}`",
+            payload.authority_node_id, shared_session.authority_id
+        )));
+    }
+    let cwd = select_create_session_cwd(payload);
+    let runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
+        EmbeddedTmuxBackend::from_build_env().map_err(publication_owner_error)?,
+        shared_session.network.clone(),
+        crate::runtime::current_executable::current_waitagent_executable()?,
+    )?;
+    let workspace = runtime
+        .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+            &cwd,
+            shared_session.authority_id.clone(),
+            u16::try_from(payload.rows).ok().filter(|rows| *rows > 0),
+            u16::try_from(payload.cols).ok().filter(|cols| *cols > 0),
+        ))
+        .map_err(publication_owner_error)?;
+    let session_id = workspace.workspace_handle.session_name.as_str().to_string();
+    Ok(CreatedRemoteTargetSession {
+        target_id: format!("remote-peer:{}:{}", shared_session.authority_id, session_id),
+        session_id,
+    })
+}
+
+fn select_create_session_cwd(payload: &CreateSessionRequestPayload) -> PathBuf {
+    payload
+        .cwd_hint
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn shared_authority_reconnect_delay(attempt: u32) -> Duration {
@@ -995,8 +1094,17 @@ fn bridge_live_authority_stream(
         let _ = forward_host_output_to_session(host_reader, host_session, host_running);
     });
     while running.load(Ordering::Relaxed) {
-        let command = match session.recv_authority_command() {
-            Ok(command) => command,
+        let command = match session.recv_authority_event() {
+            Ok(RemoteNodeAuthorityEvent::Command(command)) => command,
+            Ok(other) => {
+                running.store(false, Ordering::Relaxed);
+                let _ = host_stream.shutdown(Shutdown::Write);
+                let _ = forward_host.join();
+                let _ = host_stream.shutdown(Shutdown::Both);
+                return Err(RemoteNodeSessionError::new(format!(
+                    "unexpected authority event in live bridge: {other:?}"
+                )));
+            }
             Err(error) => {
                 running.store(false, Ordering::Relaxed);
                 let _ = host_stream.shutdown(Shutdown::Write);

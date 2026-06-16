@@ -1,15 +1,16 @@
-id: task.remote-create-2-sidebar-selection-state
+id: task.remote-create-5-server-service
 kind: task
 version: 1
-title: persist sidebar selected target in workspace-scoped tmux state
+title: implement server-side remote session creation service and catalog convergence wait
 status: in_progress
 design_ref:
   file: docs/remote-host-connect-and-session-creation-design.md
-  section: 6.2
+  section: 9.4, 10
   status: accepted
   reason: >
-    Ctrl-S needs a stable selected-target pointer that follows the existing
-    tmux-owned chrome model without introducing sidebar IPC.
+    The server must send create-session requests through the remote owner,
+    wait for acceptance and session-sync catalog publication, then activate
+    the synced target without fabricating catalog rows.
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next

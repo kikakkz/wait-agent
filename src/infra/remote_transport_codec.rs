@@ -1,10 +1,12 @@
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ClientHelloPayload, CloseMirrorRequestPayload,
-    ControlPlanePayload, ErrorPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
-    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
-    OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope,
-    RawPtyInputPayload, RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
-    TargetExitedPayload, TargetOutputPayload, TargetPublishedPayload,
+    ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
+    CreateSessionRequestPayload, ErrorPayload, MirrorBootstrapChunkPayload,
+    MirrorBootstrapCompletePayload, NodeSessionChannel, NodeSessionEnvelope,
+    OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
+    OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope, RawPtyInputPayload,
+    RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload,
+    TargetOutputPayload, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -397,6 +399,26 @@ fn write_payload(
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
         }
+        ControlPlanePayload::CreateSessionRequest(payload) => {
+            write_u8(writer, 70)?;
+            write_string(writer, &payload.request_id)?;
+            write_string(writer, &payload.authority_node_id)?;
+            write_optional_string(writer, payload.cwd_hint.as_deref())?;
+            write_usize(writer, payload.cols)?;
+            write_usize(writer, payload.rows)?;
+        }
+        ControlPlanePayload::CreateSessionAccepted(payload) => {
+            write_u8(writer, 71)?;
+            write_string(writer, &payload.request_id)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+        }
+        ControlPlanePayload::CreateSessionRejected(payload) => {
+            write_u8(writer, 72)?;
+            write_string(writer, &payload.request_id)?;
+            write_static_string(writer, payload.code)?;
+            write_string(writer, &payload.message)?;
+        }
         ControlPlanePayload::TargetPublished(payload) => {
             write_u8(writer, 9)?;
             write_string(writer, &payload.transport_session_id)?;
@@ -525,6 +547,23 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             resize_authority_console_id: read_string(reader)?,
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
+        }),
+        70 => ControlPlanePayload::CreateSessionRequest(CreateSessionRequestPayload {
+            request_id: read_string(reader)?,
+            authority_node_id: read_string(reader)?,
+            cwd_hint: read_optional_string(reader)?,
+            cols: read_usize(reader)?,
+            rows: read_usize(reader)?,
+        }),
+        71 => ControlPlanePayload::CreateSessionAccepted(CreateSessionAcceptedPayload {
+            request_id: read_string(reader)?,
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+        }),
+        72 => ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+            request_id: read_string(reader)?,
+            code: read_known_static_string(reader)?,
+            message: read_string(reader)?,
         }),
         9 => ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: read_string(reader)?,
@@ -686,6 +725,7 @@ fn read_known_static_string(
         "target_not_opened" => Ok("target_not_opened"),
         "attachment_not_open" => Ok("attachment_not_open"),
         "attachment_closed" => Ok("attachment_closed"),
+        "create_session_failed" => Ok("create_session_failed"),
         "workspace-chrome" => Ok("workspace-chrome"),
         "target-host" => Ok("target-host"),
         other => Err(RemoteTransportCodecError::new(format!(
@@ -846,9 +886,11 @@ mod tests {
         write_node_session_envelope, write_registration_frame, AuthorityTransportFrame,
     };
     use crate::infra::remote_protocol::{
-        BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload, NodeSessionChannel,
-        NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-        RawPtyInputPayload, RawPtyOutputPayload, TargetOutputPayload, TargetPublishedPayload,
+        BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
+        CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
+        NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload,
+        OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+        TargetOutputPayload, TargetPublishedPayload,
     };
 
     #[test]
@@ -960,6 +1002,71 @@ mod tests {
             let decoded = read_authority_transport_frame(&mut bytes.as_slice())
                 .expect("ping/pong should decode");
             assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_create_session_messages() {
+        let request = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-create-session".to_string(),
+            message_type: "create_session_request",
+            timestamp: "2026-06-16T00:00:00Z".to_string(),
+            sender_id: "server".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: None,
+            target_id: None,
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::CreateSessionRequest(CreateSessionRequestPayload {
+                request_id: "req-1".to_string(),
+                authority_node_id: "node-130".to_string(),
+                cwd_hint: Some("/opt/data/workspace/app-insight".to_string()),
+                cols: 120,
+                rows: 40,
+            }),
+        };
+        let accepted = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-create-session-ok".to_string(),
+            message_type: "create_session_accepted",
+            timestamp: "2026-06-16T00:00:00Z".to_string(),
+            sender_id: "node-130".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            target_id: Some("remote-peer:node-130:session-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::CreateSessionAccepted(CreateSessionAcceptedPayload {
+                request_id: "req-1".to_string(),
+                session_id: "session-1".to_string(),
+                target_id: "remote-peer:node-130:session-1".to_string(),
+            }),
+        };
+        let rejected = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-create-session-rejected".to_string(),
+            message_type: "create_session_rejected",
+            timestamp: "2026-06-16T00:00:00Z".to_string(),
+            sender_id: "node-130".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: None,
+            target_id: None,
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+                request_id: "req-1".to_string(),
+                code: "create_session_failed",
+                message: "failed to create target-host session".to_string(),
+            }),
+        };
+
+        for envelope in [request, accepted, rejected] {
+            let mut bytes = Vec::new();
+            write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+            let decoded =
+                read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+            assert_eq!(decoded, envelope);
         }
     }
 

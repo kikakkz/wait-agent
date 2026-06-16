@@ -44,6 +44,10 @@ message NodeSessionEnvelope {
 
     TargetOutput target_output = 60;
     RawPtyOutput raw_pty_output = 61;
+
+    CreateSessionRequest create_session_request = 70;
+    CreateSessionAccepted create_session_accepted = 71;
+    CreateSessionRejected create_session_rejected = 72;
   }
 }
 
@@ -175,6 +179,26 @@ message OpenMirrorRejected {
 message CloseMirrorRequest {
   string target_id = 1;
   string session_id = 2;
+}
+
+message CreateSessionRequest {
+  string request_id = 1;
+  string authority_node_id = 2;
+  optional string cwd_hint = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message CreateSessionAccepted {
+  string request_id = 1;
+  string session_id = 2;
+  string target_id = 3;
+}
+
+message CreateSessionRejected {
+  string request_id = 1;
+  string reason = 2;
+  google.rpc.Status status = 3;
 }
 
 message MirrorBootstrapChunk {

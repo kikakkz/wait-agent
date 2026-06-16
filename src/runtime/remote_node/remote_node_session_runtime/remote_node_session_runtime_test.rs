@@ -121,16 +121,18 @@ mod tests {
         });
 
         match session
-            .recv_authority_command()
+            .recv_authority_event()
             .expect("authority command should arrive")
         {
-            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
-                payload,
+            crate::runtime::remote_node_session_runtime::RemoteNodeAuthorityEvent::Command(
+                crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
+                    payload,
+                ),
             ) => {
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.input_bytes, b"a");
             }
-            other => panic!("unexpected authority command: {other:?}"),
+            other => panic!("unexpected authority event: {other:?}"),
         }
         authority_thread
             .join()
@@ -383,17 +385,19 @@ mod tests {
             ])
             .expect("raw PTY input should route through grpc node session");
         match session
-            .recv_authority_command()
+            .recv_authority_event()
             .expect("authority command should arrive over grpc")
         {
-            crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
-                payload,
+            crate::runtime::remote_node_session_runtime::RemoteNodeAuthorityEvent::Command(
+                crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand::RawPtyInput(
+                    payload,
+                ),
             ) => {
                 assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                 assert_eq!(payload.input_seq, 3);
                 assert_eq!(payload.input_bytes, b"b");
             }
-            other => panic!("unexpected authority command: {other:?}"),
+            other => panic!("unexpected authority event: {other:?}"),
         }
 
         session

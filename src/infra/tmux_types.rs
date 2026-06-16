@@ -264,6 +264,13 @@ pub trait TmuxChromeGateway: TmuxSessionGateway {
         workspace: &TmuxWorkspaceHandle,
         option_name: &str,
     ) -> Result<Option<String>, Self::Error>;
+
+    fn set_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error>;
 }
 
 pub trait TmuxLayoutGateway: TmuxGateway {

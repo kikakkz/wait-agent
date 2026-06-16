@@ -1,7 +1,8 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
+    ApplyPtyResize, CloseMirrorRequest, CreateSessionAccepted, CreateSessionRejected,
+    CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
     TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
@@ -11,7 +12,8 @@ use crate::infra::remote_grpc_transport::{
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
+    BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload, CreateSessionAcceptedPayload,
+    CreateSessionRejectedPayload, CreateSessionRequestPayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyOutputPayload, TargetExitedPayload,
     TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
@@ -459,6 +461,39 @@ pub(crate) fn route_grpc_envelope(
                 }),
             })
         }
+        Some(Body::CreateSessionRequest(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&map_create_session_request_envelope(
+                node_id, &envelope, payload,
+            )?)
+        }
+        Some(Body::CreateSessionAccepted(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&map_create_session_accepted_envelope(
+                node_id, &envelope, payload,
+            )?)
+        }
+        Some(Body::CreateSessionRejected(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&map_create_session_rejected_envelope(
+                node_id, &envelope, payload,
+            )?)
+        }
         Some(Body::OpenMirrorAccepted(payload)) => {
             let session = session.ok_or_else(|| {
                 io::Error::new(
@@ -517,6 +552,81 @@ pub(crate) fn route_grpc_envelope(
         Some(Body::Heartbeat(_)) | Some(Body::ClientHello(_)) => Ok(()),
         _ => Ok(()),
     }
+}
+
+fn map_create_session_request_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &CreateSessionRequest,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    ensure_matching_authority_id(node_id, Some(payload.authority_node_id.as_str()))?;
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "create_session_request",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope),
+        target_id: route_target_id(envelope),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::CreateSessionRequest(CreateSessionRequestPayload {
+            request_id: payload.request_id.clone(),
+            authority_node_id: payload.authority_node_id.clone(),
+            cwd_hint: payload.cwd_hint.clone(),
+            cols: payload.cols as usize,
+            rows: payload.rows as usize,
+        }),
+    })
+}
+
+fn map_create_session_accepted_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &CreateSessionAccepted,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "create_session_accepted",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope).or_else(|| Some(payload.session_id.clone())),
+        target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::CreateSessionAccepted(CreateSessionAcceptedPayload {
+            request_id: payload.request_id.clone(),
+            session_id: payload.session_id.clone(),
+            target_id: payload.target_id.clone(),
+        }),
+    })
+}
+
+fn map_create_session_rejected_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &CreateSessionRejected,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "create_session_rejected",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope),
+        target_id: route_target_id(envelope),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+            request_id: payload.request_id.clone(),
+            code: "create_session_failed",
+            message: payload.reason.clone(),
+        }),
+    })
 }
 
 fn map_target_published_envelope(

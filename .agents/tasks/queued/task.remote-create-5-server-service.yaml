@@ -2,7 +2,7 @@ id: task.remote-create-5-server-service
 kind: task
 version: 1
 title: implement server-side remote session creation service and catalog convergence wait
-status: pending
+status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-host-connect-and-session-creation-design.md

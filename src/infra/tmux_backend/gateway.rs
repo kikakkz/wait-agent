@@ -3,8 +3,8 @@ use crate::domain::session_catalog::{ManagedSessionAddress, ManagedSessionRecord
 use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::tmux_error::{parse_tmux_id, validate_percent};
 use crate::infra::tmux_types::{
-    TmuxChromeGateway, TmuxGateway, TmuxPaneId, TmuxSessionGateway, TmuxSocketName,
-    TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
+    TmuxChromeGateway, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxSessionGateway,
+    TmuxSocketName, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
 };
 
 // Channel helpers — free functions used by the main EmbeddedTmuxBackend impl
@@ -358,5 +358,14 @@ impl TmuxChromeGateway for EmbeddedTmuxBackend {
         option_name: &str,
     ) -> Result<Option<String>, Self::Error> {
         EmbeddedTmuxBackend::show_session_option(self, workspace, option_name)
+    }
+
+    fn set_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), Self::Error> {
+        TmuxLayoutGateway::set_session_option(self, workspace, option_name, value)
     }
 }

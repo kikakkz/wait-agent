@@ -337,7 +337,7 @@ next:
         entrypoints without changing remote behavior yet.
   - id: task.remote-create-2-sidebar-selection-state
     title: persist sidebar selected target in workspace-scoped tmux state
-    status: in_progress
+    status: done
     design_ref:
       file: docs/remote-host-connect-and-session-creation-design.md
       section: 6.2
@@ -347,7 +347,7 @@ next:
         tmux-owned chrome model without introducing sidebar IPC.
   - id: task.remote-create-3-protocol
     title: add create-session messages to the node-session protocol and transport mapping
-    status: pending
+    status: done
     design_ref:
       file: docs/remote-host-connect-and-session-creation-design.md
       section: 9
@@ -357,7 +357,7 @@ next:
         must not reuse mirror-open semantics.
   - id: task.remote-create-4-remote-node-handler
     title: handle remote create-session requests on the PTY-owning node
-    status: pending
+    status: done
     design_ref:
       file: docs/remote-host-connect-and-session-creation-design.md
       section: 9.3, 11
@@ -367,7 +367,7 @@ next:
         target-host session before existing session sync publishes it.
   - id: task.remote-create-5-server-service
     title: implement server-side remote session creation service and catalog convergence wait
-    status: pending
+    status: in_progress
     design_ref:
       file: docs/remote-host-connect-and-session-creation-design.md
       section: 9.4, 10

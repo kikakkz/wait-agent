@@ -12,6 +12,7 @@ use crate::runtime::event_driven_ui_pane_runtime::{
 use std::io;
 
 const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
+const WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION: &str = "@waitagent_sidebar_selected_target";
 
 pub struct EventDrivenTmuxPaneRuntime<G, R = G> {
     gateway: G,
@@ -77,6 +78,7 @@ where
             self.pane_runtime.publish_fullscreen_changed(is_fullscreen),
         );
         merge_render_update(&mut update, self.publish_session_snapshot(command)?);
+        self.sync_sidebar_selected_target_option(command)?;
         Ok(update)
     }
 
@@ -110,13 +112,33 @@ where
         Ok(update)
     }
 
-    pub fn apply_sidebar_input(&mut self, bytes: &[u8]) -> EventDrivenSidebarInputOutcome {
-        self.pane_runtime.apply_sidebar_input_bytes(bytes)
+    pub fn apply_sidebar_input(
+        &mut self,
+        command: &UiPaneCommand,
+        bytes: &[u8],
+    ) -> Result<EventDrivenSidebarInputOutcome, LifecycleError> {
+        let outcome = self.pane_runtime.apply_sidebar_input_bytes(bytes);
+        self.sync_sidebar_selected_target_option(command)?;
+        Ok(outcome)
     }
 
     #[cfg(test)]
     pub fn selected_target(&self) -> Option<String> {
         self.pane_runtime.selected_target()
+    }
+
+    fn sync_sidebar_selected_target_option(
+        &self,
+        command: &UiPaneCommand,
+    ) -> Result<(), LifecycleError> {
+        let selected_target = self.pane_runtime.selected_target().unwrap_or_default();
+        self.gateway
+            .set_session_option(
+                &workspace_handle(command),
+                WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION,
+                &selected_target,
+            )
+            .map_err(tmux_pane_error)
     }
 
     fn publish_session_snapshot(
@@ -194,7 +216,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{EventDrivenTmuxPaneRuntime, WAITAGENT_ACTIVE_TARGET_OPTION};
+    use super::{
+        EventDrivenTmuxPaneRuntime, WAITAGENT_ACTIVE_TARGET_OPTION,
+        WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION,
+    };
     use crate::cli::UiPaneCommand;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
@@ -207,6 +232,7 @@ mod tests {
         TmuxWindowHandle, TmuxWorkspaceHandle,
     };
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone)]
     struct FakeGateway {
@@ -214,6 +240,7 @@ mod tests {
         pane_size: (usize, usize),
         zoomed: bool,
         active_target: Option<String>,
+        session_options: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl TmuxGateway for FakeGateway {
@@ -382,16 +409,25 @@ mod tests {
             assert_eq!(option_name, WAITAGENT_ACTIVE_TARGET_OPTION);
             Ok(self.active_target.clone())
         }
+
+        fn set_session_option(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            option_name: &str,
+            value: &str,
+        ) -> Result<(), Self::Error> {
+            self.session_options
+                .lock()
+                .expect("session options mutex should not be poisoned")
+                .push((option_name.to_string(), value.to_string()));
+            Ok(())
+        }
     }
 
     #[test]
     fn sidebar_refresh_publishes_real_tmux_surface_and_session_snapshot() {
-        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
-            sessions: vec![session("wa-1", "sess-1", "bash")],
-            pane_size: (28, 9),
-            zoomed: false,
-            active_target: None,
-        });
+        let gateway = fake_gateway(vec![session("wa-1", "sess-1", "bash")], None);
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway.clone());
 
         let update = runtime
             .refresh_sidebar_for_pane(&command(), "%11")
@@ -403,16 +439,18 @@ mod tests {
             .map(|buffer| buffer.contains("Sessions"))
             .unwrap_or(false));
         assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-1"));
+        assert_eq!(
+            selected_target_option_values(&gateway),
+            vec!["wa-1:sess-1".to_string()]
+        );
     }
 
     #[test]
     fn footer_refresh_publishes_fullscreen_state_from_tmux() {
-        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
-            sessions: vec![session("wa-1", "sess-1", "bash")],
-            pane_size: (96, 1),
-            zoomed: true,
-            active_target: None,
-        });
+        let mut gateway = fake_gateway(vec![session("wa-1", "sess-1", "bash")], None);
+        gateway.pane_size = (96, 1);
+        gateway.zoomed = true;
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway);
 
         let update = runtime
             .refresh_footer_for_pane(&command(), "%12")
@@ -436,20 +474,21 @@ mod tests {
 
     #[test]
     fn sidebar_input_acts_on_state_loaded_from_tmux_refresh() {
-        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
-            sessions: vec![
+        let gateway = fake_gateway(
+            vec![
                 session_with_role("wa-1", "sess-1", "bash", WorkspaceSessionRole::TargetHost),
                 session_with_role("wa-1", "sess-2", "codex", WorkspaceSessionRole::TargetHost),
             ],
-            pane_size: (28, 9),
-            zoomed: false,
-            active_target: Some("wa-1:sess-1".to_string()),
-        });
+            Some("wa-1:sess-1".to_string()),
+        );
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway.clone());
         runtime
             .refresh_sidebar_for_pane(&command(), "%11")
             .expect("sidebar refresh should succeed");
 
-        let outcome = runtime.apply_sidebar_input(b"\x1b[B\r");
+        let outcome = runtime
+            .apply_sidebar_input(&command(), b"\x1b[B\r")
+            .expect("sidebar input should apply");
 
         assert!(outcome
             .render
@@ -458,12 +497,16 @@ mod tests {
             .map(|buffer| buffer.contains("> codex@local"))
             .unwrap_or(false));
         assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:sess-2"));
+        assert_eq!(
+            selected_target_option_values(&gateway),
+            vec!["wa-1:sess-1".to_string(), "wa-1:sess-2".to_string()]
+        );
     }
 
     #[test]
     fn snapshot_keeps_target_hosts_visible_until_target_is_activated() {
-        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
-            sessions: vec![
+        let gateway = fake_gateway(
+            vec![
                 session_with_role(
                     "wa-1",
                     "workspace",
@@ -472,10 +515,9 @@ mod tests {
                 ),
                 session_with_role("wa-1", "target-a", "bash", WorkspaceSessionRole::TargetHost),
             ],
-            pane_size: (28, 9),
-            zoomed: false,
-            active_target: None,
-        });
+            None,
+        );
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway.clone());
 
         let update = runtime
             .refresh_sidebar_for_pane(
@@ -491,12 +533,16 @@ mod tests {
         assert!(buffer.contains("> bash@local"));
         assert!(!buffer.contains("codex@local"));
         assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:target-a"));
+        assert_eq!(
+            selected_target_option_values(&gateway),
+            vec!["wa-1:target-a".to_string()]
+        );
     }
 
     #[test]
     fn snapshot_prefers_target_hosts_once_target_is_activated() {
-        let mut runtime = EventDrivenTmuxPaneRuntime::new(FakeGateway {
-            sessions: vec![
+        let gateway = fake_gateway(
+            vec![
                 session_with_role(
                     "wa-1",
                     "workspace",
@@ -511,10 +557,9 @@ mod tests {
                 ),
                 session_with_role("wa-1", "target-b", "bash", WorkspaceSessionRole::TargetHost),
             ],
-            pane_size: (28, 9),
-            zoomed: false,
-            active_target: Some("wa-1:target-b".to_string()),
-        });
+            Some("wa-1:target-b".to_string()),
+        );
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway.clone());
 
         let update = runtime
             .refresh_sidebar_for_pane(
@@ -530,6 +575,47 @@ mod tests {
         assert!(!buffer.contains("workspace@local"));
         assert!(buffer.contains("> bash@local"));
         assert_eq!(runtime.selected_target().as_deref(), Some("wa-1:target-b"));
+        assert_eq!(
+            selected_target_option_values(&gateway),
+            vec!["wa-1:target-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn sidebar_refresh_clears_selected_target_option_when_no_target_is_visible() {
+        let gateway = fake_gateway(Vec::new(), None);
+        let mut runtime = EventDrivenTmuxPaneRuntime::new(gateway.clone());
+
+        runtime
+            .refresh_sidebar_for_pane(&command(), "%11")
+            .expect("sidebar refresh should succeed");
+
+        assert_eq!(runtime.selected_target(), None);
+        assert_eq!(selected_target_option_values(&gateway), vec![String::new()]);
+    }
+
+    fn fake_gateway(
+        sessions: Vec<ManagedSessionRecord>,
+        active_target: Option<String>,
+    ) -> FakeGateway {
+        FakeGateway {
+            sessions,
+            pane_size: (28, 9),
+            zoomed: false,
+            active_target,
+            session_options: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn selected_target_option_values(gateway: &FakeGateway) -> Vec<String> {
+        gateway
+            .session_options
+            .lock()
+            .expect("session options mutex should not be poisoned")
+            .iter()
+            .filter(|(name, _)| name == WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION)
+            .map(|(_, value)| value.clone())
+            .collect()
     }
 
     fn command() -> UiPaneCommand {

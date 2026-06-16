@@ -2,7 +2,7 @@ id: task.remote-create-4-remote-node-handler
 kind: task
 version: 1
 title: handle remote create-session requests on the PTY-owning node
-status: pending
+status: done
 priority: high
 design_ref:
   doc: docs/remote-host-connect-and-session-creation-design.md

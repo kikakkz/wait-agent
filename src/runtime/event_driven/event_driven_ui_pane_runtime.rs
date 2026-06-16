@@ -143,7 +143,6 @@ impl EventDrivenUiPaneRuntime {
         outcome
     }
 
-    #[cfg(test)]
     pub fn selected_target(&self) -> Option<String> {
         self.state.selected_target()
     }

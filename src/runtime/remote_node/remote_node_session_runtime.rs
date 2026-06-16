@@ -3,7 +3,8 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
+    ApplyPtyResize, CloseMirrorRequest, CreateSessionAccepted, CreateSessionRejected,
+    CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, RawPtyInput, RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited,
     TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
@@ -14,6 +15,7 @@ use crate::infra::remote_grpc_transport::{
 };
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
+    CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
     NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
     ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload,
     TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
@@ -73,10 +75,27 @@ struct GrpcRemoteNodeSessionTransport {
 
 pub(crate) enum GrpcAuthorityEvent {
     Command(RemoteAuthorityCommand),
+    CreateSessionRequest {
+        payload: CreateSessionRequestPayload,
+        correlation_id: Option<String>,
+    },
+    CreateSessionAccepted(CreateSessionAcceptedPayload),
+    CreateSessionRejected(CreateSessionRejectedPayload),
     MirrorAccepted,
     MirrorRejected(OpenMirrorRejectedPayload),
     Failed(String),
     Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteNodeAuthorityEvent {
+    Command(RemoteAuthorityCommand),
+    CreateSessionRequest {
+        payload: CreateSessionRequestPayload,
+        correlation_id: Option<String>,
+    },
+    CreateSessionAccepted(CreateSessionAcceptedPayload),
+    CreateSessionRejected(CreateSessionRejectedPayload),
 }
 
 pub struct RemoteNodeSessionListenerGuard {
@@ -111,9 +130,11 @@ impl RemoteNodeSessionRuntime {
         })
     }
 
-    pub fn recv_authority_command(&self) -> Result<RemoteAuthorityCommand, RemoteNodeSessionError> {
+    pub(crate) fn recv_authority_event(
+        &self,
+    ) -> Result<RemoteNodeAuthorityEvent, RemoteNodeSessionError> {
         match &self.transport {
-            RemoteNodeSessionTransport::Local(transport) => recv_local_authority_command(transport),
+            RemoteNodeSessionTransport::Local(transport) => recv_local_authority_event(transport),
             RemoteNodeSessionTransport::Grpc(transport) => {
                 let event = transport
                     .authority_rx
@@ -126,9 +147,24 @@ impl RemoteNodeSessionRuntime {
                         )
                     })?;
                 match event {
-                    GrpcAuthorityEvent::Command(command) => Ok(command),
+                    GrpcAuthorityEvent::Command(command) => {
+                        Ok(RemoteNodeAuthorityEvent::Command(command))
+                    }
+                    GrpcAuthorityEvent::CreateSessionRequest {
+                        payload,
+                        correlation_id,
+                    } => Ok(RemoteNodeAuthorityEvent::CreateSessionRequest {
+                        payload,
+                        correlation_id,
+                    }),
+                    GrpcAuthorityEvent::CreateSessionAccepted(payload) => {
+                        Ok(RemoteNodeAuthorityEvent::CreateSessionAccepted(payload))
+                    }
+                    GrpcAuthorityEvent::CreateSessionRejected(payload) => {
+                        Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(payload))
+                    }
                     GrpcAuthorityEvent::MirrorAccepted => Err(RemoteNodeSessionError::new(
-                        "unexpected grpc mirror acceptance while waiting for authority command",
+                        "unexpected grpc mirror acceptance while waiting for authority event",
                     )),
                     GrpcAuthorityEvent::MirrorRejected(payload) => {
                         Err(RemoteNodeSessionError::new(format!(
@@ -290,6 +326,48 @@ impl RemoteNodeSessionRuntime {
         )
     }
 
+    pub(crate) fn send_create_session_accepted(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        target_id: &str,
+        correlation_id: Option<&str>,
+    ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload_with_correlation(
+            NodeSessionChannel::Authority,
+            Some(session_id),
+            Some(target_id),
+            "authority-msg",
+            correlation_id,
+            ControlPlanePayload::CreateSessionAccepted(CreateSessionAcceptedPayload {
+                request_id: request_id.to_string(),
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+            }),
+        )
+    }
+
+    pub(crate) fn send_create_session_rejected(
+        &self,
+        request_id: &str,
+        code: &'static str,
+        message: impl Into<String>,
+        correlation_id: Option<&str>,
+    ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload_with_correlation(
+            NodeSessionChannel::Authority,
+            None,
+            None,
+            "authority-msg",
+            correlation_id,
+            ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+                request_id: request_id.to_string(),
+                code,
+                message: message.into(),
+            }),
+        )
+    }
+
     pub(crate) fn send_publication_sender_command(
         &self,
         command: &PublicationSenderCommand,
@@ -392,6 +470,25 @@ impl RemoteNodeSessionRuntime {
         message_scope: &str,
         payload: ControlPlanePayload,
     ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload_with_correlation(
+            channel,
+            Some(session_id),
+            Some(target_id),
+            message_scope,
+            None,
+            payload,
+        )
+    }
+
+    fn send_payload_with_correlation(
+        &self,
+        channel: NodeSessionChannel,
+        session_id: Option<&str>,
+        target_id: Option<&str>,
+        message_scope: &str,
+        correlation_id: Option<&str>,
+        payload: ControlPlanePayload,
+    ) -> Result<(), RemoteNodeSessionError> {
         let envelope = ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
             message_id: format!(
@@ -403,9 +500,9 @@ impl RemoteNodeSessionRuntime {
             message_type: payload.message_type(),
             timestamp: now_rfc3339_like(),
             sender_id: self.node_id.clone(),
-            correlation_id: None,
-            session_id: Some(session_id.to_string()),
-            target_id: Some(target_id.to_string()),
+            correlation_id: correlation_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            target_id: target_id.map(str::to_string),
             attachment_id: None,
             console_id: None,
             payload,
@@ -518,9 +615,9 @@ fn connect_grpc_node_session(
     })
 }
 
-fn recv_local_authority_command(
+fn recv_local_authority_event(
     transport: &LocalRemoteNodeSessionTransport,
-) -> Result<RemoteAuthorityCommand, RemoteNodeSessionError> {
+) -> Result<RemoteNodeAuthorityEvent, RemoteNodeSessionError> {
     let mut reader = transport
         .reader
         .lock()
@@ -533,17 +630,29 @@ fn recv_local_authority_command(
         )));
     }
     match session_envelope.envelope.payload {
-        ControlPlanePayload::OpenMirrorRequest(payload) => {
-            Ok(RemoteAuthorityCommand::OpenMirror(payload))
+        ControlPlanePayload::OpenMirrorRequest(payload) => Ok(RemoteNodeAuthorityEvent::Command(
+            RemoteAuthorityCommand::OpenMirror(payload),
+        )),
+        ControlPlanePayload::CloseMirrorRequest(payload) => Ok(RemoteNodeAuthorityEvent::Command(
+            RemoteAuthorityCommand::CloseMirror(payload),
+        )),
+        ControlPlanePayload::RawPtyInput(payload) => Ok(RemoteNodeAuthorityEvent::Command(
+            RemoteAuthorityCommand::RawPtyInput(payload),
+        )),
+        ControlPlanePayload::ApplyResize(payload) => Ok(RemoteNodeAuthorityEvent::Command(
+            RemoteAuthorityCommand::ApplyResize(payload),
+        )),
+        ControlPlanePayload::CreateSessionRequest(payload) => {
+            Ok(RemoteNodeAuthorityEvent::CreateSessionRequest {
+                payload,
+                correlation_id: session_envelope.envelope.correlation_id,
+            })
         }
-        ControlPlanePayload::CloseMirrorRequest(payload) => {
-            Ok(RemoteAuthorityCommand::CloseMirror(payload))
+        ControlPlanePayload::CreateSessionAccepted(payload) => {
+            Ok(RemoteNodeAuthorityEvent::CreateSessionAccepted(payload))
         }
-        ControlPlanePayload::RawPtyInput(payload) => {
-            Ok(RemoteAuthorityCommand::RawPtyInput(payload))
-        }
-        ControlPlanePayload::ApplyResize(payload) => {
-            Ok(RemoteAuthorityCommand::ApplyResize(payload))
+        ControlPlanePayload::CreateSessionRejected(payload) => {
+            Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(payload))
         }
         other => Err(RemoteNodeSessionError::new(format!(
             "unexpected authority command `{}`",
@@ -615,6 +724,32 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 target_id: payload.target_id,
             }),
         )),
+        Some(GrpcBody::CreateSessionRequest(payload)) => {
+            Some(GrpcAuthorityEvent::CreateSessionRequest {
+                payload: CreateSessionRequestPayload {
+                    request_id: payload.request_id,
+                    authority_node_id: payload.authority_node_id,
+                    cwd_hint: payload.cwd_hint,
+                    cols: payload.cols as usize,
+                    rows: payload.rows as usize,
+                },
+                correlation_id: envelope.correlation_id,
+            })
+        }
+        Some(GrpcBody::CreateSessionAccepted(payload)) => Some(
+            GrpcAuthorityEvent::CreateSessionAccepted(CreateSessionAcceptedPayload {
+                request_id: payload.request_id,
+                session_id: payload.session_id,
+                target_id: payload.target_id,
+            }),
+        ),
+        Some(GrpcBody::CreateSessionRejected(payload)) => Some(
+            GrpcAuthorityEvent::CreateSessionRejected(CreateSessionRejectedPayload {
+                request_id: payload.request_id,
+                code: "create_session_failed",
+                message: payload.reason,
+            }),
+        ),
         Some(GrpcBody::OpenMirrorAccepted(payload)) => {
             let _availability = known_grpc_availability(&payload.availability)?;
             let _session_id =
@@ -657,7 +792,12 @@ pub(crate) fn map_outbound_grpc_envelope(
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<GrpcNodeSessionEnvelope, RemoteNodeSessionError> {
     let route = Some(RouteContext {
-        authority_node_id: Some(node_id.to_string()),
+        authority_node_id: match &envelope.payload {
+            ControlPlanePayload::CreateSessionRequest(payload) => {
+                Some(payload.authority_node_id.clone())
+            }
+            _ => Some(node_id.to_string()),
+        },
         target_id: envelope.target_id.clone(),
         attachment_id: envelope.attachment_id.clone(),
         console_id: envelope.console_id.clone(),
@@ -724,6 +864,29 @@ pub(crate) fn map_outbound_grpc_envelope(
             Some(GrpcBody::CloseMirrorRequest(CloseMirrorRequest {
                 target_id: payload.target_id.clone(),
                 session_id: payload.session_id.clone(),
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::CreateSessionRequest(payload)) => {
+            Some(GrpcBody::CreateSessionRequest(CreateSessionRequest {
+                request_id: payload.request_id.clone(),
+                authority_node_id: payload.authority_node_id.clone(),
+                cwd_hint: payload.cwd_hint.clone(),
+                cols: payload.cols as u32,
+                rows: payload.rows as u32,
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::CreateSessionAccepted(payload)) => {
+            Some(GrpcBody::CreateSessionAccepted(CreateSessionAccepted {
+                request_id: payload.request_id.clone(),
+                session_id: payload.session_id.clone(),
+                target_id: payload.target_id.clone(),
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::CreateSessionRejected(payload)) => {
+            Some(GrpcBody::CreateSessionRejected(CreateSessionRejected {
+                request_id: payload.request_id.clone(),
+                reason: payload.message.clone(),
+                status: None,
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::OpenMirrorAccepted(payload)) => {
