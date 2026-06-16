@@ -1,0 +1,34 @@
+id: task.remote-create-3-protocol
+kind: task
+version: 1
+title: add create-session messages to the node-session protocol and transport mapping
+status: pending
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-1-ui-keys.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - CreateSessionRequest/Accepted/Rejected are represented in proto, domain payloads, local loopback, and gRPC mappings.
+verification:
+  - cargo test remote_node_session_runtime -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - proto/waitagent/remote/v1/node_session.proto
+  - src/infra/remote_protocol.rs
+  - src/runtime/remote_node/remote_node_session_runtime.rs
+  - src/infra/remote_grpc_transport.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

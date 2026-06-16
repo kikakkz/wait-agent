@@ -165,6 +165,14 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_new_target(command)
                 .map_err(AppError::from),
+            Command::NewSelectedRemoteSession(command) => self
+                .workspace_runtime
+                .run_new_selected_remote_session(command)
+                .map_err(AppError::from),
+            Command::ConnectRemoteHost(command) => self
+                .workspace_runtime
+                .run_connect_remote_host(command)
+                .map_err(AppError::from),
             Command::MainPaneDied(command) => self
                 .workspace_runtime
                 .run_main_pane_died(command)

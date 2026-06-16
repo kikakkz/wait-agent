@@ -421,7 +421,9 @@ mod tests {
         assert!(update
             .footer
             .as_ref()
-            .map(|buffer| buffer.contains("Ctrl-N") && buffer.contains("Ctrl-M"))
+            .map(|buffer| buffer.contains("Ctrl-N")
+                && buffer.contains("Ctrl-W")
+                && buffer.contains("Ctrl-S"))
             .unwrap_or(false));
         assert!(update
             .fullscreen_status

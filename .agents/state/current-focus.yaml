@@ -1,14 +1,13 @@
 kind: state
 version: 1
-current_task: null
+current_task: task.remote-create-2-sidebar-selection-state
 focus_statement: >
-  Transport stability batch complete. All 5 layers implemented and tested:
-  layer 4 (read timeout 120s→15s + Ping/Pong liveness), layer 1 (output
-  channel try_send→blocking send + 8K buffer + 1K frame ring buffer), layer 2
-  (input FIFO blocking + 256KB buffer), layer 5 (reconnect backoff 1s→30s +
-  indefinite retry + jitter), layer 3 (output seq gap detection + SyncRequest/
-  SyncResponse frame types). Next deferred tasks: feature-agent-status-recognition,
-  ux-3 (workspace snapshot persistence), bug-fullscreen-scrollback-truncated.
+  task.remote-create-1-ui-keys is complete: Ctrl-N remains local-only, Prefix-c
+  remains a hidden local alias outside primary UI copy, and Ctrl-W/Ctrl-S hidden
+  entrypoints plus bindings are present with explicit first-slice placeholders.
+  Current focus is task.remote-create-2-sidebar-selection-state: persist the
+  sidebar selected target in workspace-scoped tmux state for later Ctrl-S remote
+  endpoint resolution.
 last_updated_from:
   file: .agents/tasks/backlog.yaml
-  reference: next
+  reference: task.remote-create-2-sidebar-selection-state

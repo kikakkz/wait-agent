@@ -167,7 +167,15 @@ fn push_styled_footer_word(output: &mut String, word: &str) {
 fn is_footer_key(word: &str) -> bool {
     matches!(
         word,
-        "Ctrl-N" | "Ctrl-O" | "Ctrl-E" | "Ctrl-M" | "PgUp/PgDn" | "Up/Down" | "q"
+        "Ctrl-N"
+            | "Ctrl-W"
+            | "Ctrl-S"
+            | "Ctrl-O"
+            | "Ctrl-E"
+            | "Ctrl-M"
+            | "PgUp/PgDn"
+            | "Up/Down"
+            | "q"
     )
 }
 

@@ -1,0 +1,32 @@
+id: task.remote-create-7-history
+kind: task
+version: 1
+title: add user-level remote host connection history without persisting secrets
+status: pending
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-1-ui-keys.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Remote host profiles are stored under ~/.config/waitagent/remote-hosts.toml without plaintext SSH or sudo passwords.
+verification:
+  - cargo test remote_host_history -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - src/runtime/remote_host
+  - src/cli.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

@@ -1,0 +1,35 @@
+id: task.remote-create-8-ctrl-w-bootstrap
+kind: task
+version: 1
+title: implement Ctrl-W remote host bootstrap, install/start, endpoint reuse, and remote session creation
+status: pending
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-5-server-service.done
+  - task.remote-create-7-history.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Ctrl-W selects or creates a profile, bootstraps remote WaitAgent with install script if needed, starts it with --port <free> --connect <local-server>, reuses existing endpoint when connected, and creates/activates a remote session.
+verification:
+  - cargo test remote_host -- --test-threads=1
+  - cargo build
+  - manual: Ctrl-W against 10.1.29.130 with saved profile
+
+touched_paths:
+  - src/runtime/remote_host
+  - src/application/control_service.rs
+  - src/runtime/workspace/workspace_command_runtime.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

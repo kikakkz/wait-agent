@@ -5,8 +5,9 @@ use crate::application::target_registry_service::{
 use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
-    ActivateTargetCommand, AttachCommand, DetachCommand, LocalTargetExitedCommand,
-    LocalTargetHostCommand, MainPaneDiedCommand, NewTargetCommand, RemoteNetworkConfig,
+    ActivateTargetCommand, AttachCommand, ConnectRemoteHostCommand, DetachCommand,
+    LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
+    NewSelectedRemoteSessionCommand, NewTargetCommand, RemoteNetworkConfig,
     RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
     ToggleFullscreenCommand,
 };
@@ -182,6 +183,36 @@ impl WorkspaceCommandRuntime {
 
     pub fn run_new_target(&self, command: NewTargetCommand) -> Result<(), LifecycleError> {
         self.main_slot_runtime.run_new_target(command)
+    }
+
+    pub fn run_new_selected_remote_session(
+        &self,
+        _command: NewSelectedRemoteSessionCommand,
+    ) -> Result<(), LifecycleError> {
+        Err(LifecycleError::Protocol(
+            "Ctrl-S remote session creation is not implemented in this slice".to_string(),
+        ))
+    }
+
+    pub fn run_connect_remote_host(
+        &self,
+        command: ConnectRemoteHostCommand,
+    ) -> Result<(), LifecycleError> {
+        let requested_target = command
+            .profile
+            .as_deref()
+            .or(command.host.as_deref())
+            .unwrap_or("unspecified remote host");
+        let _future_bootstrap_inputs = (
+            command.ssh_user.as_deref(),
+            command.auth.as_deref(),
+            command.key_path.as_deref(),
+            command.remote_port.as_deref(),
+            command.save_profile.as_deref(),
+        );
+        Err(LifecycleError::Protocol(format!(
+            "Ctrl-W remote host connect for `{requested_target}` is not implemented in this slice"
+        )))
     }
 
     pub fn run_local_target_host(

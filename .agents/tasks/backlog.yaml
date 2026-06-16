@@ -256,7 +256,7 @@ next:
     status: cancelled
   - id: task.feature-agent-status-recognition
     title: improve session state recognition accuracy in catalog and sidebar with agent plugin
-    status: deferred
+    status: done
   - id: task.ux-3
     title: implement workspace snapshot persistence and auto-load on startup
     status: deferred
@@ -300,7 +300,7 @@ next:
     title: >
       全屏后 scrollback 可看到历史，但未全屏时被换行的行全屏后依然保持折行，
       需要修复全屏后的行重排
-    status: pending
+    status: cancelled
   - id: task.bug-sidebar-lag-4-remote-sessions
     title: >
       连接 4 个 remote session（每个都在跑 claude/codex）时，sidebar item 切换卡顿。
@@ -314,9 +314,99 @@ next:
     status: wontfix
   - id: task.feature-remote-session-creation-from-sidebar
     title: >
-      sidebar focus 在 remote session client 时，允许在选中的 client 上创建新的 remote
-      session。当前只能在 local bash 上创建，remote client 可访问但无法在其上新建 session。
+      original umbrella for remote session creation from sidebar, superseded by
+      explicit local/remote/connect workflow slices
+    status: superseded
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      status: accepted
+      reason: >
+        The accepted design splits this umbrella into bounded Ctrl-N, Ctrl-W,
+        and Ctrl-S implementation slices with explicit runtime and protocol
+        ownership.
+  - id: task.remote-create-1-ui-keys
+    title: keep local new-session semantics and add explicit remote creation keys
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3, 5, 6, 14
+      status: accepted
+      reason: >
+        First implementation slice locks Ctrl-N local-only behavior, hides
+        Prefix-c from primary UI copy, and adds explicit Ctrl-W/Ctrl-S command
+        entrypoints without changing remote behavior yet.
+  - id: task.remote-create-2-sidebar-selection-state
+    title: persist sidebar selected target in workspace-scoped tmux state
+    status: in_progress
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 6.2
+      status: accepted
+      reason: >
+        Ctrl-S needs a stable selected-target pointer that follows the existing
+        tmux-owned chrome model without introducing sidebar IPC.
+  - id: task.remote-create-3-protocol
+    title: add create-session messages to the node-session protocol and transport mapping
     status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9
+      status: accepted
+      reason: >
+        Remote session creation must be a first-class node-session message and
+        must not reuse mirror-open semantics.
+  - id: task.remote-create-4-remote-node-handler
+    title: handle remote create-session requests on the PTY-owning node
+    status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9.3, 11
+      status: accepted
+      reason: >
+        The remote node owns the resulting PTY and must create a normal local
+        target-host session before existing session sync publishes it.
+  - id: task.remote-create-5-server-service
+    title: implement server-side remote session creation service and catalog convergence wait
+    status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 9.4, 10
+      status: accepted
+      reason: >
+        The server must send create-session requests through the remote owner,
+        wait for acceptance and session-sync catalog publication, then activate
+        the synced target without fabricating catalog rows.
+  - id: task.remote-create-6-ctrl-s
+    title: wire Ctrl-S to create a session on the selected connected remote endpoint
+    status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 5.2, 10.2, 12
+      status: accepted
+      reason: >
+        Ctrl-S is the explicit command for selected remote endpoint creation and
+        must fail clearly for local, missing, offline, or exited selections.
+  - id: task.remote-create-7-history
+    title: add user-level remote host connection history without persisting secrets
+    status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 7
+      status: accepted
+      reason: >
+        Ctrl-W needs reusable host profiles while preserving the rule that SSH
+        and sudo passwords are runtime-only and never stored.
+  - id: task.remote-create-8-ctrl-w-bootstrap
+    title: implement Ctrl-W remote host bootstrap, install/start, endpoint reuse, and remote session creation
+    status: pending
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 5.3, 6.3, 8, 15
+      status: accepted
+      reason: >
+        Ctrl-W owns SSH bootstrap, install/update through the install script,
+        remote WaitAgent startup with --connect back to the local server,
+        endpoint reuse, and creating the first remote session.
   - id: task.transport-stability-l4
     title: shorten authority transport read timeout and add ping/pong liveness
     status: done

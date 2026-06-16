@@ -620,6 +620,16 @@ impl WorkspaceLayoutRuntime {
             workspace,
             &self.network,
         );
+        let connect_remote_host_shell_command = connect_remote_host_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &self.network,
+        );
+        let create_remote_session_shell_command = create_remote_session_shell_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &self.network,
+        );
         let shell_command = footer_menu_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
@@ -631,6 +641,14 @@ impl WorkspaceLayoutRuntime {
             create_session_command: format!(
                 "run-shell -b {}",
                 tmux_quote_argument(&create_target_shell_command)
+            ),
+            connect_remote_host_command: format!(
+                "run-shell -b {}",
+                tmux_quote_argument(&connect_remote_host_shell_command)
+            ),
+            create_remote_session_command: format!(
+                "run-shell -b {}",
+                tmux_quote_argument(&create_remote_session_shell_command)
             ),
             open_sessions_menu_command: format!(
                 "run-shell -b {}",
@@ -775,6 +793,42 @@ fn new_target_shell_command(
         executable,
         vec![
             "__new-target".to_string(),
+            "--current-socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--current-session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    )
+}
+
+fn connect_remote_host_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
+) -> String {
+    shell_command_with_network(
+        executable,
+        vec![
+            "__connect-remote-host".to_string(),
+            "--current-socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--current-session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    )
+}
+
+fn create_remote_session_shell_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
+) -> String {
+    shell_command_with_network(
+        executable,
+        vec![
+            "__new-selected-remote-session".to_string(),
             "--current-socket-name".to_string(),
             workspace.socket_name.as_str().to_string(),
             "--current-session-name".to_string(),
@@ -951,6 +1005,7 @@ fn should_refresh_workspace_chrome(
 #[cfg(test)]
 mod tests {
     use super::{
+        connect_remote_host_shell_command, create_remote_session_shell_command,
         footer_menu_shell_command, fullscreen_toggle_tmux_command,
         layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
         main_pane_output_bridge_shell_command, should_refresh_workspace_chrome,
@@ -1003,6 +1058,26 @@ mod tests {
         assert!(command.contains("'--connect-endpoint'"));
         assert!(command.contains("'10.0.0.5:7474'"));
         assert!(command.contains("'--listener-display'"));
+    }
+
+    #[test]
+    fn remote_creation_shell_commands_target_current_workspace() {
+        let workspace = workspace();
+        let network = RemoteNetworkConfig {
+            port: 9001,
+            connect: Some("10.0.0.8:7474".to_string()),
+        };
+
+        let connect = connect_remote_host_shell_command("/tmp/wait agent", &workspace, &network);
+        let remote_new =
+            create_remote_session_shell_command("/tmp/wait agent", &workspace, &network);
+
+        assert!(connect.contains("'__connect-remote-host'"));
+        assert!(connect.contains("'--current-socket-name' 'wa-1'"));
+        assert!(connect.contains("'--connect' '10.0.0.8:7474'"));
+        assert!(remote_new.contains("'__new-selected-remote-session'"));
+        assert!(remote_new.contains("'--current-session-name' 'session-1'"));
+        assert!(remote_new.contains("'--port' '9001'"));
     }
 
     #[test]

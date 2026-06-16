@@ -1,0 +1,34 @@
+id: task.remote-create-2-sidebar-selection-state
+kind: task
+version: 1
+title: persist sidebar selected target in workspace-scoped tmux state
+status: in_progress
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-1-ui-keys.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Sidebar selection updates a tmux session option and clears it when invalid; no remote state is persisted outside the live catalog.
+verification:
+  - cargo test event_driven_ui_pane_runtime -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - src/runtime/event_driven/event_driven_ui_pane_runtime.rs
+  - src/runtime/event_driven/event_driven_pane_runtime.rs
+  - src/infra/tmux_backend.rs
+  - src/infra/tmux_types.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

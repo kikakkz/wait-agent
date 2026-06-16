@@ -1,8 +1,15 @@
-id: null
+id: task.remote-create-2-sidebar-selection-state
 kind: task
 version: 1
-title: (no active task — transport stability batch complete)
-status: done
+title: persist sidebar selected target in workspace-scoped tmux state
+status: in_progress
+design_ref:
+  file: docs/remote-host-connect-and-session-creation-design.md
+  section: 6.2
+  status: accepted
+  reason: >
+    Ctrl-S needs a stable selected-target pointer that follows the existing
+    tmux-owned chrome model without introducing sidebar IPC.
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next

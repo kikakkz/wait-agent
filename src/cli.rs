@@ -131,6 +131,8 @@ pub enum Command {
     RemoteTargetReconcilePublications(RemoteTargetReconcilePublicationsCommand),
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
+    NewSelectedRemoteSession(NewSelectedRemoteSessionCommand),
+    ConnectRemoteHost(ConnectRemoteHostCommand),
     MainPaneDied(MainPaneDiedCommand),
     RemoteTargetExited(RemoteTargetExitedCommand),
     FooterMenu(FooterMenuCommand),
@@ -322,6 +324,25 @@ pub struct NewTargetCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct NewSelectedRemoteSessionCommand {
+    pub current_socket_name: String,
+    pub current_session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConnectRemoteHostCommand {
+    pub current_socket_name: String,
+    pub current_session_name: String,
+    pub profile: Option<String>,
+    pub host: Option<String>,
+    pub ssh_user: Option<String>,
+    pub auth: Option<String>,
+    pub key_path: Option<String>,
+    pub remote_port: Option<String>,
+    pub save_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct MainPaneDiedCommand {
     pub socket_name: String,
     pub session_name: String,
@@ -472,6 +493,14 @@ impl Cli {
             "__new-target" => {
                 args.remove(0);
                 Command::NewTarget(parse_new_target(args)?)
+            }
+            "__new-selected-remote-session" => {
+                args.remove(0);
+                Command::NewSelectedRemoteSession(parse_new_selected_remote_session(args)?)
+            }
+            "__connect-remote-host" => {
+                args.remove(0);
+                Command::ConnectRemoteHost(parse_connect_remote_host(args)?)
             }
             "__main-pane-died" => {
                 args.remove(0);
@@ -1221,6 +1250,63 @@ fn parse_new_target(args: Vec<String>) -> Result<NewTargetCommand, CliError> {
     })
 }
 
+fn parse_new_selected_remote_session(
+    args: Vec<String>,
+) -> Result<NewSelectedRemoteSessionCommand, CliError> {
+    let new_target = parse_new_target(args)?;
+    Ok(NewSelectedRemoteSessionCommand {
+        current_socket_name: new_target.current_socket_name,
+        current_session_name: new_target.current_session_name,
+    })
+}
+
+fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut current_socket_name = None;
+    let mut current_session_name = None;
+    let mut profile = None;
+    let mut host = None;
+    let mut ssh_user = None;
+    let mut auth = None;
+    let mut key_path = None;
+    let mut remote_port = None;
+    let mut save_profile = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--current-socket-name" => {
+                current_socket_name = Some(expect_value("--current-socket-name", &mut iter)?)
+            }
+            "--current-session-name" => {
+                current_session_name = Some(expect_value("--current-session-name", &mut iter)?)
+            }
+            "--profile" => profile = Some(expect_value("--profile", &mut iter)?),
+            "--host" => host = Some(expect_value("--host", &mut iter)?),
+            "--ssh-user" => ssh_user = Some(expect_value("--ssh-user", &mut iter)?),
+            "--auth" => auth = Some(expect_value("--auth", &mut iter)?),
+            "--key-path" => key_path = Some(expect_value("--key-path", &mut iter)?),
+            "--remote-port" => remote_port = Some(expect_value("--remote-port", &mut iter)?),
+            "--save-profile" => save_profile = Some(expect_value("--save-profile", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ConnectRemoteHostCommand {
+        current_socket_name: current_socket_name
+            .ok_or_else(|| CliError::MissingValue("--current-socket-name".to_string()))?,
+        current_session_name: current_session_name
+            .ok_or_else(|| CliError::MissingValue("--current-session-name".to_string()))?,
+        profile,
+        host,
+        ssh_user,
+        auth,
+        key_path,
+        remote_port,
+        save_profile,
+    })
+}
+
 fn parse_main_pane_died(args: Vec<String>) -> Result<MainPaneDiedCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
@@ -1538,6 +1624,86 @@ mod tests {
             Command::UiSidebar(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_new_selected_remote_session_command() {
+        match parse(&[
+            "waitagent",
+            "__new-selected-remote-session",
+            "--current-socket-name",
+            "wa-1",
+            "--current-session-name",
+            "waitagent-1",
+        ])
+        .command
+        {
+            Command::NewSelectedRemoteSession(command) => {
+                assert_eq!(command.current_socket_name, "wa-1");
+                assert_eq!(command.current_session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_connect_remote_host_command_with_profile() {
+        match parse(&[
+            "waitagent",
+            "__connect-remote-host",
+            "--current-socket-name",
+            "wa-1",
+            "--current-session-name",
+            "waitagent-1",
+            "--profile",
+            "130",
+        ])
+        .command
+        {
+            Command::ConnectRemoteHost(command) => {
+                assert_eq!(command.current_socket_name, "wa-1");
+                assert_eq!(command.current_session_name, "waitagent-1");
+                assert_eq!(command.profile.as_deref(), Some("130"));
+                assert!(command.host.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_connect_remote_host_command_with_direct_args() {
+        match parse(&[
+            "waitagent",
+            "__connect-remote-host",
+            "--current-socket-name",
+            "wa-1",
+            "--current-session-name",
+            "waitagent-1",
+            "--host",
+            "10.1.29.130",
+            "--ssh-user",
+            "kk",
+            "--auth",
+            "key",
+            "--key-path",
+            "~/.ssh/id_ed25519",
+            "--remote-port",
+            "auto",
+            "--save-profile",
+            "130",
+        ])
+        .command
+        {
+            Command::ConnectRemoteHost(command) => {
+                assert_eq!(command.host.as_deref(), Some("10.1.29.130"));
+                assert_eq!(command.ssh_user.as_deref(), Some("kk"));
+                assert_eq!(command.auth.as_deref(), Some("key"));
+                assert_eq!(command.key_path.as_deref(), Some("~/.ssh/id_ed25519"));
+                assert_eq!(command.remote_port.as_deref(), Some("auto"));
+                assert_eq!(command.save_profile.as_deref(), Some("130"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

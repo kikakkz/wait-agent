@@ -9,6 +9,8 @@ const MAIN_FOCUS_KEY: &str = "Left";
 const SIDEBAR_HIDE_KEY: &str = "h";
 const CREATE_SESSION_KEY: &str = "C-n";
 const CREATE_SESSION_PREFIX_KEY: &str = "c";
+const CONNECT_REMOTE_HOST_KEY: &str = "C-w";
+const CREATE_REMOTE_SESSION_KEY: &str = "C-s";
 const FOOTER_SESSIONS_KEY: &str = "C-m";
 const ERROR_LOG_KEY: &str = "C-e";
 const ERROR_LOG_PREFIX_KEY: &str = "E";
@@ -27,6 +29,8 @@ const TMUX_MENU_BORDER_STYLE_OPTION: &str = "menu-border-style";
 
 pub struct FooterMenuBindings {
     pub create_session_command: String,
+    pub connect_remote_host_command: String,
+    pub create_remote_session_command: String,
     pub open_sessions_menu_command: String,
     pub error_log_command: String,
 }
@@ -153,6 +157,16 @@ where
             workspace,
             CREATE_SESSION_PREFIX_KEY,
             &footer_bindings.create_session_command,
+        )?;
+        self.tmux.bind_key_without_prefix(
+            workspace,
+            CONNECT_REMOTE_HOST_KEY,
+            &[footer_bindings.connect_remote_host_command.clone()],
+        )?;
+        self.tmux.bind_key_without_prefix(
+            workspace,
+            CREATE_REMOTE_SESSION_KEY,
+            &[footer_bindings.create_remote_session_command.clone()],
         )?;
         self.tmux.bind_waitagent_footer_action(
             workspace,
@@ -580,6 +594,8 @@ mod tests {
                 "run-shell -b \"waitagent __toggle-fullscreen\"",
                 Some(&FooterMenuBindings {
                     create_session_command: "run-shell -b 'waitagent __new-target'".to_string(),
+                    connect_remote_host_command: "run-shell -b 'waitagent __connect-remote-host'".to_string(),
+                    create_remote_session_command: "run-shell -b 'waitagent __new-selected-remote-session'".to_string(),
                     open_sessions_menu_command: "run-shell 'waitagent __footer-menu'".to_string(),
                     error_log_command: "display-popup -w 80% -h 80% -E \"waitagent __error-log && echo '' && echo '--- Press ENTER to close ---' && read -r\"".to_string(),
                 }),
@@ -637,6 +653,14 @@ mod tests {
                 Call::BindCommandWithPrefix(
                     "c".to_string(),
                     "run-shell -b 'waitagent __new-target'".to_string(),
+                ),
+                Call::BindWithoutPrefix(
+                    "C-w".to_string(),
+                    vec!["run-shell -b 'waitagent __connect-remote-host'".to_string(),],
+                ),
+                Call::BindWithoutPrefix(
+                    "C-s".to_string(),
+                    vec!["run-shell -b 'waitagent __new-selected-remote-session'".to_string(),],
                 ),
                 Call::BindWaitagentFooterAction(
                     "C-m".to_string(),

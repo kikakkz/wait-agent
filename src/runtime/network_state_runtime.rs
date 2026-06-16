@@ -184,6 +184,14 @@ fn recover_network_config_for_command(
             backend,
             &workspace_handle(&command.current_socket_name, &command.current_session_name),
         ),
+        Command::NewSelectedRemoteSession(command) => recover_network_config_for_workspace(
+            backend,
+            &workspace_handle(&command.current_socket_name, &command.current_session_name),
+        ),
+        Command::ConnectRemoteHost(command) => recover_network_config_for_workspace(
+            backend,
+            &workspace_handle(&command.current_socket_name, &command.current_session_name),
+        ),
         Command::MainPaneDied(command) => recover_network_config_for_workspace(
             backend,
             &workspace_handle(&command.socket_name, &command.session_name),

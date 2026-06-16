@@ -135,7 +135,8 @@ fn left_status_text(
 ) -> String {
     let base = match projection {
         FooterProjection::Pane => {
-            "Ctrl-N New · Ctrl-O Fullscreen · Ctrl-E Logs · Ctrl-M Sessions".to_string()
+            "Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Full · Ctrl-E Logs · Ctrl-M Menu"
+                .to_string()
         }
         FooterProjection::FullscreenStatus => {
             "View  Ctrl-O Exit fullscreen · PgUp/PgDn Page · Up/Down Line · q Close · Ctrl-N New"
@@ -227,10 +228,14 @@ mod tests {
 
         assert!(output.contains("Ctrl-N"));
         assert!(output.contains("New"));
+        assert!(output.contains("Ctrl-W"));
+        assert!(output.contains("Conn"));
+        assert!(output.contains("Ctrl-S"));
+        assert!(output.contains("Remote"));
         assert!(output.contains("Ctrl-O"));
-        assert!(output.contains("Fullscreen"));
+        assert!(output.contains("Full"));
         assert!(output.contains("Ctrl-M"));
-        assert!(output.contains("Sessions"));
+        assert!(output.contains("Menu"));
         assert!(!output.contains("Prefix-s"));
         assert!(!output.contains("Actions"));
         assert!(!output.contains("listen:"));
@@ -254,6 +259,8 @@ mod tests {
         );
 
         assert!(output.contains("Ctrl-N"));
+        assert!(output.contains("Ctrl-W"));
+        assert!(output.contains("Ctrl-S"));
         assert!(output.contains("Listen"));
         assert!(output.contains("10.1.26.84:7474"));
         assert!(!output.contains("keys:"));

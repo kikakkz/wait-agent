@@ -1,0 +1,34 @@
+id: task.remote-create-5-server-service
+kind: task
+version: 1
+title: implement server-side remote session creation service and catalog convergence wait
+status: pending
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-3-protocol.done
+  - task.remote-create-4-remote-node-handler.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Server sends create requests through the remote owner, waits for accepted/rejected and catalog publication, then returns the synced ManagedSessionRecord.
+verification:
+  - cargo test remote_create -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - src/application
+  - src/runtime/remote_node
+  - src/runtime/workspace/main_slot_runtime.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

@@ -1,0 +1,33 @@
+id: task.remote-create-4-remote-node-handler
+kind: task
+version: 1
+title: handle remote create-session requests on the PTY-owning node
+status: pending
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  why:
+    - Accepted design v1.1 defines this bounded implementation slice.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.remote-create-3-protocol.done
+
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - PTY-owning node creates a normal local target-host session for accepted create requests and relies on session sync to publish it.
+verification:
+  - cargo test remote_node_session_runtime -- --test-threads=1
+  - cargo build
+
+touched_paths:
+  - src/runtime/remote_node/remote_node_session_runtime.rs
+  - src/runtime/remote_node/remote_node_session_owner_runtime
+  - src/runtime/workspace/target_host_runtime.rs
+
+notes:
+  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
+  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.

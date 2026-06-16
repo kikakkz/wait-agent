@@ -126,9 +126,21 @@ fn build_footer_menu_args(
     push_disabled_item(&mut args, "- Commands");
     push_action_item(
         &mut args,
-        "New Session",
-        "c",
+        "New Local Session",
+        "n",
         &create_session_command(executable, command),
+    );
+    push_action_item(
+        &mut args,
+        "Connect Remote Host",
+        "w",
+        &connect_remote_host_command(executable, command),
+    );
+    push_action_item(
+        &mut args,
+        "New Remote Session",
+        "s",
+        &create_remote_session_command(executable, command),
     );
     if active.is_some() {
         push_action_item(
@@ -231,6 +243,40 @@ fn create_session_command(executable: &std::path::Path, command: &FooterMenuComm
     let shell_command = [
         shell_escape(&executable.display().to_string()),
         shell_escape("__new-target"),
+        shell_escape("--current-socket-name"),
+        shell_escape(&command.socket_name),
+        shell_escape("--current-session-name"),
+        shell_escape(&command.session_name),
+    ]
+    .join(" ");
+
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
+}
+
+fn connect_remote_host_command(
+    executable: &std::path::Path,
+    command: &FooterMenuCommand,
+) -> String {
+    let shell_command = [
+        shell_escape(&executable.display().to_string()),
+        shell_escape("__connect-remote-host"),
+        shell_escape("--current-socket-name"),
+        shell_escape(&command.socket_name),
+        shell_escape("--current-session-name"),
+        shell_escape(&command.session_name),
+    ]
+    .join(" ");
+
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
+}
+
+fn create_remote_session_command(
+    executable: &std::path::Path,
+    command: &FooterMenuCommand,
+) -> String {
+    let shell_command = [
+        shell_escape(&executable.display().to_string()),
+        shell_escape("__new-selected-remote-session"),
         shell_escape("--current-socket-name"),
         shell_escape(&command.socket_name),
         shell_escape("--current-session-name"),
@@ -345,7 +391,9 @@ mod tests {
         );
 
         assert_eq!(args[0], "display-menu");
-        assert!(args.contains(&"New Session".to_string()));
+        assert!(args.contains(&"New Local Session".to_string()));
+        assert!(args.contains(&"Connect Remote Host".to_string()));
+        assert!(args.contains(&"New Remote Session".to_string()));
         assert!(args.contains(&FOOTER_MENU_TITLE.to_string()));
         assert!(args.contains(&"--".to_string()));
         assert!(args
@@ -391,7 +439,9 @@ mod tests {
             &[],
         );
 
-        assert!(args.iter().any(|value| value == "New Session"));
+        assert!(args.iter().any(|value| value == "New Local Session"));
+        assert!(args.iter().any(|value| value == "Connect Remote Host"));
+        assert!(args.iter().any(|value| value == "New Remote Session"));
         assert!(args.iter().any(|value| value == "- No Sessions"));
     }
 
