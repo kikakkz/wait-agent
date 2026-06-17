@@ -5,6 +5,7 @@ use crate::infra::tmux::{
 
 const WAITAGENT_NETWORK_PORT_OPTION: &str = "@waitagent_network_port";
 const WAITAGENT_NETWORK_CONNECT_OPTION: &str = "@waitagent_network_connect";
+const WAITAGENT_NETWORK_NODE_ID_OPTION: &str = "@waitagent_network_node_id";
 
 pub(crate) fn persist_workspace_network_config(
     backend: &EmbeddedTmuxBackend,
@@ -21,6 +22,11 @@ pub(crate) fn persist_workspace_network_config(
         workspace,
         WAITAGENT_NETWORK_CONNECT_OPTION,
         network.connect.as_deref().unwrap_or(""),
+    )?;
+    backend.set_session_option(
+        workspace,
+        WAITAGENT_NETWORK_NODE_ID_OPTION,
+        network.node_id.as_deref().unwrap_or(""),
     )
 }
 
@@ -39,6 +45,11 @@ pub(crate) fn persist_socket_network_config(
         &socket,
         WAITAGENT_NETWORK_CONNECT_OPTION,
         network.connect.as_deref().unwrap_or(""),
+    )?;
+    backend.set_global_option_on_socket(
+        &socket,
+        WAITAGENT_NETWORK_NODE_ID_OPTION,
+        network.node_id.as_deref().unwrap_or(""),
     )
 }
 
@@ -59,6 +70,11 @@ pub(crate) fn recover_network_config_for_socket(
             .ok()
             .flatten()
             .filter(|value| !value.is_empty()),
+        node_id: backend
+            .show_global_option_on_socket(&socket, WAITAGENT_NETWORK_NODE_ID_OPTION)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -76,6 +92,11 @@ pub(crate) fn recover_network_config_for_workspace(
             port,
             connect: backend
                 .show_session_option(workspace, WAITAGENT_NETWORK_CONNECT_OPTION)
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty()),
+            node_id: backend
+                .show_session_option(workspace, WAITAGENT_NETWORK_NODE_ID_OPTION)
                 .ok()
                 .flatten()
                 .filter(|value| !value.is_empty()),
@@ -162,6 +183,11 @@ fn recover_network_config_for_command(
         Command::RemoteNodeIngressServer(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }
+        Command::RemoteDaemon(_command) => {
+            // RemoteDaemon is started headlessly by SSH bootstrap and receives
+            // network config via explicit global CLI args.
+            None
+        }
         Command::RemoteRuntimeOwner(_command) => {
             // RemoteRuntimeOwner is scoped by listener_addr, not by socket_name.
             // Network config is passed via global CLI args (prepend_global_network_args).
@@ -185,6 +211,10 @@ fn recover_network_config_for_command(
             &workspace_handle(&command.current_socket_name, &command.current_session_name),
         ),
         Command::NewSelectedRemoteSession(command) => recover_network_config_for_workspace(
+            backend,
+            &workspace_handle(&command.current_socket_name, &command.current_session_name),
+        ),
+        Command::ConnectRemoteHostUi(command) => recover_network_config_for_workspace(
             backend,
             &workspace_handle(&command.current_socket_name, &command.current_session_name),
         ),
@@ -278,6 +308,7 @@ mod tests {
         let network = RemoteNetworkConfig {
             port: 17662,
             connect: Some("10.1.29.130:17662".to_string()),
+            node_id: None,
         };
         persist_workspace_network_config(&backend, &workspace, &network)
             .expect("network state should persist");

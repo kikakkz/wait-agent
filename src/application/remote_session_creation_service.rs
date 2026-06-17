@@ -2,15 +2,18 @@ use crate::application::target_registry_service::{TargetCatalogGateway, TargetRe
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::remote_protocol::{
-    CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
+    ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
+    CreateSessionRequestPayload, NodeSessionChannel, NodeSessionEnvelope, ProtocolEnvelope,
+    REMOTE_PROTOCOL_VERSION,
+};
+use crate::infra::remote_transport_codec::{
+    read_node_session_envelope, write_node_session_envelope,
 };
 use crate::runtime::remote_node_ingress_server_runtime::{
     remote_node_ingress_owner_socket_path, RemoteNodeIngressServerRuntime,
 };
-use crate::runtime::remote_node_session_runtime::{
-    RemoteNodeAuthorityEvent, RemoteNodeSessionRuntime,
-};
 use std::fmt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -62,27 +65,53 @@ impl RemoteSessionCreationTransport for GrpcRemoteSessionCreationTransport {
     ) -> Result<CreateSessionReply, Self::Error> {
         RemoteNodeIngressServerRuntime::ensure_owner_running("__shared__", &self.network)
             .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
-        let session = RemoteNodeSessionRuntime::connect(
-            remote_node_ingress_owner_socket_path(&self.network),
-            request.authority_node_id.clone(),
-            None,
+        let socket_path = remote_node_ingress_owner_socket_path(&self.network);
+        let mut stream = UnixStream::connect(socket_path)
+            .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
+        stream
+            .set_read_timeout(Some(accept_timeout))
+            .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
+        write_node_session_envelope(
+            &mut stream,
+            &NodeSessionEnvelope {
+                channel: NodeSessionChannel::Authority,
+                envelope: create_session_request_envelope(&request),
+            },
         )
         .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
-        let reply = session
-            .request_create_session(request, accept_timeout)
+
+        let reply = read_node_session_envelope(&mut stream)
             .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
-        session.shutdown();
-        match reply {
-            RemoteNodeAuthorityEvent::CreateSessionAccepted(payload) => {
+        match reply.envelope.payload {
+            ControlPlanePayload::CreateSessionAccepted(payload) => {
                 Ok(CreateSessionReply::Accepted(payload))
             }
-            RemoteNodeAuthorityEvent::CreateSessionRejected(payload) => {
+            ControlPlanePayload::CreateSessionRejected(payload) => {
                 Ok(CreateSessionReply::Rejected(payload))
             }
             other => Err(RemoteSessionCreationTransportError::new(format!(
-                "unexpected create-session reply event `{other:?}`"
+                "unexpected create-session reply payload `{}`",
+                other.message_type()
             ))),
         }
+    }
+}
+
+fn create_session_request_envelope(
+    request: &CreateSessionRequestPayload,
+) -> ProtocolEnvelope<ControlPlanePayload> {
+    ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: format!("local-create-session-{}", next_request_id()),
+        message_type: "create_session_request",
+        timestamp: format!("{}Z", now_millis()),
+        sender_id: "waitagent-local-create-session".to_string(),
+        correlation_id: Some(request.request_id.clone()),
+        session_id: None,
+        target_id: None,
+        attachment_id: None,
+        console_id: None,
+        payload: ControlPlanePayload::CreateSessionRequest(request.clone()),
     }
 }
 
@@ -300,11 +329,15 @@ impl fmt::Display for RemoteSessionCreationError {
 
 impl std::error::Error for RemoteSessionCreationError {}
 
-fn next_request_id() -> String {
-    let millis = SystemTime::now()
+fn now_millis() -> u128 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_millis()
+}
+
+fn next_request_id() -> String {
+    let millis = now_millis();
     let seq = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
     format!("create-session-{}-{millis}-{seq}", std::process::id())
 }

@@ -303,6 +303,7 @@ mod tests {
             RemoteMainSlotIngressRuntime::from_build_env_with_network(RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
+                node_id: None,
             })
             .expect("ingress runtime should build from build env");
         let (_client, server) = UnixStream::pair().expect("stream pair should open");
@@ -339,6 +340,7 @@ mod tests {
             RemoteMainSlotIngressRuntime::from_build_env_with_network(RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
+                node_id: None,
             })
             .expect("ingress runtime should build from build env");
 

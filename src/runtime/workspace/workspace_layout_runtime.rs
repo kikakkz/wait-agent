@@ -831,11 +831,13 @@ fn connect_remote_host_shell_command(
     shell_command_with_network(
         executable,
         vec![
-            "__connect-remote-host".to_string(),
+            "__connect-remote-host-ui".to_string(),
             "--current-socket-name".to_string(),
             workspace.socket_name.as_str().to_string(),
             "--current-session-name".to_string(),
             workspace.session_name.as_str().to_string(),
+            "--client-tty".to_string(),
+            "#{client_tty}".to_string(),
         ],
         network,
     )
@@ -1069,6 +1071,7 @@ mod tests {
             &RemoteNetworkConfig {
                 port: 9001,
                 connect: Some("10.0.0.8:7474".to_string()),
+                node_id: None,
             },
             "192.168.1.22:7474",
             Some("10.0.0.5:7474"),
@@ -1087,14 +1090,16 @@ mod tests {
         let network = RemoteNetworkConfig {
             port: 9001,
             connect: Some("10.0.0.8:7474".to_string()),
+            node_id: None,
         };
 
         let connect = connect_remote_host_shell_command("/tmp/wait agent", &workspace, &network);
         let remote_new =
             create_remote_session_shell_command("/tmp/wait agent", &workspace, &network);
 
-        assert!(connect.contains("'__connect-remote-host'"));
+        assert!(connect.contains("'__connect-remote-host-ui'"));
         assert!(connect.contains("'--current-socket-name' 'wa-1'"));
+        assert!(connect.contains("'--client-tty' '#{client_tty}'"));
         assert!(connect.contains("'--connect' '10.0.0.8:7474'"));
         assert!(remote_new.contains("'__new-selected-remote-session'"));
         assert!(remote_new.contains("'--current-session-name' 'session-1'"));

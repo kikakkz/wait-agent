@@ -132,6 +132,10 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_remote_node_ingress_server(command)
                 .map_err(AppError::from),
+            Command::RemoteDaemon(_) => self
+                .workspace_runtime
+                .run_remote_daemon()
+                .map_err(AppError::from),
             Command::RemoteRuntimeOwner(command) => self
                 .remote_runtime_owner_runtime
                 .run_owner(command)
@@ -168,6 +172,10 @@ impl CommandDispatcher {
             Command::NewSelectedRemoteSession(command) => self
                 .workspace_runtime
                 .run_new_selected_remote_session(command)
+                .map_err(AppError::from),
+            Command::ConnectRemoteHostUi(command) => self
+                .workspace_runtime
+                .run_connect_remote_host_ui(command)
                 .map_err(AppError::from),
             Command::ConnectRemoteHost(command) => self
                 .workspace_runtime

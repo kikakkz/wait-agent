@@ -265,6 +265,7 @@ mod tests {
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
+                node_id: None,
             },
             poll_interval: Duration::from_millis(10),
             reconnect_delay: Duration::from_millis(10),
@@ -387,6 +388,39 @@ mod tests {
         assert_eq!(
             projected.current_path.as_deref(),
             Some(Path::new("/tmp/workspace"))
+        );
+        assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
+    fn overlay_workspace_runtime_does_not_project_internal_waitagent_runtime() {
+        let sessions = overlay_workspace_runtime_onto_active_local_target_hosts(
+            vec![
+                ManagedSessionRecord {
+                    command_name: Some("waitagent".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/workspace")),
+                    task_state: ManagedSessionTaskState::Running,
+                    ..session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome)
+                },
+                ManagedSessionRecord {
+                    command_name: Some("bash".to_string()),
+                    current_path: Some(PathBuf::from("/tmp/target")),
+                    task_state: ManagedSessionTaskState::Input,
+                    ..session("wa-1", "shell-1")
+                },
+            ],
+            "wa-1",
+            &HashMap::from([("workspace".to_string(), "wa-1:shell-1".to_string())]),
+        );
+
+        let projected = sessions
+            .into_iter()
+            .find(|session| session.address.session_id() == "shell-1")
+            .expect("target-host session should exist");
+        assert_eq!(projected.command_name.as_deref(), Some("bash"));
+        assert_eq!(
+            projected.current_path.as_deref(),
+            Some(Path::new("/tmp/target"))
         );
         assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
     }

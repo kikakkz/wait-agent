@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::runtime::remote_host::remote_host_home::waitagent_home;
 use crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId;
 use std::fmt;
 use std::fs;
@@ -52,12 +53,7 @@ impl RemoteHostHistoryStore {
     }
 
     pub fn default_path() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".config")
-            .join("waitagent")
-            .join("remote-hosts.toml")
+        waitagent_home().join("remote-hosts.toml")
     }
 
     pub fn load(&self) -> Result<RemoteHostHistory, RemoteHostHistoryStoreError> {
@@ -384,7 +380,7 @@ mod tests {
     #[test]
     fn remote_host_history_default_path_uses_user_config_dir() {
         let path = RemoteHostHistoryStore::default_path();
-        assert!(path.ends_with(PathBuf::from(".config/waitagent/remote-hosts.toml")));
+        assert!(path.ends_with(PathBuf::from(".waitagent/remote-hosts.toml")));
     }
 
     #[test]

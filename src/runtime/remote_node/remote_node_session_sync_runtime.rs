@@ -3,6 +3,7 @@ use crate::cli::{
     RemoteSessionSyncOwnerCommand,
 };
 use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_transport::{
@@ -17,6 +18,7 @@ use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
 use std::net::Shutdown;
@@ -178,6 +180,7 @@ pub struct RemoteNodeSessionSyncGuard {
 
 pub(super) struct SessionSyncAuthorityManager {
     pub(super) running_hosts: HashMap<String, SessionSyncAuthorityHost>,
+    network: RemoteNetworkConfig,
 }
 
 pub(super) struct SessionSyncAuthorityHost {
@@ -329,10 +332,55 @@ where
     }
 }
 
+struct CreatedSyncSessionTarget {
+    session_id: String,
+    target_id: String,
+}
+
+fn create_session_reply_envelope(
+    node_id: &str,
+    correlation_id: Option<&str>,
+    payload: crate::infra::remote_protocol::ControlPlanePayload,
+) -> crate::infra::remote_protocol::ProtocolEnvelope<
+    crate::infra::remote_protocol::ControlPlanePayload,
+> {
+    crate::infra::remote_protocol::ProtocolEnvelope {
+        protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: format!("{node_id}-create-session-reply-{}", sync_now_millis()),
+        message_type: payload.message_type(),
+        timestamp: format!("{}Z", sync_now_millis()),
+        sender_id: node_id.to_string(),
+        correlation_id: correlation_id.map(str::to_string),
+        session_id: match &payload {
+            crate::infra::remote_protocol::ControlPlanePayload::CreateSessionAccepted(accepted) => {
+                Some(accepted.session_id.clone())
+            }
+            _ => None,
+        },
+        target_id: match &payload {
+            crate::infra::remote_protocol::ControlPlanePayload::CreateSessionAccepted(accepted) => {
+                Some(accepted.target_id.clone())
+            }
+            _ => None,
+        },
+        attachment_id: None,
+        console_id: None,
+        payload,
+    }
+}
+
+fn sync_now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 impl SessionSyncAuthorityManager {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(network: RemoteNetworkConfig) -> Self {
         Self {
             running_hosts: HashMap::new(),
+            network,
         }
     }
 
@@ -367,14 +415,113 @@ impl SessionSyncAuthorityManager {
                     ));
                 }
             }
-            GrpcAuthorityEvent::CreateSessionRequest { .. }
-            | GrpcAuthorityEvent::CreateSessionAccepted(_)
+            GrpcAuthorityEvent::CreateSessionRequest {
+                payload,
+                correlation_id,
+            } => {
+                if let Err(error) = self.handle_create_session_request(
+                    session_handle,
+                    payload,
+                    correlation_id.as_deref(),
+                ) {
+                    ERROR_LOG.log(format!(
+                        "[session-sync] failed to handle create-session request: {error}"
+                    ));
+                }
+            }
+            GrpcAuthorityEvent::CreateSessionAccepted(_)
             | GrpcAuthorityEvent::CreateSessionRejected(_)
             | GrpcAuthorityEvent::MirrorAccepted
             | GrpcAuthorityEvent::MirrorRejected(_)
             | GrpcAuthorityEvent::Failed(_)
             | GrpcAuthorityEvent::Closed => {}
         }
+    }
+
+    fn handle_create_session_request(
+        &mut self,
+        session_handle: &RemoteNodeSessionHandle,
+        payload: crate::infra::remote_protocol::CreateSessionRequestPayload,
+        correlation_id: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        let result = self.create_local_target_for_create_session(session_handle, &payload);
+        match result {
+            Ok(created) => session_handle
+                .send(crate::runtime::remote_node_session_runtime::map_outbound_grpc_envelope(
+                    session_handle.node_id(),
+                    crate::infra::remote_protocol::NodeSessionChannel::Authority,
+                    &create_session_reply_envelope(
+                        session_handle.node_id(),
+                        correlation_id,
+                        crate::infra::remote_protocol::ControlPlanePayload::CreateSessionAccepted(
+                            crate::infra::remote_protocol::CreateSessionAcceptedPayload {
+                                request_id: payload.request_id.clone(),
+                                session_id: created.session_id,
+                                target_id: created.target_id,
+                            },
+                        ),
+                    ),
+                )
+                .map_err(remote_session_sync_error)?)
+                .map_err(remote_session_sync_error),
+            Err(error) => session_handle
+                .send(crate::runtime::remote_node_session_runtime::map_outbound_grpc_envelope(
+                    session_handle.node_id(),
+                    crate::infra::remote_protocol::NodeSessionChannel::Authority,
+                    &create_session_reply_envelope(
+                        session_handle.node_id(),
+                        correlation_id,
+                        crate::infra::remote_protocol::ControlPlanePayload::CreateSessionRejected(
+                            crate::infra::remote_protocol::CreateSessionRejectedPayload {
+                                request_id: payload.request_id.clone(),
+                                code: "create_session_failed",
+                                message: error.to_string(),
+                            },
+                        ),
+                    ),
+                )
+                .map_err(remote_session_sync_error)?)
+                .map_err(remote_session_sync_error),
+        }
+    }
+
+    fn create_local_target_for_create_session(
+        &self,
+        session_handle: &RemoteNodeSessionHandle,
+        payload: &crate::infra::remote_protocol::CreateSessionRequestPayload,
+    ) -> Result<CreatedSyncSessionTarget, LifecycleError> {
+        if payload.authority_node_id != session_handle.node_id() {
+            return Err(LifecycleError::Protocol(format!(
+                "create-session request for authority `{}` reached `{}`",
+                payload.authority_node_id,
+                session_handle.node_id()
+            )));
+        }
+        let cwd = payload
+            .cwd_hint
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
+            EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
+            self.network.clone(),
+            current_waitagent_executable()?,
+        )?;
+        let workspace = runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &cwd,
+                session_handle.node_id().to_string(),
+                u16::try_from(payload.rows).ok().filter(|rows| *rows > 0),
+                u16::try_from(payload.cols).ok().filter(|cols| *cols > 0),
+            ))
+            .map_err(remote_session_sync_error)?;
+        let session_id = workspace.workspace_handle.session_name.as_str().to_string();
+        Ok(CreatedSyncSessionTarget {
+            target_id: format!("remote-peer:{}:{session_id}", session_handle.node_id()),
+            session_id,
+        })
     }
 
     fn ensure_authority_host(

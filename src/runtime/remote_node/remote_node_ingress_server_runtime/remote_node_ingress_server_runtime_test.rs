@@ -1,8 +1,8 @@
 mod tests {
     use super::super::{
-        discover_authority_socket_paths, extract_target_component, route_transport_envelope,
-        ActiveAuthoritySocketBridge, ActiveNodeIngressSession, InternalEvent,
-        RemoteNodeIngressServerRuntime,
+        discover_authority_socket_paths, extract_target_component,
+        has_active_ingress_session_for_node, route_transport_envelope, ActiveAuthoritySocketBridge,
+        ActiveNodeIngressSession, InternalEvent, RemoteNodeIngressServerRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -426,6 +426,48 @@ mod tests {
         let _ = worker.join();
         let _ = fs::remove_file(old_socket_path);
         let _ = fs::remove_file(new_socket_path);
+    }
+
+    #[test]
+    fn node_cleanup_waits_until_last_ingress_session_is_gone() {
+        let node_id = "peer-last-close";
+        let other_node_id = "peer-other";
+        let (same_node_session, _same_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id, "session-new");
+        let (other_node_session, _other_rx) =
+            RemoteNodeSessionHandle::new_for_tests(other_node_id, "session-other");
+
+        let sessions = std::collections::HashMap::from([
+            (
+                "session-new".to_string(),
+                ActiveNodeIngressSession {
+                    session: same_node_session,
+                    bridges: std::collections::HashMap::new(),
+                },
+            ),
+            (
+                "session-other".to_string(),
+                ActiveNodeIngressSession {
+                    session: other_node_session,
+                    bridges: std::collections::HashMap::new(),
+                },
+            ),
+        ]);
+
+        assert!(has_active_ingress_session_for_node(&sessions, node_id));
+        assert!(!has_active_ingress_session_for_node(
+            &sessions,
+            "peer-missing"
+        ));
+
+        let sessions = std::collections::HashMap::from([(
+            "session-other".to_string(),
+            ActiveNodeIngressSession {
+                session: RemoteNodeSessionHandle::new_for_tests(other_node_id, "session-other-2").0,
+                bridges: std::collections::HashMap::new(),
+            },
+        )]);
+        assert!(!has_active_ingress_session_for_node(&sessions, node_id));
     }
 
     fn collect_authority_connections(

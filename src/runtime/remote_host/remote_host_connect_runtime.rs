@@ -11,13 +11,16 @@ use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostProfile,
     RemotePortPreference as HistoryRemotePortPreference,
 };
-use crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId;
+use crate::runtime::remote_host::remote_host_secret_store::{
+    FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
+};
 use crate::runtime::remote_host::remote_port_probe::{
     RemotePortProbe, RemotePortProbePreference, SshRemotePortProbe,
 };
 use crate::runtime::remote_host::ssh_remote_host_bootstrapper::{
     RemoteHostBootstrapPlan, RemoteHostBootstrapper,
 };
+use std::io::{self, Read};
 
 const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -122,22 +125,22 @@ where
         let port = port_probe
             .choose_remote_port(&preference, &request.local_connect_endpoint)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        let authority_node_id = authority_id_for_profile_port(&profile, port.port);
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             port.port,
             request.local_connect_endpoint.clone(),
+            authority_node_id.clone(),
         );
         self.bootstrapper
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
-        let authority_node_id = self.wait_for_endpoint(
-            &profile,
-            port.port,
+        let default_target = self.wait_for_first_online_target(
+            &authority_node_id,
             DEFAULT_ENDPOINT_WAIT_TIMEOUT,
             DEFAULT_ENDPOINT_POLL_INTERVAL,
         )?;
-        let created = self.create_remote_session(&authority_node_id, request.cwd_hint)?;
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
         self.history_store
@@ -146,7 +149,7 @@ where
 
         Ok(RemoteHostConnectOutcome {
             authority_node_id,
-            created_target: created,
+            created_target: default_target,
             reused_existing_endpoint: port.reused_existing_waitagent,
         })
     }
@@ -190,29 +193,28 @@ where
             .map(|target| target.address.authority_id().to_string()))
     }
 
-    fn wait_for_endpoint(
+    fn wait_for_first_online_target(
         &self,
-        profile: &RemoteHostProfile,
-        remote_port: u16,
+        expected: &str,
         timeout: Duration,
         poll_interval: Duration,
-    ) -> Result<String, LifecycleError> {
-        let expected = format!("{}#{}", profile.host, remote_port);
+    ) -> Result<ManagedSessionRecord, LifecycleError> {
+        let expected = expected.to_string();
         let deadline = Instant::now() + timeout;
         loop {
             let targets = self
                 .target_registry
                 .list_targets_on_authority(&expected)
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-            if targets
-                .iter()
-                .any(|target| target.availability == SessionAvailability::Online)
+            if let Some(target) = targets
+                .into_iter()
+                .find(|target| target.availability == SessionAvailability::Online)
             {
-                return Ok(expected);
+                return Ok(target);
             }
             if Instant::now() >= deadline {
                 return Err(LifecycleError::Protocol(format!(
-                    "remote endpoint `{expected}` did not appear before timeout"
+                    "remote endpoint `{expected}` did not publish a default session before timeout"
                 )));
             }
             thread::sleep(poll_interval);
@@ -260,10 +262,39 @@ fn profile_from_direct_args(
     let ssh_user = command.ssh_user.clone().ok_or_else(|| {
         LifecycleError::Protocol("--ssh-user is required with --host".to_string())
     })?;
+    let profile_name = command
+        .save_profile
+        .clone()
+        .unwrap_or_else(|| default_profile_name(host, &ssh_user));
+    let mut stdin_passwords = None;
+    if command.ssh_password_stdin || command.sudo_password_stdin {
+        stdin_passwords = Some(read_passwords_from_stdin()?);
+    }
+    let secret_store = FileRemoteHostSecretStore::default();
     let auth = match command.auth.as_deref().unwrap_or("agent") {
-        "password" => RemoteHostAuthProfile::Password {
-            password_secret_id: optional_secret_id(command.ssh_password_secret_id.clone())?,
-        },
+        "password" => {
+            let secret_id = if command.ssh_password_stdin {
+                let password = stdin_passwords
+                    .as_ref()
+                    .map(|passwords| passwords.ssh_password.as_str())
+                    .unwrap_or_default();
+                if password.is_empty() {
+                    return Err(LifecycleError::Protocol(
+                        "SSH password is required with --ssh-password-stdin".to_string(),
+                    ));
+                }
+                let id = generated_secret_id(&profile_name, "ssh-password")?;
+                secret_store
+                    .put_secret(&id, RemoteHostSecretValue::new(password))
+                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+                Some(id)
+            } else {
+                optional_secret_id(command.ssh_password_secret_id.clone())?
+            };
+            RemoteHostAuthProfile::Password {
+                password_secret_id: secret_id,
+            }
+        }
         "key" => RemoteHostAuthProfile::Key {
             key_path: PathBuf::from(command.key_path.clone().ok_or_else(|| {
                 LifecycleError::Protocol("--key-path is required with --auth key".to_string())
@@ -276,20 +307,89 @@ fn profile_from_direct_args(
             )));
         }
     };
+    let sudo_password_secret_id = if command.sudo_password_stdin {
+        let password = stdin_passwords
+            .as_ref()
+            .map(|passwords| passwords.sudo_password.as_str())
+            .unwrap_or_default();
+        if password.is_empty() {
+            None
+        } else {
+            let id = generated_secret_id(&profile_name, "sudo-password")?;
+            secret_store
+                .put_secret(&id, RemoteHostSecretValue::new(password))
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+            Some(id)
+        }
+    } else {
+        optional_secret_id(command.sudo_password_secret_id.clone())?
+    };
     Ok(RemoteHostProfile {
-        name: command
-            .save_profile
-            .clone()
-            .unwrap_or_else(|| host.to_string()),
+        name: profile_name,
         host: host.to_string(),
         ssh_user,
         auth,
-        sudo_password_secret_id: optional_secret_id(command.sudo_password_secret_id.clone())?,
+        sudo_password_secret_id,
         preferred_remote_port: parse_remote_port(command.remote_port.as_deref())?,
         last_remote_port: None,
         last_endpoint: None,
         last_connected_at: None,
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct StdinPasswords {
+    ssh_password: String,
+    sudo_password: String,
+}
+
+fn read_passwords_from_stdin() -> Result<StdinPasswords, LifecycleError> {
+    let mut text = String::new();
+    io::stdin().read_to_string(&mut text).map_err(|error| {
+        LifecycleError::Io("failed to read remote host passwords".to_string(), error)
+    })?;
+    let mut lines = text.lines();
+    Ok(StdinPasswords {
+        ssh_password: lines.next().unwrap_or_default().to_string(),
+        sudo_password: lines.next().unwrap_or_default().to_string(),
+    })
+}
+
+fn default_profile_name(host: &str, ssh_user: &str) -> String {
+    format!("{}@{}", ssh_user, host)
+}
+
+fn generated_secret_id(
+    profile_name: &str,
+    purpose: &str,
+) -> Result<RemoteHostSecretId, LifecycleError> {
+    RemoteHostSecretId::new(format!(
+        "waitagent.remote-host.{}.{}",
+        secret_id_segment(profile_name),
+        purpose
+    ))
+    .map_err(|error| LifecycleError::Protocol(error.to_string()))
+}
+
+fn secret_id_segment(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('-');
+        }
+    }
+    let collapsed = out
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if collapsed.is_empty() {
+        "remote".to_string()
+    } else {
+        collapsed
+    }
 }
 
 fn optional_secret_id(value: Option<String>) -> Result<Option<RemoteHostSecretId>, LifecycleError> {
@@ -309,6 +409,10 @@ fn parse_remote_port(value: Option<&str>) -> Result<HistoryRemotePortPreference,
     }
 }
 
+fn authority_id_for_profile_port(profile: &RemoteHostProfile, remote_port: u16) -> String {
+    format!("{}#{}", profile.host, remote_port)
+}
+
 fn port_preference(value: &HistoryRemotePortPreference) -> RemotePortProbePreference {
     match value {
         HistoryRemotePortPreference::Auto => RemotePortProbePreference::Auto,
@@ -325,6 +429,17 @@ fn is_online_remote_target_for_profile(
             .address
             .authority_id()
             .starts_with(&format!("{}#", profile.host))
+}
+
+#[cfg(test)]
+mod direct_arg_tests {
+    use super::*;
+
+    #[test]
+    fn generated_profile_names_follow_user_at_host() {
+        assert_eq!(default_profile_name("10.1.29.130", "kk"), "kk@10.1.29.130");
+        assert_eq!(secret_id_segment("kk@10.1.29.130"), "kk-10-1-29-130");
+    }
 }
 
 #[cfg(test)]
@@ -546,14 +661,19 @@ mod tests {
             .start_plan
             .command
             .contains("--connect '10.1.26.84:7474'"));
+        assert!(bootstrap_plans.borrow()[0]
+            .start_plan
+            .command
+            .contains("--node-id '10.1.29.130#7476'"));
+        assert!(
+            create_requests.borrow().is_empty(),
+            "first Ctrl-W bootstrap must activate the default published session without creating an extra session"
+        );
         assert_eq!(
-            create_requests.borrow()[0].authority_node_id,
+            outcome.created_target.address.authority_id(),
             "10.1.29.130#7476"
         );
-        assert_eq!(
-            create_requests.borrow()[0].cwd_hint.as_deref(),
-            Some("/opt/data/workspace/app-insight")
-        );
+        assert_eq!(outcome.created_target.address.session_id(), "seed");
         let _ = std::fs::remove_file(path);
     }
 

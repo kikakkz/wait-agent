@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+use crate::runtime::remote_host::remote_host_home::waitagent_home;
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -126,6 +129,99 @@ impl RemoteHostSecretStore for MemoryRemoteHostSecretStore {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct FileRemoteHostSecretStore {
+    root: PathBuf,
+}
+
+impl Default for FileRemoteHostSecretStore {
+    fn default() -> Self {
+        Self::new(waitagent_home().join("secrets").join("remote-host"))
+    }
+}
+
+impl FileRemoteHostSecretStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn path_for(&self, id: &RemoteHostSecretId) -> Result<PathBuf, RemoteHostSecretStoreError> {
+        let mut path = self.root.clone();
+        for segment in id.as_str().split('.') {
+            if segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || segment.contains('/')
+                || segment.contains('\\')
+            {
+                return Err(RemoteHostSecretStoreError::new(
+                    "remote host secret id contains an invalid path segment",
+                ));
+            }
+            path.push(segment);
+        }
+        Ok(path)
+    }
+}
+
+impl RemoteHostSecretStore for FileRemoteHostSecretStore {
+    type Error = RemoteHostSecretStoreError;
+
+    fn put_secret(
+        &self,
+        id: &RemoteHostSecretId,
+        secret: RemoteHostSecretValue,
+    ) -> Result<(), Self::Error> {
+        let path = self.path_for(id)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+        }
+        write_secret_file(&path, secret.expose_secret())
+    }
+
+    fn get_secret(
+        &self,
+        id: &RemoteHostSecretId,
+    ) -> Result<Option<RemoteHostSecretValue>, Self::Error> {
+        let path = self.path_for(id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let value = fs::read_to_string(path)
+            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+        Ok(Some(RemoteHostSecretValue::new(value)))
+    }
+
+    fn delete_secret(&self, id: &RemoteHostSecretId) -> Result<(), Self::Error> {
+        let path = self.path_for(id)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RemoteHostSecretStoreError::new(error.to_string())),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_secret_file(path: &Path, value: &str) -> Result<(), RemoteHostSecretStoreError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+    file.write_all(value.as_bytes())
+        .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &Path, value: &str) -> Result<(), RemoteHostSecretStoreError> {
+    fs::write(path, value).map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SecretToolRemoteHostSecretStore;
 
@@ -231,5 +327,33 @@ mod tests {
 
         store.delete_secret(&id).unwrap();
         assert!(store.get_secret(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn remote_host_file_secret_store_round_trips_passwords() {
+        let root = std::env::temp_dir().join(format!(
+            "waitagent-file-secrets-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let store = FileRemoteHostSecretStore::new(&root);
+        let id =
+            RemoteHostSecretId::new("waitagent.remote-host.10-1-29-130.kk.ssh-password").unwrap();
+
+        store
+            .put_secret(&id, RemoteHostSecretValue::new("12345679"))
+            .unwrap();
+
+        assert_eq!(
+            store.get_secret(&id).unwrap().unwrap().expose_secret(),
+            "12345679"
+        );
+        assert!(root
+            .join("waitagent/remote-host/10-1-29-130/kk/ssh-password")
+            .exists());
+
+        store.delete_secret(&id).unwrap();
+        assert!(store.get_secret(&id).unwrap().is_none());
+        let _ = fs::remove_dir_all(root);
     }
 }

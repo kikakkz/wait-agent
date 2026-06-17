@@ -4,8 +4,7 @@ use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostAuthProfile, RemoteHostProfile,
 };
 use crate::runtime::remote_host::remote_host_secret_store::{
-    RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
-    SecretToolRemoteHostSecretStore,
+    FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use std::fmt;
 use std::io::Write;
@@ -18,19 +17,27 @@ pub const WAITAGENT_INSTALL_SCRIPT_URL: &str =
 pub struct RemoteWaitAgentStartPlan {
     pub remote_port: u16,
     pub local_connect_endpoint: String,
+    pub authority_id: String,
     pub command: String,
 }
 
 impl RemoteWaitAgentStartPlan {
-    pub fn new(remote_port: u16, local_connect_endpoint: impl Into<String>) -> Self {
+    pub fn new(
+        remote_port: u16,
+        local_connect_endpoint: impl Into<String>,
+        authority_id: impl Into<String>,
+    ) -> Self {
         let local_connect_endpoint = local_connect_endpoint.into();
+        let authority_id = authority_id.into();
         Self {
             remote_port,
             command: format!(
-                "nohup waitagent --port {remote_port} --connect {} >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
-                shell_single_quote(&local_connect_endpoint)
+                "nohup waitagent --port {remote_port} --connect {} --node-id {} __remote-daemon >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                shell_single_quote(&local_connect_endpoint),
+                shell_single_quote(&authority_id)
             ),
             local_connect_endpoint,
+            authority_id,
         }
     }
 }
@@ -52,6 +59,7 @@ impl RemoteHostBootstrapPlan {
         profile: &RemoteHostProfile,
         remote_port: u16,
         local_connect_endpoint: impl Into<String>,
+        authority_id: impl Into<String>,
     ) -> Self {
         let (auth_kind, key_path, ssh_password_secret_id) = match &profile.auth {
             RemoteHostAuthProfile::Password { password_secret_id } => {
@@ -64,6 +72,7 @@ impl RemoteHostBootstrapPlan {
             ),
             RemoteHostAuthProfile::Agent => ("agent".to_string(), None, None),
         };
+        let authority_id = authority_id.into();
         Self {
             host: profile.host.clone(),
             ssh_user: profile.ssh_user.clone(),
@@ -72,7 +81,11 @@ impl RemoteHostBootstrapPlan {
             ssh_password_secret_id,
             sudo_password_secret_id: profile.sudo_password_secret_id.clone(),
             install_or_update_command: install_or_update_command(),
-            start_plan: RemoteWaitAgentStartPlan::new(remote_port, local_connect_endpoint),
+            start_plan: RemoteWaitAgentStartPlan::new(
+                remote_port,
+                local_connect_endpoint,
+                authority_id,
+            ),
         }
     }
 }
@@ -106,14 +119,14 @@ impl fmt::Display for RemoteHostBootstrapError {
 impl std::error::Error for RemoteHostBootstrapError {}
 
 #[derive(Debug, Clone)]
-pub struct SshRemoteHostBootstrapper<S = SecretToolRemoteHostSecretStore> {
+pub struct SshRemoteHostBootstrapper<S = FileRemoteHostSecretStore> {
     secret_store: S,
 }
 
-impl Default for SshRemoteHostBootstrapper<SecretToolRemoteHostSecretStore> {
+impl Default for SshRemoteHostBootstrapper<FileRemoteHostSecretStore> {
     fn default() -> Self {
         Self {
-            secret_store: SecretToolRemoteHostSecretStore,
+            secret_store: FileRemoteHostSecretStore::default(),
         }
     }
 }
@@ -168,6 +181,7 @@ where
         if let Some(secret) = &ssh_password {
             command.env("SSHPASS", secret.expose_secret());
         }
+        configure_ssh_command(&mut command);
         if let Some(key_path) = &plan.key_path {
             command.arg("-i").arg(key_path);
         }
@@ -202,8 +216,9 @@ where
             Ok(())
         } else {
             Err(RemoteHostBootstrapError::new(format!(
-                "ssh remote bootstrap command failed with status {}",
-                output.status
+                "ssh remote bootstrap command failed with status {}{}",
+                output.status,
+                stderr_summary(&output.stderr)
             )))
         }
     }
@@ -252,6 +267,24 @@ where
     }
 }
 
+fn configure_ssh_command(command: &mut Command) {
+    command
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=10");
+}
+
+fn stderr_summary(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(": {text}")
+    }
+}
+
 pub fn install_or_update_command() -> String {
     let expected_version = env!("CARGO_PKG_VERSION");
     let install = format!(
@@ -294,7 +327,12 @@ mod tests {
             last_connected_at: None,
         };
 
-        let plan = RemoteHostBootstrapPlan::from_profile(&profile, 7476, "10.1.26.84:7474");
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        );
 
         assert!(plan
             .install_or_update_command
@@ -306,10 +344,9 @@ mod tests {
             .install_or_update_command
             .contains("waitagent --version"));
         assert!(plan.install_or_update_command.contains("curl -fsSL"));
-        assert!(plan
-            .start_plan
-            .command
-            .contains("waitagent --port 7476 --connect '10.1.26.84:7474'"));
+        assert!(plan.start_plan.command.contains(
+            "waitagent --port 7476 --connect '10.1.26.84:7474' --node-id '10.1.29.130#7476' __remote-daemon"
+        ));
         assert!(plan.start_plan.command.contains("nohup"));
     }
 
@@ -338,7 +375,12 @@ mod tests {
             last_connected_at: None,
         };
 
-        let plan = RemoteHostBootstrapPlan::from_profile(&profile, 7476, "10.1.26.84:7474");
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        );
         let bootstrapper = SshRemoteHostBootstrapper::new(store);
 
         assert_eq!(plan.ssh_password_secret_id, Some(ssh_id));

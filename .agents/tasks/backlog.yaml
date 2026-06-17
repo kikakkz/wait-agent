@@ -397,16 +397,83 @@ next:
         Ctrl-W needs reusable host profiles and Xshell-style remembered credentials,
         with SSH and sudo password values stored only in a dedicated secure store.
   - id: task.remote-create-8-ctrl-w-bootstrap
-    title: implement Ctrl-W remote host bootstrap, install/start, endpoint reuse, and remote session creation
+    title: original Ctrl-W bootstrap implementation slice with v1.1 first-connect semantics
+    status: superseded
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 16
+      status: superseded
+      reason: >
+        This slice implemented useful SSH bootstrap, history, install, and startup
+        pieces, but v1.1 incorrectly specified creating an extra remote session
+        after first connect. Design v1.2 supersedes that behavior: first connect
+        activates the default session published by remote waitagent --connect,
+        while only existing endpoints create a new session.
+  - id: task.remote-create-9a-design-lock
+    title: lock corrected Ctrl-W first-connect design and split correction work
     status: done
     design_ref:
       file: docs/remote-host-connect-and-session-creation-design.md
-      section: 5.3, 6.3, 8, 15
+      section: 3.4, 5.3, 8.4, 8.5, 16, 17
       status: accepted
       reason: >
-        Ctrl-W owns SSH bootstrap, install/update through the install script,
-        remote WaitAgent startup with --connect back to the local server,
-        endpoint reuse, and creating the first remote session.
+        The corrected v1.2 design records that Ctrl-W first connect must match
+        manual waitagent --connect by activating the default published session,
+        and it explicitly forbids server-side direct dialing to remote host:port
+        for create-session.
+  - id: task.remote-create-9b-remove-direct-dial
+    title: remove direct remote create-session dialing and introduce local owner transport boundary
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3.3, 4, 10.1, 16.1, 16.4
+      status: accepted
+      reason: >
+        RemoteSessionCreationService must route through local owner/control
+        facade and must not derive http://host:port from authority_node_id.
+  - id: task.remote-create-9c-owner-create-session-routing
+    title: route remote create-session through the active node session owner event loop
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 4, 9, 10, 16.4
+      status: accepted
+      reason: >
+        Create-session requests must use the existing node session handle owned
+        by the remote owner/ingress runtime, with request/reply correlation in
+        the unified event loop.
+  - id: task.remote-create-9d-ctrl-w-first-connect
+    title: make Ctrl-W first connect activate the default published remote session
+    status: done
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 3.4, 5.3, 8.5, 16.2
+      status: accepted
+      reason: >
+        Newly bootstrapped remote endpoints must not call remote create-session;
+        they wait for the default session published by waitagent --connect and
+        activate it.
+  - id: task.remote-create-9e-daemon-parity
+    title: verify and fix __remote-daemon parity with manual waitagent --connect default session publication
+    status: ready
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 8.4, 16.3
+      status: accepted
+      reason: >
+        __remote-daemon is only a no-TTY startup mode; it must publish the same
+        default session as manual waitagent --connect while skipping TUI attach.
+  - id: task.remote-create-9f-acceptance
+    title: validate corrected Ctrl-W and Ctrl-S behavior across localhost and 10.1.29.130
+    status: ready
+    design_ref:
+      file: docs/remote-host-connect-and-session-creation-design.md
+      section: 17
+      status: accepted
+      reason: >
+        The correction must be proven by manual and automated checks covering
+        manual connect, first Ctrl-W, repeated Ctrl-W, Ctrl-S, and absence of
+        direct server-to-remote create-session dialing.
   - id: task.transport-stability-l4
     title: shorten authority transport read timeout and add ping/pong liveness
     status: done

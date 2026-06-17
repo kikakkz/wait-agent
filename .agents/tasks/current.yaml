@@ -1,35 +1,37 @@
-id: task.remote-create-8-ctrl-w-bootstrap
+id: task.remote-create-9e-daemon-parity
 kind: task
 version: 1
-title: implement Ctrl-W remote host bootstrap, install/start, endpoint reuse, and remote session creation
-status: done
+title: verify and fix __remote-daemon parity with manual waitagent --connect default session publication
+status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-host-connect-and-session-creation-design.md
   why:
-    - Accepted design v1.1 defines this bounded implementation slice.
+    - Accepted design v1.2 requires __remote-daemon to be only a no-TTY startup mode that publishes the same default session as manual waitagent --connect.
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
 depends_on:
-  - task.remote-create-5-server-service.done
-  - task.remote-create-7-history.done
+  - task.remote-create-9b-remove-direct-dial
+  - task.remote-create-9c-owner-create-session-routing
+  - task.remote-create-9d-ctrl-w-first-connect
 
 linked_primitives:
   - primitive.verification-refresh
   - primitive.task-board-sync
 done_criteria:
-  - Ctrl-W selects or creates a profile, bootstraps remote WaitAgent with install script if needed, starts it with --port <free> --connect <local-server>, reuses existing endpoint when connected, and creates/activates a remote session.
+  - __remote-daemon starts the remote runtime without TUI attach and publishes a default session equivalent to manual waitagent --connect.
+  - First Ctrl-W to an unconnected endpoint activates that default published session without creating an extra session.
 verification:
+  - cargo check
   - cargo test remote_host -- --test-threads=1
-  - cargo build
-  - manual: Ctrl-W against 10.1.29.130 with saved profile
+  - cargo test remote_node_session_sync_runtime -- --test-threads=1
+  - manual: compare manual waitagent --connect and __remote-daemon publication behavior
 
 touched_paths:
-  - src/runtime/remote_host
-  - src/application/control_service.rs
   - src/runtime/workspace/workspace_command_runtime.rs
+  - src/runtime/remote_host/ssh_remote_host_bootstrapper.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime.rs
 
 notes:
-  - Keep changes scoped to this slice; do not implement later Ctrl-W/Ctrl-S behavior early unless required by a dependency boundary.
-  - Preserve PTY ownership and runtime-owner catalog boundaries from the accepted design.
+  - Direct server-to-remote create-session dialing has been removed; do not reintroduce it for daemon parity.

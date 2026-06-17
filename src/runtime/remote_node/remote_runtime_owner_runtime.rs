@@ -730,6 +730,7 @@ mod tests {
         let network = RemoteNetworkConfig {
             port: 9001,
             connect: Some("10.0.0.8:7474".to_string()),
+            node_id: None,
         };
 
         let args = remote_runtime_owner_args(&network);
@@ -751,6 +752,7 @@ mod tests {
         let network = RemoteNetworkConfig {
             port: 7575,
             connect: None,
+            node_id: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 
@@ -879,6 +881,7 @@ mod tests {
         let network = RemoteNetworkConfig {
             port: 7474,
             connect: None,
+            node_id: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 

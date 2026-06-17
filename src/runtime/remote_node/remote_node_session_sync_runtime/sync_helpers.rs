@@ -63,7 +63,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     O: LocalTargetExitObserver,
 {
     let publication_runtime =
-        match RemoteTargetPublicationRuntime::from_build_env_with_network(network) {
+        match RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone()) {
             Ok(rt) => Some(rt),
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -97,7 +97,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
 
         let mut active_session = None;
         let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
-        let mut authority_manager = SessionSyncAuthorityManager::new();
+        let mut authority_manager = SessionSyncAuthorityManager::new(network.clone());
         let mut should_reconnect = false;
         let mut next_sync_at = Instant::now() + poll_interval;
 
@@ -415,7 +415,7 @@ pub(crate) fn overlay_workspace_runtime_onto_active_local_target_hosts(
         }) else {
             continue;
         };
-        if should_overlay_active_target_runtime(active_target) {
+        if should_overlay_active_target_runtime(active_target, &workspace_runtime) {
             active_target.command_name = workspace_runtime.command_name.clone();
             active_target.current_path = workspace_runtime.current_path.clone();
             active_target.task_state = workspace_runtime.task_state;
@@ -424,11 +424,18 @@ pub(crate) fn overlay_workspace_runtime_onto_active_local_target_hosts(
     sessions
 }
 
-fn should_overlay_active_target_runtime(session: &ManagedSessionRecord) -> bool {
-    session
+fn should_overlay_active_target_runtime(
+    session: &ManagedSessionRecord,
+    workspace_runtime: &ManagedSessionRecord,
+) -> bool {
+    workspace_runtime
         .command_name
         .as_deref()
-        .map_or(true, |name| SHELL_NAMES.contains(&name))
+        .is_some_and(|name| name != "waitagent")
+        && session
+            .command_name
+            .as_deref()
+            .map_or(true, |name| SHELL_NAMES.contains(&name))
         && matches!(
             session.task_state,
             ManagedSessionTaskState::Unknown

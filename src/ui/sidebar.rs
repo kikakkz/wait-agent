@@ -232,27 +232,15 @@ fn remote_row_label_candidates(session: &ManagedSessionRecord) -> Vec<String> {
     let command = session.command_name.as_deref().unwrap_or("bash");
     let authority = session.address.authority_id();
     let host = session.address.display_authority_id();
-    let short_session = short_remote_session_id(session.address.display_session_id());
     let command_host_port = remote_command_host_port_label(session);
     let command_host = format!("{}@{}", command, host);
 
     let mut candidates = Vec::new();
     if authority != host {
-        candidates.push(format!("{}#{}", command_host_port, short_session));
         candidates.push(command_host_port.clone());
     }
-    candidates.push(format!("{}#{}", command_host, short_session));
     candidates.push(command_host);
     candidates
-}
-
-fn short_remote_session_id(session_id: &str) -> &str {
-    const SHORT_ID_LEN: usize = 6;
-    if session_id.len() <= SHORT_ID_LEN {
-        session_id
-    } else {
-        &session_id[..SHORT_ID_LEN]
-    }
 }
 
 fn selected_detail_text(session: &ManagedSessionRecord, width: usize) -> String {
@@ -391,6 +379,7 @@ mod tests {
         );
 
         assert!(output.contains("bash@192.168.31.182:7513"));
+        assert!(!output.contains(":7513#"));
         assert!(output.contains("192.168.31.182"));
         assert!(!output.contains("372645a93b9cd222"));
     }

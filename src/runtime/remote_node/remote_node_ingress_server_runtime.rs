@@ -2,17 +2,20 @@ use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, NodeSessionEnvelope as GrpcNodeSessionEnvelope,
-    OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
-    TargetPublished as GrpcTargetPublished,
+    ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest,
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, RawPtyInput, RouteContext,
+    TargetExited as GrpcTargetExited, TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
     RemoteNodeTransport, RemoteNodeTransportEvent,
 };
 use crate::infra::remote_protocol::{
-    BootstrapMode, ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
+    ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+};
+use crate::infra::remote_transport_codec::{
+    read_node_session_envelope, write_node_session_envelope,
 };
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
@@ -20,13 +23,16 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
     authority_target_component, RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
-use crate::runtime::remote_node_session_runtime::map_inbound_grpc_authority_event;
+use crate::runtime::remote_node_session_runtime::{
+    map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
+};
 use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -64,6 +70,10 @@ enum InternalEvent {
         node_id: String,
         socket_path: PathBuf,
     },
+    LocalCreateSession {
+        envelope: GrpcNodeSessionEnvelope,
+        reply_tx: mpsc::Sender<GrpcNodeSessionEnvelope>,
+    },
     SocketDirChanged,
     Shutdown,
 }
@@ -86,14 +96,18 @@ impl RemoteNodeIngressServerRuntime {
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
-            .map_err(remote_node_ingress_error)?;
+        let listener = UnixListener::bind(&socket_path).map_err(remote_node_ingress_error)?;
         listener
             .set_nonblocking(true)
             .map_err(remote_node_ingress_error)?;
-        let _guard = self.start()?;
+        let guard = self.start()?;
+        let Some(owner_tx) = guard.owner_event_sender() else {
+            return Err(LifecycleError::Protocol(
+                "remote node ingress owner did not expose local control channel".to_string(),
+            ));
+        };
         while any_live_workspace_exists()? {
-            let _ = drain_owner_ping(&listener);
+            let _ = drain_owner_requests(&listener, &owner_tx);
             thread::sleep(BRIDGE_REFRESH_INTERVAL);
         }
         let _ = fs::remove_file(&socket_path);
@@ -177,14 +191,62 @@ fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-fn drain_owner_ping(listener: &std::os::unix::net::UnixListener) -> io::Result<()> {
+fn drain_owner_requests(
+    listener: &UnixListener,
+    owner_tx: &mpsc::Sender<InternalEvent>,
+) -> io::Result<()> {
     loop {
         match listener.accept() {
-            Ok((_stream, _)) => {}
+            Ok((stream, _)) => handle_owner_stream(stream, owner_tx.clone()),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => return Err(error),
         }
     }
+}
+
+fn handle_owner_stream(mut stream: UnixStream, owner_tx: mpsc::Sender<InternalEvent>) {
+    thread::spawn(move || {
+        let Ok(request) = read_node_session_envelope(&mut stream) else {
+            return;
+        };
+        let Some(Body::CreateSessionRequest(payload)) =
+            map_outbound_grpc_envelope_for_local_request(request).body
+        else {
+            return;
+        };
+        let authority_node_id = payload.authority_node_id.clone();
+        let request_id = payload.request_id.clone();
+        let grpc = local_create_session_request_grpc_envelope(authority_node_id, payload);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if owner_tx
+            .send(InternalEvent::LocalCreateSession {
+                envelope: grpc,
+                reply_tx,
+            })
+            .is_err()
+        {
+            let _ = write_create_session_rejected_to_stream(
+                &mut stream,
+                request_id,
+                "remote node ingress owner is not running",
+            );
+            return;
+        }
+        match reply_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(reply) => {
+                if let Some(envelope) = map_local_reply_from_grpc(reply) {
+                    let _ = write_node_session_envelope(&mut stream, &envelope);
+                }
+            }
+            Err(_) => {
+                let _ = write_create_session_rejected_to_stream(
+                    &mut stream,
+                    request_id,
+                    "timed out waiting for create-session reply from remote node",
+                );
+            }
+        }
+    });
 }
 
 fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
@@ -286,6 +348,12 @@ fn start_inotify_watcher(
     }))
 }
 
+impl RemoteNodeIngressServerGuard {
+    fn owner_event_sender(&self) -> Option<mpsc::Sender<InternalEvent>> {
+        self.shutdown_tx.clone()
+    }
+}
+
 impl Drop for RemoteNodeIngressServerGuard {
     fn drop(&mut self) {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
@@ -311,7 +379,9 @@ fn run_node_ingress_server_loop(
     start_authority_socket_watcher: bool,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
-    let mut authority_manager = SessionSyncAuthorityManager::new();
+    let mut authority_manager = SessionSyncAuthorityManager::new(RemoteNetworkConfig::default());
+    let mut pending_create_sessions =
+        HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let (event_tx, event_rx) = mpsc::channel::<IngressServerEvent>();
 
     let _transport_bridge = {
@@ -356,10 +426,22 @@ fn run_node_ingress_server_loop(
                 &publication_runtime,
                 &mut authority_manager,
                 &mut sessions,
+                &mut pending_create_sessions,
                 internal_tx.clone(),
                 event,
             ),
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
+            IngressServerEvent::Internal(InternalEvent::LocalCreateSession {
+                envelope,
+                reply_tx,
+            }) => {
+                handle_local_create_session_request(
+                    &mut sessions,
+                    &mut pending_create_sessions,
+                    envelope,
+                    reply_tx,
+                );
+            }
             IngressServerEvent::Internal(event) => {
                 handle_internal_event(&mut sessions, internal_tx.clone(), event);
             }
@@ -375,6 +457,7 @@ fn handle_transport_event(
     publication_runtime: &RemoteTargetPublicationRuntime,
     authority_manager: &mut SessionSyncAuthorityManager,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
+    pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
     internal_tx: mpsc::Sender<InternalEvent>,
     event: RemoteNodeTransportEvent,
 ) {
@@ -394,6 +477,12 @@ fn handle_transport_event(
             session_instance_id,
             envelope,
         } => {
+            if let Some(request_id) = grpc_create_session_reply_request_id(&envelope) {
+                if let Some(reply_tx) = pending_create_sessions.remove(&request_id) {
+                    let _ = reply_tx.send(envelope);
+                    return;
+                }
+            }
             let is_command = matches!(
                 envelope.body.as_ref(),
                 Some(Body::OpenMirrorRequest(_))
@@ -424,19 +513,235 @@ fn handle_transport_event(
             }
         }
         RemoteNodeTransportEvent::SessionClosed {
+            node_id,
             session_instance_id,
             ..
         } => {
             sessions.remove(&session_instance_id);
+            remove_discovered_node_if_last_ingress_session(
+                publication_runtime,
+                sessions,
+                node_id.as_str(),
+            );
         }
         RemoteNodeTransportEvent::TransportFailed {
+            node_id,
             session_instance_id,
             ..
         } => {
             if let Some(session_instance_id) = session_instance_id {
                 sessions.remove(&session_instance_id);
             }
+            if let Some(node_id) = node_id {
+                remove_discovered_node_if_last_ingress_session(
+                    publication_runtime,
+                    sessions,
+                    node_id.as_str(),
+                );
+            }
         }
+    }
+}
+
+fn has_active_ingress_session_for_node(
+    sessions: &HashMap<String, ActiveNodeIngressSession>,
+    node_id: &str,
+) -> bool {
+    sessions
+        .values()
+        .any(|active| active.session.node_id() == node_id)
+}
+
+fn remove_discovered_node_if_last_ingress_session(
+    publication_runtime: &RemoteTargetPublicationRuntime,
+    sessions: &HashMap<String, ActiveNodeIngressSession>,
+    node_id: &str,
+) {
+    if has_active_ingress_session_for_node(sessions, node_id) {
+        return;
+    }
+    if let Err(error) = publication_runtime.remove_discovered_remote_node(node_id) {
+        ERROR_LOG.log(format!(
+            "[diag] ingress server: failed to remove discovered node {node_id}: {error}"
+        ));
+    }
+}
+
+fn handle_local_create_session_request(
+    sessions: &mut HashMap<String, ActiveNodeIngressSession>,
+    pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
+    envelope: GrpcNodeSessionEnvelope,
+    reply_tx: mpsc::Sender<GrpcNodeSessionEnvelope>,
+) {
+    let Some(authority_node_id) = envelope
+        .route
+        .as_ref()
+        .and_then(|route| route.authority_node_id.clone())
+    else {
+        let _ = reply_tx.send(local_create_session_rejected_grpc_envelope(
+            String::new(),
+            "missing authority node id".to_string(),
+        ));
+        return;
+    };
+    let Some(active) = sessions
+        .values()
+        .find(|active| active.session.node_id() == authority_node_id)
+    else {
+        let request_id = grpc_create_session_request_id(&envelope).unwrap_or_default();
+        let _ = reply_tx.send(local_create_session_rejected_grpc_envelope(
+            request_id,
+            format!("remote authority `{authority_node_id}` is not connected"),
+        ));
+        return;
+    };
+    let request_id = grpc_create_session_request_id(&envelope).unwrap_or_default();
+    pending_create_sessions.insert(request_id.clone(), reply_tx);
+    if active.session.send(envelope).is_err() {
+        if let Some(reply_tx) = pending_create_sessions.remove(&request_id) {
+            let _ = reply_tx.send(local_create_session_rejected_grpc_envelope(
+                request_id,
+                format!("failed to send create-session request to `{authority_node_id}`"),
+            ));
+        }
+    }
+}
+
+fn grpc_create_session_request_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
+    match envelope.body.as_ref() {
+        Some(Body::CreateSessionRequest(payload)) => Some(payload.request_id.clone()),
+        _ => None,
+    }
+}
+
+fn grpc_create_session_reply_request_id(envelope: &GrpcNodeSessionEnvelope) -> Option<String> {
+    match envelope.body.as_ref() {
+        Some(Body::CreateSessionAccepted(payload)) => Some(payload.request_id.clone()),
+        Some(Body::CreateSessionRejected(payload)) => Some(payload.request_id.clone()),
+        _ => None,
+    }
+}
+
+fn map_outbound_grpc_envelope_for_local_request(
+    request: crate::infra::remote_protocol::NodeSessionEnvelope,
+) -> GrpcNodeSessionEnvelope {
+    match map_outbound_grpc_envelope("local-create-session", request.channel, &request.envelope) {
+        Ok(envelope) => envelope,
+        Err(_) => local_create_session_rejected_grpc_envelope(
+            String::new(),
+            "failed to map local create-session request".to_string(),
+        ),
+    }
+}
+
+fn local_create_session_request_grpc_envelope(
+    authority_node_id: String,
+    payload: CreateSessionRequest,
+) -> GrpcNodeSessionEnvelope {
+    GrpcNodeSessionEnvelope {
+        message_id: format!("local-create-session-{}", payload.request_id),
+        sent_at: None,
+        session_instance_id: String::new(),
+        correlation_id: Some(payload.request_id.clone()),
+        route: Some(RouteContext {
+            authority_node_id: Some(authority_node_id),
+            target_id: None,
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: None,
+        }),
+        body: Some(Body::CreateSessionRequest(payload)),
+    }
+}
+
+fn map_local_reply_from_grpc(
+    reply: GrpcNodeSessionEnvelope,
+) -> Option<crate::infra::remote_protocol::NodeSessionEnvelope> {
+    let payload = match reply.body? {
+        Body::CreateSessionAccepted(payload) => {
+            ControlPlanePayload::CreateSessionAccepted(CreateSessionAcceptedPayload {
+                request_id: payload.request_id,
+                session_id: payload.session_id,
+                target_id: payload.target_id,
+            })
+        }
+        Body::CreateSessionRejected(payload) => {
+            ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+                request_id: payload.request_id,
+                code: "create_session_failed",
+                message: payload.reason,
+            })
+        }
+        _ => return None,
+    };
+    Some(crate::infra::remote_protocol::NodeSessionEnvelope {
+        channel: crate::infra::remote_protocol::NodeSessionChannel::Authority,
+        envelope: ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: reply.message_id,
+            message_type: payload.message_type(),
+            timestamp: format!("{}Z", now_millis()),
+            sender_id: "waitagent-remote-node-ingress-owner".to_string(),
+            correlation_id: reply.correlation_id,
+            session_id: None,
+            target_id: None,
+            attachment_id: None,
+            console_id: None,
+            payload,
+        },
+    })
+}
+
+fn write_create_session_rejected_to_stream(
+    stream: &mut UnixStream,
+    request_id: String,
+    message: impl Into<String>,
+) -> io::Result<()> {
+    let payload = ControlPlanePayload::CreateSessionRejected(CreateSessionRejectedPayload {
+        request_id,
+        code: "create_session_failed",
+        message: message.into(),
+    });
+    write_node_session_envelope(
+        stream,
+        &crate::infra::remote_protocol::NodeSessionEnvelope {
+            channel: crate::infra::remote_protocol::NodeSessionChannel::Authority,
+            envelope: ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: format!("local-create-session-rejected-{}", now_millis()),
+                message_type: payload.message_type(),
+                timestamp: format!("{}Z", now_millis()),
+                sender_id: "waitagent-remote-node-ingress-owner".to_string(),
+                correlation_id: None,
+                session_id: None,
+                target_id: None,
+                attachment_id: None,
+                console_id: None,
+                payload,
+            },
+        },
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))
+}
+
+fn local_create_session_rejected_grpc_envelope(
+    request_id: String,
+    message: String,
+) -> GrpcNodeSessionEnvelope {
+    GrpcNodeSessionEnvelope {
+        message_id: format!("local-create-session-rejected-{}", now_millis()),
+        sent_at: None,
+        session_instance_id: String::new(),
+        correlation_id: Some(request_id.clone()),
+        route: None,
+        body: Some(Body::CreateSessionRejected(
+            crate::infra::remote_grpc_proto::v1::CreateSessionRejected {
+                request_id,
+                reason: message,
+                status: None,
+            },
+        )),
     }
 }
 
@@ -462,7 +767,7 @@ fn handle_internal_event(
                 refresh_authority_bridges(&node_id, active, internal_tx.clone());
             }
         }
-        InternalEvent::Shutdown => {}
+        InternalEvent::Shutdown | InternalEvent::LocalCreateSession { .. } => {}
     }
 }
 

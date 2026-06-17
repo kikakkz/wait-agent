@@ -8,8 +8,8 @@ use crate::application::target_registry_service::{
 use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
 use crate::cli::{
-    ActivateTargetCommand, AttachCommand, ConnectRemoteHostCommand, DetachCommand,
-    LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
+    ActivateTargetCommand, AttachCommand, ConnectRemoteHostCommand, ConnectRemoteHostUiCommand,
+    DetachCommand, LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
     NewSelectedRemoteSessionCommand, NewTargetCommand, RemoteNetworkConfig,
     RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
     ToggleFullscreenCommand,
@@ -129,6 +129,29 @@ impl WorkspaceCommandRuntime {
             backend,
             network,
         })
+    }
+
+    pub fn run_remote_daemon(&self) -> Result<(), LifecycleError> {
+        let workspace_dir = self.resolve_workspace_dir(None)?;
+        let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
+        self.remote_runtime_owner_runtime.ensure_owner_running()?;
+        self.main_slot_runtime.ensure_initial_target_materialized(
+            &workspace.workspace_handle,
+            &workspace.workspace_dir,
+        )?;
+        self.remote_target_publication_runtime
+            .ensure_configured_publications_on_socket(
+                workspace.workspace_handle.socket_name.as_str(),
+            )?;
+        self.start_remote_node_ingress(workspace.workspace_handle.socket_name.as_str())?;
+        self.start_remote_session_sync(workspace.workspace_handle.socket_name.as_str())?;
+        while self
+            .backend
+            .socket_is_live(&workspace.workspace_handle.socket_name)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Ok(())
     }
 
     pub fn run_workspace_entry(&self) -> Result<(), LifecycleError> {
@@ -268,6 +291,42 @@ impl WorkspaceCommandRuntime {
             ));
         }
         Ok(selected.to_string())
+    }
+
+    pub fn run_connect_remote_host_ui(
+        &self,
+        command: ConnectRemoteHostUiCommand,
+    ) -> Result<(), LifecycleError> {
+        let workspace =
+            workspace_handle(&command.current_socket_name, &command.current_session_name);
+        let form_command = connect_remote_host_form_command(
+            &self.current_executable_path(),
+            &command.current_socket_name,
+            &command.current_session_name,
+            &self.network,
+        );
+        self.backend
+            .run_socket_command(
+                &workspace.socket_name,
+                &[
+                    "display-popup".to_string(),
+                    "-c".to_string(),
+                    command.client_tty,
+                    "-w".to_string(),
+                    "70%".to_string(),
+                    "-h".to_string(),
+                    "70%".to_string(),
+                    "-E".to_string(),
+                    form_command,
+                ],
+            )
+            .map_err(tmux_runtime_error)
+    }
+
+    fn current_executable_path(&self) -> String {
+        current_waitagent_executable()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "waitagent".to_string())
     }
 
     pub fn run_connect_remote_host(
@@ -476,6 +535,61 @@ impl WorkspaceCommandRuntime {
     pub fn network_config(&self) -> RemoteNetworkConfig {
         self.network.clone()
     }
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn connect_remote_host_form_command(
+    executable: &str,
+    socket_name: &str,
+    session_name: &str,
+    network: &RemoteNetworkConfig,
+) -> String {
+    let command = format!(
+        "set -u; \
+         wait_close() {{ printf '\nPress ENTER to close.'; read -r _; }}; \
+         fail() {{ printf '\n%s\n' \"$1\"; wait_close; exit 2; }}; \
+         printf 'Connect Remote Host\n\n'; \
+         printf 'Host: '; read -r host; \
+         printf 'SSH user: '; read -r ssh_user; \
+         printf 'Auth [agent/key/password]: '; read -r auth; \
+         auth=${{auth:-agent}}; \
+         case \"$auth\" in agent|key|password) ;; *) fail \"Invalid auth: $auth\" ;; esac; \
+         [ -n \"$host\" ] || fail 'Host is required.'; \
+         [ -n \"$ssh_user\" ] || fail 'SSH user is required.'; \
+         key_path=''; ssh_password=''; sudo_password=''; \
+         if [ \"$auth\" = key ]; then printf 'Key path: '; read -r key_path; [ -n \"$key_path\" ] || fail 'Key path is required for key auth.'; fi; \
+         if [ \"$auth\" = password ]; then printf 'SSH password: '; stty -echo; read -r ssh_password; stty echo; printf '\n'; [ -n \"$ssh_password\" ] || fail 'SSH password is required for password auth.'; fi; \
+         printf 'Sudo password (optional): '; stty -echo; read -r sudo_password; stty echo; printf '\n'; \
+         printf 'Remote port [auto]: '; read -r remote_port; remote_port=${{remote_port:-auto}}; \
+         args=({exe} {port_args} {cmd} {sock_flag} {sock} {sess_flag} {sess} {host_flag} \"$host\" {user_flag} \"$ssh_user\" {auth_flag} \"$auth\" {remote_port_flag} \"$remote_port\"); \
+         if [ -n \"$key_path\" ]; then args+=( {key_flag} \"$key_path\" ); fi; \
+         if [ \"$auth\" = password ]; then args+=( {ssh_stdin_flag} ); fi; \
+         if [ -n \"$sudo_password\" ]; then args+=( {sudo_stdin_flag} ); fi; \
+         if [ \"$auth\" = password ] || [ -n \"$sudo_password\" ]; then input=$(printf '%s\\n%s\\n' \"$ssh_password\" \"$sudo_password\"); if printf '%s' \"$input\" | \"${{args[@]}}\"; then printf '\nDone.'; wait_close; else status=$?; printf '\nConnect failed with status %s.' \"$status\"; wait_close; exit \"$status\"; fi; else if \"${{args[@]}}\"; then printf '\nDone.'; wait_close; else status=$?; printf '\nConnect failed with status %s.' \"$status\"; wait_close; exit \"$status\"; fi; fi",
+        exe = shell_escape(executable),
+        port_args = network
+            .to_cli_args()
+            .into_iter()
+            .map(|arg| shell_escape(&arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        cmd = shell_escape("__connect-remote-host"),
+        sock_flag = shell_escape("--current-socket-name"),
+        sock = shell_escape(socket_name),
+        sess_flag = shell_escape("--current-session-name"),
+        sess = shell_escape(session_name),
+        host_flag = shell_escape("--host"),
+        user_flag = shell_escape("--ssh-user"),
+        auth_flag = shell_escape("--auth"),
+        remote_port_flag = shell_escape("--remote-port"),
+        key_flag = shell_escape("--key-path"),
+        ssh_stdin_flag = shell_escape("--ssh-password-stdin"),
+        sudo_stdin_flag = shell_escape("--sudo-password-stdin"),
+    );
+    format!("bash -lc {}", shell_escape(&command))
 }
 
 fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandle {

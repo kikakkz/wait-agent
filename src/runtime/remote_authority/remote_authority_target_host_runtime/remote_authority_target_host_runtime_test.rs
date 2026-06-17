@@ -300,6 +300,7 @@ mod tests {
             &RemoteNetworkConfig {
                 port: 9001,
                 connect: Some("10.0.0.8:7474".to_string()),
+                node_id: None,
             },
         );
 

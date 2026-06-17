@@ -1,8 +1,8 @@
 # Remote Host Connect And Session Creation Design
 
-Version: `v1.1`
-Status: `Accepted for task.feature-remote-session-creation-from-sidebar`
-Date: `2026-06-16`
+Version: `v1.2`
+Status: `Accepted for task.remote-create-9-ctrl-w-correction`
+Date: `2026-06-17`
 
 ## 1. Purpose
 
@@ -19,6 +19,13 @@ The accepted model has three explicit user actions:
 - create a local session
 - connect or prepare a remote host
 - create a session on an already connected remote endpoint
+
+This version corrects a v1.1 implementation mistake: `Ctrl-W` first-connect
+semantics must match manually running `waitagent --connect <local-server>`. A
+newly bootstrapped remote host publishes its default remote session and that
+session is activated. WaitAgent must not create a second remote session after
+first connect. Remote create-session is used only when an endpoint is already
+connected, or when the user explicitly invokes `Ctrl-S`.
 
 This design complements:
 
@@ -64,7 +71,7 @@ Accepted bindings:
 | --- | --- |
 | `Ctrl-N` | Create a new local session. |
 | Prefix-c | Hidden tmux-compatible alias for local session creation. |
-| `Ctrl-W` | Open remote host connect/bootstrap workflow. |
+| `Ctrl-W` | Connect or reuse a remote host endpoint. |
 | `Ctrl-S` | Create a new session on the currently selected remote endpoint. |
 
 Prefix-c must remain available for tmux users, but it must not be displayed in
@@ -90,6 +97,39 @@ single endpoint may publish many remote sessions.
 When a sidebar row points to a remote session, `Ctrl-S` uses that row's
 authority node as the endpoint placement target for a new remote session.
 
+`authority_node_id` is an identity and routing key. In the SSH bootstrap flow it
+may be formatted as `<host>#<remote-port>` for stability, but that string is not
+a dial target for server-side create-session. The server must not translate it
+into `http://<host>:<remote-port>` for this workflow.
+
+### 3.4 Ctrl-W First-Connect Semantics
+
+`Ctrl-W` is the automated version of running this command on the remote host:
+
+```bash
+waitagent --connect <local-host>:<local-port>
+```
+
+Manual first connect creates or opens the remote WaitAgent's default shell
+session, publishes it back to the local server, and does not create an extra
+second session. `Ctrl-W` must preserve that behavior.
+
+Accepted `Ctrl-W` behavior:
+
+- if the target host endpoint is not connected, SSH bootstraps remote
+  WaitAgent, waits for the default remote session to appear through normal
+  catalog/session-sync, and activates that default session
+- if the target host endpoint is already connected, `Ctrl-W` reuses that
+  endpoint and creates one new ordinary remote session on it
+
+`Ctrl-W` must not unconditionally create a remote session after bootstrap.
+
+### 3.5 Ctrl-S Remote New Semantics
+
+`Ctrl-S` is the explicit command for creating a new session on an already
+connected remote endpoint. It does not perform SSH bootstrap and it does not
+fall back to local creation.
+
 ## 4. High-Level Runtime Architecture
 
 ```text
@@ -104,16 +144,21 @@ WorkspaceCommandRuntime
         |       -> SidebarSelectionState
         |       -> TargetRegistryService / RemoteRuntimeOwner snapshot
         |       -> RemoteSessionCreationService
-        |       -> RemoteNodeSessionOwnerRuntime
-        |       -> NodeSession stream CreateSessionRequest
+        |       -> local remote-owner control channel
+        |       -> existing node-session stream CreateSessionRequest
         |
         +-- Remote host connect/bootstrap
                 -> RemoteHostHistoryStore
                 -> RemoteHostConnectRuntime
-                -> SshRemoteHostBootstrapper
-                -> remote install/start waitagent --connect local server
-                -> RemoteRuntimeOwner endpoint wait
-                -> RemoteSessionCreationService
+                -> if endpoint already connected:
+                |       -> RemoteSessionCreationService
+                |       -> activate created remote session
+                |
+                -> if endpoint not connected:
+                        -> SshRemoteHostBootstrapper
+                        -> remote install/start waitagent --connect local server
+                        -> wait for default remote session from catalog/session-sync
+                        -> activate default remote session
 ```
 
 The important ownership split is:
@@ -121,12 +166,20 @@ The important ownership split is:
 - `WorkspaceCommandRuntime` owns command dispatch.
 - `MainSlotRuntime` owns local main-slot activation and existing local target
   creation.
-- `RemoteHostConnectRuntime` owns SSH bootstrap and remote process startup.
-- `RemoteNodeSessionOwnerRuntime` owns live node connections and remote session
-  state.
-- `RemoteSessionCreationService` sends create-session requests and waits for
-  catalog convergence.
-- The remote node's local target-host runtime owns the actual new remote PTY.
+- `RemoteHostConnectRuntime` owns SSH bootstrap, endpoint reuse decisions, and
+  choosing whether to activate the first published default session or create a
+  new session on an existing endpoint.
+- `RemoteNodeSessionOwnerRuntime` or the node connection owner owns live node
+  connections, remote session state, and create-session routing over an
+  existing node session.
+- `RemoteSessionCreationService` sends create-session requests through the
+  local owner/control facade and waits for catalog convergence. It never dials
+  a remote host:port directly.
+- The remote node's local target-host runtime owns the actual remote PTY.
+
+Unified event dispatch is a hard boundary. Application services may request
+remote operations, but they must not create ad hoc remote gRPC/TCP connections
+that bypass the owner runtime.
 
 ## 5. Command Design
 
@@ -174,33 +227,37 @@ Failure semantics:
 - create rejection or timeout: fail clearly
 - no local fallback is allowed
 
-### 5.3 New Remote Host Connect Command
+### 5.3 Remote Host Connect Command
 
-Add a hidden command for `Ctrl-W` after UI prompt/profile selection:
+The hidden command behind `Ctrl-W` is:
 
 ```text
 waitagent __connect-remote-host   --current-socket-name <socket>   --current-session-name <session>   --profile <name>
 ```
 
-Also allow direct non-interactive arguments for tests and future scripting:
+It also allows direct non-interactive arguments for tests and future scripting:
 
 ```text
-waitagent __connect-remote-host   --current-socket-name <socket>   --current-session-name <session>   --host <host>   --ssh-user <user>   --auth password|key|agent   [--key-path <path>]   [--remote-port auto|<port>]   [--save-profile <name>]
+waitagent __connect-remote-host   --current-socket-name <socket>   --current-session-name <session>   --host <host>   --ssh-user <user>   --auth password|key|agent   [--key-path <path>]   [--remote-port auto|<port>]
 ```
 
 Runtime semantics:
 
 1. load or create a remote host profile
 2. collect runtime-only password or sudo password if needed
-3. SSH to the host
-4. verify/install/update WaitAgent
-5. find or start a remote WaitAgent that connects back to the current local
+3. check the live target catalog for an online endpoint matching the target host
+4. if an endpoint is already online, create one new ordinary remote session on
+   that endpoint and activate it
+5. if no matching endpoint is online, SSH to the host
+6. verify/install/update WaitAgent
+7. find or start a remote WaitAgent that connects back to the current local
    server
-6. wait for the endpoint to appear in the remote owner snapshot/catalog
-7. create a new remote session on that endpoint
-8. activate the new remote session
+8. wait for the endpoint's default remote session to appear in the shared
+   catalog through normal session sync
+9. activate that default remote session
 
-No step may create a local fallback session.
+No step may create a local fallback session. First-connect bootstrap must not
+create an additional remote session after the default session appears.
 
 ## 6. Tmux Binding And UI Design
 
@@ -398,7 +455,9 @@ Expected responsibilities:
 - `RemoteHostSecretStore`: persist remembered SSH/sudo passwords in a dedicated
   secure store
 - `RemoteHostConnectRuntime`: orchestrate profile selection results,
-  bootstrap, endpoint wait, and remote session creation
+  endpoint reuse decisions, SSH bootstrap, endpoint wait, first-connect default
+  session activation, and remote session creation only for already connected
+  endpoints
 - `SshRemoteHostBootstrapper`: execute SSH commands and file-safe remote checks
 - `RemotePortProbe`: choose or verify a remote listener port
 
@@ -455,11 +514,23 @@ A remote WaitAgent started by `Ctrl-W` must listen on the remote host and connec
 back to the current local server:
 
 ```bash
-waitagent --port <free-remote-port> --connect <local-server-host>:<local-server-port>
+waitagent --port <free-remote-port> \
+  --connect <local-server-host>:<local-server-port> \
+  --node-id <host#free-remote-port> \
+  __remote-daemon
 ```
 
 `<local-server-host>:<local-server-port>` comes from the current workspace
 network configuration, the same listener identity shown in the footer.
+
+`--node-id` is a stable authority identity. It must not be interpreted by the
+server as a direct create-session endpoint.
+
+`__remote-daemon` is a no-TTY startup mode for SSH bootstrap. It must be
+semantically equivalent to manual `waitagent --connect <local-server>` for
+session publication: the remote node still creates or owns its default shell
+session and publishes it through normal session sync. It only suppresses TUI
+attach and interactive UI rendering so the SSH command can return.
 
 Starting remote WaitAgent with only `--port` is rejected for this workflow
 because it would not publish sessions back to the current server.
@@ -467,6 +538,21 @@ because it would not publish sessions back to the current server.
 The remote process must be started so that the SSH command can return without
 blocking on inherited stdout/stderr. The implementation should redirect or
 otherwise detach remote output deliberately.
+
+### 8.5 First-Connect Activation
+
+After SSH bootstrap, `RemoteHostConnectRuntime` waits for the first online
+publishable target on the expected authority. That target is the remote
+WaitAgent default session, matching the manual `waitagent --connect` behavior.
+
+Completion criteria for first connect:
+
+1. expected authority appears in catalog
+2. at least one target on that authority is online
+3. choose the target created or first published by the bootstrapped endpoint
+4. activate that target in the main slot
+
+The first-connect path must not call `RemoteSessionCreationService`.
 
 ## 9. Remote Create-Session Protocol
 
@@ -563,10 +649,10 @@ Introduce an application/runtime service such as `RemoteSessionCreationService`.
 
 Responsibilities:
 
-- resolve an authority endpoint from a selected remote session or connected
-  profile
+- accept an already connected `authority_node_id` from a selected remote session
+  or endpoint reuse decision
 - generate request ids
-- send create-session request through the remote owner/session facade
+- send create-session request through the local remote owner/session facade
 - wait for accepted/rejected response
 - wait for catalog convergence
 - return the new `ManagedSessionRecord` or a typed failure
@@ -577,6 +663,8 @@ It should not:
 - inspect tmux panes directly
 - fabricate catalog rows
 - own remote process lifecycle
+- derive `http://host:port` or otherwise directly dial the remote host from
+  `authority_node_id`
 
 ### 10.2 RemoteEndpointResolver
 
@@ -606,8 +694,10 @@ For `Ctrl-S`, cwd hint fallback order is:
 2. selected remote session `workspace_dir`
 3. remote node default startup directory
 
-For `Ctrl-W`, use the profile/default remote workspace dir when available. If
-none is known, omit `cwd_hint` and let the remote node choose its default.
+For `Ctrl-W` first-connect, no create-session request is sent, so no `cwd_hint`
+is needed. When `Ctrl-W` reuses an already connected endpoint and creates a new
+session, use the profile/default remote workspace dir when available. If none is
+known, omit `cwd_hint` and let the remote node choose its default.
 
 The server must not assume that a local path exists on the remote host.
 
@@ -653,88 +743,153 @@ Runtime tests:
 
 - local `Ctrl-N` remains local-only
 - `Ctrl-S` rejects local selection
-- `Ctrl-S` sends create request for selected remote authority
+- `Ctrl-S` sends create request for selected remote authority through the local
+  owner/control facade, not by dialing remote host:port
 - accepted create waits for catalog publication before activation
-- `Ctrl-W` reuses already connected endpoint
+- `Ctrl-W` first-connect waits for and activates the default published session
+- `Ctrl-W` first-connect does not call remote create-session
+- `Ctrl-W` reuses an already connected endpoint and creates one new remote
+  session
 - `Ctrl-W` chooses non-conflicting remote port in bootstrap abstraction tests
+- `__remote-daemon` publishes a default session like manual `waitagent --connect`
 
 Manual cross-host validation:
 
 1. start WaitAgent server locally
-2. use `Ctrl-W` to connect `10.1.29.130` with password or key profile
-3. verify remote install/update uses the install script when needed
-4. verify remote process starts as `waitagent --port <free> --connect <local>`
-5. verify saved profile can be reused without retyping host/user
-6. verify `Ctrl-S` on a remote row creates another session on the same endpoint
-7. verify `Ctrl-N` still creates a local session
+2. manually run `waitagent --connect <local>` on the remote host and record the
+   default-session behavior
+3. use `Ctrl-W` to connect `10.1.29.130` with password or key profile
+4. verify first `Ctrl-W` publishes and activates exactly the default remote
+   session, with no extra remote session
+5. verify remote install/update uses the install script when needed
+6. verify remote process starts as
+   `waitagent --port <free> --connect <local> --node-id <host#free> __remote-daemon`
+7. verify saved profile can be reused without retyping host/user
+8. verify repeated `Ctrl-W` on the same connected host creates one new remote
+   session
+9. verify `Ctrl-S` on a remote row creates another session on the same endpoint
+10. verify `Ctrl-N` still creates a local session
+11. verify local server logs show no direct create-session dialing to remote
+    `<host>:<port>`
 
 ## 14. Implementation Slices
 
-Recommended order:
+The original v1.1 slices through `task.remote-create-8` are historical. The
+corrective v1.2 implementation resumes from these slices:
 
-1. UI copy and key binding cleanup
-   - keep `Ctrl-N` local-only
-   - hide Prefix-c from footer/menu copy
-   - add placeholders/bindings for `Ctrl-W` and `Ctrl-S`
-2. Sidebar selected target state
-   - write selected target to tmux session option
-   - add tests around selection changes and invalidation
-3. Create-session protocol
-   - proto extension
-   - domain payloads
-   - gRPC/local mapping tests
-4. Remote node create-session handler
-   - create normal local target-host session on authority node
-   - respond accepted/rejected
-5. Server-side remote creation service
-   - send request
-   - wait for acceptance
-   - wait for catalog publication
-   - activate synced target
-6. `Ctrl-S` command path
-   - selected remote endpoint resolution
-   - failure handling for local/offline selection
-7. Connection history store
-   - TOML profile storage
-   - secret references in profiles
-   - remembered passwords only through `RemoteHostSecretStore`
-8. Remote host bootstrap runtime
-   - SSH abstraction
-   - install/update via install script
-   - remote port selection
-   - start `waitagent --port <free> --connect <local-server>`
-9. `Ctrl-W` profile picker/new profile flow
-   - saved profile reuse
-   - new profile entry
-   - endpoint reuse or bootstrap then remote session creation
-10. Cross-host acceptance and cleanup
+1. `task.remote-create-9a-design-lock`
+   Documentation-only slice. Lock corrected first-connect semantics and task
+   split.
 
-## 15. Acceptance Criteria
+2. `task.remote-create-9b-remove-direct-dial`
+   Remove `authority_node_id -> http://host:port` direct dialing from
+   `RemoteSessionCreationService` transport. Replace it with a local owner
+   transport boundary, even if the first step is a narrow local IPC facade.
 
-The task is complete when:
+3. `task.remote-create-9c-owner-create-session-routing`
+   Implement request/reply routing inside the owner event loop using the active
+   node session handle for the authority. This preserves the one-node-one-stream
+   architecture.
 
-- `Ctrl-N` always creates a local session
-- Prefix-c still works as a hidden local alias and is absent from primary
-  menu/footer text
-- `Ctrl-S` creates a session on the selected connected remote endpoint and
-  activates it
-- `Ctrl-S` on local/offline/missing selection fails clearly
-- `Ctrl-W` can reuse a saved host profile
-- `Ctrl-W` can add a new host profile and optionally remember SSH/sudo
-  passwords through the secure store
-- `Ctrl-W` installs or updates remote WaitAgent using:
+4. `task.remote-create-9d-ctrl-w-first-connect`
+   Change `RemoteHostConnectRuntime` decision logic: already connected endpoint
+   creates a new remote session; newly bootstrapped endpoint waits for default
+   session and activates it.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
+5. `task.remote-create-9e-daemon-parity`
+   Verify and fix `__remote-daemon` so SSH bootstrap publishes a default session
+   with the same semantics as manual `waitagent --connect`, without TUI attach.
+
+6. `task.remote-create-9f-acceptance`
+   Cross-host and localhost acceptance pass, including no direct server-to-remote
+   create-session dialing.
+
+Each implementation slice must remove or disable the superseded v1.1 behavior
+it replaces. Do not leave the direct-dial path as fallback compatibility.
+
+## 15. Acceptance Checklist
+
+The corrected workflow is accepted only when all of the following are true:
+
+- `Ctrl-N` creates and activates a local session only.
+- `Ctrl-S` creates a new ordinary session on the selected connected remote
+  endpoint and fails clearly for local/offline/missing selections.
+- Manual `waitagent --connect <local>` on a remote host publishes one default
+  remote session.
+- First `Ctrl-W` to an unconnected host publishes and activates that same kind
+  of default session and does not create an extra session.
+- Repeated `Ctrl-W` to an already connected host creates and activates one new
+  ordinary remote session.
+- `__remote-daemon` is a no-TTY startup mode only; it does not change default
+  session publication semantics.
+- `authority_node_id` is never translated into a direct create-session
+  `http://host:port` dial target by application/runtime service code.
+- Remote input, output, resize, mirror, and exit behavior for sessions created
+  by Ctrl-W/Ctrl-S matches ordinary remote session behavior.
+
+## 16. Correction Plan From v1.1
+
+The v1.1 implementation drifted in two important ways and those changes must be
+corrected before further feature work builds on them.
+
+### 16.1 Remove Direct Remote Dialing
+
+Remove the server-side create-session path that converts an authority identity
+into a remote TCP endpoint:
+
+```text
+host#port -> http://host:port -> RemoteNodeSessionRuntime::connect(...)
 ```
 
-- `Ctrl-W` starts remote WaitAgent with:
+This is architecturally wrong because `Ctrl-W` relies on the remote node dialing
+back to the local listener. The local server must route create-session requests
+through the active node session already owned by the remote owner/ingress
+runtime.
 
-```bash
-waitagent --port <free-remote-port> --connect <local-server-host>:<local-server-port>
-```
+### 16.2 Restore First-Connect Semantics
 
-- already connected endpoints are reused rather than duplicated
-- new remote sessions enter the sidebar through existing remote session sync
-  and owner snapshot paths
-- no new file-backed remote sidebar source is introduced
+Change `RemoteHostConnectRuntime` so that:
+
+- existing endpoint: create and activate a new remote session
+- newly bootstrapped endpoint: wait for and activate the default session
+
+The new endpoint path must not call remote create-session.
+
+### 16.3 Preserve `__remote-daemon` But Narrow Its Meaning
+
+`__remote-daemon` remains valid only as no-TTY SSH startup mode. It must start
+the same backend runtime needed for default session publication. If it does not
+publish a default session like manual `waitagent --connect`, it is incomplete.
+
+### 16.4 Keep Unified Event Dispatch
+
+Create-session transport must be a local control facade into the owner runtime.
+It must not open a separate production remote connection. This correction is
+required to preserve the one-node-one-connection model from
+`remote-node-connection-architecture.md`.
+
+## 17. Correction Task Split
+
+1. `task.remote-create-9a-design-lock`
+   Lock v1.2 design and mark v1.1 Ctrl-W first-connect behavior as superseded.
+
+2. `task.remote-create-9b-remove-direct-dial`
+   Remove `authority_node_id -> http://host:port` direct create-session dialing
+   and replace the transport boundary with a local owner/control facade.
+
+3. `task.remote-create-9c-owner-create-session-routing`
+   Route create-session requests through the active node session owned by the
+   local remote owner/ingress event loop, including request/reply correlation.
+
+4. `task.remote-create-9d-ctrl-w-first-connect`
+   Change Ctrl-W so newly bootstrapped endpoints activate the default published
+   session and only existing endpoints create a new session.
+
+5. `task.remote-create-9e-daemon-parity`
+   Verify and fix `__remote-daemon` so it publishes a default session with the
+   same semantics as manual `waitagent --connect`, without attaching TUI.
+
+6. `task.remote-create-9f-acceptance`
+   Validate localhost, 10.1.29.130, manual `waitagent --connect`, first Ctrl-W,
+   repeated Ctrl-W, Ctrl-S, and no local-server direct dialing to remote
+   `<host>:<port>` for create-session.

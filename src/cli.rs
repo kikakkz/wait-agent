@@ -16,6 +16,7 @@ pub struct Cli {
 pub struct RemoteNetworkConfig {
     pub port: u16,
     pub connect: Option<String>,
+    pub node_id: Option<String>,
 }
 
 impl Default for RemoteNetworkConfig {
@@ -23,6 +24,7 @@ impl Default for RemoteNetworkConfig {
         Self {
             port: DEFAULT_REMOTE_NODE_PORT,
             connect: None,
+            node_id: None,
         }
     }
 }
@@ -48,7 +50,9 @@ impl RemoteNetworkConfig {
     }
 
     pub fn advertised_node_id(&self) -> String {
-        format!("{}#{}", self.advertised_host_id(), self.port)
+        self.node_id
+            .clone()
+            .unwrap_or_else(|| format!("{}#{}", self.advertised_host_id(), self.port))
     }
 
     pub fn connect_endpoint_uri(&self) -> Option<String> {
@@ -66,6 +70,10 @@ impl RemoteNetworkConfig {
         if let Some(connect) = &self.connect {
             args.push("--connect".to_string());
             args.push(connect.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            args.push("--node-id".to_string());
+            args.push(node_id.clone());
         }
         args
     }
@@ -124,6 +132,7 @@ pub enum Command {
     RemoteTargetPublicationOwner(RemoteTargetPublicationOwnerCommand),
     RemoteSessionSyncOwner(RemoteSessionSyncOwnerCommand),
     RemoteNodeIngressServer(RemoteNodeIngressServerCommand),
+    RemoteDaemon(RemoteDaemonCommand),
     RemoteRuntimeOwner(RemoteRuntimeOwnerCommand),
     SocketLifecycleHook(SocketLifecycleHookCommand),
     RemoteTargetBindPublication(RemoteTargetBindPublicationCommand),
@@ -132,6 +141,7 @@ pub enum Command {
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
     NewSelectedRemoteSession(NewSelectedRemoteSessionCommand),
+    ConnectRemoteHostUi(ConnectRemoteHostUiCommand),
     ConnectRemoteHost(ConnectRemoteHostCommand),
     MainPaneDied(MainPaneDiedCommand),
     RemoteTargetExited(RemoteTargetExitedCommand),
@@ -266,6 +276,9 @@ pub struct RemoteNodeIngressServerCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct RemoteDaemonCommand;
+
+#[derive(Debug, Clone, Default)]
 pub struct RemoteRuntimeOwnerCommand;
 
 #[derive(Debug, Clone, Default)]
@@ -330,6 +343,13 @@ pub struct NewSelectedRemoteSessionCommand {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ConnectRemoteHostUiCommand {
+    pub current_socket_name: String,
+    pub current_session_name: String,
+    pub client_tty: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ConnectRemoteHostCommand {
     pub current_socket_name: String,
     pub current_session_name: String,
@@ -340,6 +360,8 @@ pub struct ConnectRemoteHostCommand {
     pub key_path: Option<String>,
     pub ssh_password_secret_id: Option<String>,
     pub sudo_password_secret_id: Option<String>,
+    pub ssh_password_stdin: bool,
+    pub sudo_password_stdin: bool,
     pub remote_port: Option<String>,
     pub save_profile: Option<String>,
 }
@@ -464,6 +486,10 @@ impl Cli {
                 args.remove(0);
                 Command::RemoteNodeIngressServer(parse_remote_node_ingress_server(args)?)
             }
+            "__remote-daemon" => {
+                args.remove(0);
+                Command::RemoteDaemon(parse_remote_daemon(args)?)
+            }
             "__remote-runtime-owner" => {
                 args.remove(0);
                 Command::RemoteRuntimeOwner(parse_remote_runtime_owner(args)?)
@@ -499,6 +525,10 @@ impl Cli {
             "__new-selected-remote-session" => {
                 args.remove(0);
                 Command::NewSelectedRemoteSession(parse_new_selected_remote_session(args)?)
+            }
+            "__connect-remote-host-ui" => {
+                args.remove(0);
+                Command::ConnectRemoteHostUi(parse_connect_remote_host_ui(args)?)
             }
             "__connect-remote-host" => {
                 args.remove(0);
@@ -620,6 +650,19 @@ fn parse_global_network_config(
                     return Err(CliError::InvalidValue("--connect".to_string(), value));
                 }
                 network.connect = Some(value);
+            }
+            "--node-id" => {
+                explicit = true;
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--node-id".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue("--node-id".to_string(), value));
+                }
+                network.node_id = Some(value);
             }
             _ => break,
         }
@@ -989,6 +1032,11 @@ fn parse_remote_runtime_owner(args: Vec<String>) -> Result<RemoteRuntimeOwnerCom
     Ok(RemoteRuntimeOwnerCommand)
 }
 
+fn parse_remote_daemon(args: Vec<String>) -> Result<RemoteDaemonCommand, CliError> {
+    parse_no_args(args)?;
+    Ok(RemoteDaemonCommand)
+}
+
 fn parse_remote_session_sync_owner(
     args: Vec<String>,
 ) -> Result<RemoteSessionSyncOwnerCommand, CliError> {
@@ -1262,6 +1310,35 @@ fn parse_new_selected_remote_session(
     })
 }
 
+fn parse_connect_remote_host_ui(args: Vec<String>) -> Result<ConnectRemoteHostUiCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut current_socket_name = None;
+    let mut current_session_name = None;
+    let mut client_tty = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--current-socket-name" => {
+                current_socket_name = Some(expect_value("--current-socket-name", &mut iter)?)
+            }
+            "--current-session-name" => {
+                current_session_name = Some(expect_value("--current-session-name", &mut iter)?)
+            }
+            "--client-tty" => client_tty = Some(expect_value("--client-tty", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ConnectRemoteHostUiCommand {
+        current_socket_name: current_socket_name
+            .ok_or_else(|| CliError::MissingValue("--current-socket-name".to_string()))?,
+        current_session_name: current_session_name
+            .ok_or_else(|| CliError::MissingValue("--current-session-name".to_string()))?,
+        client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
+    })
+}
+
 fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostCommand, CliError> {
     let mut iter = args.into_iter();
     let mut current_socket_name = None;
@@ -1273,6 +1350,8 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
     let mut key_path = None;
     let mut ssh_password_secret_id = None;
     let mut sudo_password_secret_id = None;
+    let mut ssh_password_stdin = false;
+    let mut sudo_password_stdin = false;
     let mut remote_port = None;
     let mut save_profile = None;
 
@@ -1296,6 +1375,8 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
                 sudo_password_secret_id =
                     Some(expect_value("--sudo-password-secret-id", &mut iter)?)
             }
+            "--ssh-password-stdin" => ssh_password_stdin = true,
+            "--sudo-password-stdin" => sudo_password_stdin = true,
             "--remote-port" => remote_port = Some(expect_value("--remote-port", &mut iter)?),
             "--save-profile" => save_profile = Some(expect_value("--save-profile", &mut iter)?),
             "--help" | "-h" => {}
@@ -1315,6 +1396,8 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
         key_path,
         ssh_password_secret_id,
         sudo_password_secret_id,
+        ssh_password_stdin,
+        sudo_password_stdin,
         remote_port,
         save_profile,
     })
@@ -1663,6 +1746,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_hidden_connect_remote_host_ui_command() {
+        match parse(&[
+            "waitagent",
+            "__connect-remote-host-ui",
+            "--current-socket-name",
+            "wa-1",
+            "--current-session-name",
+            "waitagent-1",
+            "--client-tty",
+            "/dev/pts/7",
+        ])
+        .command
+        {
+            Command::ConnectRemoteHostUi(command) => {
+                assert_eq!(command.current_socket_name, "wa-1");
+                assert_eq!(command.current_session_name, "waitagent-1");
+                assert_eq!(command.client_tty, "/dev/pts/7");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_hidden_connect_remote_host_command_with_profile() {
         match parse(&[
             "waitagent",
@@ -1707,6 +1813,8 @@ mod tests {
             "waitagent.remote-host.130.ssh-password",
             "--sudo-password-secret-id",
             "waitagent.remote-host.130.sudo-password",
+            "--ssh-password-stdin",
+            "--sudo-password-stdin",
             "--remote-port",
             "auto",
             "--save-profile",
@@ -1727,6 +1835,8 @@ mod tests {
                     command.sudo_password_secret_id.as_deref(),
                     Some("waitagent.remote-host.130.sudo-password")
                 );
+                assert!(command.ssh_password_stdin);
+                assert!(command.sudo_password_stdin);
                 assert_eq!(command.remote_port.as_deref(), Some("auto"));
                 assert_eq!(command.save_profile.as_deref(), Some("130"));
             }
@@ -2156,6 +2266,25 @@ mod tests {
             Command::RemoteNodeIngressServer(command) => {
                 assert_eq!(command.socket_name, "wa-1");
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_daemon_command() {
+        match parse(&[
+            "waitagent",
+            "--port",
+            "7580",
+            "--connect",
+            "10.1.26.84:7676",
+            "--node-id",
+            "127.0.0.1#7580",
+            "__remote-daemon",
+        ])
+        .command
+        {
+            Command::RemoteDaemon(_) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

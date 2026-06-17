@@ -321,12 +321,14 @@ mod tests {
             RemoteTargetPublicationRuntime::from_build_env_with_network(RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("10.1.29.130:7474".to_string()),
+                node_id: None,
             })
             .expect("publication runtime should build"),
             waitagent_test_executable(),
             RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("10.1.29.130:7474".to_string()),
+                node_id: None,
             },
         );
 
@@ -719,12 +721,14 @@ mod tests {
             RemoteTargetPublicationRuntime::from_build_env_with_network(RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("10.1.29.130:7474".to_string()),
+                node_id: None,
             })
             .expect("publication runtime should build"),
             waitagent_test_executable(),
             RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("10.1.29.130:7474".to_string()),
+                node_id: None,
             },
         );
 

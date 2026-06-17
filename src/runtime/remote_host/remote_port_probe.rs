@@ -4,7 +4,7 @@ use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostAuthProfile, RemoteHostProfile,
 };
 use crate::runtime::remote_host::remote_host_secret_store::{
-    RemoteHostSecretStore, RemoteHostSecretValue, SecretToolRemoteHostSecretStore,
+    FileRemoteHostSecretStore, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use std::fmt;
 use std::process::{Command, Stdio};
@@ -75,16 +75,16 @@ impl RemotePortProbe for StaticRemotePortProbe {
 }
 
 #[derive(Debug, Clone)]
-pub struct SshRemotePortProbe<S = SecretToolRemoteHostSecretStore> {
+pub struct SshRemotePortProbe<S = FileRemoteHostSecretStore> {
     profile: RemoteHostProfile,
     secret_store: S,
 }
 
-impl SshRemotePortProbe<SecretToolRemoteHostSecretStore> {
+impl SshRemotePortProbe<FileRemoteHostSecretStore> {
     pub fn new(profile: RemoteHostProfile) -> Self {
         Self {
             profile,
-            secret_store: SecretToolRemoteHostSecretStore,
+            secret_store: FileRemoteHostSecretStore::default(),
         }
     }
 }
@@ -128,6 +128,7 @@ where
         if let Some(secret) = &ssh_password {
             command.env("SSHPASS", secret.expose_secret());
         }
+        configure_ssh_command(&mut command);
         if let RemoteHostAuthProfile::Key { key_path } = &self.profile.auth {
             command.arg("-i").arg(key_path);
         }
@@ -139,8 +140,9 @@ where
             .map_err(|error| RemotePortProbeError::new(error.to_string()))?;
         if !output.status.success() {
             return Err(RemotePortProbeError::new(format!(
-                "remote port probe failed with status {}",
-                output.status
+                "remote port probe failed with status {}{}",
+                output.status,
+                stderr_summary(&output.stderr)
             )));
         }
         parse_probe_output(&String::from_utf8_lossy(&output.stdout))
@@ -171,6 +173,24 @@ where
                 ))
             })
             .map(Some)
+    }
+}
+
+fn configure_ssh_command(command: &mut Command) {
+    command
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=10");
+}
+
+fn stderr_summary(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(": {text}")
     }
 }
 

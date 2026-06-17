@@ -2876,6 +2876,7 @@ mod tests {
         RemoteNetworkConfig {
             port: 20000 + (hash % 20000),
             connect: None,
+            node_id: None,
         }
     }
 
