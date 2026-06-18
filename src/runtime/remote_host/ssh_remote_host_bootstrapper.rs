@@ -6,9 +6,10 @@ use crate::runtime::remote_host::remote_host_history_store::{
 use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
+use crate::runtime::remote_host::remote_ssh_executor::{
+    RemoteSshAuth, RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
+};
 use std::fmt;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 pub const WAITAGENT_INSTALL_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh";
@@ -118,28 +119,44 @@ impl fmt::Display for RemoteHostBootstrapError {
 impl std::error::Error for RemoteHostBootstrapError {}
 
 #[derive(Debug, Clone)]
-pub struct SshRemoteHostBootstrapper<S = FileRemoteHostSecretStore> {
+pub struct SshRemoteHostBootstrapper<S = FileRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
     secret_store: S,
+    ssh_executor: E,
 }
 
-impl Default for SshRemoteHostBootstrapper<FileRemoteHostSecretStore> {
+impl Default for SshRemoteHostBootstrapper<FileRemoteHostSecretStore, RusshRemoteSshExecutor> {
     fn default() -> Self {
         Self {
             secret_store: FileRemoteHostSecretStore::default(),
+            ssh_executor: RusshRemoteSshExecutor,
         }
     }
 }
 
-impl<S> SshRemoteHostBootstrapper<S> {
+impl<S> SshRemoteHostBootstrapper<S, RusshRemoteSshExecutor> {
     pub fn new(secret_store: S) -> Self {
-        Self { secret_store }
+        Self {
+            secret_store,
+            ssh_executor: RusshRemoteSshExecutor,
+        }
     }
 }
 
-impl<S> RemoteHostBootstrapper for SshRemoteHostBootstrapper<S>
+impl<S, E> SshRemoteHostBootstrapper<S, E> {
+    pub fn with_executor(secret_store: S, ssh_executor: E) -> Self {
+        Self {
+            secret_store,
+            ssh_executor,
+        }
+    }
+}
+
+impl<S, E> RemoteHostBootstrapper for SshRemoteHostBootstrapper<S, E>
 where
     S: RemoteHostSecretStore,
     S::Error: ToString,
+    E: RemoteSshExecutor,
+    E::Error: ToString,
 {
     type Error = RemoteHostBootstrapError;
 
@@ -152,10 +169,12 @@ where
     }
 }
 
-impl<S> SshRemoteHostBootstrapper<S>
+impl<S, E> SshRemoteHostBootstrapper<S, E>
 where
     S: RemoteHostSecretStore,
     S::Error: ToString,
+    E: RemoteSshExecutor,
+    E::Error: ToString,
 {
     fn run_ssh_command(
         &self,
@@ -169,49 +188,20 @@ where
         } else {
             None
         };
-        let destination = format!("{}@{}", plan.ssh_user, plan.host);
-        let mut command = if ssh_password.is_some() {
-            let mut command = Command::new("sshpass");
-            command.arg("-e").arg("ssh");
-            command
-        } else {
-            Command::new("ssh")
-        };
-        if let Some(secret) = &ssh_password {
-            command.env("SSHPASS", secret.expose_secret());
-        }
-        configure_ssh_command(&mut command);
-        if let Some(key_path) = &plan.key_path {
-            command.arg("-i").arg(key_path);
-        }
+        let target = self.ssh_target(plan, ssh_password)?;
         let remote_command = if sudo_password.is_some() {
             format!("sudo -S sh -lc {}", shell_single_quote(remote_command))
         } else {
             remote_command.to_string()
         };
-        let mut child = command
-            .arg(destination)
-            .arg(remote_command)
-            .stdin(if sudo_password.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
+        let stdin = sudo_password
+            .as_ref()
+            .map(|secret| format!("{}\n", secret.expose_secret()));
+        let output = self
+            .ssh_executor
+            .exec(&target, &remote_command, stdin.as_deref())
             .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))?;
-        if let Some(secret) = sudo_password {
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin
-                    .write_all(format!("{}\n", secret.expose_secret()).as_bytes())
-                    .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))?;
-            }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))?;
-        if output.status.success() {
+        if output.status == 0 {
             Ok(())
         } else {
             Err(RemoteHostBootstrapError::new(format!(
@@ -220,6 +210,41 @@ where
                 stderr_summary(&output.stderr)
             )))
         }
+    }
+
+    fn ssh_target(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        ssh_password: Option<RemoteHostSecretValue>,
+    ) -> Result<RemoteSshTarget, RemoteHostBootstrapError> {
+        let auth = match plan.auth_kind.as_str() {
+            "password" => {
+                let password = ssh_password.ok_or_else(|| {
+                    RemoteHostBootstrapError::new("password auth requires a loaded SSH password")
+                })?;
+                RemoteSshAuth::Password {
+                    password: password.expose_secret().to_string(),
+                }
+            }
+            "key" => RemoteSshAuth::Key {
+                key_path: plan
+                    .key_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| RemoteHostBootstrapError::new("key auth requires a key path"))?,
+            },
+            other => {
+                return Err(RemoteHostBootstrapError::new(format!(
+                    "unsupported remote host auth `{other}`"
+                )))
+            }
+        };
+        Ok(RemoteSshTarget {
+            host: plan.host.clone(),
+            port: 22,
+            user: plan.ssh_user.clone(),
+            auth,
+        })
     }
 
     fn ssh_password(
@@ -266,14 +291,6 @@ where
     }
 }
 
-fn configure_ssh_command(command: &mut Command) {
-    command
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("ConnectTimeout=10");
-}
-
 fn stderr_summary(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let text = text.trim();
@@ -296,10 +313,23 @@ pub fn install_or_update_command() -> String {
         install
     )
 }
-
 fn shell_single_quote(value: &str) -> String {
-    let escaped = value.replace('\'', "'\\''");
-    format!("'{escaped}'")
+    let quote = char::from(39);
+    let slash = char::from(92);
+    let mut out = String::new();
+    out.push(quote);
+    for ch in value.chars() {
+        if ch == quote {
+            out.push(quote);
+            out.push(slash);
+            out.push(quote);
+            out.push(quote);
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push(quote);
+    out
 }
 
 #[cfg(test)]
@@ -308,6 +338,38 @@ mod tests {
     use crate::runtime::remote_host::remote_host_history_store::{
         RemoteHostAuthProfile, RemoteHostProfile, RemotePortPreference,
     };
+    use crate::runtime::remote_host::remote_ssh_executor::{
+        RemoteSshExecutor, RemoteSshOutput, RemoteSshTarget,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct RecordingSshExecutor {
+        calls: Rc<RefCell<Vec<(RemoteSshTarget, String, Option<String>)>>>,
+    }
+
+    impl RemoteSshExecutor for RecordingSshExecutor {
+        type Error = String;
+
+        fn exec(
+            &self,
+            target: &RemoteSshTarget,
+            command: &str,
+            stdin: Option<&str>,
+        ) -> Result<RemoteSshOutput, Self::Error> {
+            self.calls.borrow_mut().push((
+                target.clone(),
+                command.to_string(),
+                stdin.map(str::to_string),
+            ));
+            Ok(RemoteSshOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
     use crate::runtime::remote_host::remote_host_secret_store::{
         MemoryRemoteHostSecretStore, RemoteHostSecretStore,
     };
@@ -404,5 +466,54 @@ mod tests {
                 .expose_secret(),
             "sudo-secret"
         );
+    }
+    #[test]
+    fn remote_host_bootstrapper_uses_in_process_ssh_executor() {
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let sudo_id = RemoteHostSecretId::new("waitagent.remote-host.130.sudo-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        store
+            .put_secret(&sudo_id, RemoteHostSecretValue::new("sudo-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: Some(sudo_id),
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+        };
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        );
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            store,
+            RecordingSshExecutor {
+                calls: calls.clone(),
+            },
+        );
+
+        bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0.host, "10.1.29.130");
+        assert_eq!(calls[0].0.user, "kk");
+        assert!(calls[0].1.starts_with("sudo -S sh -lc "));
+        assert_eq!(calls[0].2.as_deref(), Some("sudo-secret\n"));
+        assert!(calls[1].1.contains("__remote-daemon"));
+        assert_eq!(calls[1].2, None);
     }
 }

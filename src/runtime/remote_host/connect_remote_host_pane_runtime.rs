@@ -395,7 +395,7 @@ impl ConnectRemoteHostState {
         if !point_in_rect(x, y, layout.details) {
             return PaneAction::None;
         }
-        let row = y.saturating_sub(layout.details.y + 1);
+        let row = y.saturating_sub(layout.details.y);
         match row {
             1 => self.set_focus(Focus::Host),
             2 => self.set_focus(Focus::Port),
@@ -1727,6 +1727,25 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Esc)),
             PaneAction::Close
         );
+    }
+
+    #[test]
+    fn connect_popup_mouse_hits_visible_password_row() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        state.apply_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.details.x + 20,
+            row: geometry.details.y + 7,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+
+        assert_eq!(state.focus, Focus::Password);
+        assert_eq!(state.editing, Some(EditField::SshPassword));
     }
 
     #[test]

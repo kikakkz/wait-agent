@@ -6,8 +6,10 @@ use crate::runtime::remote_host::remote_host_history_store::{
 use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretStore, RemoteHostSecretValue,
 };
+use crate::runtime::remote_host::remote_ssh_executor::{
+    RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
+};
 use std::fmt;
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemotePortProbePreference {
@@ -75,25 +77,42 @@ impl RemotePortProbe for StaticRemotePortProbe {
 }
 
 #[derive(Debug, Clone)]
-pub struct SshRemotePortProbe<S = FileRemoteHostSecretStore> {
+pub struct SshRemotePortProbe<S = FileRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
     profile: RemoteHostProfile,
     secret_store: S,
+    ssh_executor: E,
 }
 
-impl SshRemotePortProbe<FileRemoteHostSecretStore> {
+impl SshRemotePortProbe<FileRemoteHostSecretStore, RusshRemoteSshExecutor> {
     pub fn new(profile: RemoteHostProfile) -> Self {
         Self {
             profile,
             secret_store: FileRemoteHostSecretStore::default(),
+            ssh_executor: RusshRemoteSshExecutor,
         }
     }
 }
 
-impl<S> SshRemotePortProbe<S> {
+impl<S> SshRemotePortProbe<S, RusshRemoteSshExecutor> {
     pub fn with_secret_store(profile: RemoteHostProfile, secret_store: S) -> Self {
         Self {
             profile,
             secret_store,
+            ssh_executor: RusshRemoteSshExecutor,
+        }
+    }
+}
+
+impl<S, E> SshRemotePortProbe<S, E> {
+    pub fn with_secret_store_and_executor(
+        profile: RemoteHostProfile,
+        secret_store: S,
+        ssh_executor: E,
+    ) -> Self {
+        Self {
+            profile,
+            secret_store,
+            ssh_executor,
         }
     }
 
@@ -105,10 +124,12 @@ impl<S> SshRemotePortProbe<S> {
     }
 }
 
-impl<S> RemotePortProbe for SshRemotePortProbe<S>
+impl<S, E> RemotePortProbe for SshRemotePortProbe<S, E>
 where
     S: RemoteHostSecretStore,
     S::Error: ToString,
+    E: RemoteSshExecutor,
+    E::Error: ToString,
 {
     type Error = RemotePortProbeError;
 
@@ -118,27 +139,18 @@ where
         _local_connect_endpoint: &str,
     ) -> Result<RemotePortProbeResult, Self::Error> {
         let ssh_password = self.ssh_password()?;
-        let mut command = if ssh_password.is_some() {
-            let mut command = Command::new("sshpass");
-            command.arg("-e").arg("ssh");
-            command
-        } else {
-            Command::new("ssh")
-        };
-        if let Some(secret) = &ssh_password {
-            command.env("SSHPASS", secret.expose_secret());
-        }
-        configure_ssh_command(&mut command);
-        if let RemoteHostAuthProfile::Key { key_path } = &self.profile.auth {
-            command.arg("-i").arg(key_path);
-        }
-        let output = command
-            .arg(format!("{}@{}", self.profile.ssh_user, self.profile.host))
-            .arg(remote_probe_command(preference))
-            .stdin(Stdio::null())
-            .output()
+        let target = RemoteSshTarget::from_profile(
+            self.profile.host.clone(),
+            self.profile.ssh_user.clone(),
+            &self.profile.auth,
+            ssh_password,
+        )
+        .map_err(|error| RemotePortProbeError::new(error.to_string()))?;
+        let output = self
+            .ssh_executor
+            .exec(&target, &remote_probe_command(preference), None)
             .map_err(|error| RemotePortProbeError::new(error.to_string()))?;
-        if !output.status.success() {
+        if output.status != 0 {
             return Err(RemotePortProbeError::new(format!(
                 "remote port probe failed with status {}{}",
                 output.status,
@@ -149,7 +161,7 @@ where
     }
 }
 
-impl<S> SshRemotePortProbe<S>
+impl<S, E> SshRemotePortProbe<S, E>
 where
     S: RemoteHostSecretStore,
     S::Error: ToString,
@@ -174,14 +186,6 @@ where
             })
             .map(Some)
     }
-}
-
-fn configure_ssh_command(command: &mut Command) {
-    command
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("ConnectTimeout=10");
 }
 
 fn stderr_summary(stderr: &[u8]) -> String {
@@ -234,6 +238,35 @@ fn parse_probe_output(output: &str) -> Result<RemotePortProbeResult, RemotePortP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::remote_host::remote_ssh_executor::{
+        RemoteSshExecutor, RemoteSshOutput, RemoteSshTarget,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct RecordingSshExecutor {
+        calls: Rc<RefCell<Vec<(RemoteSshTarget, String, Option<String>)>>>,
+        output: RemoteSshOutput,
+    }
+
+    impl RemoteSshExecutor for RecordingSshExecutor {
+        type Error = String;
+
+        fn exec(
+            &self,
+            target: &RemoteSshTarget,
+            command: &str,
+            stdin: Option<&str>,
+        ) -> Result<RemoteSshOutput, Self::Error> {
+            self.calls.borrow_mut().push((
+                target.clone(),
+                command.to_string(),
+                stdin.map(str::to_string),
+            ));
+            Ok(self.output.clone())
+        }
+    }
 
     #[test]
     fn remote_host_port_probe_parses_free_and_reused_ports() {
@@ -285,5 +318,52 @@ mod tests {
         let command = remote_probe_command(&RemotePortProbePreference::Auto);
         assert!(command.contains("seq 7474 7574"));
         assert!(command.contains("ss -ltn"));
+    }
+    #[test]
+    fn remote_host_port_probe_uses_in_process_ssh_executor() {
+        use crate::runtime::remote_host::remote_host_secret_store::{
+            MemoryRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretValue,
+        };
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port:
+                crate::runtime::remote_host::remote_host_history_store::RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+        };
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let executor = RecordingSshExecutor {
+            calls: calls.clone(),
+            output: RemoteSshOutput {
+                status: 0,
+                stdout: b"port=7475\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        };
+        let probe = SshRemotePortProbe::with_secret_store_and_executor(profile, store, executor);
+
+        let result = probe
+            .choose_remote_port(&RemotePortProbePreference::Auto, "10.1.26.84:7474")
+            .unwrap();
+
+        assert_eq!(result.port, 7475);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.host, "10.1.29.130");
+        assert_eq!(calls[0].0.user, "kk");
+        assert!(calls[0].1.contains("seq 7474 7574"));
+        assert_eq!(calls[0].2, None);
     }
 }
