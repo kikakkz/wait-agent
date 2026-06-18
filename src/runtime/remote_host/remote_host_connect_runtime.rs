@@ -271,7 +271,7 @@ fn profile_from_direct_args(
         stdin_passwords = Some(read_passwords_from_stdin()?);
     }
     let secret_store = FileRemoteHostSecretStore::default();
-    let auth = match command.auth.as_deref().unwrap_or("agent") {
+    let auth = match command.auth.as_deref().unwrap_or("password") {
         "password" => {
             let secret_id = if command.ssh_password_stdin {
                 let password = stdin_passwords
@@ -300,7 +300,6 @@ fn profile_from_direct_args(
                 LifecycleError::Protocol("--key-path is required with --auth key".to_string())
             })?),
         },
-        "agent" => RemoteHostAuthProfile::Agent,
         other => {
             return Err(LifecycleError::Protocol(format!(
                 "unsupported remote host auth `{other}`"
@@ -682,7 +681,9 @@ mod tests {
             name: "130".to_string(),
             host: "10.1.29.130".to_string(),
             ssh_user: "kk".to_string(),
-            auth: RemoteHostAuthProfile::Agent,
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
             sudo_password_secret_id: None,
             preferred_remote_port: HistoryRemotePortPreference::Auto,
             last_remote_port: None,

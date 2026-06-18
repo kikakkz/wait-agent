@@ -141,7 +141,7 @@ pub enum Command {
     ActivateTarget(ActivateTargetCommand),
     NewTarget(NewTargetCommand),
     NewSelectedRemoteSession(NewSelectedRemoteSessionCommand),
-    ConnectRemoteHostUi(ConnectRemoteHostUiCommand),
+    ConnectRemoteHostPane(ConnectRemoteHostPaneCommand),
     ConnectRemoteHost(ConnectRemoteHostCommand),
     MainPaneDied(MainPaneDiedCommand),
     RemoteTargetExited(RemoteTargetExitedCommand),
@@ -343,10 +343,9 @@ pub struct NewSelectedRemoteSessionCommand {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectRemoteHostUiCommand {
+pub struct ConnectRemoteHostPaneCommand {
     pub current_socket_name: String,
     pub current_session_name: String,
-    pub client_tty: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -526,9 +525,9 @@ impl Cli {
                 args.remove(0);
                 Command::NewSelectedRemoteSession(parse_new_selected_remote_session(args)?)
             }
-            "__connect-remote-host-ui" => {
+            "__connect-remote-host-pane" => {
                 args.remove(0);
-                Command::ConnectRemoteHostUi(parse_connect_remote_host_ui(args)?)
+                Command::ConnectRemoteHostPane(parse_connect_remote_host_pane(args)?)
             }
             "__connect-remote-host" => {
                 args.remove(0);
@@ -1310,11 +1309,12 @@ fn parse_new_selected_remote_session(
     })
 }
 
-fn parse_connect_remote_host_ui(args: Vec<String>) -> Result<ConnectRemoteHostUiCommand, CliError> {
+fn parse_connect_remote_host_pane(
+    args: Vec<String>,
+) -> Result<ConnectRemoteHostPaneCommand, CliError> {
     let mut iter = args.into_iter();
     let mut current_socket_name = None;
     let mut current_session_name = None;
-    let mut client_tty = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1324,18 +1324,16 @@ fn parse_connect_remote_host_ui(args: Vec<String>) -> Result<ConnectRemoteHostUi
             "--current-session-name" => {
                 current_session_name = Some(expect_value("--current-session-name", &mut iter)?)
             }
-            "--client-tty" => client_tty = Some(expect_value("--client-tty", &mut iter)?),
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
     }
 
-    Ok(ConnectRemoteHostUiCommand {
+    Ok(ConnectRemoteHostPaneCommand {
         current_socket_name: current_socket_name
             .ok_or_else(|| CliError::MissingValue("--current-socket-name".to_string()))?,
         current_session_name: current_session_name
             .ok_or_else(|| CliError::MissingValue("--current-session-name".to_string()))?,
-        client_tty: client_tty.ok_or_else(|| CliError::MissingValue("--client-tty".to_string()))?,
     })
 }
 
@@ -1746,23 +1744,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_hidden_connect_remote_host_ui_command() {
+    fn parses_hidden_connect_remote_host_pane_command() {
         match parse(&[
             "waitagent",
-            "__connect-remote-host-ui",
+            "__connect-remote-host-pane",
             "--current-socket-name",
             "wa-1",
             "--current-session-name",
             "waitagent-1",
-            "--client-tty",
-            "/dev/pts/7",
         ])
         .command
         {
-            Command::ConnectRemoteHostUi(command) => {
+            Command::ConnectRemoteHostPane(command) => {
                 assert_eq!(command.current_socket_name, "wa-1");
                 assert_eq!(command.current_session_name, "waitagent-1");
-                assert_eq!(command.client_tty, "/dev/pts/7");
             }
             other => panic!("unexpected command: {other:?}"),
         }

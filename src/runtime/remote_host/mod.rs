@@ -1,3 +1,4 @@
+pub mod connect_remote_host_pane_runtime;
 pub mod remote_host_connect_runtime;
 pub mod remote_host_history_store;
 pub mod remote_host_home;

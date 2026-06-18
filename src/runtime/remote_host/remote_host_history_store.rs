@@ -28,7 +28,6 @@ pub enum RemoteHostAuthProfile {
     Key {
         key_path: PathBuf,
     },
-    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,10 +132,6 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
             RemoteHostAuthProfile::Key { key_path } => {
                 push_string(&mut out, "auth_kind", "key");
                 push_string(&mut out, "key_path", &key_path.to_string_lossy());
-            }
-            RemoteHostAuthProfile::Agent => {
-                push_string(&mut out, "auth_kind", "agent");
-                push_string(&mut out, "key_path", "");
             }
         }
         if let Some(secret_id) = &host.sudo_password_secret_id {
@@ -251,7 +246,9 @@ impl RawProfile {
     }
 
     fn into_profile(self) -> Result<RemoteHostProfile, RemoteHostHistoryStoreError> {
-        let auth_kind = self.auth_kind.unwrap_or_else(|| "agent".to_string());
+        let auth_kind = self
+            .auth_kind
+            .ok_or_else(|| RemoteHostHistoryStoreError::new("remote host auth_kind is required"))?;
         let auth = match auth_kind.as_str() {
             "password" => RemoteHostAuthProfile::Password {
                 password_secret_id: optional_secret_id(self.ssh_password_secret_id)?,
@@ -259,7 +256,6 @@ impl RawProfile {
             "key" => RemoteHostAuthProfile::Key {
                 key_path: PathBuf::from(self.key_path.unwrap_or_default()),
             },
-            "agent" => RemoteHostAuthProfile::Agent,
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host auth kind `{other}`"
@@ -463,7 +459,9 @@ mod tests {
             name: name.to_string(),
             host: host.to_string(),
             ssh_user: "kk".to_string(),
-            auth: RemoteHostAuthProfile::Agent,
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Port(7474),
             last_remote_port: None,

@@ -257,19 +257,21 @@ fn connect_remote_host_command(
     executable: &std::path::Path,
     command: &FooterMenuCommand,
 ) -> String {
-    let shell_command = [
+    let pane_command = [
         shell_escape(&executable.display().to_string()),
-        shell_escape("__connect-remote-host-ui"),
+        shell_escape("__connect-remote-host-pane"),
         shell_escape("--current-socket-name"),
         shell_escape(&command.socket_name),
         shell_escape("--current-session-name"),
         shell_escape(&command.session_name),
-        shell_escape("--client-tty"),
-        shell_escape(&command.client_tty),
     ]
     .join(" ");
 
-    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
+    format!(
+        "display-popup -c {} -w 66 -h 16 -E {}",
+        tmux_quote_argument(&command.client_tty),
+        tmux_quote_argument(&pane_command)
+    )
 }
 
 fn create_remote_session_command(
@@ -420,10 +422,9 @@ mod tests {
                 && value.contains("'wa-1:1'")
         }));
         assert!(args.iter().any(|value| {
-            value.contains("run-shell -b ")
-                && value.contains("'__connect-remote-host-ui'")
-                && value.contains("'--client-tty'")
-                && value.contains("'/dev/pts/7'")
+            value.contains("display-popup -c")
+                && value.contains("'__connect-remote-host-pane'")
+                && value.contains("/dev/pts/7")
         }));
         assert!(args.iter().any(|value| {
             value.contains(

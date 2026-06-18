@@ -70,7 +70,6 @@ impl RemoteHostBootstrapPlan {
                 Some(key_path.to_string_lossy().into_owned()),
                 None,
             ),
-            RemoteHostAuthProfile::Agent => ("agent".to_string(), None, None),
         };
         let authority_id = authority_id.into();
         Self {
@@ -319,7 +318,9 @@ mod tests {
             name: "130".to_string(),
             host: "10.1.29.130".to_string(),
             ssh_user: "kk".to_string(),
-            auth: RemoteHostAuthProfile::Agent,
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
             sudo_password_secret_id: None,
             preferred_remote_port: RemotePortPreference::Auto,
             last_remote_port: None,

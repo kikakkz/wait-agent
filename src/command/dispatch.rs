@@ -5,6 +5,7 @@ use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::remote_authority_target_host_runtime::{
     run_pane_died_event, RemoteAuthorityTargetHostRuntime,
 };
+use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
 use crate::runtime::remote_node_session_owner_runtime::RemoteNodeSessionOwnerRuntime;
 use crate::runtime::remote_node_session_sync_runtime::RemoteNodeSessionSyncRuntime;
@@ -23,6 +24,7 @@ pub struct CommandDispatcher {
     workspace_runtime: WorkspaceCommandRuntime,
     pane_runtime: EventDrivenPaneRuntime,
     footer_menu_runtime: FooterMenuRuntime,
+    connect_remote_host_pane_runtime: ConnectRemoteHostPaneRuntime,
     remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime,
     remote_main_slot_ingress_runtime: RemoteMainSlotIngressRuntime,
     remote_node_session_owner_runtime: RemoteNodeSessionOwnerRuntime,
@@ -43,6 +45,7 @@ impl CommandDispatcher {
             )?,
             pane_runtime: EventDrivenPaneRuntime::from_build_env_with_network(network.clone())?,
             footer_menu_runtime: FooterMenuRuntime::from_build_env_with_network(network.clone())?,
+            connect_remote_host_pane_runtime: ConnectRemoteHostPaneRuntime::new(network.clone()),
             remote_authority_target_host_runtime: RemoteAuthorityTargetHostRuntime::from_build_env(
                 network.clone(),
             )?,
@@ -173,13 +176,13 @@ impl CommandDispatcher {
                 .workspace_runtime
                 .run_new_selected_remote_session(command)
                 .map_err(AppError::from),
-            Command::ConnectRemoteHostUi(command) => self
-                .workspace_runtime
-                .run_connect_remote_host_ui(command)
-                .map_err(AppError::from),
             Command::ConnectRemoteHost(command) => self
                 .workspace_runtime
                 .run_connect_remote_host(command)
+                .map_err(AppError::from),
+            Command::ConnectRemoteHostPane(command) => self
+                .connect_remote_host_pane_runtime
+                .run(command)
                 .map_err(AppError::from),
             Command::MainPaneDied(command) => self
                 .workspace_runtime

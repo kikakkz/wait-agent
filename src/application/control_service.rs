@@ -612,7 +612,7 @@ mod tests {
                 "run-shell -b \"waitagent __toggle-fullscreen\"",
                 Some(&FooterMenuBindings {
                     create_session_command: "run-shell -b 'waitagent __new-target'".to_string(),
-                    connect_remote_host_command: "run-shell -b 'waitagent __connect-remote-host-ui'".to_string(),
+                    connect_remote_host_command: r#"display-popup -w 70% -h 70% -E '"waitagent" __connect-remote-host-pane'"#.to_string(),
                     create_remote_session_command: "run-shell -b 'waitagent __new-selected-remote-session'".to_string(),
                     open_sessions_menu_command: "run-shell 'waitagent __footer-menu'".to_string(),
                     error_log_command: "display-popup -w 80% -h 80% -E \"waitagent __error-log && echo '' && echo '--- Press ENTER to close ---' && read -r\"".to_string(),
@@ -678,7 +678,7 @@ mod tests {
                 ),
                 Call::BindWithoutPrefix(
                     "C-w".to_string(),
-                    vec!["run-shell -b 'waitagent __connect-remote-host-ui'".to_string(),],
+                    vec!["display-popup -w 70% -h 70% -E '\"waitagent\" __connect-remote-host-pane'".to_string(),],
                 ),
                 Call::BindWithoutPrefix(
                     "C-s".to_string(),

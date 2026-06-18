@@ -214,7 +214,7 @@ fn recover_network_config_for_command(
             backend,
             &workspace_handle(&command.current_socket_name, &command.current_session_name),
         ),
-        Command::ConnectRemoteHostUi(command) => recover_network_config_for_workspace(
+        Command::ConnectRemoteHostPane(command) => recover_network_config_for_workspace(
             backend,
             &workspace_handle(&command.current_socket_name, &command.current_session_name),
         ),
