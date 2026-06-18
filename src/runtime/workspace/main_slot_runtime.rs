@@ -1174,28 +1174,24 @@ impl MainSlotRuntime {
         let result = self
             .layout_runtime
             .refresh_workspace_chrome(workspace, &current_workspace.workspace_dir);
-        let effective_pane = self.workspace_main_pane(workspace)?;
-        if effective_pane != *pane {
-            ERROR_LOG.log(format!(
-                "[diag-bug] restore_workspace_main_pane remapped pane from {} to {} after refresh",
-                pane.as_str(),
-                effective_pane.as_str()
-            ));
+        if !self.pane_exists(workspace, pane.as_str())
+            || !self.pane_is_live_on_socket(workspace, pane.as_str())?
+        {
+            return Err(LifecycleError::Protocol(format!(
+                "restored main pane `{}` disappeared while refreshing workspace chrome",
+                pane.as_str()
+            )));
         }
+        self.set_workspace_main_pane(workspace, pane)?;
         let pane_generation = self.bump_main_pane_generation(workspace)?;
         let pane_died_command = self
             .layout_runtime
             .main_pane_died_hook_command(workspace, &pane_generation);
         self.backend
-            .set_pane_hook(
-                workspace,
-                &effective_pane,
-                MAIN_PANE_DIED_HOOK,
-                &pane_died_command,
-            )
+            .set_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK, &pane_died_command)
             .map_err(main_slot_error)?;
         self.backend
-            .set_pane_option(workspace, &effective_pane, "remain-on-exit", "on")
+            .set_pane_option(workspace, pane, "remain-on-exit", "on")
             .map_err(main_slot_error)?;
         result
     }
@@ -1232,16 +1228,80 @@ impl MainSlotRuntime {
         recovery_pane: &TmuxPaneId,
         target: &ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
-        if !self.pane_exists_on_socket(workspace, recovery_pane.as_str())? {
+        if !self.pane_exists_on_socket(workspace, recovery_pane.as_str())?
+            || !self.pane_is_live_on_socket(workspace, recovery_pane.as_str())?
+        {
             self.clear_session_pane(workspace, target.address.qualified_target().as_str())?;
+            self.set_active_target(workspace, None)?;
+            self.backend
+                .set_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION, "")
+                .map_err(main_slot_error)?;
             return self.activate_remote_target_in_workspace(current_workspace, target);
         }
+        self.ensure_pane_in_workspace_window(workspace, recovery_pane)?;
         self.assign_remote_target_to_content_pane(
             current_workspace,
             workspace,
             recovery_pane,
             target,
         )
+    }
+
+    fn ensure_pane_in_workspace_window(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<(), LifecycleError> {
+        if self.pane_exists(workspace, pane.as_str()) {
+            return Ok(());
+        }
+        let destination = self.workspace_window_join_destination(workspace, pane)?;
+        self.backend
+            .join_pane(workspace, pane, &destination, true)
+            .map_err(main_slot_error)
+    }
+
+    fn workspace_window_join_destination(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        excluded_pane: &TmuxPaneId,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        let window = self
+            .backend
+            .current_window(workspace)
+            .map_err(main_slot_error)?;
+        let panes = self
+            .backend
+            .list_panes(workspace, &window)
+            .map_err(main_slot_error)?;
+        panes
+            .iter()
+            .find(|pane| {
+                !pane.is_dead
+                    && pane.pane_id != *excluded_pane
+                    && pane.title != SIDEBAR_PANE_TITLE
+                    && pane.title != FOOTER_PANE_TITLE
+            })
+            .or_else(|| {
+                panes.iter().find(|pane| {
+                    !pane.is_dead
+                        && pane.pane_id != *excluded_pane
+                        && pane.title != FOOTER_PANE_TITLE
+                })
+            })
+            .or_else(|| {
+                panes
+                    .iter()
+                    .find(|pane| !pane.is_dead && pane.pane_id != *excluded_pane)
+            })
+            .map(|pane| pane.pane_id.clone())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no destination pane for recovering `{}`",
+                    workspace.session_name.as_str(),
+                    excluded_pane.as_str()
+                ))
+            })
     }
 
     fn assign_remote_target_to_content_pane(
@@ -1494,7 +1554,7 @@ impl MainSlotRuntime {
             .backend
             .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
             .map_err(main_slot_error)?
-            .filter(|pane| self.pane_is_live(workspace, pane));
+            .filter(|pane| self.pane_exists(workspace, pane) && self.pane_is_live(workspace, pane));
         let pane = configured_pane
             .or_else(|| self.infer_target_main_pane(workspace))
             .ok_or_else(|| {
@@ -1820,7 +1880,9 @@ impl MainSlotRuntime {
             return Ok(None);
         };
         let pane_id = TmuxPaneId::new(pane_id_str);
-        if self.pane_is_live(workspace, pane_id.as_str()) {
+        if self.pane_exists_on_socket(workspace, pane_id.as_str())?
+            && self.pane_is_live_on_socket(workspace, pane_id.as_str())?
+        {
             Ok(Some(pane_id))
         } else {
             // Pane died -- kill it to prevent dead-pane accumulation,
