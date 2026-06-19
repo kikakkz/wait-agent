@@ -104,15 +104,19 @@ where
         request: RemoteHostConnectRequest,
     ) -> Result<RemoteHostConnectOutcome, LifecycleError> {
         let mut profile = self.resolve_profile(&request)?;
+        let should_save_profile =
+            request.profile_name.is_some() || request.save_profile_name.is_some();
         if let Some(name) = request.save_profile_name.as_ref() {
             profile.name = name.clone();
-            self.history_store
-                .upsert_profile(profile.clone())
-                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         }
 
         if let Some(endpoint) = self.find_connected_endpoint(&profile)? {
             let created = self.create_remote_session(&endpoint, request.cwd_hint)?;
+            if should_save_profile {
+                self.history_store
+                    .upsert_profile(profile)
+                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+            }
             return Ok(RemoteHostConnectOutcome {
                 authority_node_id: endpoint,
                 created_target: created,
@@ -143,9 +147,11 @@ where
         )?;
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
-        self.history_store
-            .upsert_profile(profile)
-            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        if should_save_profile {
+            self.history_store
+                .upsert_profile(profile)
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        }
 
         Ok(RemoteHostConnectOutcome {
             authority_node_id,
@@ -529,6 +535,20 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct FailingBootstrapper;
+
+    impl RemoteHostBootstrapper for FailingBootstrapper {
+        type Error = String;
+
+        fn ensure_waitagent_and_start(
+            &self,
+            _plan: &RemoteHostBootstrapPlan,
+        ) -> Result<(), Self::Error> {
+            Err("bootstrap failed".to_string())
+        }
+    }
+
+    #[derive(Clone)]
     struct FakeCreateTransport {
         requests: Rc<RefCell<Vec<CreateSessionRequestPayload>>>,
         catalog_targets: Rc<RefCell<Vec<ManagedSessionRecord>>>,
@@ -673,6 +693,88 @@ mod tests {
             "10.1.29.130#7476"
         );
         assert_eq!(outcome.created_target.address.session_id(), "seed");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_does_not_save_direct_profile_when_bootstrap_fails() {
+        let path = unique_path("remote-host-connect-failed-direct.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let catalog_targets = Rc::new(RefCell::new(Vec::new()));
+        let gateway = FakeGateway {
+            targets: catalog_targets.clone(),
+        };
+        let registry = TargetRegistryService::new(gateway.clone());
+        let runtime = RemoteHostConnectRuntime::new(
+            history.clone(),
+            FakeProbe {
+                calls: Rc::new(RefCell::new(0)),
+                port: 7476,
+            },
+            FailingBootstrapper,
+            registry.clone(),
+            RemoteSessionCreationService::new(
+                FakeCreateTransport {
+                    requests: Rc::new(RefCell::new(Vec::new())),
+                    catalog_targets,
+                },
+                registry,
+            ),
+        );
+
+        let result = runtime.connect(RemoteHostConnectRequest {
+            profile_name: None,
+            direct_profile: Some(profile()),
+            save_profile_name: Some("130".to_string()),
+            local_connect_endpoint: "10.1.26.84:7474".to_string(),
+            cwd_hint: None,
+        });
+
+        assert!(result.is_err());
+        assert!(history.load().unwrap().hosts.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_does_not_save_unsaved_direct_profile_after_success() {
+        let path = unique_path("remote-host-connect-unsaved-direct.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        let catalog_targets = Rc::new(RefCell::new(Vec::new()));
+        let gateway = FakeGateway {
+            targets: catalog_targets.clone(),
+        };
+        let registry = TargetRegistryService::new(gateway.clone());
+        let runtime = RemoteHostConnectRuntime::new(
+            history.clone(),
+            FakeProbe {
+                calls: Rc::new(RefCell::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Rc::new(RefCell::new(Vec::new())),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry.clone(),
+            RemoteSessionCreationService::new(
+                FakeCreateTransport {
+                    requests: Rc::new(RefCell::new(Vec::new())),
+                    catalog_targets,
+                },
+                registry,
+            ),
+        );
+
+        runtime
+            .connect(RemoteHostConnectRequest {
+                profile_name: None,
+                direct_profile: Some(profile()),
+                save_profile_name: None,
+                local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                cwd_hint: None,
+            })
+            .unwrap();
+
+        assert!(history.load().unwrap().hosts.is_empty());
         let _ = std::fs::remove_file(path);
     }
 

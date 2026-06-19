@@ -8,12 +8,12 @@ use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretStore,
 };
 use crate::ui::chrome::display_width;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Write};
@@ -39,8 +39,10 @@ impl ConnectRemoteHostPaneRuntime {
         let mut terminal = Terminal::new(backend).map_err(write_error)?;
         terminal.clear().map_err(write_error)?;
 
-        let mut state = ConnectRemoteHostState::load();
-        let result = self.run_event_loop(&mut terminal, &mut state, command);
+        let (mut state, initial_secret_request) =
+            ConnectRemoteHostState::load_with_initial_secret_request();
+        let result =
+            self.run_event_loop(&mut terminal, &mut state, command, initial_secret_request);
 
         crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
             .map_err(write_error)?;
@@ -54,8 +56,12 @@ impl ConnectRemoteHostPaneRuntime {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         state: &mut ConnectRemoteHostState,
         command: ConnectRemoteHostPaneCommand,
+        initial_secret_request: Option<SecretLoadRequest>,
     ) -> Result<(), LifecycleError> {
         let (secret_tx, secret_rx) = mpsc::channel();
+        if let Some(request) = initial_secret_request {
+            spawn_secret_loader(request, secret_tx.clone());
+        }
         terminal
             .draw(|frame| render(frame, state))
             .map_err(write_error)?;
@@ -89,6 +95,19 @@ impl ConnectRemoteHostPaneRuntime {
                 PaneAction::LoadSecrets(request) => {
                     if let Some(request) = request {
                         spawn_secret_loader(request, secret_tx.clone());
+                    }
+                }
+                PaneAction::DeleteSelectedHost { profile_name } => {
+                    match delete_selected_host(state, &profile_name) {
+                        Ok(request) => {
+                            if let Some(request) = request {
+                                spawn_secret_loader(request, secret_tx.clone());
+                            }
+                        }
+                        Err(message) => {
+                            state.delete_confirm = DeleteConfirmState::Idle;
+                            state.status = Status::Error(message);
+                        }
                     }
                 }
                 PaneAction::Connect => {
@@ -141,15 +160,23 @@ struct ConnectRemoteHostState {
     sudo_password: String,
     password_mode: PasswordMode,
     sudo_mode: SudoMode,
+    show_ssh_password: bool,
+    show_sudo_password: bool,
     remember: bool,
     editing: Option<EditField>,
     status: Status,
+    delete_confirm: DeleteConfirmState,
     secret_load: SecretLoadState,
     next_secret_request_id: u64,
 }
 
 impl ConnectRemoteHostState {
+    #[cfg(test)]
     fn load() -> Self {
+        Self::load_with_initial_secret_request().0
+    }
+
+    fn load_with_initial_secret_request() -> (Self, Option<SecretLoadRequest>) {
         let profiles = load_profiles();
         let mut state = Self {
             profiles,
@@ -164,17 +191,21 @@ impl ConnectRemoteHostState {
             sudo_password: String::new(),
             password_mode: PasswordMode::Enter,
             sudo_mode: SudoMode::SameAsSsh,
+            show_ssh_password: false,
+            show_sudo_password: false,
             remember: true,
             editing: None,
             status: Status::Hint("Select a saved host or fill a new host.".to_string()),
+            delete_confirm: DeleteConfirmState::Idle,
             secret_load: SecretLoadState::Idle,
             next_secret_request_id: 1,
         };
-        let _ = state.sync_selected_profile();
-        state
+        let initial_secret_request = state.sync_selected_profile();
+        (state, initial_secret_request)
     }
 
     fn sync_selected_profile(&mut self) -> Option<SecretLoadRequest> {
+        self.delete_confirm = DeleteConfirmState::Idle;
         self.secret_load = SecretLoadState::Idle;
         if self.selected >= self.profiles.len() {
             self.host.clear();
@@ -186,6 +217,8 @@ impl ConnectRemoteHostState {
             self.sudo_password.clear();
             self.password_mode = PasswordMode::Enter;
             self.sudo_mode = SudoMode::SameAsSsh;
+            self.show_ssh_password = false;
+            self.show_sudo_password = false;
             self.remember = true;
             self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
             return None;
@@ -239,6 +272,8 @@ impl ConnectRemoteHostState {
                 SudoMode::None
             };
         }
+        self.show_ssh_password = false;
+        self.show_sudo_password = false;
         self.remember = true;
         if request.has_work() {
             self.status = Status::Loading("Loading saved credentials...".to_string());
@@ -303,6 +338,9 @@ impl ConnectRemoteHostState {
     }
 
     fn apply_key(&mut self, key: KeyEvent) -> PaneAction {
+        if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
+            return self.apply_delete_confirm_key(key);
+        }
         if let Some(field) = self.editing {
             return self.apply_edit_key(key, field);
         }
@@ -317,17 +355,21 @@ impl ConnectRemoteHostState {
             }
             KeyCode::Char('q') => PaneAction::Close,
             KeyCode::Tab => {
-                self.set_focus(self.focus.next(self.auth));
+                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()));
                 PaneAction::None
             }
             KeyCode::BackTab => {
-                self.set_focus(self.focus.prev(self.auth));
+                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()));
                 PaneAction::None
             }
             KeyCode::Up => self.move_up(),
             KeyCode::Down => self.move_down(),
             KeyCode::Left => {
-                if self.focus.uses_horizontal_choice() {
+                if self.focus == Focus::PasswordToggle {
+                    self.set_focus(Focus::Password);
+                } else if self.focus == Focus::SudoToggle {
+                    self.set_focus(Focus::Sudo);
+                } else if self.focus.uses_horizontal_choice() {
                     self.adjust_choice(-1);
                 } else if self.focus != Focus::Hosts {
                     self.set_focus(Focus::Hosts);
@@ -337,9 +379,17 @@ impl ConnectRemoteHostState {
             KeyCode::Right => {
                 if self.focus == Focus::Hosts {
                     self.set_focus(self.default_detail_focus());
+                } else if self.focus == Focus::Password {
+                    self.set_focus(Focus::PasswordToggle);
+                } else if self.focus == Focus::Sudo {
+                    self.set_focus(Focus::SudoToggle);
                 } else {
                     self.adjust_choice(1);
                 }
+                PaneAction::None
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_password_visibility();
                 PaneAction::None
             }
             KeyCode::Enter => self.activate_focus(),
@@ -353,14 +403,103 @@ impl ConnectRemoteHostState {
         }
     }
 
+    fn apply_delete_confirm_key(&mut self, key: KeyEvent) -> PaneAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                PaneAction::None
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                self.shift_delete_confirm_focus();
+                PaneAction::None
+            }
+            KeyCode::Enter => self.activate_delete_confirm_focus(),
+            _ => PaneAction::None,
+        }
+    }
+
+    fn apply_delete_confirm_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> PaneAction {
+        let layout = DeleteConfirmGeometry::from_terminal_size(
+            crossterm::terminal::size().unwrap_or((96, 24)),
+        );
+        if point_in_rect(mouse.column, mouse.row, layout.cancel_button) {
+            self.delete_confirm = DeleteConfirmState::Idle;
+            return PaneAction::None;
+        }
+        if point_in_rect(mouse.column, mouse.row, layout.delete_button) {
+            return self.confirm_delete_action();
+        }
+        PaneAction::None
+    }
+
+    fn shift_delete_confirm_focus(&mut self) {
+        if let DeleteConfirmState::Prompt { focus, .. } = &mut self.delete_confirm {
+            *focus = match focus {
+                DeleteConfirmFocus::Cancel => DeleteConfirmFocus::Delete,
+                DeleteConfirmFocus::Delete => DeleteConfirmFocus::Cancel,
+            };
+        }
+    }
+
+    fn activate_delete_confirm_focus(&mut self) -> PaneAction {
+        match self.delete_confirm_focus() {
+            Some(DeleteConfirmFocus::Cancel) => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                PaneAction::None
+            }
+            Some(DeleteConfirmFocus::Delete) => self.confirm_delete_action(),
+            None => PaneAction::None,
+        }
+    }
+
+    fn delete_confirm_focus(&self) -> Option<DeleteConfirmFocus> {
+        match &self.delete_confirm {
+            DeleteConfirmState::Prompt { focus, .. } => Some(*focus),
+            DeleteConfirmState::Idle => None,
+        }
+    }
+
+    fn confirm_delete_action(&mut self) -> PaneAction {
+        let DeleteConfirmState::Prompt { profile_name, .. } = &self.delete_confirm else {
+            return PaneAction::None;
+        };
+        PaneAction::DeleteSelectedHost {
+            profile_name: profile_name.clone(),
+        }
+    }
+
     fn apply_edit_key(&mut self, key: KeyEvent, field: EditField) -> PaneAction {
+        if matches!(
+            (field, key.code),
+            (
+                EditField::SshPassword | EditField::SudoPassword,
+                KeyCode::Char('r')
+            )
+        ) && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.toggle_password_visibility();
+            return PaneAction::None;
+        }
+        if field == EditField::SudoPassword {
+            return self.apply_sudo_password_edit_key(key);
+        }
+        if field == EditField::SshPassword && self.password_mode == PasswordMode::Saved {
+            self.password_mode = PasswordMode::Enter;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Left => self.set_focus(Focus::Hosts),
-            KeyCode::Tab => self.set_focus(self.focus.next(self.auth)),
-            KeyCode::BackTab => self.set_focus(self.focus.prev(self.auth)),
+            KeyCode::Right if field == EditField::SshPassword => {
+                self.set_focus(Focus::PasswordToggle)
+            }
+            KeyCode::Tab => self.set_focus(self.focus.next(self.auth, self.has_saved_selection())),
+            KeyCode::BackTab => {
+                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()))
+            }
             KeyCode::Up => return self.move_up(),
             KeyCode::Down => return self.move_down(),
-            KeyCode::Enter => {}
+            KeyCode::Enter => {
+                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()))
+            }
             KeyCode::Backspace => {
                 edit_buffer(self, field).pop();
             }
@@ -370,9 +509,35 @@ impl ConnectRemoteHostState {
         PaneAction::None
     }
 
+    fn apply_sudo_password_edit_key(&mut self, key: KeyEvent) -> PaneAction {
+        match key.code {
+            KeyCode::Esc => self.set_focus(Focus::Sudo),
+            KeyCode::Tab => self.set_focus(self.focus.next(self.auth, self.has_saved_selection())),
+            KeyCode::BackTab => {
+                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()))
+            }
+            KeyCode::Up => return self.move_up(),
+            KeyCode::Down => return self.move_down(),
+            KeyCode::Left => self.set_focus(Focus::Hosts),
+            KeyCode::Right => self.set_focus(Focus::SudoToggle),
+            KeyCode::Enter => {
+                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()))
+            }
+            KeyCode::Backspace => {
+                self.sudo_password.pop();
+            }
+            KeyCode::Char(ch) if !ch.is_control() => self.sudo_password.push(ch),
+            _ => {}
+        }
+        PaneAction::None
+    }
+
     fn apply_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> PaneAction {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return PaneAction::None;
+        }
+        if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
+            return self.apply_delete_confirm_mouse(mouse);
         }
         let x = mouse.column;
         let y = mouse.row;
@@ -396,18 +561,38 @@ impl ConnectRemoteHostState {
             return PaneAction::None;
         }
         let row = y.saturating_sub(layout.details.y);
+        let details = DetailsGeometry::from_area(layout.details, self);
         match row {
-            1 => self.set_focus(Focus::Host),
-            2 => self.set_focus(Focus::Port),
-            3 => self.set_focus(Focus::User),
-            6 => self.set_focus(Focus::Auth),
-            7 => self.set_focus(Focus::Password),
-            row if row == sudo_row_for(self.auth) as u16 => self.set_focus(Focus::Sudo),
-            row if row == remember_row_for(self.auth) as u16 => {
+            row if row == details.rows.host => self.set_focus(Focus::Host),
+            row if row == details.rows.port => self.set_focus(Focus::Port),
+            row if row == details.rows.user => self.set_focus(Focus::User),
+            row if row == details.rows.auth => self.set_focus(Focus::Auth),
+            row if row == details.rows.password => {
+                if password_visibility_button_hit(x, layout.details.x, self, PasswordField::Ssh) {
+                    self.set_focus(Focus::Password);
+                    self.toggle_password_visibility();
+                } else {
+                    self.set_focus(Focus::Password);
+                }
+            }
+            row if row == details.rows.sudo => {
+                if password_visibility_button_hit(x, layout.details.x, self, PasswordField::Sudo) {
+                    self.set_focus(Focus::Sudo);
+                    self.toggle_password_visibility();
+                } else {
+                    self.set_focus(Focus::Sudo);
+                }
+            }
+            row if row == details.rows.remember => {
                 self.set_focus(Focus::Remember);
+                self.delete_confirm = DeleteConfirmState::Idle;
                 self.remember = !self.remember;
             }
-            row if row == connect_row_for(self.auth) as u16 => {
+            row if Some(row) == details.rows.delete => {
+                self.set_focus(Focus::Delete);
+                return self.delete_action();
+            }
+            row if row == details.rows.connect => {
                 self.set_focus(Focus::Connect);
                 return self.connect_action();
             }
@@ -423,7 +608,7 @@ impl ConnectRemoteHostState {
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
-            let mut next = self.focus.prev(self.auth);
+            let mut next = self.focus.prev(self.auth, self.has_saved_selection());
             if next == Focus::Hosts {
                 next = Focus::Host;
             }
@@ -439,7 +624,7 @@ impl ConnectRemoteHostState {
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
-            let mut next = self.focus.next(self.auth);
+            let mut next = self.focus.next(self.auth, self.has_saved_selection());
             if next == Focus::Hosts {
                 next = Focus::Connect;
             }
@@ -457,6 +642,9 @@ impl ConnectRemoteHostState {
     }
 
     fn set_focus(&mut self, focus: Focus) {
+        if self.focus != focus {
+            self.delete_confirm = DeleteConfirmState::Idle;
+        }
         self.focus = focus;
         self.editing = focus.edit_field(self.auth);
         if focus == Focus::Password
@@ -465,14 +653,41 @@ impl ConnectRemoteHostState {
         {
             self.password_mode = PasswordMode::Enter;
         }
-        if focus == Focus::Sudo && self.sudo_mode == SudoMode::Replace {
-            self.editing = Some(EditField::SudoPassword);
+        if focus == Focus::Sudo {
+            self.start_sudo_password_edit();
         }
     }
 
     fn start_edit(&mut self, field: EditField) {
         self.focus = edit_focus(field);
         self.editing = Some(field);
+    }
+
+    fn start_sudo_password_edit(&mut self) {
+        if self.sudo_mode == SudoMode::None {
+            return;
+        }
+        if self.sudo_mode == SudoMode::SameAsSsh {
+            self.sudo_password = self.ssh_password.clone();
+            self.sudo_mode = SudoMode::Replace;
+        }
+        self.start_edit(EditField::SudoPassword);
+    }
+
+    fn toggle_password_visibility(&mut self) {
+        self.toggle_password_visibility_for(self.focus);
+    }
+
+    fn toggle_password_visibility_for(&mut self, focus: Focus) {
+        match focus {
+            Focus::Password | Focus::PasswordToggle if self.auth == AuthChoice::Password => {
+                self.show_ssh_password = !self.show_ssh_password;
+            }
+            Focus::Sudo | Focus::SudoToggle if self.sudo_mode != SudoMode::None => {
+                self.show_sudo_password = !self.show_sudo_password;
+            }
+            _ => {}
+        }
     }
 
     fn activate_focus(&mut self) -> PaneAction {
@@ -487,16 +702,39 @@ impl ConnectRemoteHostState {
                 PaneAction::None
             }
             Focus::Password => PaneAction::None,
+            Focus::PasswordToggle => {
+                self.toggle_password_visibility_for(Focus::PasswordToggle);
+                PaneAction::None
+            }
             Focus::Sudo => {
-                self.adjust_choice(1);
+                self.start_sudo_password_edit();
+                PaneAction::None
+            }
+            Focus::SudoToggle => {
+                self.toggle_password_visibility_for(Focus::SudoToggle);
                 PaneAction::None
             }
             Focus::Remember => {
+                self.delete_confirm = DeleteConfirmState::Idle;
                 self.remember = !self.remember;
                 PaneAction::None
             }
+            Focus::Delete => self.delete_action(),
             Focus::Connect => self.connect_action(),
         }
+    }
+
+    fn delete_action(&mut self) -> PaneAction {
+        let Some(profile) = self.selected_profile() else {
+            self.delete_confirm = DeleteConfirmState::Idle;
+            return PaneAction::None;
+        };
+        self.delete_confirm = DeleteConfirmState::Prompt {
+            profile_name: profile.name.clone(),
+            profile_label: saved_host_label(profile),
+            focus: DeleteConfirmFocus::Cancel,
+        };
+        PaneAction::None
     }
 
     fn connect_action(&self) -> PaneAction {
@@ -508,6 +746,9 @@ impl ConnectRemoteHostState {
     }
 
     fn adjust_choice(&mut self, step: i32) {
+        if self.focus != Focus::Delete {
+            self.delete_confirm = DeleteConfirmState::Idle;
+        }
         match self.focus {
             Focus::Auth => {
                 self.auth = self.auth.shift(step);
@@ -525,12 +766,6 @@ impl ConnectRemoteHostState {
                     self.start_edit(EditField::SshPassword);
                 }
             }
-            Focus::Sudo => {
-                self.sudo_mode = self
-                    .sudo_mode
-                    .shift(step, self.auth, self.saved_sudo_password());
-                self.set_focus(Focus::Sudo);
-            }
             _ => {}
         }
     }
@@ -545,6 +780,10 @@ impl ConnectRemoteHostState {
         self.profiles.get(self.selected)
     }
 
+    fn has_saved_selection(&self) -> bool {
+        self.selected < self.profiles.len()
+    }
+
     fn saved_ssh_password(&self) -> bool {
         matches!(
             self.selected_profile().map(|profile| &profile.auth),
@@ -552,12 +791,6 @@ impl ConnectRemoteHostState {
                 password_secret_id: Some(_),
             })
         )
-    }
-
-    fn saved_sudo_password(&self) -> bool {
-        self.selected_profile()
-            .and_then(|profile| profile.sudo_password_secret_id.as_ref())
-            .is_some()
     }
 }
 
@@ -569,14 +802,17 @@ enum Focus {
     User,
     Auth,
     Password,
+    PasswordToggle,
     Sudo,
+    SudoToggle,
     Remember,
+    Delete,
     Connect,
 }
 
 impl Focus {
     fn uses_horizontal_choice(self) -> bool {
-        matches!(self, Self::Auth | Self::Sudo)
+        matches!(self, Self::Auth)
     }
 
     fn edit_field(self, auth: AuthChoice) -> Option<EditField> {
@@ -590,8 +826,8 @@ impl Focus {
         }
     }
 
-    fn ordered(_auth: AuthChoice) -> Vec<Self> {
-        vec![
+    fn ordered(_auth: AuthChoice, has_saved_selection: bool) -> Vec<Self> {
+        let mut ordered = vec![
             Self::Hosts,
             Self::Host,
             Self::Port,
@@ -600,18 +836,22 @@ impl Focus {
             Self::Password,
             Self::Sudo,
             Self::Remember,
-            Self::Connect,
-        ]
+        ];
+        ordered.push(Self::Connect);
+        if has_saved_selection {
+            ordered.push(Self::Delete);
+        }
+        ordered
     }
 
-    fn next(self, auth: AuthChoice) -> Self {
-        let ordered = Self::ordered(auth);
+    fn next(self, auth: AuthChoice, has_saved_selection: bool) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + 1) % ordered.len()]
     }
 
-    fn prev(self, auth: AuthChoice) -> Self {
-        let ordered = Self::ordered(auth);
+    fn prev(self, auth: AuthChoice, has_saved_selection: bool) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + ordered.len() - 1) % ordered.len()]
     }
@@ -674,20 +914,6 @@ enum SudoMode {
     None,
 }
 
-impl SudoMode {
-    fn shift(self, step: i32, auth: AuthChoice, saved: bool) -> Self {
-        let mut values = Vec::new();
-        if auth == AuthChoice::Password {
-            values.push(Self::SameAsSsh);
-        }
-        if saved {
-            values.push(Self::Saved);
-        }
-        values.extend([Self::Replace, Self::None]);
-        shift_value(&values, self, step)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Status {
     Hint(String),
@@ -697,11 +923,28 @@ enum Status {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum DeleteConfirmState {
+    Idle,
+    Prompt {
+        profile_name: String,
+        profile_label: String,
+        focus: DeleteConfirmFocus,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteConfirmFocus {
+    Cancel,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PaneAction {
     None,
     Redraw,
     Close,
     Connect,
+    DeleteSelectedHost { profile_name: String },
     LoadSecrets(Option<SecretLoadRequest>),
 }
 
@@ -742,6 +985,53 @@ struct PopupGeometry {
     details: Rect,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DetailsGeometry {
+    connection: Rect,
+    authentication: Rect,
+    options: Rect,
+    status: Rect,
+    rows: DetailsRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetailsRows {
+    host: u16,
+    port: u16,
+    user: u16,
+    auth: u16,
+    password: u16,
+    sudo: u16,
+    remember: u16,
+    connect: u16,
+    delete: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeleteConfirmGeometry {
+    dialog: Rect,
+    cancel_button: Rect,
+    delete_button: Rect,
+}
+
+impl DeleteConfirmGeometry {
+    fn from_terminal_size((cols, rows): (u16, u16)) -> Self {
+        let width = cols.min(56).max(36);
+        let height = 7.min(rows.max(1));
+        let x = cols.saturating_sub(width) / 2;
+        let y = rows.saturating_sub(height) / 2;
+        let dialog = Rect::new(x, y, width, height);
+        let button_y = y.saturating_add(height.saturating_sub(2));
+        let delete_button = Rect::new(x.saturating_add(width.saturating_sub(18)), button_y, 14, 1);
+        let cancel_button = Rect::new(delete_button.x.saturating_sub(13), button_y, 10, 1);
+        Self {
+            dialog,
+            cancel_button,
+            delete_button,
+        }
+    }
+}
+
 impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
         let dialog = Rect::new(0, 0, cols, rows);
@@ -764,6 +1054,42 @@ impl PopupGeometry {
             dialog,
             hosts: columns[0],
             details: columns[2],
+        }
+    }
+}
+
+impl DetailsGeometry {
+    fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
+        let options_rows = if state.has_saved_selection() { 4 } else { 3 };
+        let options_height = 1 + options_rows;
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Length(4),
+                Constraint::Length(options_height),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        let rows = DetailsRows {
+            host: sections[0].y.saturating_add(1).saturating_sub(area.y),
+            port: sections[0].y.saturating_add(2).saturating_sub(area.y),
+            user: sections[0].y.saturating_add(3).saturating_sub(area.y),
+            auth: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            password: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            sudo: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            remember: sections[2].y.saturating_add(1).saturating_sub(area.y),
+            connect: sections[2].y.saturating_add(3).saturating_sub(area.y),
+            delete: state
+                .has_saved_selection()
+                .then(|| sections[2].y.saturating_add(4).saturating_sub(area.y)),
+        };
+        Self {
+            connection: sections[0],
+            authentication: sections[1],
+            options: sections[2],
+            status: sections[3],
+            rows,
         }
     }
 }
@@ -798,6 +1124,7 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     );
     render_details(frame, geometry.details, state);
     render_cursor(frame, geometry.details, state);
+    render_delete_confirm(frame, state);
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -871,19 +1198,11 @@ fn status_message(state: &ConnectRemoteHostState) -> &str {
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(6),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    render_connection(frame, sections[0], state);
-    render_authentication(frame, sections[1], state);
-    render_options(frame, sections[2], state);
-    render_status(frame, sections[3], state);
+    let geometry = DetailsGeometry::from_area(area, state);
+    render_connection(frame, geometry.connection, state);
+    render_authentication(frame, geometry.authentication, state);
+    render_options(frame, geometry.options, state);
+    render_status(frame, geometry.status, state);
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -896,36 +1215,37 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let mut rows = vec![focused_row("Auth", auth_tabs(state), state, Focus::Auth)];
-    rows.push(detail_row(
-        if state.auth == AuthChoice::Key {
-            "Key"
-        } else {
-            "Password"
-        },
-        &password_display(state),
-        state,
-        Focus::Password,
-    ));
-    rows.push(focused_row("Sudo", sudo_tabs(state), state, Focus::Sudo));
+    let mut rows = vec![choice_row("Auth", auth_tabs(state), state, Focus::Auth)];
+    if state.auth == AuthChoice::Key {
+        rows.push(detail_row(
+            "Key",
+            &password_display(state),
+            state,
+            Focus::Password,
+        ));
+    } else {
+        rows.push(password_row("Password", PasswordField::Ssh, state));
+    }
+    rows.push(password_row("Sudo", PasswordField::Sudo, state));
     render_detail_table(frame, area, "Authentication", rows);
 }
 
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let rows = [
-        detail_row(
-            "Save",
-            if state.remember {
-                "[x] Remember host"
-            } else {
-                "[ ] Do not save"
-            },
-            state,
-            Focus::Remember,
-        ),
-        Row::new(vec![String::new(), String::new()]),
-        connect_row(connect_label(state), state),
-    ];
+    let mut rows = vec![detail_row(
+        "Save",
+        if state.remember {
+            "[x] Remember host"
+        } else {
+            "[ ] Do not save"
+        },
+        state,
+        Focus::Remember,
+    )];
+    rows.push(Row::new(vec![String::new(), String::new()]));
+    rows.push(connect_row(connect_label(state), state));
+    if state.has_saved_selection() {
+        rows.push(action_row(delete_label(state), state, Focus::Delete));
+    }
     render_detail_table(frame, area, "Options", rows);
 }
 
@@ -954,37 +1274,147 @@ fn detail_row(
     focus: Focus,
 ) -> Row<'static> {
     let prefix = " ";
-    let style = if state.focus == focus {
+    let style = detail_focus_style(state, focus);
+    Row::new(vec![label.to_string(), format!("{prefix}{value}")]).style(style)
+}
+
+fn detail_focus_style(state: &ConnectRemoteHostState, focus: Focus) -> Style {
+    if state.focus == focus {
+        active_focus_style()
+    } else {
+        Style::default()
+    }
+}
+
+fn password_row(label: &str, field: PasswordField, state: &ConnectRemoteHostState) -> Row<'static> {
+    Row::new(vec![
+        Line::from(label.to_string()),
+        password_control_line(field, state),
+    ])
+}
+
+fn password_control_line(field: PasswordField, state: &ConnectRemoteHostState) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    let display = password_control_display(field, state);
+    let value_style = if state.focus == display.field_focus {
         active_focus_style()
     } else {
         Style::default()
     };
-    Row::new(vec![label.to_string(), format!("{prefix}{value}")]).style(style)
+    spans.push(Span::styled(display.value, value_style));
+    if display.toggle_available {
+        spans.push(Span::raw("  "));
+        let toggle_style = if state.focus == display.toggle_focus {
+            active_focus_style()
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(
+            password_visibility_label(display.show_plaintext),
+            toggle_style,
+        ));
+    }
+    Line::from(spans)
 }
 
-fn connect_row(value: impl Into<String>, state: &ConnectRemoteHostState) -> Row<'static> {
-    let style = if state.focus == Focus::Connect {
-        active_focus_style()
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
-    Row::new(vec![String::new(), format!(" {}", value.into())]).style(style)
+struct PasswordControlDisplay {
+    value: String,
+    show_plaintext: bool,
+    field_focus: Focus,
+    toggle_focus: Focus,
+    toggle_available: bool,
 }
 
-fn focused_row(
-    label: &str,
+fn password_control_display(
+    field: PasswordField,
+    state: &ConnectRemoteHostState,
+) -> PasswordControlDisplay {
+    match field {
+        PasswordField::Ssh if state.auth == AuthChoice::Password => PasswordControlDisplay {
+            value: password_field_display(
+                &state.ssh_password,
+                state.password_mode == PasswordMode::Loading,
+                state.show_ssh_password,
+                "",
+            ),
+            show_plaintext: state.show_ssh_password,
+            field_focus: Focus::Password,
+            toggle_focus: Focus::PasswordToggle,
+            toggle_available: state.password_mode != PasswordMode::Loading,
+        },
+        PasswordField::Sudo if state.sudo_mode != SudoMode::None => PasswordControlDisplay {
+            value: password_field_display(
+                sudo_password_value(state),
+                state.sudo_mode == SudoMode::Loading,
+                state.show_sudo_password,
+                "",
+            ),
+            show_plaintext: state.show_sudo_password,
+            field_focus: Focus::Sudo,
+            toggle_focus: Focus::SudoToggle,
+            toggle_available: state.sudo_mode != SudoMode::Loading,
+        },
+        PasswordField::Sudo => PasswordControlDisplay {
+            value: "No sudo password".to_string(),
+            show_plaintext: false,
+            field_focus: Focus::Sudo,
+            toggle_focus: Focus::SudoToggle,
+            toggle_available: false,
+        },
+        PasswordField::Ssh => PasswordControlDisplay {
+            value: password_display(state),
+            show_plaintext: false,
+            field_focus: Focus::Password,
+            toggle_focus: Focus::PasswordToggle,
+            toggle_available: false,
+        },
+    }
+}
+
+fn action_row(
     value: impl Into<String>,
     state: &ConnectRemoteHostState,
     focus: Focus,
 ) -> Row<'static> {
     let focused = state.focus == focus;
-    let style = if focused {
+    let style = action_focus_style(focused, focus);
+    Row::new(vec![String::new(), format!(" {}", value.into())]).style(style)
+}
+
+fn action_focus_style(focused: bool, focus: Focus) -> Style {
+    if focused {
+        match focus {
+            Focus::Delete => delete_focus_style(),
+            _ => active_focus_style(),
+        }
+    } else {
+        match focus {
+            Focus::Delete => Style::default().fg(Color::Red),
+            _ => Style::default().add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+fn connect_row(value: impl Into<String>, state: &ConnectRemoteHostState) -> Row<'static> {
+    action_row(value, state, Focus::Connect)
+}
+
+fn choice_row(
+    label: &str,
+    value: Vec<ChoiceSegment>,
+    state: &ConnectRemoteHostState,
+    focus: Focus,
+) -> Row<'static> {
+    let focused = state.focus == focus;
+    let label_style = if focused {
         active_focus_style()
     } else {
         Style::default()
     };
-    let prefix = " ";
-    Row::new(vec![label.to_string(), format!("{prefix}{}", value.into())]).style(style)
+    Row::new(vec![
+        Line::from(label.to_string()).style(label_style),
+        choice_line(value, focused),
+    ])
 }
 
 fn active_focus_style() -> Style {
@@ -994,54 +1424,75 @@ fn active_focus_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn delete_focus_style() -> Style {
+    Style::default()
+        .bg(Color::Red)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn selected_host_style() -> Style {
     Style::default().bg(Color::Gray).fg(Color::Black)
 }
 
-fn auth_tabs(state: &ConnectRemoteHostState) -> String {
-    segmented(&[
-        ("Password", state.auth == AuthChoice::Password),
-        ("Key", state.auth == AuthChoice::Key),
-    ])
+fn inactive_selected_style() -> Style {
+    selected_host_style()
 }
 
-fn sudo_tabs(state: &ConnectRemoteHostState) -> String {
-    let mut segments = Vec::new();
-    if state.auth == AuthChoice::Password {
-        segments.push(("Same", state.sudo_mode == SudoMode::SameAsSsh));
-    }
-    if state.sudo_mode == SudoMode::Loading {
-        segments.push(("Loading", true));
-    } else if state.saved_sudo_password() {
-        segments.push(("Saved", state.sudo_mode == SudoMode::Saved));
-    }
-    segments.push(("Replace", state.sudo_mode == SudoMode::Replace));
-    segments.push(("None", state.sudo_mode == SudoMode::None));
-    segmented(&segments)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChoiceSegment {
+    label: &'static str,
+    selected: bool,
 }
 
-fn segmented(segments: &[(&str, bool)]) -> String {
+fn auth_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
+    vec![
+        ChoiceSegment {
+            label: "Password",
+            selected: state.auth == AuthChoice::Password,
+        },
+        ChoiceSegment {
+            label: "Key",
+            selected: state.auth == AuthChoice::Key,
+        },
+    ]
+}
+
+fn choice_line(segments: Vec<ChoiceSegment>, focused: bool) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (index, segment) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let style = if segment.selected && focused {
+            active_focus_style()
+        } else if segment.selected {
+            inactive_selected_style()
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(segment.label, style));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+fn segmented_for_test(segments: &[ChoiceSegment]) -> String {
     segments
         .iter()
-        .map(|(label, selected)| {
-            if *selected {
-                format!("[{label}]")
-            } else {
-                label.to_string()
-            }
-        })
+        .map(|segment| segment.label)
         .collect::<Vec<_>>()
         .join("  ")
 }
 
 fn password_display(state: &ConnectRemoteHostState) -> String {
     match state.auth {
-        AuthChoice::Password => match state.password_mode {
-            PasswordMode::Loading => "Loading saved...".to_string(),
-            PasswordMode::Saved => "Saved encrypted".to_string(),
-            PasswordMode::Enter if state.ssh_password.is_empty() => "Enter password".to_string(),
-            PasswordMode::Enter => "*".repeat(state.ssh_password.chars().count().max(6)),
-        },
+        AuthChoice::Password => password_field_with_toggle_display(
+            &state.ssh_password,
+            state.password_mode == PasswordMode::Loading,
+            state.show_ssh_password,
+            "",
+        ),
         AuthChoice::Key => {
             if state.key_path.is_empty() {
                 "Key file path".to_string()
@@ -1052,6 +1503,114 @@ fn password_display(state: &ConnectRemoteHostState) -> String {
     }
 }
 
+#[cfg(test)]
+fn sudo_password_display(state: &ConnectRemoteHostState) -> String {
+    if state.sudo_mode == SudoMode::None {
+        return "No sudo password".to_string();
+    }
+    password_field_with_toggle_display(
+        sudo_password_value(state),
+        state.sudo_mode == SudoMode::Loading,
+        state.show_sudo_password,
+        "",
+    )
+}
+
+fn password_field_with_toggle_display(
+    value: &str,
+    loading: bool,
+    show_plaintext: bool,
+    empty_label: &str,
+) -> String {
+    let value = password_field_display(value, loading, show_plaintext, empty_label);
+    if loading {
+        value
+    } else {
+        format!("{}  {}", value, password_visibility_label(show_plaintext))
+    }
+}
+
+fn password_field_display(
+    value: &str,
+    loading: bool,
+    show_plaintext: bool,
+    empty_label: &str,
+) -> String {
+    if loading {
+        "Loading saved...".to_string()
+    } else if value.is_empty() {
+        empty_label.to_string()
+    } else if show_plaintext {
+        value.to_string()
+    } else {
+        password_mask(value)
+    }
+}
+
+fn password_mask(value: &str) -> String {
+    "*".repeat(value.chars().count().max(6))
+}
+
+fn sudo_password_value(state: &ConnectRemoteHostState) -> &str {
+    match state.sudo_mode {
+        SudoMode::SameAsSsh => &state.ssh_password,
+        SudoMode::Saved | SudoMode::Replace => &state.sudo_password,
+        SudoMode::Loading | SudoMode::None => "",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasswordField {
+    Ssh,
+    Sudo,
+}
+
+fn password_visibility_label(show_plaintext: bool) -> &'static str {
+    if show_plaintext {
+        "Hide"
+    } else {
+        "Show"
+    }
+}
+
+fn password_visibility_button_hit(
+    x: u16,
+    details_x: u16,
+    state: &ConnectRemoteHostState,
+    field: PasswordField,
+) -> bool {
+    let (value, loading, show_plaintext, empty_label) = match field {
+        PasswordField::Ssh if state.auth == AuthChoice::Password => (
+            state.ssh_password.as_str(),
+            state.password_mode == PasswordMode::Loading,
+            state.show_ssh_password,
+            "",
+        ),
+        PasswordField::Sudo if state.sudo_mode != SudoMode::None => (
+            sudo_password_value(state),
+            state.sudo_mode == SudoMode::Loading,
+            state.show_sudo_password,
+            "",
+        ),
+        _ => return false,
+    };
+    if loading {
+        return false;
+    }
+    let field_start = details_x.saturating_add(14);
+    let value_width = password_field_display(value, loading, show_plaintext, empty_label)
+        .chars()
+        .count() as u16;
+    let button_start = field_start.saturating_add(value_width).saturating_add(2);
+    let button_end =
+        button_start.saturating_add(password_visibility_label(show_plaintext).len() as u16);
+    x >= button_start && x < button_end
+}
+
+fn delete_label(_state: &ConnectRemoteHostState) -> String {
+    "Delete".to_string()
+}
+
 fn connect_label(state: &ConnectRemoteHostState) -> String {
     let label = if matches!(state.status, Status::Working(_)) {
         "Connecting..."
@@ -1060,11 +1619,7 @@ fn connect_label(state: &ConnectRemoteHostState) -> String {
     } else {
         "Connect"
     };
-    if state.focus == Focus::Connect {
-        format!("[ {label} ]")
-    } else {
-        label.to_string()
-    }
+    label.to_string()
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -1081,24 +1636,113 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     );
 }
 
-fn render_cursor(frame: &mut Frame<'_>, details: Rect, state: &ConnectRemoteHostState) {
-    let Some(field) = state.editing else {
+fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
+    let DeleteConfirmState::Prompt {
+        profile_label,
+        focus,
+        ..
+    } = &state.delete_confirm
+    else {
         return;
     };
+    let geometry =
+        DeleteConfirmGeometry::from_terminal_size((frame.size().width, frame.size().height));
+    frame.render_widget(Clear, geometry.dialog);
+    let block = Block::default()
+        .title(section_title("Delete saved host"))
+        .borders(Borders::ALL);
+    frame.render_widget(block, geometry.dialog);
+    let message_area = Rect::new(
+        geometry.dialog.x.saturating_add(2),
+        geometry.dialog.y.saturating_add(2),
+        geometry.dialog.width.saturating_sub(4),
+        2,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("Delete saved host {profile_label}?"))
+            .style(Style::default().fg(Color::White))
+            .alignment(Alignment::Left),
+        message_area,
+    );
+    render_modal_button(
+        frame,
+        geometry.cancel_button,
+        "Cancel",
+        *focus == DeleteConfirmFocus::Cancel,
+        false,
+    );
+    render_modal_button(
+        frame,
+        geometry.delete_button,
+        "Delete",
+        *focus == DeleteConfirmFocus::Delete,
+        true,
+    );
+}
+
+fn render_modal_button(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    focused: bool,
+    destructive: bool,
+) {
+    let style = if focused {
+        if destructive {
+            delete_focus_style()
+        } else {
+            active_focus_style()
+        }
+    } else if destructive {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        Paragraph::new(label.to_string())
+            .style(style)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_cursor(frame: &mut Frame<'_>, details: Rect, state: &ConnectRemoteHostState) {
+    if let Some((x, y)) = cursor_position(details, state) {
+        frame.set_cursor(x, y);
+    }
+}
+
+fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16, u16)> {
+    let field = state.editing?;
+    let rows = DetailsGeometry::from_area(details, state).rows;
     let (row, value) = match field {
-        EditField::Host => (1, state.host.as_str()),
-        EditField::RemotePort => (2, state.remote_port.as_str()),
-        EditField::SshUser => (3, state.ssh_user.as_str()),
-        EditField::KeyPath => (7, state.key_path.as_str()),
-        EditField::SshPassword => (7, state.ssh_password.as_str()),
+        EditField::Host => (rows.host, state.host.as_str().to_string()),
+        EditField::RemotePort => (rows.port, state.remote_port.as_str().to_string()),
+        EditField::SshUser => (rows.user, state.ssh_user.as_str().to_string()),
+        EditField::KeyPath => (rows.password, state.key_path.as_str().to_string()),
+        EditField::SshPassword => (
+            rows.password,
+            password_field_display(
+                &state.ssh_password,
+                state.password_mode == PasswordMode::Loading,
+                state.show_ssh_password,
+                "",
+            ),
+        ),
         EditField::SudoPassword => (
-            sudo_row_for(state.auth) as u16 + 1,
-            state.sudo_password.as_str(),
+            rows.sudo,
+            password_field_display(
+                sudo_password_value(state),
+                state.sudo_mode == SudoMode::Loading,
+                state.show_sudo_password,
+                "",
+            ),
         ),
     };
-    let x = details.x + 14 + value.chars().count() as u16;
-    let y = details.y + row;
-    frame.set_cursor(x, y);
+    let value_width = value.chars().count() as u16;
+    let desired_x = details.x.saturating_add(14).saturating_add(value_width);
+    let max_x = details.x.saturating_add(details.width.saturating_sub(1));
+    Some((desired_x.min(max_x), details.y.saturating_add(row)))
 }
 
 fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
@@ -1159,16 +1803,53 @@ fn load_profiles() -> Vec<RemoteHostProfile> {
         .unwrap_or_default()
 }
 
-fn sudo_row_for(_auth: AuthChoice) -> usize {
-    8
-}
+fn delete_selected_host(
+    state: &mut ConnectRemoteHostState,
+    profile_name: &str,
+) -> Result<Option<SecretLoadRequest>, String> {
+    let deleted_index = state
+        .profiles
+        .iter()
+        .position(|profile| profile.name == profile_name)
+        .ok_or_else(|| format!("saved host profile `{profile_name}` is no longer selected"))?;
+    let history_store = RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path());
+    let removed = history_store
+        .remove_profile(profile_name)
+        .map_err(|error| error.to_string())?;
+    let Some(removed) = removed else {
+        state.delete_confirm = DeleteConfirmState::Idle;
+        return Err(format!("saved host profile `{profile_name}` was not found"));
+    };
 
-fn remember_row_for(_auth: AuthChoice) -> usize {
-    10
-}
+    let secret_store = FileRemoteHostSecretStore::default();
+    let mut delete_errors = Vec::new();
+    if let RemoteHostAuthProfile::Password {
+        password_secret_id: Some(id),
+    } = &removed.auth
+    {
+        if let Err(error) = secret_store.delete_secret(id) {
+            delete_errors.push(format!("SSH password: {error}"));
+        }
+    }
+    if let Some(id) = &removed.sudo_password_secret_id {
+        if let Err(error) = secret_store.delete_secret(id) {
+            delete_errors.push(format!("sudo password: {error}"));
+        }
+    }
 
-fn connect_row_for(_auth: AuthChoice) -> usize {
-    11
+    let deleted_label = saved_host_label(&removed);
+    state.profiles = load_profiles();
+    state.selected = deleted_index.min(state.profiles.len());
+    let request = state.sync_selected_profile();
+    if delete_errors.is_empty() {
+        state.status = Status::Hint(format!("Deleted saved host {deleted_label}."));
+    } else {
+        state.status = Status::Error(format!(
+            "Deleted saved host {deleted_label}, but failed to delete secret: {}",
+            delete_errors.join("; ")
+        ));
+    }
+    Ok(request)
 }
 
 fn run_connect(
@@ -1189,9 +1870,10 @@ fn run_connect(
         command.current_session_name.clone(),
     ];
     let mut stdin_payload = None;
-    if let Some(profile) = state.selected_profile().filter(|_| {
-        state.password_mode == PasswordMode::Saved && state.sudo_mode != SudoMode::Replace
-    }) {
+    if let Some(profile) = state
+        .selected_profile()
+        .filter(|_| saved_profile_can_connect_by_id(state))
+    {
         args.push("--profile".to_string());
         args.push(profile.name.clone());
     } else {
@@ -1251,13 +1933,7 @@ fn run_connect(
                 String::new()
             };
             let sudo = match state.sudo_mode {
-                SudoMode::SameAsSsh => {
-                    if !state.ssh_password.is_empty() {
-                        state.ssh_password.clone()
-                    } else {
-                        saved_ssh_password_value(state)?
-                    }
-                }
+                SudoMode::SameAsSsh => state.ssh_password.clone(),
                 SudoMode::Replace => state.sudo_password.clone(),
                 SudoMode::Loading => return Err("Saved credentials are still loading.".to_string()),
                 _ => String::new(),
@@ -1307,6 +1983,11 @@ fn run_connect(
             }
         ))
     }
+}
+
+fn saved_profile_can_connect_by_id(state: &ConnectRemoteHostState) -> bool {
+    state.password_mode == PasswordMode::Saved
+        && matches!(state.sudo_mode, SudoMode::Saved | SudoMode::None)
 }
 
 fn validate(state: &ConnectRemoteHostState) -> Result<(), String> {
@@ -1360,18 +2041,6 @@ fn saved_sudo_secret_id(state: &ConnectRemoteHostState) -> Option<String> {
         .map(|id| id.as_str().to_string())
 }
 
-fn saved_ssh_password_value(state: &ConnectRemoteHostState) -> Result<String, String> {
-    let id =
-        saved_ssh_secret_id(state).ok_or_else(|| "Saved SSH password is missing.".to_string())?;
-    load_secret_value_from_str(&id)
-}
-
-fn load_secret_value_from_str(id: &str) -> Result<String, String> {
-    let id = crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId::new(id)
-        .map_err(|error| error.to_string())?;
-    load_secret_value(&id)
-}
-
 fn load_secret_value(
     id: &crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId,
 ) -> Result<String, String> {
@@ -1392,6 +2061,38 @@ fn write_error(error: io::Error) -> LifecycleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn saved_password_profile() -> RemoteHostProfile {
+        RemoteHostProfile {
+            name: "k.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7575),
+            last_endpoint: None,
+            last_connected_at: None,
+        }
+    }
+
+    fn rendered_text(width: u16, height: u16, state: &ConnectRemoteHostState) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                output.push_str(buffer.get(x, y).symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
 
     #[test]
     fn connect_popup_renders_saved_host_and_profile_fields() {
@@ -1413,7 +2114,92 @@ mod tests {
         let _ = state.sync_selected_profile();
         assert_eq!(state.host, "127.0.0.1");
         assert_eq!(state.ssh_user, "k");
-        assert_eq!(auth_tabs(&state), "[Password]  Key");
+        assert_eq!(segmented_for_test(&auth_tabs(&state)), "Password  Key");
+    }
+
+    #[test]
+    fn connect_popup_initial_secret_load_request_only_targets_selected_profile() {
+        let ssh_id =
+            crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId::new(
+                "waitagent.remote-host.first.ssh-password",
+            )
+            .unwrap();
+        let sudo_id =
+            crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId::new(
+                "waitagent.remote-host.first.sudo-password",
+            )
+            .unwrap();
+        let second_id =
+            crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId::new(
+                "waitagent.remote-host.second.ssh-password",
+            )
+            .unwrap();
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![
+            RemoteHostProfile {
+                name: "first".to_string(),
+                host: "127.0.0.1".to_string(),
+                ssh_user: "k".to_string(),
+                auth: RemoteHostAuthProfile::Password {
+                    password_secret_id: Some(ssh_id.clone()),
+                },
+                sudo_password_secret_id: Some(sudo_id.clone()),
+                preferred_remote_port: RemotePortPreference::Auto,
+                last_remote_port: Some(7575),
+                last_endpoint: None,
+                last_connected_at: None,
+            },
+            RemoteHostProfile {
+                name: "second".to_string(),
+                host: "127.0.0.2".to_string(),
+                ssh_user: "k".to_string(),
+                auth: RemoteHostAuthProfile::Password {
+                    password_secret_id: Some(second_id),
+                },
+                sudo_password_secret_id: None,
+                preferred_remote_port: RemotePortPreference::Auto,
+                last_remote_port: Some(7575),
+                last_endpoint: None,
+                last_connected_at: None,
+            },
+        ];
+        state.selected = 0;
+
+        let request = state.sync_selected_profile().unwrap();
+
+        assert_eq!(request.selected, 0);
+        assert_eq!(request.ssh_secret_id, Some(ssh_id));
+        assert_eq!(request.sudo_secret_id, Some(sudo_id));
+    }
+
+    #[test]
+    fn connect_popup_initial_saved_host_creates_current_profile_load_request() {
+        let mut state = ConnectRemoteHostState::load();
+        let ssh_id =
+            crate::runtime::remote_host::remote_host_secret_store::RemoteHostSecretId::new(
+                "waitagent.remote-host.k-127-0-0-1.ssh-password",
+            )
+            .unwrap();
+        state.profiles = vec![RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7575),
+            last_endpoint: None,
+            last_connected_at: None,
+        }];
+        state.selected = 0;
+
+        let initial_request = state.sync_selected_profile();
+
+        assert!(initial_request.is_some());
+        assert!(state.credentials_loading());
+        assert_eq!(connect_label(&state), "Loading...");
     }
 
     #[test]
@@ -1469,7 +2255,8 @@ mod tests {
         assert_eq!(state.sudo_mode, SudoMode::Saved);
         assert_eq!(state.ssh_password, "ssh-secret");
         assert_eq!(state.sudo_password, "sudo-secret");
-        assert_eq!(password_display(&state), "Saved encrypted");
+        assert_eq!(password_display(&state), "**********  Show");
+        assert_eq!(sudo_password_display(&state), "***********  Show");
         state.set_focus(Focus::Password);
         assert_eq!(state.ssh_password, "ssh-secret");
     }
@@ -1512,10 +2299,13 @@ mod tests {
         state.selected = 1;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((66, 16), &state);
+        let geometry = PopupGeometry::from_terminal_size((66, 17), &state);
 
         assert_eq!(geometry.dialog.width, 66);
-        assert_eq!(geometry.dialog.height, 16);
+        assert_eq!(geometry.dialog.height, 17);
+        assert_eq!(geometry.hosts.y, 2);
+        assert_eq!(geometry.details.y, 2);
+        assert_eq!(geometry.hosts.height, 15);
         assert_eq!(geometry.hosts.width, 20);
         assert!(geometry.details.width >= DETAIL_MIN_WIDTH);
     }
@@ -1622,6 +2412,23 @@ mod tests {
         );
         assert_eq!(state.focus, Focus::Remember);
         assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Down)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Connect);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Down)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Delete);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Up)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Connect);
+
+        state.set_focus(Focus::Remember);
+        assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
@@ -1670,6 +2477,103 @@ mod tests {
         assert_eq!(state.focus, Focus::Host);
         state.apply_key(KeyEvent::from(KeyCode::BackTab));
         assert_eq!(state.focus, Focus::Hosts);
+    }
+
+    #[test]
+    fn connect_popup_renders_delete_in_ctrl_w_popup_size() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        let popup = PopupGeometry::from_terminal_size((66, 17), &state);
+        let details = DetailsGeometry::from_area(popup.details, &state);
+
+        assert_eq!(popup.details.y, 2);
+        assert_eq!(popup.details.height, 15);
+        assert_eq!(details.rows.delete, Some(12));
+        assert!(
+            popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height
+        );
+
+        let output = rendered_text(66, 17, &state);
+        assert!(output.contains("Connect Remote Host"));
+        assert!(output.contains("Remember host"));
+        assert!(output.contains("Connect"));
+        assert!(output.contains("Delete"));
+    }
+
+    #[test]
+    fn connect_popup_delete_saved_host_opens_confirmation_popup() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Delete);
+
+        assert_eq!(delete_label(&state), "Delete");
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(delete_label(&state), "Delete");
+        assert_eq!(
+            state.delete_confirm_focus(),
+            Some(DeleteConfirmFocus::Cancel)
+        );
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(state.delete_confirm, DeleteConfirmState::Idle);
+    }
+
+    #[test]
+    fn connect_popup_delete_confirmation_requires_delete_choice() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Delete);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+
+        assert_eq!(
+            state.delete_confirm_focus(),
+            Some(DeleteConfirmFocus::Cancel)
+        );
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Right)),
+            PaneAction::None
+        );
+        assert_eq!(
+            state.delete_confirm_focus(),
+            Some(DeleteConfirmFocus::Delete)
+        );
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::DeleteSelectedHost {
+                profile_name: "k.0.0.1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn connect_popup_delete_confirmation_escape_cancels_popup() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Delete);
+        let _ = state.apply_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Esc)),
+            PaneAction::None
+        );
+        assert_eq!(state.delete_confirm, DeleteConfirmState::Idle);
     }
 
     #[test]
@@ -1737,15 +2641,371 @@ mod tests {
         let _ = state.sync_selected_profile();
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
 
+        let details = DetailsGeometry::from_area(geometry.details, &state);
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: geometry.details.x + 20,
-            row: geometry.details.y + 7,
+            row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
 
         assert_eq!(state.focus, Focus::Password);
         assert_eq!(state.editing, Some(EditField::SshPassword));
+    }
+
+    #[test]
+    fn password_rows_style_only_the_focused_subcontrol() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "secret".to_string();
+
+        state.set_focus(Focus::Password);
+        assert_password_control_styles(
+            password_control_line(PasswordField::Ssh, &state),
+            active_focus_style(),
+            Style::default(),
+        );
+
+        state.set_focus(Focus::PasswordToggle);
+        assert_password_control_styles(
+            password_control_line(PasswordField::Ssh, &state),
+            Style::default(),
+            active_focus_style(),
+        );
+
+        state.set_focus(Focus::Sudo);
+        assert_password_control_styles(
+            password_control_line(PasswordField::Sudo, &state),
+            active_focus_style(),
+            Style::default(),
+        );
+
+        state.set_focus(Focus::SudoToggle);
+        assert_password_control_styles(
+            password_control_line(PasswordField::Sudo, &state),
+            Style::default(),
+            active_focus_style(),
+        );
+    }
+
+    fn assert_password_control_styles(
+        line: Line<'static>,
+        input_style: Style,
+        toggle_style: Style,
+    ) {
+        assert_eq!(line.spans[0].style, Style::default());
+        assert_eq!(line.spans[1].content.as_ref(), "******");
+        assert_eq!(line.spans[1].style, input_style);
+        assert_eq!(line.spans[2].style, Style::default());
+        assert_eq!(line.spans[3].content.as_ref(), "Show");
+        assert_eq!(line.spans[3].style, toggle_style);
+    }
+
+    #[test]
+    fn password_and_sudo_empty_states_leave_input_display_empty() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Password);
+
+        let password_line = password_control_line(PasswordField::Ssh, &state);
+        assert_eq!(password_line.spans[1].content.as_ref(), "");
+        assert_eq!(password_line.spans[3].content.as_ref(), "Show");
+        assert_eq!(password_display(&state), "  Show");
+
+        state.set_focus(Focus::Sudo);
+        let sudo_line = password_control_line(PasswordField::Sudo, &state);
+        assert_eq!(sudo_line.spans[1].content.as_ref(), "");
+        assert_eq!(sudo_line.spans[3].content.as_ref(), "Show");
+        assert_eq!(sudo_password_display(&state), "  Show");
+    }
+
+    #[test]
+    fn empty_password_cursor_starts_at_input_origin() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Password);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (x, y) = cursor_position(geometry.details, &state).unwrap();
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+
+        assert_eq!(y, geometry.details.y + details.rows.password);
+        assert_eq!(x, geometry.details.x + 14);
+    }
+
+    #[test]
+    fn edit_enter_moves_to_next_focus_item() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+
+        state.set_focus(Focus::Host);
+        assert_eq!(state.editing, Some(EditField::Host));
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Port);
+
+        state.set_focus(Focus::Password);
+        assert_eq!(state.editing, Some(EditField::SshPassword));
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Sudo);
+        assert_eq!(state.editing, Some(EditField::SudoPassword));
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Remember);
+    }
+
+    #[test]
+    fn password_visibility_toggles_are_not_in_default_focus_order() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Auth);
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Down)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Password);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Down)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Sudo);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Up)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Password);
+    }
+
+    #[test]
+    fn password_field_focus_has_cursor_and_right_enter_toggles_visibility() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "secret".to_string();
+        state.password_mode = PasswordMode::Saved;
+        state.set_focus(Focus::Password);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (x, y) = cursor_position(geometry.details, &state).unwrap();
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+
+        assert_eq!(state.editing, Some(EditField::SshPassword));
+        assert_eq!(y, geometry.details.y + details.rows.password);
+        assert_eq!(x, geometry.details.x + 14 + 6);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Right)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::PasswordToggle);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert!(state.show_ssh_password);
+        assert_eq!(password_display(&state), "secret  Hide");
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Left)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Password);
+        assert_eq!(state.editing, Some(EditField::SshPassword));
+    }
+
+    #[test]
+    fn sudo_field_focus_has_cursor_and_right_enter_toggles_visibility() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "secret".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.set_focus(Focus::Sudo);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (x, y) = cursor_position(geometry.details, &state).unwrap();
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+
+        assert_eq!(state.editing, Some(EditField::SudoPassword));
+        assert_eq!(y, geometry.details.y + details.rows.sudo);
+        assert_eq!(x, geometry.details.x + 14 + 6);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Right)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::SudoToggle);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert!(state.show_sudo_password);
+        assert_eq!(sudo_password_display(&state), "secret  Hide");
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Left)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Sudo);
+        assert_eq!(state.editing, Some(EditField::SudoPassword));
+    }
+
+    #[test]
+    fn password_visibility_button_toggles_show_hide_state() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "secret".to_string();
+        state.password_mode = PasswordMode::Saved;
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+
+        state.apply_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.details.x + 14 + 6 + 2,
+            row: geometry.details.y + details.rows.password,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+
+        assert!(state.show_ssh_password);
+        assert_eq!(password_display(&state), "secret  Hide");
+        assert_eq!(state.focus, Focus::Password);
+    }
+
+    #[test]
+    fn saved_password_cursor_uses_masked_display_width() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "secret".to_string();
+        state.password_mode = PasswordMode::Saved;
+        state.set_focus(Focus::Password);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (x, y) = cursor_position(geometry.details, &state).unwrap();
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+
+        assert_eq!(password_display(&state), "******  Show");
+        assert_eq!(y, geometry.details.y + details.rows.password);
+        assert_eq!(x, geometry.details.x + 14 + 6);
+    }
+
+    #[test]
+    fn connect_popup_password_cursor_stays_on_visible_row_for_long_password() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "x".repeat(120);
+        state.set_focus(Focus::Password);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (x, y) = cursor_position(geometry.details, &state).unwrap();
+
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+        assert_eq!(y, geometry.details.y + details.rows.password);
+        assert!(x < geometry.details.x + geometry.details.width);
+    }
+
+    #[test]
+    fn connect_popup_sudo_cursor_stays_on_visible_row() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.sudo_mode = SudoMode::Replace;
+        state.start_edit(EditField::SudoPassword);
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+
+        let (_x, y) = cursor_position(geometry.details, &state).unwrap();
+
+        let details = DetailsGeometry::from_area(geometry.details, &state);
+        assert_eq!(y, geometry.details.y + details.rows.sudo);
+    }
+
+    #[test]
+    fn focused_buttons_use_plain_labels() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.focus = Focus::Connect;
+        assert_eq!(connect_label(&state), "Connect");
+
+        state.profiles = vec![saved_password_profile()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.set_focus(Focus::Delete);
+        assert_eq!(delete_label(&state), "Delete");
+    }
+
+    #[test]
+    fn choice_selection_uses_different_styles_for_focused_and_inactive_selection() {
+        let selected = vec![ChoiceSegment {
+            label: "Password",
+            selected: true,
+        }];
+
+        let focused = choice_line(selected.clone(), true);
+        let inactive = choice_line(selected, false);
+
+        assert_eq!(focused.spans[1].content.as_ref(), "Password");
+        assert_eq!(inactive.spans[1].content.as_ref(), "Password");
+        assert_eq!(focused.spans[1].style, active_focus_style());
+        assert_eq!(inactive.spans[1].style, selected_host_style());
+    }
+
+    #[test]
+    fn choice_selection_uses_plain_labels_without_focus() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.focus = Focus::Hosts;
+        state.auth = AuthChoice::Password;
+
+        assert_eq!(segmented_for_test(&auth_tabs(&state)), "Password  Key");
+    }
+
+    #[test]
+    fn sudo_defaults_to_ssh_password_mask_and_editing_makes_it_custom() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "ssh-secret".to_string();
+        state.password_mode = PasswordMode::Enter;
+        state.sudo_mode = SudoMode::SameAsSsh;
+        state.set_focus(Focus::Sudo);
+
+        assert_eq!(sudo_password_display(&state), "**********  Show");
+        assert_eq!(state.editing, Some(EditField::SudoPassword));
+        assert_eq!(state.sudo_mode, SudoMode::Replace);
+        assert_eq!(state.sudo_password, "ssh-secret");
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Remember);
     }
 
     #[test]
@@ -1758,7 +3018,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Enter)),
             PaneAction::None
         );
-        assert_eq!(connect_label(&state), "[ Connecting... ]");
+        assert_eq!(connect_label(&state), "Connecting...");
     }
 
     #[test]

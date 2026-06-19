@@ -2749,16 +2749,21 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "waitagent"
 version = "0.0.74"
 dependencies = [
+ "aes",
  "base64",
+ "cbc",
  "crossterm",
+ "getrandom 0.4.2",
  "hmac",
  "libc",
+ "pbkdf2",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
  "ratatui",
  "russh",
  "sha1",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tonic",

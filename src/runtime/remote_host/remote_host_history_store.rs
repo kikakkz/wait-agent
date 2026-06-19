@@ -87,6 +87,19 @@ impl RemoteHostHistoryStore {
         }
         self.save(&history)
     }
+
+    pub fn remove_profile(
+        &self,
+        name: &str,
+    ) -> Result<Option<RemoteHostProfile>, RemoteHostHistoryStoreError> {
+        let mut history = self.load()?;
+        let Some(index) = history.hosts.iter().position(|host| host.name == name) else {
+            return Ok(None);
+        };
+        let removed = history.hosts.remove(index);
+        self.save(&history)?;
+        Ok(Some(removed))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,6 +463,25 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.hosts.len(), 1);
         assert_eq!(loaded.hosts[0].host, "10.1.29.131");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_history_removes_profile_by_name() {
+        let path = unique_path("remote-hosts-remove.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        store.upsert_profile(profile("a", "10.1.29.130")).unwrap();
+        store.upsert_profile(profile("b", "10.1.29.131")).unwrap();
+
+        let removed = store.remove_profile("a").unwrap().unwrap();
+        assert_eq!(removed.name, "a");
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.hosts.len(), 1);
+        assert_eq!(loaded.hosts[0].name, "b");
+        assert!(store.remove_profile("missing").unwrap().is_none());
 
         let _ = fs::remove_file(path);
     }

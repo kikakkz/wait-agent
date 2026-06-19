@@ -268,7 +268,7 @@ fn connect_remote_host_command(
     .join(" ");
 
     format!(
-        "display-popup -c {} -w 66 -h 16 -E {}",
+        "display-popup -c {} -w 66 -h 17 -E {}",
         tmux_quote_argument(&command.client_tty),
         tmux_quote_argument(&pane_command)
     )

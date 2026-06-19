@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use crate::runtime::remote_host::remote_host_home::waitagent_home;
+use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -193,9 +195,6 @@ impl RemoteHostSecretStore for FileRemoteHostSecretStore {
         let value = fs::read_to_string(&path)
             .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
         let decrypted = decode_secret_file(id, &value)?;
-        if !value.starts_with(FILE_SECRET_HEADER) {
-            let _ = write_secret_file(&path, id, &decrypted);
-        }
         Ok(Some(RemoteHostSecretValue::new(decrypted)))
     }
 
@@ -237,82 +236,110 @@ fn write_secret_file(
         .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))
 }
 
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+const OPENSSL_SALTED_PREFIX: &[u8; 8] = b"Salted__";
+const OPENSSL_SALT_LEN: usize = 8;
+const AES_256_KEY_LEN: usize = 32;
+const AES_CBC_IV_LEN: usize = 16;
+const SECRET_PBKDF2_ITERATIONS: u32 = 200_000;
+
 fn encode_secret_file(
     id: &RemoteHostSecretId,
     value: &str,
 ) -> Result<String, RemoteHostSecretStoreError> {
-    let payload = openssl_secret_crypt(id, value.as_bytes(), true)?;
-    Ok(format!("{}\n{}\n", FILE_SECRET_HEADER, payload.trim()))
+    let payload = encrypt_secret_payload(id, value.as_bytes())?;
+    Ok(format!("{}\n{}\n", FILE_SECRET_HEADER, payload))
 }
 
 fn decode_secret_file(
     id: &RemoteHostSecretId,
     text: &str,
 ) -> Result<String, RemoteHostSecretStoreError> {
-    if !text.starts_with(FILE_SECRET_HEADER) {
-        return Ok(text.to_string());
+    let mut lines = text.lines();
+    if lines.next() != Some(FILE_SECRET_HEADER) {
+        return Err(RemoteHostSecretStoreError::new(
+            "encrypted remote host secret is missing header",
+        ));
     }
-    let payload = text.lines().skip(1).collect::<Vec<_>>().join("");
+    let payload = lines.collect::<Vec<_>>().join("");
     if payload.trim().is_empty() {
         return Err(RemoteHostSecretStoreError::new(
             "encrypted remote host secret is missing payload",
         ));
     }
-    let plain = openssl_secret_crypt(id, payload.as_bytes(), false)?;
-    String::from_utf8(plain.into_bytes())
-        .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))
+    let plain = decrypt_secret_payload(id, payload.trim())?;
+    String::from_utf8(plain).map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))
 }
 
-fn openssl_secret_crypt(
+fn encrypt_secret_payload(
     id: &RemoteHostSecretId,
     input: &[u8],
-    encrypt: bool,
 ) -> Result<String, RemoteHostSecretStoreError> {
-    let mut command = Command::new("openssl");
-    command
-        .arg("enc")
-        .arg("-aes-256-cbc")
-        .arg("-pbkdf2")
-        .arg("-iter")
-        .arg("200000")
-        .arg("-salt")
-        .arg("-a")
-        .arg("-A")
-        .arg("-pass")
-        .arg(format!("pass:{}", machine_bound_passphrase(id)?));
-    if encrypt {
-        command.arg("-e");
-    } else {
-        command.arg("-d");
-    }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut salt = [0u8; OPENSSL_SALT_LEN];
+    getrandom::fill(&mut salt)
         .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(input)
-            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-    }
-    let output = child
-        .wait_with_output()
+    let (key, iv) = derive_secret_key_iv(id, &salt)?;
+
+    let padded_len = input.len() + AES_CBC_IV_LEN;
+    let mut buffer = vec![0u8; padded_len];
+    buffer[..input.len()].copy_from_slice(input);
+    let ciphertext = Aes256CbcEnc::new(&key.into(), &iv.into())
+        .encrypt_padded::<Pkcs7>(&mut buffer, input.len())
         .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(RemoteHostSecretStoreError::new(format!(
-            "openssl remote host secret {} failed with status {}{}",
-            if encrypt { "encrypt" } else { "decrypt" },
-            output.status,
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", stderr.trim())
-            }
-        )));
+
+    let mut framed =
+        Vec::with_capacity(OPENSSL_SALTED_PREFIX.len() + salt.len() + ciphertext.len());
+    framed.extend_from_slice(OPENSSL_SALTED_PREFIX);
+    framed.extend_from_slice(&salt);
+    framed.extend_from_slice(ciphertext);
+    Ok(BASE64_STANDARD.encode(framed))
+}
+
+fn decrypt_secret_payload(
+    id: &RemoteHostSecretId,
+    payload: &str,
+) -> Result<Vec<u8>, RemoteHostSecretStoreError> {
+    let mut framed = BASE64_STANDARD
+        .decode(payload)
+        .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+    if framed.len() < OPENSSL_SALTED_PREFIX.len() + OPENSSL_SALT_LEN + AES_CBC_IV_LEN
+        || &framed[..OPENSSL_SALTED_PREFIX.len()] != OPENSSL_SALTED_PREFIX
+    {
+        return Err(RemoteHostSecretStoreError::new(
+            "encrypted remote host secret has invalid payload",
+        ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+
+    let salt_start = OPENSSL_SALTED_PREFIX.len();
+    let salt_end = salt_start + OPENSSL_SALT_LEN;
+    let salt = framed[salt_start..salt_end].to_vec();
+    let ciphertext = &mut framed[salt_end..];
+    let (key, iv) = derive_secret_key_iv(id, &salt)?;
+    let plain = Aes256CbcDec::new(&key.into(), &iv.into())
+        .decrypt_padded::<Pkcs7>(ciphertext)
+        .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+    Ok(plain.to_vec())
+}
+
+fn derive_secret_key_iv(
+    id: &RemoteHostSecretId,
+    salt: &[u8],
+) -> Result<([u8; AES_256_KEY_LEN], [u8; AES_CBC_IV_LEN]), RemoteHostSecretStoreError> {
+    let mut key_iv = [0u8; AES_256_KEY_LEN + AES_CBC_IV_LEN];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+        machine_bound_passphrase(id)?.as_bytes(),
+        salt,
+        SECRET_PBKDF2_ITERATIONS,
+        &mut key_iv,
+    );
+
+    let mut key = [0u8; AES_256_KEY_LEN];
+    let mut iv = [0u8; AES_CBC_IV_LEN];
+    key.copy_from_slice(&key_iv[..AES_256_KEY_LEN]);
+    iv.copy_from_slice(&key_iv[AES_256_KEY_LEN..]);
+    Ok((key, iv))
 }
 
 fn machine_bound_passphrase(id: &RemoteHostSecretId) -> Result<String, RemoteHostSecretStoreError> {
@@ -438,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_host_file_secret_store_migrates_legacy_plaintext_passwords() {
+    fn remote_host_file_secret_store_rejects_legacy_plaintext_passwords() {
         let root = std::env::temp_dir().join(format!(
             "waitagent-file-secrets-legacy-{}-{}",
             std::process::id(),
@@ -450,13 +477,12 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "legacy-secret").unwrap();
 
+        let error = store.get_secret(&id).unwrap_err();
         assert_eq!(
-            store.get_secret(&id).unwrap().unwrap().expose_secret(),
-            "legacy-secret"
+            error.to_string(),
+            "encrypted remote host secret is missing header"
         );
-        let stored = fs::read_to_string(&path).unwrap();
-        assert!(stored.starts_with(FILE_SECRET_HEADER));
-        assert!(!stored.contains("legacy-secret"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "legacy-secret");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -484,6 +510,9 @@ mod tests {
         let stored = fs::read_to_string(&secret_path).unwrap();
         assert!(stored.starts_with(FILE_SECRET_HEADER));
         assert!(!stored.contains("12345679"));
+        let payload = stored.lines().nth(1).unwrap();
+        let framed = BASE64_STANDARD.decode(payload).unwrap();
+        assert!(framed.starts_with(OPENSSL_SALTED_PREFIX));
 
         store.delete_secret(&id).unwrap();
         assert!(store.get_secret(&id).unwrap().is_none());
