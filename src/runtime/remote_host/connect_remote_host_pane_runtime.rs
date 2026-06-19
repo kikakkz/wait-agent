@@ -1014,6 +1014,12 @@ struct DeleteConfirmGeometry {
     delete_button: Rect,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ConnectingGeometry {
+    dialog: Rect,
+    message: Rect,
+}
+
 impl DeleteConfirmGeometry {
     fn from_terminal_size((cols, rows): (u16, u16)) -> Self {
         let width = cols.min(56).max(36);
@@ -1029,6 +1035,23 @@ impl DeleteConfirmGeometry {
             cancel_button,
             delete_button,
         }
+    }
+}
+
+impl ConnectingGeometry {
+    fn from_terminal_size((cols, rows): (u16, u16)) -> Self {
+        let width = cols.min(36).max(24);
+        let height = 5.min(rows.max(1));
+        let x = cols.saturating_sub(width) / 2;
+        let y = rows.saturating_sub(height) / 2;
+        let dialog = Rect::new(x, y, width, height);
+        let message = Rect::new(
+            x.saturating_add(2),
+            y.saturating_add(height / 2),
+            width.saturating_sub(4),
+            1,
+        );
+        Self { dialog, message }
     }
 }
 
@@ -1124,6 +1147,7 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     );
     render_details(frame, geometry.details, state);
     render_cursor(frame, geometry.details, state);
+    render_connecting_popup(frame, state);
     render_delete_confirm(frame, state);
 }
 
@@ -1624,7 +1648,7 @@ fn delete_label(_state: &ConnectRemoteHostState) -> String {
 
 fn connect_label(state: &ConnectRemoteHostState) -> String {
     let label = if matches!(state.status, Status::Working(_)) {
-        "Connecting..."
+        "Connect"
     } else if state.credentials_loading() {
         "Loading..."
     } else {
@@ -1644,6 +1668,25 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
             .style(Style::default().fg(color))
             .alignment(Alignment::Left),
         area,
+    );
+}
+
+fn render_connecting_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
+    let Status::Working(message) = &state.status else {
+        return;
+    };
+    let geometry =
+        ConnectingGeometry::from_terminal_size((frame.size().width, frame.size().height));
+    frame.render_widget(Clear, geometry.dialog);
+    let block = Block::default()
+        .title(section_title("Connecting"))
+        .borders(Borders::ALL);
+    frame.render_widget(block, geometry.dialog);
+    frame.render_widget(
+        Paragraph::new(message.as_str())
+            .style(Style::default().fg(Color::White))
+            .alignment(Alignment::Center),
+        geometry.message,
     );
 }
 
@@ -2520,6 +2563,21 @@ mod tests {
     }
 
     #[test]
+    fn connect_popup_shows_connecting_as_modal_without_renaming_connect_button() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.status = Status::Working("Connecting...".to_string());
+
+        assert_eq!(connect_label(&state), "Connect");
+        let output = rendered_text(66, 17, &state);
+        assert!(output.contains("Connecting"));
+        assert!(output.contains("Connecting..."));
+        assert!(output.contains("Connect"));
+    }
+
+    #[test]
     fn connect_popup_delete_saved_host_opens_confirmation_popup() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![saved_password_profile()];
@@ -3127,7 +3185,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Enter)),
             PaneAction::None
         );
-        assert_eq!(connect_label(&state), "Connecting...");
+        assert_eq!(connect_label(&state), "Connect");
     }
 
     #[test]
