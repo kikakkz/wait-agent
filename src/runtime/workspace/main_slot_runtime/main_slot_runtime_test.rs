@@ -27,7 +27,9 @@ mod tests {
     use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
     use crate::runtime::target_host_runtime::TargetHostRuntime;
     use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
-    use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
+    use crate::runtime::workspace_layout_runtime::{
+        set_layout_topology_after_options_hook_for_tests, WorkspaceLayoutRuntime,
+    };
     use crate::runtime::workspace_runtime::WorkspaceRuntime;
     use std::fs;
     use std::path::PathBuf;
@@ -329,6 +331,147 @@ mod tests {
         let _ = fs::remove_dir_all(workspace_dir);
 
         assert_eq!(target_host_command, "bash");
+    }
+
+    #[test]
+    fn stale_layout_reconcile_during_main_slot_transition_must_not_rewrite_main_pane_metadata() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("stale-layout-transition");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+        let waitagent_executable = waitagent_test_executable();
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        let target_host = backend
+            .ensure_workspace(
+                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                    &workspace_dir,
+                    workspace.workspace_handle.socket_name.as_str(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("target host bootstrap should succeed");
+
+        let runtime = Arc::new(MainSlotRuntime::new(
+            backend.clone(),
+            TargetHostRuntime::from_build_env(backend.clone())
+                .expect("target host runtime should build"),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            RemoteNetworkConfig::default(),
+        ));
+
+        let local_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            target_host.session_name.as_str()
+        );
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: local_target.clone(),
+            })
+            .expect("local target activation should succeed");
+
+        let remote_runtime_owner = RemoteRuntimeOwnerRuntime::new_for_tests(
+            waitagent_executable.clone(),
+            RemoteNetworkConfig::default(),
+        );
+        let remote_target = remote_session_with_selector(
+            "peer-a",
+            "remote-stale-layout",
+            &local_target,
+            ManagedSessionTaskState::Input,
+        );
+        remote_runtime_owner
+            .upsert_session("peer-a", &remote_target)
+            .expect("remote target should be discoverable on workspace socket");
+
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: remote_target.address.qualified_target(),
+            })
+            .expect("remote target activation should succeed");
+
+        wait_for_condition(|| {
+            let active_target = backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read");
+            active_target.as_deref() == Some(remote_target.address.qualified_target().as_str())
+        });
+
+        backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane should read after remote activation")
+            .expect("remote activation should set main pane");
+        let gate = Arc::new(Barrier::new(2));
+        let hook_gate = gate.clone();
+        let hook_session = workspace.workspace_handle.session_name.as_str().to_string();
+        set_layout_topology_after_options_hook_for_tests(Some(Arc::new(move |workspace| {
+            if workspace.session_name.as_str() == hook_session.as_str() {
+                hook_gate.wait();
+                hook_gate.wait();
+            }
+        })));
+
+        let runtime_for_thread = runtime.clone();
+        let workspace_for_thread = workspace.workspace_handle.clone();
+        let workspace_dir_for_thread = workspace_dir.clone();
+        let reconcile = thread::spawn(move || {
+            runtime_for_thread
+                .layout_runtime
+                .sync_main_slot_bindings(&workspace_for_thread, &workspace_dir_for_thread)
+                .expect("stale layout sync should complete");
+        });
+
+        gate.wait();
+        backend
+            .set_session_option(
+                &workspace.workspace_handle,
+                WAITAGENT_MAIN_PANE_TRANSITION_OPTION,
+                "1",
+            )
+            .expect("transition marker should set");
+        backend
+            .set_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION, "")
+            .expect("main pane should clear during transition");
+        gate.wait();
+        reconcile.join().expect("stale layout thread should join");
+        set_layout_topology_after_options_hook_for_tests(None);
+
+        let transition_main_pane = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane should read during transition");
+        assert_eq!(
+            transition_main_pane, None,
+            "stale layout reconcile must not rewrite main pane metadata after main-slot transition begins"
+        );
     }
 
     #[test]

@@ -20,8 +20,17 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+type LayoutTopologyAfterOptionsHook = dyn Fn(&TmuxWorkspaceHandle) + Send + Sync + 'static;
+
+#[cfg(test)]
+static LAYOUT_TOPOLOGY_AFTER_OPTIONS_HOOK: Mutex<Option<Arc<LayoutTopologyAfterOptionsHook>>> =
+    Mutex::new(None);
 
 const STARTUP_CHROME_READY_TIMEOUT: Duration = Duration::from_millis(300);
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
@@ -38,6 +47,23 @@ const MAIN_PANE_OUTPUT_BRIDGE_ENABLED: &str = "enabled";
 enum InitialChromePane {
     Sidebar,
     Footer,
+}
+
+#[cfg(test)]
+pub(crate) fn set_layout_topology_after_options_hook_for_tests(
+    hook: Option<Arc<LayoutTopologyAfterOptionsHook>>,
+) {
+    *LAYOUT_TOPOLOGY_AFTER_OPTIONS_HOOK
+        .lock()
+        .expect("layout topology test hook should lock") = hook;
+}
+
+#[cfg(test)]
+fn layout_topology_after_options_hook_for_tests() -> Option<Arc<LayoutTopologyAfterOptionsHook>> {
+    LAYOUT_TOPOLOGY_AFTER_OPTIONS_HOOK
+        .lock()
+        .expect("layout topology test hook should lock")
+        .clone()
 }
 
 pub struct WorkspaceLayoutRuntime {
@@ -108,6 +134,13 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
         if self.native_fullscreen_active(workspace)? {
+            return Ok(());
+        }
+        if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag] sync_main_slot_bindings: skipped while main-slot transition owns main pane metadata for session={:?}",
+                workspace.session_name
+            ));
             return Ok(());
         }
         self.ensure_layout_topology(workspace, workspace_dir, LayoutFocusBehavior::ReturnToMain)
@@ -352,6 +385,13 @@ impl WorkspaceLayoutRuntime {
                 )
                 .map_err(tmux_layout_error);
         }
+        if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag] reconcile_layout: skipped while main-slot transition owns main pane metadata for session={:?}",
+                workspace.session_name
+            ));
+            return Ok(());
+        }
         self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)
             .map(|_| ())
     }
@@ -478,6 +518,10 @@ impl WorkspaceLayoutRuntime {
             t_options.elapsed(),
             t_total.elapsed()
         ));
+        #[cfg(test)]
+        if let Some(hook) = layout_topology_after_options_hook_for_tests() {
+            hook(workspace);
+        }
         let t_layout = Instant::now();
         let layout = self
             .layout_service
@@ -532,6 +576,13 @@ impl WorkspaceLayoutRuntime {
             previous_main_pane.as_ref(),
             &layout.main_pane,
         );
+        if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag] ensure_layout_topology: skipped stale main pane metadata write while main-slot transition owns metadata for session={:?}",
+                workspace.session_name
+            ));
+            return Ok(layout);
+        }
         let t_set_main = Instant::now();
         self.backend
             .set_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION, main_pane.as_str())
@@ -575,6 +626,26 @@ impl WorkspaceLayoutRuntime {
             t_total.elapsed()
         ));
         Ok(layout)
+    }
+
+    fn main_slot_transition_owns_main_pane_metadata(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<bool, LifecycleError> {
+        let transition_active = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_TRANSITION_OPTION)
+            .map_err(tmux_layout_error)?
+            .as_deref()
+            == Some("1");
+        if !transition_active {
+            return Ok(false);
+        }
+        let main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?;
+        Ok(main_pane.as_deref().is_none_or(str::is_empty))
     }
 
     fn ensure_main_pane_output_bridge(
