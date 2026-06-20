@@ -2,9 +2,9 @@ mod tests {
     use super::super::{
         next_remote_target, next_remote_target_on_active_authority, next_target_host_session,
         remote_main_slot_program, split_qualified_target, target_socket_name, CurrentWorkspace,
-        MainSlotRuntime, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE, WAITAGENT_ACTIVE_TARGET_OPTION,
-        WAITAGENT_MAIN_PANE_GENERATION_OPTION, WAITAGENT_MAIN_PANE_OPTION,
-        WAITAGENT_MAIN_PANE_TRANSITION_OPTION,
+        MainSlotRuntime, FOOTER_PANE_TITLE, MAIN_PANE_DIED_HOOK, SIDEBAR_PANE_TITLE,
+        WAITAGENT_ACTIVE_TARGET_OPTION, WAITAGENT_MAIN_PANE_GENERATION_OPTION,
+        WAITAGENT_MAIN_PANE_OPTION, WAITAGENT_MAIN_PANE_TRANSITION_OPTION,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -1961,6 +1961,7 @@ mod tests {
             .expect("vendored tmux backend should discover build env");
         let workspace_config = unique_workspace_config("remote-main-slot-exit");
         let workspace_dir = workspace_config.workspace_dir.clone();
+        let network = unique_remote_network_config(&workspace_config.workspace_key);
 
         let waitagent_executable = waitagent_test_executable();
         let entry_runtime = WorkspaceEntryRuntime::new(
@@ -1968,13 +1969,15 @@ mod tests {
             WorkspaceLayoutRuntime::new_for_tests(
                 backend.clone(),
                 waitagent_executable.clone(),
-                RemoteNetworkConfig::default(),
+                network.clone(),
             )
             .expect("workspace layout runtime should build"),
         );
         let workspace = entry_runtime
             .bootstrap_workspace(&workspace_dir)
             .expect("workspace bootstrap should succeed");
+        persist_workspace_network_config(&backend, &workspace.workspace_handle, &network)
+            .expect("workspace network config should persist");
         let target_host = backend
             .ensure_workspace(
                 &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
@@ -1993,7 +1996,7 @@ mod tests {
             WorkspaceLayoutRuntime::new_for_tests(
                 backend.clone(),
                 waitagent_executable.clone(),
-                RemoteNetworkConfig::default(),
+                network.clone(),
             )
             .expect("workspace layout runtime should build"),
             TargetRegistryService::new(
@@ -2003,7 +2006,7 @@ mod tests {
                 .expect("target catalog gateway should build"),
             ),
             waitagent_executable.clone(),
-            RemoteNetworkConfig::default(),
+            network.clone(),
         );
 
         let local_target = format!(
@@ -2019,27 +2022,26 @@ mod tests {
             })
             .expect("local target activation should succeed");
 
-        let remote_runtime_owner = RemoteRuntimeOwnerRuntime::new_for_tests(
-            waitagent_executable.clone(),
-            RemoteNetworkConfig::default(),
-        );
+        let remote_runtime_owner =
+            RemoteRuntimeOwnerRuntime::new_for_tests(waitagent_executable.clone(), network.clone());
+        let remote_authority = format!("10.1.29.130#{}", network.port);
         let remote_target = remote_session_with_selector(
-            "10.1.29.130#7474",
+            remote_authority.as_str(),
             "remote-exit-1",
             &local_target,
             ManagedSessionTaskState::Input,
         );
         let remote_target_2 = remote_session_with_selector(
-            "10.1.29.130#7474",
+            remote_authority.as_str(),
             "remote-exit-2",
             &local_target,
             ManagedSessionTaskState::Running,
         );
         remote_runtime_owner
-            .upsert_session("10.1.29.130#7474", &remote_target)
+            .upsert_session(remote_authority.as_str(), &remote_target)
             .expect("first remote target should be discoverable on workspace socket");
         remote_runtime_owner
-            .upsert_session("10.1.29.130#7474", &remote_target_2)
+            .upsert_session(remote_authority.as_str(), &remote_target_2)
             .expect("second remote target should be discoverable on workspace socket");
 
         runtime
@@ -2065,14 +2067,18 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read")
             .expect("main pane option should be populated");
+        let main_pane = crate::infra::tmux::TmuxPaneId::new(main_pane_id.clone());
         backend
             .set_pane_option(
                 &workspace.workspace_handle,
-                &crate::infra::tmux::TmuxPaneId::new(main_pane_id.clone()),
+                &main_pane,
                 "remain-on-exit",
                 "on",
             )
             .expect("remote pane should remain after clean exit");
+        backend
+            .unset_pane_hook(&workspace.workspace_handle, &main_pane, MAIN_PANE_DIED_HOOK)
+            .expect("manual remote exit simulation should disable automatic pane-died recovery");
         backend
             .run_on_socket(
                 &workspace.workspace_handle.socket_name,
