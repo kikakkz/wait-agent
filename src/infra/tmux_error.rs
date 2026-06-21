@@ -227,6 +227,13 @@ impl TmuxCommandRunner {
                     .arg("kill-server")
                     .output();
                 append_tmux_verbose_logs(&mut lines, &debug_dir);
+                append_tmux_strace(
+                    &mut lines,
+                    &debug_dir,
+                    &self.tmux_binary_path,
+                    socket_name,
+                    args,
+                );
             }
             Err(error) => {
                 lines.push(format!(
@@ -320,6 +327,83 @@ fn append_tmux_verbose_logs(lines: &mut Vec<String>, debug_dir: &std::path::Path
         match fs::read_to_string(&path) {
             Ok(contents) => {
                 for line in tail_lines(&contents, 120) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            Err(error) => lines.push(format!("    <failed to read: {error}>")),
+        }
+    }
+}
+
+fn append_tmux_strace(
+    lines: &mut Vec<String>,
+    debug_dir: &std::path::Path,
+    tmux_binary_path: &std::path::Path,
+    socket_name: &TmuxSocketName,
+    args: &[String],
+) {
+    let strace_probe = Command::new("strace").arg("-V").output();
+    if strace_probe.is_err() {
+        lines.push("  strace=<unavailable>".to_string());
+        return;
+    }
+
+    let diagnostic_socket = format!("{}-strace-{}", socket_name.as_str(), std::process::id());
+    let output_prefix = debug_dir.join("strace-tmux");
+    let output = Command::new("strace")
+        .arg("-ff")
+        .arg("-tt")
+        .arg("-s")
+        .arg("256")
+        .arg("-o")
+        .arg(&output_prefix)
+        .arg(tmux_binary_path)
+        .arg("-f")
+        .arg("/dev/null")
+        .arg("-L")
+        .arg(&diagnostic_socket)
+        .args(args)
+        .current_dir(debug_dir)
+        .output();
+    lines.push(format!("  strace_replay={}", render_command_probe(output)));
+
+    let _ = Command::new(tmux_binary_path)
+        .arg("-f")
+        .arg("/dev/null")
+        .arg("-L")
+        .arg(&diagnostic_socket)
+        .arg("kill-server")
+        .output();
+    append_strace_logs(lines, debug_dir);
+}
+
+fn append_strace_logs(lines: &mut Vec<String>, debug_dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(debug_dir) else {
+        lines.push("  strace_logs=<read_dir failed>".to_string());
+        return;
+    };
+    let mut paths = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("strace-tmux."))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    if paths.is_empty() {
+        lines.push("  strace_logs=<none>".to_string());
+        return;
+    }
+
+    for path in paths.iter().rev().take(8).rev() {
+        lines.push(format!("  strace_log={}:", path.display()));
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                for line in tail_lines(&contents, 80) {
                     lines.push(format!("    {line}"));
                 }
             }
