@@ -21,12 +21,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install system deps
+      - name: Install packaging deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bison pkg-config libevent-dev libncurses-dev \
-            build-essential automake autoconf rpm
+          sudo apt-get install -y rpm
 
       - name: Install Rust toolchain
         run: rustup show
@@ -41,7 +39,25 @@ jobs:
           fi
 
       - name: cargo build --release
-        run: cargo build --release
+        run: |
+          docker run --rm \
+            -e CARGO_TERM_COLOR=always \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            ubuntu:20.04 \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y \
+                ca-certificates curl bison pkg-config libevent-dev libncurses-dev \
+                build-essential automake autoconf
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain 1.86.0
+              . "$HOME/.cargo/env"
+              cargo build --release
+            '
+          sudo chown -R "$(id -u):$(id -g)" target
 
       - name: Build .tar.gz archive
         run: |
