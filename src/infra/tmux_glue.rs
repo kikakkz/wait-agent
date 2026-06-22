@@ -31,13 +31,11 @@ pub fn extract_embedded_tmux() -> Result<PathBuf, TmuxError> {
     let data_dir = data_local_dir().join("waitagent");
     let tmux_path = data_dir.join("tmux");
     let version_path = data_dir.join("tmux.version");
-    let tmux_version = option_env!("WAITAGENT_VENDORED_TMUX_VERSION").unwrap_or("unknown");
+    let tmux_identity = embedded_tmux_identity();
 
-    // Re-extract if missing, or if the embedded tmux version has changed
-    // (e.g. after a waitagent upgrade via a new package).
     let needs_extract = !tmux_path.exists()
         || std::fs::read_to_string(&version_path)
-            .map(|v| v != tmux_version)
+            .map(|stored| stored != tmux_identity)
             .unwrap_or(true);
 
     if needs_extract {
@@ -64,11 +62,27 @@ pub fn extract_embedded_tmux() -> Result<PathBuf, TmuxError> {
                 tmux_path.display()
             ))
         })?;
-        // Store the version so future runs can detect stale binaries
-        // after a waitagent upgrade.
-        let _ = std::fs::write(&version_path, tmux_version);
+        let _ = std::fs::write(&version_path, tmux_identity);
     }
     Ok(tmux_path)
+}
+
+fn embedded_tmux_identity() -> String {
+    let tmux_version = option_env!("WAITAGENT_VENDORED_TMUX_VERSION").unwrap_or("unknown");
+    format!(
+        "version={tmux_version};len={};hash={:016x}",
+        VENDORED_TMUX_BYTES.len(),
+        fnv1a64(VENDORED_TMUX_BYTES)
+    )
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn data_local_dir() -> PathBuf {
@@ -219,7 +233,7 @@ impl TmuxGlueBuildStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        TmuxGlueArtifacts, TmuxGlueBuildConfig, TmuxGlueBuildStatus, TmuxGlueManifest,
+        fnv1a64, TmuxGlueArtifacts, TmuxGlueBuildConfig, TmuxGlueBuildStatus, TmuxGlueManifest,
         VendoredTmuxSource, VENDORED_TMUX_BIN_ENV, VENDORED_TMUX_BUILD_ROOT_ENV,
         VENDORED_TMUX_MANIFEST_ENV, VENDORED_TMUX_SOURCE_ENV, VENDORED_TMUX_SUBMODULE_PATH,
     };
@@ -298,6 +312,12 @@ mod tests {
         assert_ne!(VENDORED_TMUX_SOURCE_ENV, VENDORED_TMUX_BUILD_ROOT_ENV);
         assert_ne!(VENDORED_TMUX_BUILD_ROOT_ENV, VENDORED_TMUX_BIN_ENV);
         assert_ne!(VENDORED_TMUX_BIN_ENV, VENDORED_TMUX_MANIFEST_ENV);
+    }
+
+    #[test]
+    fn embedded_tmux_hash_changes_when_bytes_change() {
+        assert_ne!(fnv1a64(b"static"), fnv1a64(b"dynamic"));
+        assert_eq!(fnv1a64(b"same"), fnv1a64(b"same"));
     }
 
     #[test]
