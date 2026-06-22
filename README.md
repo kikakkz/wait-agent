@@ -46,27 +46,28 @@ Warp is a complete development environment: it replaces your terminal, provides 
 
 ## How It Works
 
-WaitAgent embeds a vendored tmux and builds a persistent workspace layout on top of it:
+WaitAgent embeds a vendored tmux and builds one persistent workspace out of real tmux panes. The chrome stays mounted while only the main slot is rebound to the selected target.
 
+```text
+┌──────────────────────────────────────────────────────────────┬──────────────────────┐
+│ Main Slot                                                    │ Sessions  [h] hide   │
+│ Active local or remote PTY                                  │──────────────────────│
+│                                                              │ > codex@local     🔊I │
+│ - shell, Claude Code, Codex CLI, or any terminal app         │ * bash@10.1.29.130  │
+│ - raw output, input, and resize flow through this pane       │   claude@remote   📢C│
+│ - remote targets render through a session-scoped mirror      │                      │
+│                                                              │ selected target info │
+├──────────────────────────────────────────────────────────────┴──────────────────────┤
+│ Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu  │
+│ Listen 0.0.0.0:7474  Connect 192.168.1.20:7474                         /repo/path │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
-┌────────────────────────────────────┐
-│  Sidebar          │  Main Slot     │
-│  ─────────        │                │
-│  Session list     │  Active        │
-│  Node list        │  session       │
-│  Waiting badges   │  output        │
-│                   │                │
-├────────────────────────────────────┤
-│  Footer / Status                   │
-└────────────────────────────────────┘
-```
 
-- **Sidebar** — session catalog with waiting-state badges, shared across local and remote sessions
-- **Main slot** — the active focused session; receives all input, renders raw PTY output
-- **Footer** — status line with node identity and session info
-- **Fullscreen** — zoom the main slot to full terminal size, restore cleanly
-
-Switching sessions rebinds the main slot only — sidebar and footer stay fixed. This keeps the workspace stable while the user moves between sessions.
+- **Main Slot** — the focused session surface. It receives input and renders the active local or remote PTY.
+- **Sidebar** — a fixed session catalog. `>` marks the selected row, `*` marks the active target, and badges show task state (`I` input, `R` running, `C` confirm, `U` unknown).
+- **Footer** — fixed command/status bar. It shows WaitAgent actions, listener/connect endpoints, and the current path.
+- **Session switching** — selecting a sidebar or footer item rebinds the main slot; sidebar and footer remain in place.
+- **Fullscreen/history** — the main slot can be zoomed or switched into history without replacing the workspace chrome model.
 
 ---
 
@@ -98,11 +99,11 @@ waitagent --port 7474
 waitagent --connect <server-ip>:7474
 ```
 
-Remote sessions appear in the sidebar alongside local sessions. Input flows through the server control plane to the PTY-owning node; output synchronizes back to all attached consoles. The transport uses a single long-lived node-scoped gRPC connection with session-scoped routing, reconnect support, and replay on reconnect.
+Remote sessions appear in the sidebar alongside local sessions. Input flows through the server control plane to the PTY-owning node; output synchronizes back to attached consoles over a node-scoped gRPC connection with session-scoped routing.
 
-From an interactive workspace, `Ctrl-W` opens **Connect Remote Host**. This can SSH into a remote host, install or update `waitagent`, start the remote daemon, and activate the default remote session once the connection signal arrives. `Ctrl-S` creates an additional session on the selected connected remote endpoint.
+From an interactive workspace, `Ctrl-W` opens **Connect Remote Host**. It can SSH into a host, install or update `waitagent`, start the remote daemon, and activate the default remote session after the connection signal arrives. `Ctrl-S` creates an additional session on the selected connected remote endpoint.
 
-Remote host bootstrap supports password or key authentication, optional sudo password, saved host profiles, and an install proxy configuration. The proxy configuration is available from the Connect Remote Host popup under **Proxy Configuration**; when enabled, the remote install command exports `all_proxy`, `https_proxy`, uppercase variants, and `no_proxy` so the GitHub release/API fetches inside the installer inherit the proxy.
+Remote host bootstrap supports password or key authentication, optional sudo password, saved host profiles, and an install proxy configuration. **Proxy Configuration** in the Connect Remote Host popup exports `all_proxy`, `https_proxy`, uppercase variants, and `no_proxy` for the remote install command so GitHub release/API fetches inherit the proxy.
 
 ---
 
@@ -110,47 +111,93 @@ Remote host bootstrap supports password or key authentication, optional sudo pas
 
 ### Systems
 
-| System | Status | Notes |
-|---|---|---|
-| Linux x86_64 | Supported release target | Published as `.tar.gz`, `.deb`, and `.rpm`. |
-| macOS Apple Silicon | Supported release target | Published as `.tar.gz` and `.dmg`. |
-| Windows via WSL2 | Supported through Linux build | Use a recent WSL2 and the networking settings below. Native Windows binaries are not currently published. |
-| Linux source builds | Supported | Dependency helper covers Debian/Ubuntu, Fedora, Arch/Manjaro, Alpine, and openSUSE/SLES. |
-| macOS source builds | Supported | Uses Homebrew dependencies. |
-| macOS Intel | Source build only | No prebuilt Intel macOS release artifact. |
-| Native Windows | Not supported | Run WaitAgent inside WSL2 instead. |
+GitHub Markdown does not provide real tabs in README files, so the system matrix is grouped with collapsible sections.
+
+<details open>
+<summary><strong>Linux x86_64</strong></summary>
+
+| Item | Status |
+|---|---|
+| Prebuilt release | Supported: `.tar.gz`, `.deb`, `.rpm` |
+| One-line installer | Supported |
+| Source build | Supported |
+| Build dependency helper | Debian/Ubuntu, Fedora, Arch/Manjaro, Alpine, openSUSE/SLES |
+| Primary development target | Yes |
+
+</details>
+
+<details>
+<summary><strong>macOS Apple Silicon</strong></summary>
+
+| Item | Status |
+|---|---|
+| Prebuilt release | Supported: `.tar.gz`, `.dmg` |
+| One-line installer | Supported |
+| Source build | Supported with Homebrew dependencies |
+| Intel Mac release artifact | Not published |
+
+</details>
+
+<details>
+<summary><strong>Windows via WSL2</strong></summary>
+
+| Item | Status |
+|---|---|
+| Native Windows binary | Not supported |
+| WSL2 Linux build | Supported |
+| Recommended networking | Mirrored networking with DNS tunneling, firewall integration, and auto proxy |
+| Remote host bootstrap | Supported when the remote host can reach the WSL listener endpoint |
+
+WSL configuration is documented in [WSL2 Setup](#wsl2-setup).
+
+</details>
+
+<details>
+<summary><strong>Other Linux / source builds</strong></summary>
+
+| Item | Status |
+|---|---|
+| Linux aarch64 prebuilt artifact | Not currently published |
+| Linux aarch64 source build | Expected to build if Rust and tmux dependencies are available; not a release target |
+| Unsupported distributions | Install `bison/yacc`, `pkg-config`, libevent headers, ncurses headers, C compiler, make, automake, and autoconf manually |
+
+</details>
 
 ### Runtime Features
 
 | Feature | Status |
 |---|---|
-| Local tmux-backed workspace with fixed sidebar, main slot, and footer | Implemented |
-| Local session create, switch, attach, detach, fullscreen, and logs | Implemented |
-| gRPC node session protocol | Implemented |
-| `--port` / `--connect` CLI remote mode | Implemented |
-| `Ctrl-W` remote host SSH bootstrap | Implemented |
-| Saved remote host profiles and credential reuse | Implemented |
+| Local tmux-backed workspace with fixed main slot, sidebar, and footer | Stable |
+| Local session create/switch/attach/detach | Stable |
+| Main-slot fullscreen/history view | Stable |
+| Sidebar task-state badges and manual attention cues | Implemented; no auto-focus switching |
+| Footer menu and keyboard actions (`Ctrl-N`, `Ctrl-W`, `Ctrl-S`, `Ctrl-O`, `Ctrl-E`, `Ctrl-M`) | Implemented |
+| `waitagent --port` server listener | Implemented |
+| `waitagent --connect` remote node connection | Implemented |
+| Remote session catalog over node-scoped gRPC | Implemented |
+| Remote main-slot open/input/output/resize path | Implemented; still being hardened for full TUI parity |
+| `Ctrl-W` SSH remote-host bootstrap | Implemented and user-validated for default-session activation |
 | Remote install proxy configuration | Implemented |
-| `Ctrl-S` create new session on selected remote endpoint | Implemented |
-| Session-scoped routing and authority transport | Implemented |
-| Reconnect with bounded replay | Implemented |
-| Remote terminal bootstrap and replay | Implemented |
-| Live-mirror open/close protocol | Implemented |
-| Remote exit/sidebar disappearance latency | In progress |
-| Full terminal-mode parity for every remote TUI | In progress |
+| `Ctrl-S` new session on selected remote endpoint | Implemented |
+| Reconnect and bounded replay | Implemented baseline; edge-case hardening continues |
+| Remote session exit visibility latency | In progress |
+| Remote Codex/complex TUI parity | In progress; known issues include application-cursor mode and some replay/metadata freshness gaps |
 
 ## Remote Protocol Status
 
-| Feature | Status |
+| Area | Status |
 |---|---|
-| gRPC node session protocol | Implemented |
-| `--port` / `--connect` CLI | Implemented |
-| Session-scoped routing and authority transport | Implemented |
-| Reconnect with bounded replay | Implemented |
-| Publication ownership and target discovery | Implemented |
-| Remote terminal bootstrap and replay | Implemented |
-| Live-mirror open/close protocol | Implemented |
-| PTY-owner mirror lifecycle hardening | In progress |
+| Protocol namespace and protobuf envelope (`waitagent.remote.v1`) | Implemented |
+| Node-scoped gRPC connection (`OpenNodeSession`) | Implemented |
+| `client_hello` / `server_hello` handshake | Implemented |
+| Session-scoped routing by `session_id` | Implemented |
+| Remote target catalog publication | Implemented; runtime-owner path is current, older file-backed catalog sources are being retired |
+| Remote open target / input / resize / output envelopes | Implemented |
+| Authority transport and live PTY host bridge | Implemented |
+| Session-scoped live mirror lifecycle | Implemented enough for current remote main-slot use; hardening continues |
+| Reconnect with bounded replay | Implemented baseline |
+| Create-session request routing for `Ctrl-S` | Implemented through the local owner/control path |
+| Remote exit synchronization | In progress: moving from periodic sync latency to acknowledged local catalog wakeups |
 | Cross-host visible parity validation | In progress |
 
 ---
