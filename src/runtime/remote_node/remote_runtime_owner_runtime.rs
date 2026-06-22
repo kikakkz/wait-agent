@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const REMOTE_RUNTIME_OWNER_READY_RETRIES: usize = 20;
+const REMOTE_RUNTIME_OWNER_READY_RETRIES: usize = 100;
 const REMOTE_RUNTIME_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 const REMOTE_RUNTIME_OWNER_LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -454,8 +454,9 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
     }
 
     Err(LifecycleError::Protocol(format!(
-        "remote runtime owner for listener `{}` did not become ready",
-        network.listener_addr()
+        "remote runtime owner for listener `{}` did not become ready at {}",
+        network.listener_addr(),
+        socket_path.display()
     )))
 }
 
