@@ -18,6 +18,7 @@ pub struct RemoteHostProfile {
     pub last_remote_port: Option<u16>,
     pub last_endpoint: Option<String>,
     pub last_connected_at: Option<String>,
+    pub use_install_proxy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,7 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(connected_at) = &host.last_connected_at {
             push_string(&mut out, "last_connected_at", connected_at);
         }
+        out.push_str(&format!("use_install_proxy = {}\n", host.use_install_proxy));
         out.push('\n');
     }
     out
@@ -233,6 +235,7 @@ struct RawProfile {
     last_remote_port: Option<String>,
     last_endpoint: Option<String>,
     last_connected_at: Option<String>,
+    use_install_proxy: Option<String>,
 }
 
 impl RawProfile {
@@ -249,6 +252,7 @@ impl RawProfile {
             "last_remote_port" => self.last_remote_port = Some(value),
             "last_endpoint" => self.last_endpoint = Some(value),
             "last_connected_at" => self.last_connected_at = Some(value),
+            "use_install_proxy" => self.use_install_proxy = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -285,6 +289,8 @@ impl RawProfile {
             last_remote_port: optional_u16(self.last_remote_port, "last_remote_port")?,
             last_endpoint: self.last_endpoint.filter(|value| !value.is_empty()),
             last_connected_at: self.last_connected_at.filter(|value| !value.is_empty()),
+            use_install_proxy: optional_bool(self.use_install_proxy, "use_install_proxy")?
+                .unwrap_or(true),
         })
     }
 }
@@ -346,6 +352,22 @@ fn optional_secret_id(
         .map(RemoteHostSecretId::new)
         .transpose()
         .map_err(|error| RemoteHostHistoryStoreError::new(error.to_string()))
+}
+
+fn optional_bool(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<bool>, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(RemoteHostHistoryStoreError::new(format!(
+            "remote host profile `{field}` must be true or false"
+        ))),
+    }
 }
 
 fn parse_port_preference(
@@ -422,6 +444,7 @@ mod tests {
                 last_remote_port: Some(7476),
                 last_endpoint: Some("10.1.29.130:7476".to_string()),
                 last_connected_at: Some("2026-06-16T00:00:00Z".to_string()),
+                use_install_proxy: true,
             })
             .unwrap();
 
@@ -499,6 +522,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }
     }
 

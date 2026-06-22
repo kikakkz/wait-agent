@@ -363,6 +363,7 @@ pub struct ConnectRemoteHostCommand {
     pub sudo_password_stdin: bool,
     pub remote_port: Option<String>,
     pub save_profile: Option<String>,
+    pub use_install_proxy: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1337,6 +1338,14 @@ fn parse_connect_remote_host_pane(
     })
 }
 
+fn parse_bool_flag(flag: &str, value: &str) -> Result<bool, CliError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(CliError::InvalidValue(flag.to_string(), value.to_string())),
+    }
+}
+
 fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostCommand, CliError> {
     let mut iter = args.into_iter();
     let mut current_socket_name = None;
@@ -1352,6 +1361,7 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
     let mut sudo_password_stdin = false;
     let mut remote_port = None;
     let mut save_profile = None;
+    let mut use_install_proxy = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1377,6 +1387,10 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
             "--sudo-password-stdin" => sudo_password_stdin = true,
             "--remote-port" => remote_port = Some(expect_value("--remote-port", &mut iter)?),
             "--save-profile" => save_profile = Some(expect_value("--save-profile", &mut iter)?),
+            "--use-install-proxy" => {
+                let value = expect_value("--use-install-proxy", &mut iter)?;
+                use_install_proxy = Some(parse_bool_flag("--use-install-proxy", &value)?);
+            }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1398,6 +1412,7 @@ fn parse_connect_remote_host(args: Vec<String>) -> Result<ConnectRemoteHostComma
         sudo_password_stdin,
         remote_port,
         save_profile,
+        use_install_proxy,
     })
 }
 
@@ -1814,6 +1829,8 @@ mod tests {
             "auto",
             "--save-profile",
             "130",
+            "--use-install-proxy",
+            "false",
         ])
         .command
         {
@@ -1834,6 +1851,7 @@ mod tests {
                 assert!(command.sudo_password_stdin);
                 assert_eq!(command.remote_port.as_deref(), Some("auto"));
                 assert_eq!(command.save_profile.as_deref(), Some("130"));
+                assert_eq!(command.use_install_proxy, Some(false));
             }
             other => panic!("unexpected command: {other:?}"),
         }

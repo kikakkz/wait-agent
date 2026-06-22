@@ -1052,7 +1052,7 @@ fn connect_remote_host_popup_command(
         network,
     );
     format!(
-        "display-popup -w 66 -h 17 -E {}",
+        "display-popup -w 66 -h 18 -E {}",
         tmux_quote_argument(&pane_command)
     )
 }
@@ -1314,7 +1314,7 @@ mod tests {
         assert!(connect.contains("'__connect-remote-host-pane'"));
         assert!(connect.contains("'--current-socket-name' 'wa-1'"));
         assert!(connect.contains("'--connect' '10.0.0.8:7474'"));
-        assert!(connect.contains("display-popup -w 66 -h 17 -E"));
+        assert!(connect.contains("display-popup -w 66 -h 18 -E"));
         assert!(remote_new.contains("'__new-selected-remote-session'"));
         assert!(remote_new.contains("'--current-session-name' 'session-1'"));
         assert!(remote_new.contains("'--port' '9001'"));

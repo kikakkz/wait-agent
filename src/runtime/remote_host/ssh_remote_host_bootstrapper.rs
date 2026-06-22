@@ -388,6 +388,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -436,6 +437,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -490,6 +492,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,

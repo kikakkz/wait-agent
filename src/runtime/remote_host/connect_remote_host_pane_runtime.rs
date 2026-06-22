@@ -7,6 +7,9 @@ use crate::runtime::remote_host::remote_host_history_store::{
 use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretStore,
 };
+use crate::runtime::remote_host::remote_install_proxy_store::{
+    no_proxy_for_install, RemoteInstallProxyConfig, RemoteInstallProxyStore,
+};
 use crate::ui::chrome::display_width;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -14,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -97,6 +100,14 @@ impl ConnectRemoteHostPaneRuntime {
                         spawn_secret_loader(request, secret_tx.clone());
                     }
                 }
+                PaneAction::SaveProxyConfig => match save_proxy_config(state) {
+                    Ok(()) => {
+                        state.status = Status::Hint("Saved proxy configuration.".to_string());
+                    }
+                    Err(message) => {
+                        state.status = Status::Error(message);
+                    }
+                },
                 PaneAction::DeleteSelectedHost { profile_name } => {
                     match delete_selected_host(state, &profile_name) {
                         Ok(request) => {
@@ -163,6 +174,10 @@ struct ConnectRemoteHostState {
     show_ssh_password: bool,
     show_sudo_password: bool,
     remember: bool,
+    use_install_proxy: bool,
+    proxy_config: RemoteInstallProxyConfig,
+    proxy_all_proxy_autofilled: bool,
+    proxy_https_proxy_autofilled: bool,
     editing: Option<EditField>,
     status: Status,
     delete_confirm: DeleteConfirmState,
@@ -194,6 +209,10 @@ impl ConnectRemoteHostState {
             show_ssh_password: false,
             show_sudo_password: false,
             remember: true,
+            use_install_proxy: true,
+            proxy_config: load_proxy_config(),
+            proxy_all_proxy_autofilled: false,
+            proxy_https_proxy_autofilled: false,
             editing: None,
             status: Status::Hint("Select a saved host or fill a new host.".to_string()),
             delete_confirm: DeleteConfirmState::Idle,
@@ -220,6 +239,7 @@ impl ConnectRemoteHostState {
             self.show_ssh_password = false;
             self.show_sudo_password = false;
             self.remember = true;
+            self.use_install_proxy = true;
             self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
             return None;
         }
@@ -275,6 +295,7 @@ impl ConnectRemoteHostState {
         self.show_ssh_password = false;
         self.show_sudo_password = false;
         self.remember = true;
+        self.use_install_proxy = profile.use_install_proxy;
         if request.has_work() {
             self.status = Status::Loading("Loading saved credentials...".to_string());
             self.secret_load = SecretLoadState::Loading {
@@ -341,6 +362,9 @@ impl ConnectRemoteHostState {
         if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
             return self.apply_delete_confirm_key(key);
         }
+        if matches!(self.status, Status::Error(_)) {
+            return self.apply_error_popup_key(key);
+        }
         if let Some(field) = self.editing {
             return self.apply_edit_key(key, field);
         }
@@ -355,11 +379,11 @@ impl ConnectRemoteHostState {
             }
             KeyCode::Char('q') => PaneAction::Close,
             KeyCode::Tab => {
-                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()));
+                self.set_focus(self.next_focus());
                 PaneAction::None
             }
             KeyCode::BackTab => {
-                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()));
+                self.set_focus(self.prev_focus());
                 PaneAction::None
             }
             KeyCode::Up => self.move_up(),
@@ -396,7 +420,19 @@ impl ConnectRemoteHostState {
             KeyCode::Char(' ') => {
                 if self.focus == Focus::Remember {
                     self.remember = !self.remember;
+                } else if self.focus == Focus::InstallProxy {
+                    self.use_install_proxy = !self.use_install_proxy;
                 }
+                PaneAction::None
+            }
+            _ => PaneAction::None,
+        }
+    }
+
+    fn apply_error_popup_key(&mut self, key: KeyEvent) -> PaneAction {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                self.dismiss_error_popup();
                 PaneAction::None
             }
             _ => PaneAction::None,
@@ -491,19 +527,15 @@ impl ConnectRemoteHostState {
             KeyCode::Right if field == EditField::SshPassword => {
                 self.set_focus(Focus::PasswordToggle)
             }
-            KeyCode::Tab => self.set_focus(self.focus.next(self.auth, self.has_saved_selection())),
-            KeyCode::BackTab => {
-                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()))
-            }
+            KeyCode::Tab => self.set_focus(self.next_focus()),
+            KeyCode::BackTab => self.set_focus(self.prev_focus()),
             KeyCode::Up => return self.move_up(),
             KeyCode::Down => return self.move_down(),
-            KeyCode::Enter => {
-                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()))
-            }
+            KeyCode::Enter => self.set_focus(self.next_focus()),
             code if is_backspace_key(code, key.modifiers) => {
-                edit_buffer(self, field).pop();
+                self.edit_field_backspace(field);
             }
-            KeyCode::Char(ch) if !ch.is_control() => edit_buffer(self, field).push(ch),
+            KeyCode::Char(ch) if !ch.is_control() => self.edit_field_push(field, ch),
             _ => {}
         }
         PaneAction::None
@@ -512,21 +544,25 @@ impl ConnectRemoteHostState {
     fn apply_sudo_password_edit_key(&mut self, key: KeyEvent) -> PaneAction {
         match key.code {
             KeyCode::Esc => self.set_focus(Focus::Sudo),
-            KeyCode::Tab => self.set_focus(self.focus.next(self.auth, self.has_saved_selection())),
-            KeyCode::BackTab => {
-                self.set_focus(self.focus.prev(self.auth, self.has_saved_selection()))
-            }
+            KeyCode::Tab => self.set_focus(self.next_focus()),
+            KeyCode::BackTab => self.set_focus(self.prev_focus()),
             KeyCode::Up => return self.move_up(),
             KeyCode::Down => return self.move_down(),
             KeyCode::Left => self.set_focus(Focus::Hosts),
             KeyCode::Right => self.set_focus(Focus::SudoToggle),
-            KeyCode::Enter => {
-                self.set_focus(self.focus.next(self.auth, self.has_saved_selection()))
-            }
+            KeyCode::Enter => self.set_focus(self.next_focus()),
             code if is_backspace_key(code, key.modifiers) => {
+                if self.sudo_mode == SudoMode::Saved {
+                    self.sudo_mode = SudoMode::Replace;
+                }
                 self.sudo_password.pop();
             }
-            KeyCode::Char(ch) if !ch.is_control() => self.sudo_password.push(ch),
+            KeyCode::Char(ch) if !ch.is_control() => {
+                if self.sudo_mode == SudoMode::Saved {
+                    self.sudo_mode = SudoMode::Replace;
+                }
+                self.sudo_password.push(ch);
+            }
             _ => {}
         }
         PaneAction::None
@@ -541,6 +577,15 @@ impl ConnectRemoteHostState {
         }
         let x = mouse.column;
         let y = mouse.row;
+        if matches!(self.status, Status::Error(_)) {
+            let layout = ConnectErrorGeometry::from_terminal_size(
+                crossterm::terminal::size().unwrap_or((96, 24)),
+            );
+            if point_in_rect(x, y, layout.ok_button) {
+                self.dismiss_error_popup();
+            }
+            return PaneAction::None;
+        }
         let layout = PopupGeometry::from_terminal_size(
             crossterm::terminal::size().unwrap_or((96, 24)),
             self,
@@ -549,11 +594,15 @@ impl ConnectRemoteHostState {
             return PaneAction::None;
         }
         if point_in_rect(x, y, layout.hosts) {
-            let row = y.saturating_sub(layout.hosts.y + 1) as usize;
-            if row <= self.profiles.len() {
-                self.selected = row;
+            let row = y.saturating_sub(layout.hosts.y) as usize;
+            if let Some(selection) = selection_from_display_row(self, row) {
+                self.selected = selection;
                 self.set_focus(Focus::Hosts);
-                return PaneAction::LoadSecrets(self.sync_selected_profile());
+                return if self.selected_proxy_config() {
+                    PaneAction::None
+                } else {
+                    PaneAction::LoadSecrets(self.sync_selected_profile())
+                };
             }
             return PaneAction::None;
         }
@@ -561,6 +610,16 @@ impl ConnectRemoteHostState {
             return PaneAction::None;
         }
         let row = y.saturating_sub(layout.details.y);
+        if self.selected_proxy_config() {
+            let details = ProxyDetailsGeometry::from_area(layout.details);
+            match row {
+                row if row == details.rows.all_proxy => self.set_focus(Focus::AllProxy),
+                row if row == details.rows.https_proxy => self.set_focus(Focus::HttpsProxy),
+                row if row == details.rows.save => return PaneAction::SaveProxyConfig,
+                _ => {}
+            }
+            return PaneAction::None;
+        }
         let details = DetailsGeometry::from_area(layout.details, self);
         match row {
             row if row == details.rows.host => self.set_focus(Focus::Host),
@@ -588,6 +647,11 @@ impl ConnectRemoteHostState {
                 self.delete_confirm = DeleteConfirmState::Idle;
                 self.remember = !self.remember;
             }
+            row if row == details.rows.install_proxy => {
+                self.set_focus(Focus::InstallProxy);
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.use_install_proxy = !self.use_install_proxy;
+            }
             row if Some(row) == details.rows.delete => {
                 self.set_focus(Focus::Delete);
                 return self.delete_action();
@@ -605,12 +669,15 @@ impl ConnectRemoteHostState {
         if self.focus == Focus::Hosts {
             if self.selected > 0 {
                 self.selected -= 1;
+                if self.selected_proxy_config() {
+                    return PaneAction::None;
+                }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
-            let mut next = self.focus.prev(self.auth, self.has_saved_selection());
+            let mut next = self.prev_focus();
             if next == Focus::Hosts {
-                next = Focus::Host;
+                next = self.default_detail_focus();
             }
             self.set_focus(next);
         }
@@ -619,14 +686,21 @@ impl ConnectRemoteHostState {
 
     fn move_down(&mut self) -> PaneAction {
         if self.focus == Focus::Hosts {
-            if self.selected < self.profiles.len() {
+            if self.selected < self.proxy_selection_index() {
                 self.selected += 1;
+                if self.selected_proxy_config() {
+                    return PaneAction::None;
+                }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
-            let mut next = self.focus.next(self.auth, self.has_saved_selection());
+            let mut next = self.next_focus();
             if next == Focus::Hosts {
-                next = Focus::Connect;
+                next = if self.selected_proxy_config() {
+                    Focus::ProxySave
+                } else {
+                    Focus::Connect
+                };
             }
             self.set_focus(next);
         }
@@ -634,7 +708,9 @@ impl ConnectRemoteHostState {
     }
 
     fn default_detail_focus(&self) -> Focus {
-        if self.selected >= self.profiles.len() {
+        if self.selected_proxy_config() {
+            Focus::AllProxy
+        } else if self.selected >= self.profiles.len() {
             Focus::Host
         } else {
             Focus::Connect
@@ -696,7 +772,9 @@ impl ConnectRemoteHostState {
                 self.set_focus(self.default_detail_focus());
                 PaneAction::None
             }
-            Focus::Host | Focus::Port | Focus::User => PaneAction::None,
+            Focus::Host | Focus::Port | Focus::User | Focus::AllProxy | Focus::HttpsProxy => {
+                PaneAction::None
+            }
             Focus::Auth => {
                 self.adjust_choice(1);
                 PaneAction::None
@@ -719,8 +797,14 @@ impl ConnectRemoteHostState {
                 self.remember = !self.remember;
                 PaneAction::None
             }
+            Focus::InstallProxy => {
+                self.delete_confirm = DeleteConfirmState::Idle;
+                self.use_install_proxy = !self.use_install_proxy;
+                PaneAction::None
+            }
             Focus::Delete => self.delete_action(),
             Focus::Connect => self.connect_action(),
+            Focus::ProxySave => PaneAction::SaveProxyConfig,
         }
     }
 
@@ -735,6 +819,12 @@ impl ConnectRemoteHostState {
             focus: DeleteConfirmFocus::Cancel,
         };
         PaneAction::None
+    }
+
+    fn dismiss_error_popup(&mut self) {
+        if matches!(self.status, Status::Error(_)) {
+            self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
+        }
     }
 
     fn connect_action(&self) -> PaneAction {
@@ -770,10 +860,88 @@ impl ConnectRemoteHostState {
         }
     }
 
+    fn edit_field_backspace(&mut self, field: EditField) {
+        edit_buffer(self, field).pop();
+        self.after_field_edit(field);
+    }
+
+    fn edit_field_push(&mut self, field: EditField, ch: char) {
+        edit_buffer(self, field).push(ch);
+        self.after_field_edit(field);
+    }
+
+    fn after_field_edit(&mut self, field: EditField) {
+        match field {
+            EditField::AllProxy => {
+                self.proxy_all_proxy_autofilled = false;
+                self.apply_proxy_default_from_all_proxy();
+            }
+            EditField::HttpsProxy => {
+                self.proxy_https_proxy_autofilled = false;
+                self.apply_proxy_default_from_https_proxy();
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_proxy_default_from_all_proxy(&mut self) {
+        if !self.proxy_config.https_proxy.trim().is_empty() && !self.proxy_https_proxy_autofilled {
+            return;
+        }
+        let Some(host) = proxy_host_part(&self.proxy_config.all_proxy) else {
+            if self.proxy_https_proxy_autofilled {
+                self.proxy_config.https_proxy.clear();
+                self.proxy_https_proxy_autofilled = false;
+            }
+            return;
+        };
+        self.proxy_config.https_proxy = format!("http://{host}");
+        self.proxy_https_proxy_autofilled = true;
+    }
+
+    fn apply_proxy_default_from_https_proxy(&mut self) {
+        if !self.proxy_config.all_proxy.trim().is_empty() && !self.proxy_all_proxy_autofilled {
+            return;
+        }
+        let Some(host) = proxy_host_part(&self.proxy_config.https_proxy) else {
+            if self.proxy_all_proxy_autofilled {
+                self.proxy_config.all_proxy.clear();
+                self.proxy_all_proxy_autofilled = false;
+            }
+            return;
+        };
+        self.proxy_config.all_proxy = format!("socks5://{host}");
+        self.proxy_all_proxy_autofilled = true;
+    }
+
     fn credentials_loading(&self) -> bool {
         matches!(self.secret_load, SecretLoadState::Loading { .. })
             || self.password_mode == PasswordMode::Loading
             || self.sudo_mode == SudoMode::Loading
+    }
+
+    fn next_focus(&self) -> Focus {
+        self.focus.next(
+            self.auth,
+            self.has_saved_selection(),
+            self.selected_proxy_config(),
+        )
+    }
+
+    fn prev_focus(&self) -> Focus {
+        self.focus.prev(
+            self.auth,
+            self.has_saved_selection(),
+            self.selected_proxy_config(),
+        )
+    }
+
+    fn proxy_selection_index(&self) -> usize {
+        self.profiles.len().saturating_add(1)
+    }
+
+    fn selected_proxy_config(&self) -> bool {
+        self.selected == self.proxy_selection_index()
     }
 
     fn selected_profile(&self) -> Option<&RemoteHostProfile> {
@@ -806,8 +974,12 @@ enum Focus {
     Sudo,
     SudoToggle,
     Remember,
+    InstallProxy,
     Delete,
     Connect,
+    AllProxy,
+    HttpsProxy,
+    ProxySave,
 }
 
 impl Focus {
@@ -820,13 +992,23 @@ impl Focus {
             Self::Host => Some(EditField::Host),
             Self::Port => Some(EditField::RemotePort),
             Self::User => Some(EditField::SshUser),
+            Self::AllProxy => Some(EditField::AllProxy),
+            Self::HttpsProxy => Some(EditField::HttpsProxy),
             Self::Password if auth == AuthChoice::Key => Some(EditField::KeyPath),
             Self::Password if auth == AuthChoice::Password => Some(EditField::SshPassword),
             _ => None,
         }
     }
 
-    fn ordered(_auth: AuthChoice, has_saved_selection: bool) -> Vec<Self> {
+    fn ordered(_auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Vec<Self> {
+        if proxy_page {
+            return vec![
+                Self::Hosts,
+                Self::AllProxy,
+                Self::HttpsProxy,
+                Self::ProxySave,
+            ];
+        }
         let mut ordered = vec![
             Self::Hosts,
             Self::Host,
@@ -836,6 +1018,7 @@ impl Focus {
             Self::Password,
             Self::Sudo,
             Self::Remember,
+            Self::InstallProxy,
         ];
         ordered.push(Self::Connect);
         if has_saved_selection {
@@ -844,14 +1027,14 @@ impl Focus {
         ordered
     }
 
-    fn next(self, auth: AuthChoice, has_saved_selection: bool) -> Self {
-        let ordered = Self::ordered(auth, has_saved_selection);
+    fn next(self, auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection, proxy_page);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + 1) % ordered.len()]
     }
 
-    fn prev(self, auth: AuthChoice, has_saved_selection: bool) -> Self {
-        let ordered = Self::ordered(auth, has_saved_selection);
+    fn prev(self, auth: AuthChoice, has_saved_selection: bool, proxy_page: bool) -> Self {
+        let ordered = Self::ordered(auth, has_saved_selection, proxy_page);
         let index = ordered.iter().position(|field| *field == self).unwrap_or(0);
         ordered[(index + ordered.len() - 1) % ordered.len()]
     }
@@ -865,6 +1048,8 @@ enum EditField {
     KeyPath,
     SshPassword,
     SudoPassword,
+    AllProxy,
+    HttpsProxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -946,6 +1131,7 @@ enum PaneAction {
     Connect,
     DeleteSelectedHost { profile_name: String },
     LoadSecrets(Option<SecretLoadRequest>),
+    SaveProxyConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,8 +1189,26 @@ struct DetailsRows {
     password: u16,
     sudo: u16,
     remember: u16,
+    install_proxy: u16,
     connect: u16,
     delete: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProxyDetailsGeometry {
+    proxy: Rect,
+    no_proxy: Rect,
+    save: Rect,
+    status: Rect,
+    rows: ProxyDetailsRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProxyDetailsRows {
+    all_proxy: u16,
+    https_proxy: u16,
+    no_proxy: u16,
+    save: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1018,6 +1222,12 @@ struct DeleteConfirmGeometry {
 struct ConnectingGeometry {
     dialog: Rect,
     message: Rect,
+}
+
+struct ConnectErrorGeometry {
+    dialog: Rect,
+    message: Rect,
+    ok_button: Rect,
 }
 
 impl DeleteConfirmGeometry {
@@ -1055,6 +1265,33 @@ impl ConnectingGeometry {
     }
 }
 
+impl ConnectErrorGeometry {
+    fn from_terminal_size((cols, rows): (u16, u16)) -> Self {
+        let width = cols.min(76).max(36);
+        let height = rows.min(14).max(7);
+        let x = cols.saturating_sub(width) / 2;
+        let y = rows.saturating_sub(height) / 2;
+        let dialog = Rect::new(x, y, width, height);
+        let message = Rect::new(
+            x.saturating_add(2),
+            y.saturating_add(2),
+            width.saturating_sub(4),
+            height.saturating_sub(5),
+        );
+        let ok_button = Rect::new(
+            x.saturating_add(width.saturating_sub(12) / 2),
+            y.saturating_add(height.saturating_sub(2)),
+            12,
+            1,
+        );
+        Self {
+            dialog,
+            message,
+            ok_button,
+        }
+    }
+}
+
 impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
         let dialog = Rect::new(0, 0, cols, rows);
@@ -1083,7 +1320,7 @@ impl PopupGeometry {
 
 impl DetailsGeometry {
     fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
-        let options_rows = if state.has_saved_selection() { 4 } else { 3 };
+        let options_rows = if state.has_saved_selection() { 5 } else { 4 };
         let options_height = 1 + options_rows;
         let sections = Layout::default()
             .direction(Direction::Vertical)
@@ -1102,16 +1339,54 @@ impl DetailsGeometry {
             password: sections[1].y.saturating_add(2).saturating_sub(area.y),
             sudo: sections[1].y.saturating_add(3).saturating_sub(area.y),
             remember: sections[2].y.saturating_add(1).saturating_sub(area.y),
-            connect: sections[2].y.saturating_add(3).saturating_sub(area.y),
+            install_proxy: sections[2].y.saturating_add(2).saturating_sub(area.y),
+            connect: sections[2].y.saturating_add(4).saturating_sub(area.y),
             delete: state
                 .has_saved_selection()
-                .then(|| sections[2].y.saturating_add(4).saturating_sub(area.y)),
+                .then(|| sections[2].y.saturating_add(5).saturating_sub(area.y)),
         };
         Self {
             connection: sections[0],
             authentication: sections[1],
             options: sections[2],
             status: sections[3],
+            rows,
+        }
+    }
+}
+
+impl ProxyDetailsGeometry {
+    fn from_area(area: Rect) -> Self {
+        let bottom = area.y.saturating_add(area.height);
+        let proxy_height = area.height.min(3);
+        let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
+        let no_proxy_y = area.y.saturating_add(proxy_height);
+        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
+        let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
+        let save_y = no_proxy_y
+            .saturating_add(no_proxy_height)
+            .saturating_add(1)
+            .min(bottom);
+        let save_height = u16::from(save_y < bottom);
+        let save = Rect::new(area.x, save_y, area.width, save_height);
+        let status_y = save_y.saturating_add(save_height).min(bottom);
+        let status = Rect::new(
+            area.x,
+            status_y,
+            area.width,
+            bottom.saturating_sub(status_y),
+        );
+        let rows = ProxyDetailsRows {
+            all_proxy: proxy.y.saturating_add(1).saturating_sub(area.y),
+            https_proxy: proxy.y.saturating_add(2).saturating_sub(area.y),
+            no_proxy: no_proxy.y.saturating_sub(area.y),
+            save: save.y.saturating_sub(area.y),
+        };
+        Self {
+            proxy,
+            no_proxy,
+            save,
+            status,
             rows,
         }
     }
@@ -1148,6 +1423,7 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     render_details(frame, geometry.details, state);
     render_cursor(frame, geometry.details, state);
     render_connecting_popup(frame, state);
+    render_connect_error_popup(frame, state);
     render_delete_confirm(frame, state);
 }
 
@@ -1157,23 +1433,14 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         .map(ListItem::new)
         .collect::<Vec<_>>();
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(section_title("Saved Hosts"))
-                .borders(Borders::RIGHT),
-        )
+        .block(Block::default().borders(Borders::RIGHT))
         .highlight_style(if state.focus == Focus::Hosts {
             active_focus_style()
         } else {
             selected_host_style()
-        })
-        .highlight_symbol(if state.focus == Focus::Hosts {
-            "> "
-        } else {
-            "  "
         });
     let mut list_state = ratatui::widgets::ListState::default();
-    list_state.select(Some(state.selected));
+    list_state.select(Some(display_row_from_selection(state.selected)));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -1181,14 +1448,30 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
     format!("{}@{}", profile.ssh_user, profile.host)
 }
 
+const HOST_MENU_CHILD_INDENT: &str = "  ";
+
+fn saved_host_menu_label(profile: &RemoteHostProfile) -> String {
+    format!("{HOST_MENU_CHILD_INDENT}{}", saved_host_label(profile))
+}
+
 fn host_list_labels(state: &ConnectRemoteHostState) -> Vec<String> {
-    let mut labels = state
-        .profiles
-        .iter()
-        .map(saved_host_label)
-        .collect::<Vec<_>>();
-    labels.push("+ New Host".to_string());
+    let mut labels = vec!["Saved Hosts".to_string()];
+    labels.extend(state.profiles.iter().map(saved_host_menu_label));
+    labels.push("New Host".to_string());
+    labels.push("Proxy Configuration".to_string());
     labels
+}
+
+fn selection_from_display_row(state: &ConnectRemoteHostState, row: usize) -> Option<usize> {
+    if row == 0 {
+        return None;
+    }
+    let selection = row - 1;
+    (selection <= state.proxy_selection_index()).then_some(selection)
+}
+
+fn display_row_from_selection(selection: usize) -> usize {
+    selection.saturating_add(1)
 }
 
 const HOST_LIST_MIN_WIDTH: u16 = 20;
@@ -1222,6 +1505,10 @@ fn status_message(state: &ConnectRemoteHostState) -> &str {
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if state.selected_proxy_config() {
+        render_proxy_details(frame, area, state);
+        return;
+    }
     let geometry = DetailsGeometry::from_area(area, state);
     render_connection(frame, geometry.connection, state);
     render_authentication(frame, geometry.authentication, state);
@@ -1229,10 +1516,73 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
     render_status(frame, geometry.status, state);
 }
 
+fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let geometry = ProxyDetailsGeometry::from_area(area);
+    let rows = [
+        detail_row(
+            "all_proxy",
+            &proxy_input_display(&state.proxy_config.all_proxy),
+            state,
+            Focus::AllProxy,
+        ),
+        detail_row(
+            "https_proxy",
+            &proxy_input_display(&state.proxy_config.https_proxy),
+            state,
+            Focus::HttpsProxy,
+        ),
+    ];
+    render_detail_table(frame, geometry.proxy, "Proxy Configuration", rows);
+    render_no_proxy(frame, geometry.no_proxy, state);
+    render_proxy_save(frame, geometry.save, state);
+    render_status(frame, geometry.status, state);
+}
+
+const PROXY_EMPTY_PLACEHOLDER: &str = "________________";
+
+fn proxy_input_display(value: &str) -> String {
+    if value.is_empty() {
+        PROXY_EMPTY_PLACEHOLDER.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    let label_width = 12;
+    let value_x = area.x.saturating_add(label_width + 1);
+    let value_width = area.width.saturating_sub(label_width + 1);
+    frame.render_widget(
+        Paragraph::new("no_proxy"),
+        Rect::new(area.x, area.y, label_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(format!(" auto: {}", no_proxy_for_install(&state.host, "")))
+            .wrap(Wrap { trim: false }),
+        Rect::new(value_x, area.y, value_width, area.height),
+    );
+}
+
+fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    let style = action_focus_style(state.focus == Focus::ProxySave, Focus::ProxySave);
+    frame.render_widget(
+        Paragraph::new("Save")
+            .style(style)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let rows = [
         detail_row("Host", &host_display(state), state, Focus::Host),
-        detail_row("Port", &state.remote_port, state, Focus::Port),
+        detail_row("Listen Port", &state.remote_port, state, Focus::Port),
         detail_row("SSH User", &state.ssh_user, state, Focus::User),
     ];
     render_detail_table(frame, area, "Connection", rows);
@@ -1265,6 +1615,16 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         state,
         Focus::Remember,
     )];
+    rows.push(detail_row(
+        "Install",
+        if state.use_install_proxy {
+            "[x] Use proxy"
+        } else {
+            "[ ] Do not use"
+        },
+        state,
+        Focus::InstallProxy,
+    ));
     rows.push(Row::new(vec![String::new(), String::new()]));
     rows.push(connect_row(connect_label(state), state));
     if state.has_saved_selection() {
@@ -1349,6 +1709,14 @@ struct PasswordControlDisplay {
     toggle_available: bool,
 }
 
+fn password_mask_preserve_length(state: &ConnectRemoteHostState, field: PasswordField) -> bool {
+    matches!(
+        (field, state.editing),
+        (PasswordField::Ssh, Some(EditField::SshPassword))
+            | (PasswordField::Sudo, Some(EditField::SudoPassword))
+    )
+}
+
 fn password_control_display(
     field: PasswordField,
     state: &ConnectRemoteHostState,
@@ -1360,6 +1728,7 @@ fn password_control_display(
                 state.password_mode == PasswordMode::Loading,
                 state.show_ssh_password,
                 PASSWORD_EMPTY_PLACEHOLDER,
+                password_mask_preserve_length(state, PasswordField::Ssh),
             ),
             show_plaintext: state.show_ssh_password,
             field_focus: Focus::Password,
@@ -1372,6 +1741,7 @@ fn password_control_display(
                 state.sudo_mode == SudoMode::Loading,
                 state.show_sudo_password,
                 PASSWORD_EMPTY_PLACEHOLDER,
+                password_mask_preserve_length(state, PasswordField::Sudo),
             ),
             show_plaintext: state.show_sudo_password,
             field_focus: Focus::Sudo,
@@ -1527,6 +1897,7 @@ fn password_display(state: &ConnectRemoteHostState) -> String {
             state.password_mode == PasswordMode::Loading,
             state.show_ssh_password,
             PASSWORD_EMPTY_PLACEHOLDER,
+            password_mask_preserve_length(state, PasswordField::Ssh),
         ),
         AuthChoice::Key => {
             if state.key_path.is_empty() {
@@ -1548,6 +1919,7 @@ fn sudo_password_display(state: &ConnectRemoteHostState) -> String {
         state.sudo_mode == SudoMode::Loading,
         state.show_sudo_password,
         PASSWORD_EMPTY_PLACEHOLDER,
+        password_mask_preserve_length(state, PasswordField::Sudo),
     )
 }
 
@@ -1556,8 +1928,15 @@ fn password_field_with_toggle_display(
     loading: bool,
     show_plaintext: bool,
     empty_label: &str,
+    preserve_mask_length: bool,
 ) -> String {
-    let value = password_field_display(value, loading, show_plaintext, empty_label);
+    let value = password_field_display(
+        value,
+        loading,
+        show_plaintext,
+        empty_label,
+        preserve_mask_length,
+    );
     if loading {
         value
     } else {
@@ -1570,6 +1949,7 @@ fn password_field_display(
     loading: bool,
     show_plaintext: bool,
     empty_label: &str,
+    preserve_mask_length: bool,
 ) -> String {
     if loading {
         "Loading saved...".to_string()
@@ -1578,12 +1958,13 @@ fn password_field_display(
     } else if show_plaintext {
         value.to_string()
     } else {
-        password_mask(value)
+        password_mask(value, preserve_mask_length)
     }
 }
 
-fn password_mask(value: &str) -> String {
-    "*".repeat(value.chars().count().max(6))
+fn password_mask(value: &str, preserve_length: bool) -> String {
+    let len = value.chars().count();
+    "*".repeat(if preserve_length { len } else { len.max(6) })
 }
 
 fn sudo_password_value(state: &ConnectRemoteHostState) -> &str {
@@ -1633,7 +2014,7 @@ fn password_visibility_button_hit(
         return false;
     }
     let field_start = details_x.saturating_add(14);
-    let value_width = password_field_display(value, loading, show_plaintext, empty_label)
+    let value_width = password_field_display(value, loading, show_plaintext, empty_label, false)
         .chars()
         .count() as u16;
     let button_start = field_start.saturating_add(value_width).saturating_add(2);
@@ -1659,10 +2040,14 @@ fn connect_label(state: &ConnectRemoteHostState) -> String {
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let color = match &state.status {
-        Status::Hint(_) | Status::Loading(_) | Status::Working(_) => Color::DarkGray,
-        Status::Error(_) => Color::Red,
+        Status::Hint(_) | Status::Loading(_) | Status::Working(_) | Status::Error(_) => {
+            Color::DarkGray
+        }
     };
-    let message = status_message(state);
+    let message = match &state.status {
+        Status::Error(_) => "Press Enter to close the error message.",
+        _ => status_message(state),
+    };
     frame.render_widget(
         Paragraph::new(message)
             .style(Style::default().fg(color))
@@ -1688,6 +2073,27 @@ fn render_connecting_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState
             .alignment(Alignment::Center),
         geometry.message,
     );
+}
+
+fn render_connect_error_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
+    let Status::Error(message) = &state.status else {
+        return;
+    };
+    let geometry =
+        ConnectErrorGeometry::from_terminal_size((frame.size().width, frame.size().height));
+    frame.render_widget(Clear, geometry.dialog);
+    let block = Block::default()
+        .title(section_title("Connect failed"))
+        .borders(Borders::ALL);
+    frame.render_widget(block, geometry.dialog);
+    frame.render_widget(
+        Paragraph::new(message.as_str())
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false })
+            .alignment(Alignment::Left),
+        geometry.message,
+    );
+    render_modal_button(frame, geometry.ok_button, "OK", true, false);
 }
 
 fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
@@ -1768,6 +2174,18 @@ fn render_cursor(frame: &mut Frame<'_>, details: Rect, state: &ConnectRemoteHost
 
 fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16, u16)> {
     let field = state.editing?;
+    if state.selected_proxy_config() {
+        let rows = ProxyDetailsGeometry::from_area(details).rows;
+        let (row, value) = match field {
+            EditField::AllProxy => (rows.all_proxy, state.proxy_config.all_proxy.as_str()),
+            EditField::HttpsProxy => (rows.https_proxy, state.proxy_config.https_proxy.as_str()),
+            _ => return None,
+        };
+        let value_width = value.chars().count() as u16;
+        let desired_x = details.x.saturating_add(14).saturating_add(value_width);
+        let max_x = details.x.saturating_add(details.width.saturating_sub(1));
+        return Some((desired_x.min(max_x), details.y.saturating_add(row)));
+    }
     let rows = DetailsGeometry::from_area(details, state).rows;
     let (row, value) = match field {
         EditField::Host => (rows.host, state.host.as_str().to_string()),
@@ -1781,6 +2199,7 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
                 state.password_mode == PasswordMode::Loading,
                 state.show_ssh_password,
                 "",
+                true,
             ),
         ),
         EditField::SudoPassword => (
@@ -1790,8 +2209,10 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
                 state.sudo_mode == SudoMode::Loading,
                 state.show_sudo_password,
                 "",
+                true,
             ),
         ),
+        EditField::AllProxy | EditField::HttpsProxy => return None,
     };
     let value_width = value.chars().count() as u16;
     let desired_x = details.x.saturating_add(14).saturating_add(value_width);
@@ -1822,6 +2243,26 @@ fn is_backspace_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
         || matches!(code, KeyCode::Char('\u{7f}'))
 }
 
+fn proxy_host_part(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let value = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .or_else(|| value.strip_prefix("socks5://"))
+        .or_else(|| value.strip_prefix("socks5h://"))
+        .unwrap_or(value);
+    if let Some(stripped) = value.strip_prefix('[') {
+        return stripped
+            .split_once(']')
+            .map(|(host, rest)| format!("[{host}]{rest}"));
+    }
+    let authority = value.split('/').next().unwrap_or(value);
+    (!authority.trim().is_empty()).then(|| authority.to_string())
+}
+
 fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut String {
     match field {
         EditField::Host => &mut state.host,
@@ -1830,6 +2271,8 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
         EditField::KeyPath => &mut state.key_path,
         EditField::SshPassword => &mut state.ssh_password,
         EditField::SudoPassword => &mut state.sudo_password,
+        EditField::AllProxy => &mut state.proxy_config.all_proxy,
+        EditField::HttpsProxy => &mut state.proxy_config.https_proxy,
     }
 }
 
@@ -1840,6 +2283,8 @@ fn edit_focus(field: EditField) -> Focus {
         EditField::SshUser => Focus::User,
         EditField::KeyPath | EditField::SshPassword => Focus::Password,
         EditField::SudoPassword => Focus::Sudo,
+        EditField::AllProxy => Focus::AllProxy,
+        EditField::HttpsProxy => Focus::HttpsProxy,
     }
 }
 
@@ -1854,6 +2299,18 @@ fn spawn_secret_loader(request: SecretLoadRequest, tx: Sender<SecretLoadResult>)
             sudo,
         });
     });
+}
+
+fn load_proxy_config() -> RemoteInstallProxyConfig {
+    RemoteInstallProxyStore::default()
+        .load()
+        .unwrap_or_default()
+}
+
+fn save_proxy_config(state: &ConnectRemoteHostState) -> Result<(), String> {
+    RemoteInstallProxyStore::default()
+        .save(&state.proxy_config)
+        .map_err(|error| error.to_string())
 }
 
 fn load_profiles() -> Vec<RemoteHostProfile> {
@@ -1930,6 +2387,8 @@ fn run_connect(
         command.current_session_name.clone(),
     ];
     let mut stdin_payload = None;
+    args.push("--use-install-proxy".to_string());
+    args.push(state.use_install_proxy.to_string());
     if let Some(profile) = state
         .selected_profile()
         .filter(|_| saved_profile_can_connect_by_id(state))
@@ -2014,7 +2473,7 @@ fn run_connect(
         .spawn()
         .map_err(|error| error.to_string())?;
     if let Some(payload) = stdin_payload {
-        if let Some(stdin) = child.stdin.as_mut() {
+        if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(payload.as_bytes())
                 .map_err(|error| error.to_string())?;
@@ -2136,7 +2595,20 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }
+    }
+
+    fn menu_text_column(label: &str) -> Option<usize> {
+        [
+            "Saved Hosts",
+            "New Host",
+            "Proxy Configuration",
+            "k@127.0.0.1",
+        ]
+        .into_iter()
+        .find_map(|text| label.find(text))
+        .map(|index| display_width(&label[..index]))
     }
 
     fn rendered_text(width: u16, height: u16, state: &ConnectRemoteHostState) -> String {
@@ -2155,6 +2627,74 @@ mod tests {
     }
 
     #[test]
+    fn proxy_configuration_save_is_centered_in_detail_area() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.selected = state.proxy_selection_index();
+        let popup = PopupGeometry::from_terminal_size((66, 18), &state);
+        let details = ProxyDetailsGeometry::from_area(popup.details);
+        let output = rendered_text(66, 18, &state);
+        let save_row = output
+            .lines()
+            .nth(details.save.y as usize)
+            .expect("save row should render");
+        let save_col = save_row.find("Save").expect("Save should render") as u16;
+
+        assert!(save_col > details.save.x + 8);
+        assert!(save_col + 4 < details.save.x + details.save.width);
+    }
+
+    #[test]
+    fn proxy_configuration_autofills_https_proxy_from_all_proxy_when_empty() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.set_focus(Focus::AllProxy);
+
+        for ch in "socks5://127.0.0.1:7897".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        assert_eq!(state.proxy_config.all_proxy, "socks5://127.0.0.1:7897");
+        assert_eq!(state.proxy_config.https_proxy, "http://127.0.0.1:7897");
+    }
+
+    #[test]
+    fn proxy_configuration_autofills_all_proxy_from_https_proxy_when_empty() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.set_focus(Focus::HttpsProxy);
+
+        for ch in "http://10.0.0.1:8080".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        assert_eq!(state.proxy_config.https_proxy, "http://10.0.0.1:8080");
+        assert_eq!(state.proxy_config.all_proxy, "socks5://10.0.0.1:8080");
+    }
+
+    #[test]
+    fn proxy_configuration_does_not_overwrite_user_edited_counterpart() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.set_focus(Focus::AllProxy);
+        for ch in "socks5://127.0.0.1:7897".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        state.set_focus(Focus::HttpsProxy);
+        while !state.proxy_config.https_proxy.is_empty() {
+            state.apply_key(KeyEvent::from(KeyCode::Backspace));
+        }
+        for ch in "http://proxy.example:443".chars() {
+            state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        state.set_focus(Focus::AllProxy);
+        state.apply_key(KeyEvent::from(KeyCode::Char('8')));
+
+        assert_eq!(state.proxy_config.https_proxy, "http://proxy.example:443");
+    }
+
+    #[test]
     fn connect_popup_renders_saved_host_and_profile_fields() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![RemoteHostProfile {
@@ -2169,6 +2709,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -2208,6 +2749,7 @@ mod tests {
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
             RemoteHostProfile {
                 name: "second".to_string(),
@@ -2221,6 +2763,7 @@ mod tests {
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
         ];
         state.selected = 0;
@@ -2252,6 +2795,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
         state.selected = 0;
 
@@ -2288,6 +2832,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
         state.selected = 0;
         let request = state
@@ -2335,6 +2880,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
 
         assert_eq!(saved_host_label(&profile), "k@127.0.0.1");
@@ -2355,18 +2901,19 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
         state.selected = 1;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((66, 17), &state);
+        let geometry = PopupGeometry::from_terminal_size((66, 18), &state);
 
         assert_eq!(geometry.dialog.width, 66);
-        assert_eq!(geometry.dialog.height, 17);
+        assert_eq!(geometry.dialog.height, 18);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
-        assert_eq!(geometry.hosts.height, 15);
-        assert_eq!(geometry.hosts.width, 20);
+        assert_eq!(geometry.hosts.height, 16);
+        assert_eq!(geometry.hosts.width, 23);
         assert!(geometry.details.width >= DETAIL_MIN_WIDTH);
     }
 
@@ -2385,9 +2932,10 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
 
-        assert_eq!(host_list_width(&state, 98), 20);
+        assert_eq!(host_list_width(&state, 98), 25);
     }
 
     #[test]
@@ -2405,6 +2953,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
 
         assert_eq!(host_list_width(&state, 98), 34);
@@ -2426,6 +2975,7 @@ mod tests {
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
             RemoteHostProfile {
                 name: "b@127.0.0.2".to_string(),
@@ -2439,6 +2989,7 @@ mod tests {
                 last_remote_port: None,
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
         ];
         state.set_focus(Focus::Hosts);
@@ -2470,7 +3021,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::Remember);
+        assert_eq!(state.focus, Focus::InstallProxy);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Down)),
             PaneAction::None
@@ -2530,6 +3081,48 @@ mod tests {
     }
 
     #[test]
+    fn proxy_configuration_is_global_left_nav_entry() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+
+        let labels = host_list_labels(&state);
+        assert_eq!(labels.first().map(String::as_str), Some("Saved Hosts"));
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("Proxy Configuration")
+        );
+        assert_eq!(
+            labels.get(state.profiles.len() + 1).map(String::as_str),
+            Some("New Host")
+        );
+        assert_eq!(menu_text_column(labels.first().unwrap()), Some(0));
+        assert_eq!(menu_text_column(labels.get(1).unwrap()), Some(2));
+        assert_eq!(
+            menu_text_column(labels.get(state.profiles.len() + 1).unwrap()),
+            Some(0)
+        );
+        assert_eq!(menu_text_column(labels.last().unwrap()), Some(0));
+        assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
+
+        state.selected = state.proxy_selection_index();
+        state.set_focus(Focus::Hosts);
+        assert_eq!(state.default_detail_focus(), Focus::AllProxy);
+        assert!(state.selected_profile().is_none());
+    }
+
+    #[test]
+    fn install_proxy_toggle_is_host_detail_state() {
+        let mut state = ConnectRemoteHostState::load();
+        assert!(state.use_install_proxy);
+        state.set_focus(Focus::InstallProxy);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
+            PaneAction::None
+        );
+        assert!(!state.use_install_proxy);
+    }
+
+    #[test]
     fn connect_popup_tab_cycles_focus() {
         let mut state = ConnectRemoteHostState::load();
         assert_eq!(state.focus, Focus::Hosts);
@@ -2545,19 +3138,20 @@ mod tests {
         state.profiles = vec![saved_password_profile()];
         state.selected = 0;
         let _ = state.sync_selected_profile();
-        let popup = PopupGeometry::from_terminal_size((66, 17), &state);
+        let popup = PopupGeometry::from_terminal_size((66, 18), &state);
         let details = DetailsGeometry::from_area(popup.details, &state);
 
         assert_eq!(popup.details.y, 2);
-        assert_eq!(popup.details.height, 15);
-        assert_eq!(details.rows.delete, Some(12));
+        assert_eq!(popup.details.height, 16);
+        assert_eq!(details.rows.delete, Some(13));
         assert!(
             popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height
         );
 
-        let output = rendered_text(66, 17, &state);
+        let output = rendered_text(66, 18, &state);
         assert!(output.contains("Connect Remote Host"));
         assert!(output.contains("Remember host"));
+        assert!(output.contains("Use proxy"));
         assert!(output.contains("Connect"));
         assert!(output.contains("Delete"));
     }
@@ -2571,7 +3165,7 @@ mod tests {
         state.status = Status::Working("Connecting...".to_string());
 
         assert_eq!(connect_label(&state), "Connect");
-        let output = rendered_text(66, 17, &state);
+        let output = rendered_text(66, 18, &state);
         assert!(output.contains("Connecting"));
         assert!(output.contains("Connecting..."));
         assert!(output.contains("Connect"));
@@ -2666,6 +3260,7 @@ mod tests {
             last_remote_port: Some(7575),
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }];
 
         state.selected = 0;
@@ -2854,6 +3449,54 @@ mod tests {
 
         assert_eq!(y, geometry.details.y + details.rows.password);
         assert_eq!(x, geometry.details.x + 14);
+    }
+
+    #[test]
+    fn editing_password_mask_tracks_short_password_length() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.ssh_password = "abc".to_string();
+        state.password_mode = PasswordMode::Enter;
+
+        assert_eq!(password_display(&state), "******  Show");
+        state.set_focus(Focus::Password);
+        assert_eq!(password_display(&state), "***  Show");
+
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+        let (x, _) = cursor_position(geometry.details, &state).unwrap();
+        assert_eq!(x, geometry.details.x + 14 + 3);
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Backspace)),
+            PaneAction::None
+        );
+        assert_eq!(password_display(&state), "**  Show");
+    }
+
+    #[test]
+    fn editing_sudo_password_mask_tracks_short_password_length() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.sudo_password = "abc".to_string();
+        state.sudo_mode = SudoMode::Replace;
+
+        assert_eq!(sudo_password_display(&state), "******  Show");
+        state.set_focus(Focus::Sudo);
+        assert_eq!(sudo_password_display(&state), "***  Show");
+
+        let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
+        let (x, _) = cursor_position(geometry.details, &state).unwrap();
+        assert_eq!(x, geometry.details.x + 14 + 3);
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Backspace)),
+            PaneAction::None
+        );
+        assert_eq!(sudo_password_display(&state), "**  Show");
     }
 
     #[test]
@@ -3176,6 +3819,39 @@ mod tests {
     }
 
     #[test]
+    fn connect_error_popup_blocks_actions_until_dismissed() {
+        let mut state = ConnectRemoteHostState::load();
+        state.focus = Focus::Connect;
+        state.status = Status::Error("Connect failed: long diagnostic".to_string());
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            PaneAction::None
+        );
+        assert!(matches!(state.status, Status::Hint(_)));
+
+        state.status = Status::Error("Connect failed again".to_string());
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char('q'))),
+            PaneAction::None
+        );
+        assert!(matches!(state.status, Status::Hint(_)));
+    }
+
+    #[test]
+    fn connect_error_popup_ignores_connect_activation() {
+        let mut state = ConnectRemoteHostState::load();
+        state.focus = Focus::Connect;
+        state.status = Status::Error("Connect failed".to_string());
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char('x'))),
+            PaneAction::None
+        );
+        assert!(matches!(state.status, Status::Error(_)));
+    }
+
+    #[test]
     fn connect_popup_ignores_connect_action_while_working() {
         let mut state = ConnectRemoteHostState::load();
         state.focus = Focus::Connect;
@@ -3204,6 +3880,7 @@ mod tests {
                 last_remote_port: Some(7474),
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
             RemoteHostProfile {
                 name: "b@127.0.0.1".to_string(),
@@ -3217,6 +3894,7 @@ mod tests {
                 last_remote_port: Some(7575),
                 last_endpoint: None,
                 last_connected_at: None,
+                use_install_proxy: true,
             },
         ];
         state.focus = Focus::Hosts;

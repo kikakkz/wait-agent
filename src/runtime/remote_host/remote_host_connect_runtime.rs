@@ -14,6 +14,9 @@ use crate::runtime::remote_host::remote_host_history_store::{
 use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
+use crate::runtime::remote_host::remote_install_proxy_store::{
+    wrap_install_command_with_proxy, RemoteInstallProxyStore,
+};
 use crate::runtime::remote_host::remote_port_probe::{
     RemotePortProbe, RemotePortProbePreference, SshRemotePortProbe,
 };
@@ -22,11 +25,10 @@ use crate::runtime::remote_host::ssh_remote_host_bootstrapper::{
 };
 use std::io::{self, Read};
 
-const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub trait RemotePortProbeFactory {
     type Probe;
@@ -52,6 +54,7 @@ pub struct RemoteHostConnectRequest {
     pub save_profile_name: Option<String>,
     pub local_connect_endpoint: String,
     pub cwd_hint: Option<PathBuf>,
+    pub use_install_proxy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,23 +133,32 @@ where
             .choose_remote_port(&preference, &request.local_connect_endpoint)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         let authority_node_id = authority_id_for_profile_port(&profile, port.port);
-        let plan = RemoteHostBootstrapPlan::from_profile(
+        let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             port.port,
             request.local_connect_endpoint.clone(),
             authority_node_id.clone(),
         );
+        if request.use_install_proxy {
+            let proxy_config = RemoteInstallProxyStore::default()
+                .load()
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+            plan.install_or_update_command = wrap_install_command_with_proxy(
+                &plan.install_or_update_command,
+                &proxy_config,
+                &profile.host,
+                &request.local_connect_endpoint,
+            );
+        }
         self.bootstrapper
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
-        let default_target = self.wait_for_first_online_target(
-            &authority_node_id,
-            DEFAULT_ENDPOINT_WAIT_TIMEOUT,
-            DEFAULT_ENDPOINT_POLL_INTERVAL,
-        )?;
+        let default_target =
+            self.wait_for_first_online_target(&authority_node_id, DEFAULT_ENDPOINT_POLL_INTERVAL)?;
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
+        profile.use_install_proxy = request.use_install_proxy;
         if should_save_profile {
             self.history_store
                 .upsert_profile(profile)
@@ -202,11 +214,9 @@ where
     fn wait_for_first_online_target(
         &self,
         expected: &str,
-        timeout: Duration,
         poll_interval: Duration,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
         let expected = expected.to_string();
-        let deadline = Instant::now() + timeout;
         loop {
             let targets = self
                 .target_registry
@@ -217,11 +227,6 @@ where
                 .find(|target| target.availability == SessionAvailability::Online)
             {
                 return Ok(target);
-            }
-            if Instant::now() >= deadline {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote endpoint `{expected}` did not publish a default session before timeout"
-                )));
             }
             thread::sleep(poll_interval);
         }
@@ -258,6 +263,7 @@ pub fn request_from_command(
         save_profile_name: command.save_profile.clone(),
         local_connect_endpoint,
         cwd_hint,
+        use_install_proxy: command.use_install_proxy.unwrap_or(true),
     })
 }
 
@@ -339,6 +345,7 @@ fn profile_from_direct_args(
         last_remote_port: None,
         last_endpoint: None,
         last_connected_at: None,
+        use_install_proxy: command.use_install_proxy.unwrap_or(true),
     })
 }
 
@@ -472,6 +479,27 @@ mod tests {
 
         fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
             Ok(self.targets.borrow().clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedGateway {
+        calls: Rc<RefCell<usize>>,
+        authority_id: String,
+        session_id: String,
+    }
+
+    impl TargetCatalogGateway for DelayedGateway {
+        type Error = String;
+
+        fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+            let mut calls = self.calls.borrow_mut();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![remote_target(&self.authority_id, &self.session_id)])
+            }
         }
     }
 
@@ -617,6 +645,7 @@ mod tests {
                 save_profile_name: None,
                 local_connect_endpoint: "10.1.26.84:7474".to_string(),
                 cwd_hint: None,
+                use_install_proxy: true,
             })
             .unwrap();
 
@@ -670,6 +699,7 @@ mod tests {
                 save_profile_name: None,
                 local_connect_endpoint: "10.1.26.84:7474".to_string(),
                 cwd_hint: Some(PathBuf::from("/opt/data/workspace/app-insight")),
+                use_install_proxy: true,
             })
             .unwrap();
 
@@ -680,6 +710,10 @@ mod tests {
             .start_plan
             .command
             .contains("--connect '10.1.26.84:7474'"));
+        assert!(!bootstrap_plans.borrow()[0]
+            .start_plan
+            .command
+            .contains("all_proxy"));
         assert!(bootstrap_plans.borrow()[0]
             .start_plan
             .command
@@ -728,6 +762,7 @@ mod tests {
             save_profile_name: Some("130".to_string()),
             local_connect_endpoint: "10.1.26.84:7474".to_string(),
             cwd_hint: None,
+            use_install_proxy: true,
         });
 
         assert!(result.is_err());
@@ -771,11 +806,95 @@ mod tests {
                 save_profile_name: None,
                 local_connect_endpoint: "10.1.26.84:7474".to_string(),
                 cwd_hint: None,
+                use_install_proxy: true,
             })
             .unwrap();
 
         assert!(history.load().unwrap().hosts.is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn wait_for_first_online_target_waits_for_signal_without_timeout_failure() {
+        let calls = Rc::new(RefCell::new(0));
+        let gateway = DelayedGateway {
+            calls: calls.clone(),
+            authority_id: "10.1.29.130#7476".to_string(),
+            session_id: "seed".to_string(),
+        };
+        let registry = TargetRegistryService::new(gateway.clone());
+        let runtime = RemoteHostConnectRuntime::new(
+            RemoteHostHistoryStore::new(unique_path("remote-host-connect-delayed-signal.toml")),
+            FakeProbe {
+                calls: Rc::new(RefCell::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Rc::new(RefCell::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry.clone(),
+            RemoteSessionCreationService::new(
+                FakeCreateTransport {
+                    requests: Rc::new(RefCell::new(Vec::new())),
+                    catalog_targets: Rc::new(RefCell::new(Vec::new())),
+                },
+                registry,
+            ),
+        );
+
+        let target = runtime
+            .wait_for_first_online_target("10.1.29.130#7476", Duration::from_millis(0))
+            .unwrap();
+
+        assert_eq!(target.address.authority_id(), "10.1.29.130#7476");
+        assert_eq!(target.address.session_id(), "seed");
+        assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn remote_host_connect_respects_disabled_install_proxy() {
+        let catalog_targets = Rc::new(RefCell::new(Vec::new()));
+        let bootstrap_plans = Rc::new(RefCell::new(Vec::new()));
+        let gateway = FakeGateway {
+            targets: catalog_targets.clone(),
+        };
+        let registry = TargetRegistryService::new(gateway.clone());
+        let runtime = RemoteHostConnectRuntime::new(
+            RemoteHostHistoryStore::new(unique_path("remote-host-connect-no-proxy.toml")),
+            FakeProbe {
+                calls: Rc::new(RefCell::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry.clone(),
+            RemoteSessionCreationService::new(
+                FakeCreateTransport {
+                    requests: Rc::new(RefCell::new(Vec::new())),
+                    catalog_targets,
+                },
+                registry,
+            ),
+        );
+
+        runtime
+            .connect(RemoteHostConnectRequest {
+                profile_name: None,
+                direct_profile: Some(profile()),
+                save_profile_name: None,
+                local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                cwd_hint: None,
+                use_install_proxy: false,
+            })
+            .unwrap();
+
+        let plans = bootstrap_plans.borrow();
+        assert_eq!(plans.len(), 1);
+        assert!(!plans[0].install_or_update_command.contains("all_proxy"));
+        assert!(!plans[0].start_plan.command.contains("all_proxy"));
     }
 
     fn profile() -> RemoteHostProfile {
@@ -791,6 +910,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         }
     }
 

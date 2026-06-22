@@ -188,7 +188,9 @@ fn is_footer_muted(word: &str) -> bool {
 }
 
 fn char_width(ch: char) -> usize {
-    if ch.is_ascii() || is_single_width_non_ascii(ch) {
+    if matches!(ch, '\u{fe0e}' | '\u{fe0f}') {
+        0
+    } else if ch.is_ascii() || is_single_width_non_ascii(ch) {
         1
     } else {
         2

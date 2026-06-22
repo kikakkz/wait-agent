@@ -302,6 +302,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
         let probe =
             SshRemotePortProbe::with_secret_store(profile, MemoryRemoteHostSecretStore::default());
@@ -342,6 +343,7 @@ mod tests {
             last_remote_port: None,
             last_endpoint: None,
             last_connected_at: None,
+            use_install_proxy: true,
         };
         let calls = Rc::new(RefCell::new(Vec::new()));
         let executor = RecordingSshExecutor {
