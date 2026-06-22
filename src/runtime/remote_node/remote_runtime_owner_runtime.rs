@@ -932,6 +932,7 @@ mod tests {
             port: 9001,
             connect: Some("10.0.0.8:7474".to_string()),
             node_id: None,
+            public_endpoint: None,
         };
 
         let args = remote_runtime_owner_args(&network);
@@ -954,6 +955,7 @@ mod tests {
             port: 7575,
             connect: None,
             node_id: None,
+            public_endpoint: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 
@@ -1083,6 +1085,7 @@ mod tests {
             port: 7474,
             connect: None,
             node_id: None,
+            public_endpoint: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 

@@ -17,6 +17,7 @@ It complements:
 - [architecture.md](architecture.md)
 - [remote-session-foundation.md](remote-session-foundation.md)
 - [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
+- [reliable-remote-publication-design.md](reliable-remote-publication-design.md)
 - [functional-design.md](functional-design.md)
 
 ## 2. Scope
@@ -30,6 +31,10 @@ It does not change the accepted local product path:
 - local tmux remains a valid target producer without network transport
 - server-hosted consoles keep using the same control-plane model, but their
   events are in-process rather than wire messages
+
+The accepted follow-up design for revisioned remote-session publication,
+acknowledgements, retry, and replay is documented in
+[reliable-remote-publication-design.md](reliable-remote-publication-design.md).
 
 This document intentionally defines:
 

@@ -607,6 +607,7 @@ mod tests {
                 port: 7474,
                 connect: Some("10.1.29.130:7474".to_string()),
                 node_id: None,
+                public_endpoint: None,
             },
             "wa-1",
             "session-1",

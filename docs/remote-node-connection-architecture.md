@@ -23,6 +23,7 @@ It complements:
 - [remote-session-foundation.md](remote-session-foundation.md)
 - [remote-network-completion-plan.md](remote-network-completion-plan.md)
 - [protocol.md](protocol.md)
+- [reliable-remote-publication-design.md](reliable-remote-publication-design.md)
 
 ## 2. Product And Runtime Rule
 
@@ -173,6 +174,12 @@ One primary bidirectional streaming RPC should carry:
 In protocol `v1`, `TargetPublished` and `TargetExited` remain compatibility
 wire names, but their product meaning is remote-session synchronization rather
 than publication-centric target discovery.
+
+The reliability rules for those messages are defined separately in
+[reliable-remote-publication-design.md](reliable-remote-publication-design.md):
+publications are revisioned, applied idempotently by the receiver, acknowledged,
+retried with exponential backoff when unacknowledged, and replayed after
+reconnect.
 
 This means WaitAgent does not need a second transport socket per target, and
 it does not need a hand-rolled framing layer for production transport.

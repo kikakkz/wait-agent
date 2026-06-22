@@ -17,6 +17,7 @@ pub struct RemoteNetworkConfig {
     pub port: u16,
     pub connect: Option<String>,
     pub node_id: Option<String>,
+    pub public_endpoint: Option<String>,
 }
 
 impl Default for RemoteNetworkConfig {
@@ -25,6 +26,7 @@ impl Default for RemoteNetworkConfig {
             port: DEFAULT_REMOTE_NODE_PORT,
             connect: None,
             node_id: None,
+            public_endpoint: None,
         }
     }
 }
@@ -43,6 +45,12 @@ impl RemoteNetworkConfig {
 
     pub fn advertised_listener_label(&self) -> String {
         self.advertised_listener_addr().to_string()
+    }
+
+    pub fn advertised_public_endpoint_label(&self) -> String {
+        self.public_endpoint
+            .clone()
+            .unwrap_or_else(|| self.advertised_listener_label())
     }
 
     pub fn advertised_host_id(&self) -> String {
@@ -74,6 +82,10 @@ impl RemoteNetworkConfig {
         if let Some(node_id) = &self.node_id {
             args.push("--node-id".to_string());
             args.push(node_id.clone());
+        }
+        if let Some(public_endpoint) = &self.public_endpoint {
+            args.push("--public".to_string());
+            args.push(public_endpoint.clone());
         }
         args
     }
@@ -664,6 +676,19 @@ fn parse_global_network_config(
                     return Err(CliError::InvalidValue("--node-id".to_string(), value));
                 }
                 network.node_id = Some(value);
+            }
+            "--public" => {
+                explicit = true;
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--public".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue("--public".to_string(), value));
+                }
+                network.public_endpoint = Some(value);
             }
             _ => break,
         }
@@ -1579,8 +1604,8 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
-        "  waitagent [--port <port>] [--connect <host:port>]",
-        "  waitagent [--port <port>] [--connect <host:port>] attach [<target>]",
+        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>]",
+        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<target>]",
         "  waitagent ls",
         "  waitagent detach [<target>]",
         "  waitagent stop [<target>]",
@@ -1658,12 +1683,18 @@ mod tests {
             "8484",
             "--connect",
             "remote.example:7474",
+            "--public",
+            "nat.example:17474",
             "attach",
             "wa-1:waitagent-1",
         ]);
 
         assert_eq!(cli.network.port, 8484);
         assert_eq!(cli.network.connect.as_deref(), Some("remote.example:7474"));
+        assert_eq!(
+            cli.network.public_endpoint.as_deref(),
+            Some("nat.example:17474")
+        );
         assert_eq!(
             cli.network.connect_endpoint_uri().as_deref(),
             Some("http://remote.example:7474")

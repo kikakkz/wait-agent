@@ -1286,6 +1286,7 @@ mod tests {
                 port: 9001,
                 connect: Some("10.0.0.8:7474".to_string()),
                 node_id: None,
+                public_endpoint: None,
             },
             "192.168.1.22:7474",
             Some("10.0.0.5:7474"),
@@ -1305,6 +1306,7 @@ mod tests {
             port: 9001,
             connect: Some("10.0.0.8:7474".to_string()),
             node_id: None,
+            public_endpoint: None,
         };
 
         let connect = connect_remote_host_popup_command("/tmp/wait agent", &workspace, &network);

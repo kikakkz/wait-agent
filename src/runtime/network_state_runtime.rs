@@ -6,6 +6,7 @@ use crate::infra::tmux::{
 const WAITAGENT_NETWORK_PORT_OPTION: &str = "@waitagent_network_port";
 const WAITAGENT_NETWORK_CONNECT_OPTION: &str = "@waitagent_network_connect";
 const WAITAGENT_NETWORK_NODE_ID_OPTION: &str = "@waitagent_network_node_id";
+const WAITAGENT_NETWORK_PUBLIC_ENDPOINT_OPTION: &str = "@waitagent_network_public_endpoint";
 
 pub(crate) fn persist_workspace_network_config(
     backend: &EmbeddedTmuxBackend,
@@ -27,6 +28,11 @@ pub(crate) fn persist_workspace_network_config(
         workspace,
         WAITAGENT_NETWORK_NODE_ID_OPTION,
         network.node_id.as_deref().unwrap_or(""),
+    )?;
+    backend.set_session_option(
+        workspace,
+        WAITAGENT_NETWORK_PUBLIC_ENDPOINT_OPTION,
+        network.public_endpoint.as_deref().unwrap_or(""),
     )
 }
 
@@ -50,6 +56,11 @@ pub(crate) fn persist_socket_network_config(
         &socket,
         WAITAGENT_NETWORK_NODE_ID_OPTION,
         network.node_id.as_deref().unwrap_or(""),
+    )?;
+    backend.set_global_option_on_socket(
+        &socket,
+        WAITAGENT_NETWORK_PUBLIC_ENDPOINT_OPTION,
+        network.public_endpoint.as_deref().unwrap_or(""),
     )
 }
 
@@ -75,6 +86,11 @@ pub(crate) fn recover_network_config_for_socket(
             .ok()
             .flatten()
             .filter(|value| !value.is_empty()),
+        public_endpoint: backend
+            .show_global_option_on_socket(&socket, WAITAGENT_NETWORK_PUBLIC_ENDPOINT_OPTION)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -97,6 +113,11 @@ pub(crate) fn recover_network_config_for_workspace(
                 .filter(|value| !value.is_empty()),
             node_id: backend
                 .show_session_option(workspace, WAITAGENT_NETWORK_NODE_ID_OPTION)
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty()),
+            public_endpoint: backend
+                .show_session_option(workspace, WAITAGENT_NETWORK_PUBLIC_ENDPOINT_OPTION)
                 .ok()
                 .flatten()
                 .filter(|value| !value.is_empty()),
@@ -309,6 +330,7 @@ mod tests {
             port: 17662,
             connect: Some("10.1.29.130:17662".to_string()),
             node_id: None,
+            public_endpoint: Some("nat.example:17474".to_string()),
         };
         persist_workspace_network_config(&backend, &workspace, &network)
             .expect("network state should persist");

@@ -426,8 +426,11 @@ impl WorkspaceCommandRuntime {
         command: ConnectRemoteHostCommand,
     ) -> Result<(), LifecycleError> {
         let cwd_hint = Some(self.resolve_workspace_dir(None)?);
-        let request =
-            request_from_command(&command, self.network.advertised_listener_label(), cwd_hint)?;
+        let request = request_from_command(
+            &command,
+            self.network.advertised_public_endpoint_label(),
+            cwd_hint,
+        )?;
         let catalog = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env_with_network(self.network.clone())
                 .map_err(tmux_runtime_error)?,

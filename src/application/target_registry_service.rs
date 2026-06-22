@@ -789,6 +789,7 @@ mod tests {
             port: 17575,
             connect: Some("127.0.0.1:7575".to_string()),
             node_id: None,
+            public_endpoint: None,
         };
 
         backend

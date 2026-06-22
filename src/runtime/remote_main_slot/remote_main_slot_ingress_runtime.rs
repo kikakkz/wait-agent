@@ -314,6 +314,7 @@ mod tests {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
                 node_id: None,
+                public_endpoint: None,
             })
             .expect("ingress runtime should build from build env");
         let (_client, server) = UnixStream::pair().expect("stream pair should open");
@@ -351,6 +352,7 @@ mod tests {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
                 node_id: None,
+                public_endpoint: None,
             })
             .expect("ingress runtime should build from build env");
 

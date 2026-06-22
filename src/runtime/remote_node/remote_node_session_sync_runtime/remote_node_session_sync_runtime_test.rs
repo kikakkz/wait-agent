@@ -296,6 +296,7 @@ mod tests {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
                 node_id: None,
+                public_endpoint: None,
             },
             poll_interval: Duration::from_millis(10),
             reconnect_delay: Duration::from_millis(10),
