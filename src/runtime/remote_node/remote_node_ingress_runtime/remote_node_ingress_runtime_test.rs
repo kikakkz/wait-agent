@@ -55,12 +55,16 @@ mod tests {
                     crate::infra::remote_grpc_proto::v1::TargetExited {
                         target_id: "remote-peer:10.1.26.84:7474:6a1b816eb1111435".to_string(),
                         transport_session_id: "6a1b816eb1111435".to_string(),
+                        node_instance_id: "node-inst-1".to_string(),
+                        revision: 7,
                     },
                 )),
             },
             &crate::infra::remote_grpc_proto::v1::TargetExited {
                 target_id: "remote-peer:10.1.26.84:7474:6a1b816eb1111435".to_string(),
                 transport_session_id: "6a1b816eb1111435".to_string(),
+                node_instance_id: "node-inst-1".to_string(),
+                revision: 7,
             },
         );
 

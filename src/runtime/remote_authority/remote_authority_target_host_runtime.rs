@@ -14,13 +14,14 @@ use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_registered,
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
 };
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -385,6 +386,11 @@ enum AuthorityHostEvent {
 }
 
 const OUTPUT_CHANNEL_BOUND: usize = 8192;
+const OUTPUT_FRAME_CACHE_CAP: usize = 1024;
+const INPUT_RING_BUFFER_CAP: usize = 256 * 1024;
+const INPUT_CONGESTION_HIGH_WATERMARK: usize = INPUT_RING_BUFFER_CAP * 3 / 4;
+const INPUT_CONGESTION_LOW_WATERMARK: usize = INPUT_RING_BUFFER_CAP / 4;
+const INPUT_DRAIN_CHUNK_MAX: usize = 4096;
 const REMOTE_AUTHORITY_PANE_DIED_HOOK: &str = "pane-died[20]";
 
 #[derive(Clone)]
@@ -400,6 +406,50 @@ enum AuthorityOutputMessage {
 
 struct AuthorityPaneBinding {
     pane: TmuxPaneId,
+}
+
+#[derive(Clone)]
+struct OutputFrameCacheEntry {
+    seq: u64,
+    session_id: String,
+    target_id: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct OutputFrameCache {
+    frames: VecDeque<OutputFrameCacheEntry>,
+}
+
+impl OutputFrameCache {
+    fn push(&mut self, entry: OutputFrameCacheEntry) {
+        if self.frames.len() == OUTPUT_FRAME_CACHE_CAP {
+            self.frames.pop_front();
+        }
+        self.frames.push_back(entry);
+    }
+
+    fn replay_from(&self, expected_seq: u64, received_seq: u64) -> Vec<OutputFrameCacheEntry> {
+        self.frames
+            .iter()
+            .filter(|entry| entry.seq >= expected_seq && entry.seq < received_seq)
+            .cloned()
+            .collect()
+    }
+}
+
+struct InputRingBuffer {
+    queue: Mutex<VecDeque<u8>>,
+    available: Condvar,
+}
+
+impl InputRingBuffer {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::with_capacity(INPUT_RING_BUFFER_CAP)),
+            available: Condvar::new(),
+        }
+    }
 }
 
 pub struct RemoteAuthorityOutputPumpRuntime;
@@ -457,6 +507,12 @@ where
         ensure_authority_pane_binding(self, &command, &mut current_binding, &event_socket_path)?;
 
         let (event_tx, event_rx) = mpsc::channel();
+        let output_cache = Arc::new(Mutex::new(OutputFrameCache::default()));
+        let input_buffer = Arc::new(InputRingBuffer::new());
+        let input_congested = Arc::new(AtomicBool::new(false));
+        let current_input_pane = Arc::new(Mutex::new(
+            current_binding.as_ref().map(|binding| binding.pane.clone()),
+        ));
         let (output_tx, output_rx) =
             mpsc::sync_channel::<AuthorityOutputMessage>(OUTPUT_CHANNEL_BOUND);
         let reader_transport = transport.clone();
@@ -506,6 +562,13 @@ where
         });
 
         let running = Arc::new(AtomicBool::new(true));
+        let input_drain_thread = spawn_input_drain_thread(
+            self.gateway.clone(),
+            command.socket_name.clone(),
+            input_buffer.clone(),
+            current_input_pane.clone(),
+            running.clone(),
+        );
         let output_thread =
             spawn_output_ingest_thread(output_listener, running.clone(), event_tx.clone());
         let pane_event_thread =
@@ -633,6 +696,39 @@ where
                     payload,
                 )) => {
                     health.record_event();
+                    if let Err(error) = ensure_authority_pane_binding(
+                        self,
+                        &command,
+                        &mut current_binding,
+                        &event_socket_path,
+                    ) {
+                        break Err(error);
+                    }
+                    *current_input_pane
+                        .lock()
+                        .expect("current input pane mutex should not be poisoned") =
+                        current_binding.as_ref().map(|binding| binding.pane.clone());
+                    let bytes_len = payload.input_bytes.len();
+                    let congested =
+                        enqueue_input_bytes(&input_buffer, &payload.input_bytes, &input_congested);
+                    if let Some(congested) = congested {
+                        if let Err(error) = transport.send_input_congestion(congested) {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] target host: input congestion signal failed: {error}"
+                            ));
+                        }
+                    }
+                    health.record_input(bytes_len as u64);
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] target host: queued RawPtyInput ({} bytes)",
+                        bytes_len
+                    ));
+                }
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::SyncRequest {
+                    expected_seq,
+                    received_seq,
+                }) => {
+                    health.record_event();
                     let pane = match ensure_authority_pane_binding(
                         self,
                         &command,
@@ -642,18 +738,21 @@ where
                         Ok(pane) => pane,
                         Err(error) => break Err(error),
                     };
-                    if let Err(error) = self
-                        .gateway
-                        .send_input(&command.socket_name, &pane, &payload.input_bytes)
-                        .map_err(remote_authority_error)
-                    {
+                    *current_input_pane
+                        .lock()
+                        .expect("current input pane mutex should not be poisoned") =
+                        current_binding.as_ref().map(|binding| binding.pane.clone());
+                    if let Err(error) = replay_output_frames_for_sync_request(
+                        self,
+                        &command,
+                        &pane,
+                        &transport,
+                        &output_cache,
+                        expected_seq,
+                        received_seq,
+                    ) {
                         break Err(error);
                     }
-                    health.record_input(payload.input_bytes.len() as u64);
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] target host: delivered RawPtyInput ({} bytes)",
-                        payload.input_bytes.len()
-                    ));
                 }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::ApplyResize(
                     payload,
@@ -715,6 +814,15 @@ where
                     // RawPtyOutput carries raw PTY bytes streamed through
                     // pipe-pane -O; TargetOutput carries full-screen captures
                     // from the output pump.
+                    output_cache
+                        .lock()
+                        .expect("output frame cache mutex should not be poisoned")
+                        .push(OutputFrameCacheEntry {
+                            seq: output_seq,
+                            session_id: command.transport_session_id.clone(),
+                            target_id: command.target_id.clone(),
+                            bytes: bytes.clone(),
+                        });
                     let msg = AuthorityOutputMessage::TargetOutput {
                         session_id: command.transport_session_id.clone(),
                         target_id: command.target_id.clone(),
@@ -796,6 +904,7 @@ where
         }
         cleanup_authority_pane_binding(self, &command, current_binding.take());
         running.store(false, Ordering::Relaxed);
+        input_buffer.available.notify_all();
         let _ = UnixStream::connect(&ingest_socket_path);
         let _ = UnixStream::connect(&event_socket_path);
         let _ = fs::remove_file(&ingest_socket_path);
@@ -806,6 +915,7 @@ where
         let _ = command_thread.join();
         let _ = output_thread.join();
         let _ = pane_event_thread.join();
+        let _ = input_drain_thread.join();
         // Write final diagnostics before exiting so operators can inspect
         // event counters for this target host.
         let _ = health.write_diag(&authority_diag_path(
@@ -949,6 +1059,135 @@ fn bind_output_ingest_listener(
     }
     let listener = UnixListener::bind(socket_path)?;
     Ok(listener)
+}
+
+fn enqueue_input_bytes(
+    input_buffer: &Arc<InputRingBuffer>,
+    bytes: &[u8],
+    congested: &Arc<AtomicBool>,
+) -> Option<bool> {
+    let mut queue = input_buffer
+        .queue
+        .lock()
+        .expect("input ring buffer mutex should not be poisoned");
+    while queue.len().saturating_add(bytes.len()) > INPUT_RING_BUFFER_CAP {
+        queue.pop_front();
+    }
+    queue.extend(bytes.iter().copied());
+    let len = queue.len();
+    input_buffer.available.notify_one();
+    if len >= INPUT_CONGESTION_HIGH_WATERMARK
+        && congested
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        Some(true)
+    } else if len <= INPUT_CONGESTION_LOW_WATERMARK
+        && congested
+            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn spawn_input_drain_thread<G>(
+    gateway: G,
+    socket_name: String,
+    input_buffer: Arc<InputRingBuffer>,
+    current_pane: Arc<Mutex<Option<TmuxPaneId>>>,
+    running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()>
+where
+    G: RemoteTargetPtyGateway,
+{
+    thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            let bytes = {
+                let mut queue = input_buffer
+                    .queue
+                    .lock()
+                    .expect("input ring buffer mutex should not be poisoned");
+                while queue.is_empty() && running.load(Ordering::Relaxed) {
+                    queue = input_buffer
+                        .available
+                        .wait(queue)
+                        .expect("input ring buffer mutex should not be poisoned");
+                }
+                if queue.is_empty() {
+                    Vec::new()
+                } else {
+                    let drain_len = queue.len().min(INPUT_DRAIN_CHUNK_MAX);
+                    queue.drain(..drain_len).collect::<Vec<_>>()
+                }
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let pane = current_pane
+                .lock()
+                .expect("current input pane mutex should not be poisoned")
+                .clone();
+            let Some(pane) = pane else {
+                continue;
+            };
+            if let Err(error) = gateway.send_input(&socket_name, &pane, &bytes) {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] target host: input drain send error: {}",
+                    error.to_string()
+                ));
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    })
+}
+
+fn replay_output_frames_for_sync_request<G, P>(
+    runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
+    command: &RemoteAuthorityTargetHostCommand,
+    pane: &TmuxPaneId,
+    transport: &RemoteAuthorityTransportRuntime,
+    output_cache: &Arc<Mutex<OutputFrameCache>>,
+    expected_seq: u64,
+    received_seq: u64,
+) -> Result<(), LifecycleError>
+where
+    G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
+{
+    let replay = output_cache
+        .lock()
+        .expect("output frame cache mutex should not be poisoned")
+        .replay_from(expected_seq, received_seq);
+    if !replay.is_empty() {
+        for entry in replay {
+            transport
+                .send_sync_response(&entry.session_id, &entry.target_id, entry.seq, entry.bytes)
+                .map_err(remote_authority_error)?;
+        }
+        return Ok(());
+    }
+
+    let screen = runtime
+        .gateway
+        .capture_bootstrap_screen(&command.socket_name, pane, false)
+        .map_err(remote_authority_error)?;
+    let (cursor_x, cursor_y) = runtime
+        .gateway
+        .capture_cursor_position(&command.socket_name, pane)
+        .map_err(remote_authority_error)?;
+    let replay = render_bootstrap_replay(&screen, cursor_x, cursor_y);
+    transport
+        .send_sync_response(
+            &command.transport_session_id,
+            &command.target_id,
+            expected_seq,
+            replay.into_bytes(),
+        )
+        .map_err(remote_authority_error)?;
+    Ok(())
 }
 
 fn spawn_output_ingest_thread(

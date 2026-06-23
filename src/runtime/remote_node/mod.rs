@@ -5,3 +5,4 @@ pub mod remote_node_session_runtime;
 pub mod remote_node_session_sync_runtime;
 pub mod remote_node_transport_runtime;
 pub mod remote_runtime_owner_runtime;
+pub mod remote_workspace_socket_registry_runtime;

@@ -2,7 +2,7 @@ id: task.remote-exit-latency-1
 kind: task
 version: 1
 title: add acknowledged local catalog notify to the remote session sync event loop
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-session-exit-latency-design.md

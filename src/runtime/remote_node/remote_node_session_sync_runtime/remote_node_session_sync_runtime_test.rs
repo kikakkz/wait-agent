@@ -5,9 +5,9 @@ mod tests {
         notify_remote_session_sync_owner, overlay_workspace_runtime_onto_active_local_target_hosts,
         remote_session_exited_envelope, remote_session_published_envelope,
         remote_session_sync_owner_available, remote_session_sync_owner_socket_path,
-        sync_explicit_local_catalog_change, sync_local_sessions, AuthorityHostSignal,
-        LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
-        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
+        sync_local_sessions, AuthorityHostSignal, LocalCatalogChangeReason, LocalSessionCatalog,
+        LocalTargetExitObserver, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
+        SessionSyncAuthorityHost, SourcePublicationAckOutcome, SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -20,7 +20,8 @@ mod tests {
         OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
     };
     use crate::infra::remote_protocol::{
-        BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload,
+        BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, TargetPublicationAckPayload,
+        TargetPublicationAckStatus,
     };
     use crate::infra::remote_transport_codec::read_control_plane_envelope;
     use crate::lifecycle::LifecycleError;
@@ -30,7 +31,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -149,31 +150,159 @@ mod tests {
     }
 
     #[test]
-    fn explicit_local_target_exit_sends_exit_without_synced_baseline() {
-        let (handle, mut receiver) =
-            RemoteNodeSessionHandle::new_for_tests("10.0.0.2", "server-session-1");
-        let mut synced_sessions = HashMap::new();
+    fn source_publication_tracker_revisions_ack_and_reconnect_replay() {
+        let mut tracker = SourcePublicationTracker::new();
         let mut next_message_id = 0;
+        tracker.on_connected();
 
-        sync_explicit_local_catalog_change(
-            "10.0.0.2",
-            &handle,
-            &LocalCatalogChangeReason::LocalTargetExited {
-                target_session_name: "shell-1".to_string(),
-            },
-            &mut synced_sessions,
-            &mut next_message_id,
-        )
-        .expect("explicit local exit should be sent");
-
-        let envelope = receiver
-            .try_recv()
-            .expect("remote target exit envelope should be sent");
-        let Some(Body::TargetExited(payload)) = envelope.body else {
-            panic!("expected target_exited body");
+        let first = tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session("wa-1", "shell-1"),
+            )
+            .expect("new state should publish");
+        assert_eq!(first.revision, 1);
+        let Some(Body::TargetPublished(payload)) = first.envelope.body.as_ref() else {
+            panic!("expected target published");
         };
-        assert_eq!(payload.target_id, "remote-peer:10.0.0.2:shell-1");
-        assert_eq!(payload.transport_session_id, "shell-1");
+        assert_eq!(payload.node_instance_id, "server-session-1");
+        assert_eq!(payload.revision, 1);
+        assert!(tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session("wa-1", "shell-1"),
+            )
+            .is_none());
+
+        assert_eq!(tracker.pending_publications().len(), 1);
+        tracker.on_disconnected();
+        assert!(tracker.pending_publications().is_empty());
+        tracker.on_connected();
+        assert_eq!(tracker.pending_publications()[0].revision, 1);
+
+        let ack = TargetPublicationAckPayload {
+            node_id: "10.0.0.2".to_string(),
+            node_instance_id: "server-session-1".to_string(),
+            target_id: "remote-peer:10.0.0.2:shell-1".to_string(),
+            revision: 1,
+            status: TargetPublicationAckStatus::Applied,
+            message: None,
+        };
+        assert_eq!(tracker.on_ack(&ack), SourcePublicationAckOutcome::Cleared);
+        assert!(tracker.pending_publications().is_empty());
+    }
+
+    #[test]
+    fn source_publication_tracker_failed_ack_keeps_pending_and_newer_ack_does_not_clear() {
+        let mut tracker = SourcePublicationTracker::new();
+        let mut next_message_id = 0;
+        tracker.on_connected();
+        tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session("wa-1", "shell-1"),
+            )
+            .expect("new state should publish");
+
+        let failed = TargetPublicationAckPayload {
+            node_id: "10.0.0.2".to_string(),
+            node_instance_id: "server-session-1".to_string(),
+            target_id: "remote-peer:10.0.0.2:shell-1".to_string(),
+            revision: 1,
+            status: TargetPublicationAckStatus::Failed,
+            message: Some("try again".to_string()),
+        };
+        assert_eq!(
+            tracker.on_ack(&failed),
+            SourcePublicationAckOutcome::Retained
+        );
+        assert_eq!(tracker.pending_publications().len(), 1);
+
+        let mut stale = failed.clone();
+        stale.revision = 0;
+        stale.status = TargetPublicationAckStatus::Applied;
+        assert_eq!(tracker.on_ack(&stale), SourcePublicationAckOutcome::Ignored);
+        assert_eq!(tracker.pending_publications().len(), 1);
+    }
+
+    #[test]
+    fn source_publication_tracker_schedules_retry_backoff_and_pauses_while_disconnected() {
+        let mut tracker = SourcePublicationTracker::new();
+        let mut next_message_id = 0;
+        let now = std::time::Instant::now();
+        tracker.on_connected();
+        let publication = tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session("wa-1", "shell-1"),
+            )
+            .expect("new state should publish");
+
+        tracker.on_publication_sent(&publication.target_id, publication.revision, now);
+        assert!(tracker
+            .due_retry_publications(now + Duration::from_millis(249))
+            .is_empty());
+        assert_eq!(
+            tracker.due_retry_publications(now + Duration::from_millis(250))[0].revision,
+            1
+        );
+        assert!(tracker
+            .next_retry_delay(now + Duration::from_millis(100))
+            .is_some());
+
+        tracker.on_disconnected();
+        assert!(tracker
+            .due_retry_publications(now + Duration::from_secs(1))
+            .is_empty());
+        assert!(tracker
+            .next_retry_delay(now + Duration::from_secs(1))
+            .is_none());
+
+        tracker.on_connected();
+        assert_eq!(tracker.pending_replay_publications()[0].revision, 1);
+        tracker.on_publication_sent(&publication.target_id, publication.revision, now);
+        assert!(tracker
+            .due_retry_publications(now + Duration::from_millis(499))
+            .is_empty());
+        assert_eq!(
+            tracker.due_retry_publications(now + Duration::from_millis(500))[0].revision,
+            1
+        );
+    }
+
+    #[test]
+    fn source_publication_tracker_target_exit_uses_next_revision() {
+        let mut tracker = SourcePublicationTracker::new();
+        let mut next_message_id = 0;
+        tracker.on_connected();
+        tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session("wa-1", "shell-1"),
+            )
+            .expect("new state should publish");
+        let exit = tracker.on_target_exited(
+            "10.0.0.2",
+            "server-session-1",
+            &mut next_message_id,
+            "shell-1",
+        );
+        assert_eq!(exit.revision, 2);
+        let Some(Body::TargetExited(payload)) = exit.envelope.body.as_ref() else {
+            panic!("expected target exited");
+        };
+        assert_eq!(payload.revision, 2);
+        assert_eq!(payload.node_instance_id, "server-session-1");
     }
 
     #[test]
@@ -183,6 +312,8 @@ mod tests {
         let observer = RecordingLocalTargetExitObserver::default();
         let mut synced_sessions = local_sessions_by_local_id(vec![session("wa-1", "shell-1")]);
         let mut next_message_id = 0;
+        let mut publication_tracker = SourcePublicationTracker::new();
+        publication_tracker.on_connected();
 
         sync_local_sessions(
             &FakeGateway { sessions: vec![] },
@@ -191,6 +322,7 @@ mod tests {
             &observer,
             &mut synced_sessions,
             &mut next_message_id,
+            &mut publication_tracker,
         )
         .expect("local session sync should succeed");
 
@@ -298,7 +430,6 @@ mod tests {
                 node_id: None,
                 public_endpoint: None,
             },
-            poll_interval: Duration::from_millis(10),
             reconnect_delay: Duration::from_millis(10),
         };
 
@@ -319,6 +450,106 @@ mod tests {
         };
         assert_eq!(payload.transport_session_id, "shell-1");
         drop(guard);
+    }
+
+    #[test]
+    fn runtime_retries_unacked_publication_with_same_revision() {
+        let receiver_slot = Arc::new(Mutex::new(None));
+        let runtime = RemoteNodeSessionSyncRuntime {
+            gateway: FakeGateway {
+                sessions: vec![session("wa-1", "shell-1")],
+            },
+            transport: FakeTransport {
+                receiver_slot: receiver_slot.clone(),
+            },
+            local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            network: RemoteNetworkConfig {
+                port: 7474,
+                connect: Some("127.0.0.1:7474".to_string()),
+                node_id: None,
+                public_endpoint: None,
+            },
+            reconnect_delay: Duration::from_millis(10),
+        };
+
+        let guard = runtime.start().expect("runtime should start");
+        let first = wait_for_envelope(&receiver_slot);
+        let second = wait_for_envelope(&receiver_slot);
+        drop(guard);
+
+        let Some(Body::TargetPublished(first_payload)) = first.body else {
+            panic!("expected first target_published body");
+        };
+        let Some(Body::TargetPublished(second_payload)) = second.body else {
+            panic!("expected retry target_published body");
+        };
+        assert_eq!(first_payload.transport_session_id, "shell-1");
+        assert_eq!(second_payload.transport_session_id, "shell-1");
+        assert_eq!(first_payload.revision, 1);
+        assert_eq!(second_payload.revision, 1);
+    }
+
+    #[test]
+    fn runtime_reconnect_replays_pending_and_publishes_new_live_baseline() {
+        let transport = ControlledReconnectTransport::default();
+        let sessions = Arc::new(Mutex::new(vec![session("wa-1", "shell-1")]));
+        let runtime = RemoteNodeSessionSyncRuntime {
+            gateway: MutableFakeGateway {
+                sessions: sessions.clone(),
+            },
+            transport: transport.clone(),
+            local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            network: RemoteNetworkConfig {
+                port: 7474,
+                connect: Some("127.0.0.1:7474".to_string()),
+                node_id: Some("node-a".to_string()),
+                public_endpoint: None,
+            },
+            reconnect_delay: Duration::from_millis(10),
+        };
+
+        let guard = runtime.start().expect("runtime should start");
+        let first = wait_for_controlled_envelope(&transport.receivers, 0);
+        let Some(Body::TargetPublished(first_payload)) = first.body else {
+            panic!("expected first target_published body");
+        };
+        assert_eq!(first_payload.transport_session_id, "shell-1");
+        assert_eq!(first_payload.revision, 1);
+        assert_eq!(first_payload.node_instance_id, "server-session-1");
+
+        sessions
+            .lock()
+            .expect("fake sessions mutex should not be poisoned")
+            .push(session("wa-1", "shell-2"));
+        transport.close_session(0, "node-a", "server-session-1");
+
+        let second = wait_for_controlled_envelope(&transport.receivers, 1);
+        let third = wait_for_controlled_envelope(&transport.receivers, 1);
+        drop(guard);
+
+        let publications = [second, third]
+            .into_iter()
+            .map(|envelope| {
+                let Some(Body::TargetPublished(payload)) = envelope.body else {
+                    panic!("expected target_published body after reconnect");
+                };
+                payload
+            })
+            .collect::<Vec<_>>();
+
+        let replay = publications
+            .iter()
+            .find(|payload| payload.transport_session_id == "shell-1")
+            .expect("pending shell-1 publication should replay");
+        assert_eq!(replay.revision, 1);
+        assert_eq!(replay.node_instance_id, "server-session-1");
+
+        let baseline = publications
+            .iter()
+            .find(|payload| payload.transport_session_id == "shell-2")
+            .expect("new live shell-2 baseline should publish");
+        assert_eq!(baseline.revision, 1);
+        assert_eq!(baseline.node_instance_id, "server-session-2");
     }
 
     #[test]
@@ -367,6 +598,89 @@ mod tests {
         }
         notifier.join().expect("notifier should join");
         let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn local_catalog_change_triggers_catalog_diff_sync_without_poll_wait() {
+        let receiver_slot = Arc::new(Mutex::new(None));
+        let sessions = Arc::new(Mutex::new(vec![session("wa-1", "shell-1")]));
+        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let runtime = RemoteNodeSessionSyncRuntime {
+            gateway: MutableFakeGateway {
+                sessions: sessions.clone(),
+            },
+            transport: FakeTransport {
+                receiver_slot: receiver_slot.clone(),
+            },
+            local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            network: RemoteNetworkConfig {
+                port: 7474,
+                connect: Some("127.0.0.1:7474".to_string()),
+                node_id: None,
+                public_endpoint: None,
+            },
+            reconnect_delay: Duration::from_millis(10),
+        };
+
+        let guard = runtime
+            .start_with_local_catalog_changes(local_catalog_rx)
+            .expect("runtime should start");
+        let first = wait_for_envelope(&receiver_slot);
+        let Some(Body::TargetPublished(payload)) = first.body else {
+            panic!("expected initial target_published body");
+        };
+        assert_eq!(payload.transport_session_id, "shell-1");
+
+        sessions
+            .lock()
+            .expect("fake sessions mutex should not be poisoned")
+            .clear();
+        local_catalog_tx
+            .send(LocalCatalogChangeReason::LocalTargetExited {
+                target_session_name: "shell-1".to_string(),
+            })
+            .expect("local catalog change should send");
+
+        let second = wait_for_envelope(&receiver_slot);
+        let Some(Body::TargetExited(payload)) = second.body else {
+            panic!("expected target_exited body after catalog diff");
+        };
+        assert_eq!(payload.transport_session_id, "shell-1");
+        drop(guard);
+    }
+
+    #[test]
+    fn catalog_transport_event_syncs_newly_created_target_into_baseline() {
+        let (handle, mut receiver) =
+            RemoteNodeSessionHandle::new_for_tests("10.0.0.2", "server-session-1");
+        let observer = RecordingLocalTargetExitObserver::default();
+        let mut synced_sessions = local_sessions_by_local_id(vec![session("wa-1", "shell-1")]);
+        let mut next_message_id = 0;
+        let mut publication_tracker = SourcePublicationTracker::new();
+        publication_tracker.on_connected();
+
+        let should_reconnect = super::super::sync_local_sessions_after_catalog_transport_event(
+            &FakeGateway {
+                sessions: vec![session("wa-1", "shell-1"), session("wa-1", "shell-2")],
+            },
+            "10.0.0.2",
+            Some(&handle),
+            &observer,
+            &mut synced_sessions,
+            &mut next_message_id,
+            &mut publication_tracker,
+            "test create-session",
+        );
+
+        assert!(!should_reconnect);
+        assert!(synced_sessions.contains_key("local-tmux:wa-1:shell-2"));
+        let envelope = receiver
+            .try_recv()
+            .expect("newly created target should be published immediately");
+        let Some(Body::TargetPublished(payload)) = envelope.body else {
+            panic!("expected target_published body");
+        };
+        assert_eq!(payload.transport_session_id, "shell-2");
     }
 
     #[test]
@@ -593,6 +907,23 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MutableFakeGateway {
+        sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    }
+
+    impl LocalSessionCatalog for MutableFakeGateway {
+        type Error = &'static str;
+
+        fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+            Ok(self
+                .sessions
+                .lock()
+                .expect("fake sessions mutex should not be poisoned")
+                .clone())
+        }
+    }
+
+    #[derive(Clone)]
     struct FakeTransport {
         receiver_slot: Arc<
             Mutex<
@@ -605,7 +936,9 @@ mod tests {
         >,
     }
 
-    struct FakeGuard;
+    struct FakeGuard {
+        _event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
+    }
 
     impl OutboundRemoteNodeTransport for FakeTransport {
         type Guard = FakeGuard;
@@ -625,7 +958,76 @@ mod tests {
             event_tx
                 .send(RemoteNodeTransportEvent::SessionOpened { session: handle })
                 .map_err(|_| "failed to deliver session open event")?;
-            Ok(FakeGuard)
+            Ok(FakeGuard {
+                _event_tx: event_tx,
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ControlledReconnectTransport {
+        receivers: Arc<
+            Mutex<
+                Vec<
+                    tokio::sync::mpsc::UnboundedReceiver<
+                        crate::infra::remote_grpc_proto::v1::NodeSessionEnvelope,
+                    >,
+                >,
+            >,
+        >,
+        event_txs: Arc<Mutex<Vec<mpsc::Sender<RemoteNodeTransportEvent>>>>,
+        connect_count: Arc<AtomicUsize>,
+    }
+
+    struct ControlledReconnectGuard {
+        _event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
+    }
+
+    impl ControlledReconnectTransport {
+        fn close_session(&self, index: usize, node_id: &str, session_instance_id: &str) {
+            let event_tx = self
+                .event_txs
+                .lock()
+                .expect("controlled transport event tx mutex should not be poisoned")
+                .get(index)
+                .cloned()
+                .expect("controlled transport session should exist");
+            event_tx
+                .send(RemoteNodeTransportEvent::SessionClosed {
+                    node_id: node_id.to_string(),
+                    session_instance_id: session_instance_id.to_string(),
+                })
+                .expect("controlled transport close event should send");
+        }
+    }
+
+    impl OutboundRemoteNodeTransport for ControlledReconnectTransport {
+        type Guard = ControlledReconnectGuard;
+        type Error = &'static str;
+
+        fn connect_outbound(
+            &self,
+            request: OutboundNodeSessionRequest,
+            event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
+        ) -> Result<Self::Guard, Self::Error> {
+            let session_index = self.connect_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let session_instance_id = format!("server-session-{session_index}");
+            let (handle, receiver) =
+                RemoteNodeSessionHandle::new_for_tests(request.node_id, session_instance_id);
+            self.receivers
+                .lock()
+                .expect("controlled transport receiver mutex should not be poisoned")
+                .push(receiver);
+            self.event_txs
+                .lock()
+                .expect("controlled transport event tx mutex should not be poisoned")
+                .push(event_tx.clone());
+            event_tx
+                .send(RemoteNodeTransportEvent::SessionOpened { session: handle })
+                .map_err(|_| "failed to deliver session open event")?;
+            Ok(ControlledReconnectGuard {
+                _event_tx: event_tx,
+            })
         }
     }
 
@@ -639,6 +1041,58 @@ mod tests {
             raw_pty_passthrough: true,
             bootstrap_mode: BootstrapMode::Full,
         })
+    }
+
+    fn wait_for_envelope(
+        receiver_slot: &Arc<
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::UnboundedReceiver<
+                        crate::infra::remote_grpc_proto::v1::NodeSessionEnvelope,
+                    >,
+                >,
+            >,
+        >,
+    ) -> crate::infra::remote_grpc_proto::v1::NodeSessionEnvelope {
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("timed out waiting for outbound session sync envelope");
+            }
+            if let Some(envelope) = try_take_envelope(receiver_slot) {
+                return envelope;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_controlled_envelope(
+        receivers: &Arc<
+            Mutex<
+                Vec<
+                    tokio::sync::mpsc::UnboundedReceiver<
+                        crate::infra::remote_grpc_proto::v1::NodeSessionEnvelope,
+                    >,
+                >,
+            >,
+        >,
+        index: usize,
+    ) -> crate::infra::remote_grpc_proto::v1::NodeSessionEnvelope {
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("timed out waiting for controlled outbound session sync envelope");
+            }
+            let envelope = receivers
+                .lock()
+                .expect("controlled transport receiver mutex should not be poisoned")
+                .get_mut(index)
+                .and_then(|receiver| receiver.try_recv().ok());
+            if let Some(envelope) = envelope {
+                return envelope;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn try_take_envelope(

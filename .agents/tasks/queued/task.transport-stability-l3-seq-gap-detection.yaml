@@ -2,7 +2,7 @@ id: task.transport-stability-l3
 kind: task
 version: 1
 title: add output sequence numbering and SyncRequest gap recovery
-status: ready
+status: done
 priority: low
 design_ref:
   doc: docs/remote-transport-stability-design.md

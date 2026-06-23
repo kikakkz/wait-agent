@@ -12,6 +12,16 @@ impl ErrorLog {
     }
 
     pub fn log(&self, message: String) {
+        self.write(message);
+    }
+
+    pub fn log_exit_latency(&self, message: String) {
+        if std::env::var_os("WAITAGENT_EXIT_LATENCY_DIAG").is_some() {
+            self.write(message);
+        }
+    }
+
+    fn write(&self, message: String) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -6,7 +6,8 @@ use crate::infra::remote_protocol::{
     OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
     OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope, RawPtyInputPayload,
     RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublishedPayload,
+    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+    TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -20,6 +21,7 @@ const AUTHORITY_FRAME_PING: u8 = 4;
 const AUTHORITY_FRAME_PONG: u8 = 5;
 const AUTHORITY_FRAME_SYNC_REQUEST: u8 = 6;
 const AUTHORITY_FRAME_SYNC_RESPONSE: u8 = 7;
+const AUTHORITY_FRAME_INPUT_CONGESTION: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityTransportFrame {
@@ -38,6 +40,7 @@ pub enum AuthorityTransportFrame {
         seq: u64,
         bytes: Vec<u8>,
     },
+    InputCongestion(bool),
 }
 
 pub fn write_registration_frame(
@@ -171,6 +174,10 @@ pub fn write_authority_transport_frame(
             write_u64(writer, *seq)?;
             write_bytes(writer, bytes)?;
         }
+        AuthorityTransportFrame::InputCongestion(congested) => {
+            write_u8(writer, AUTHORITY_FRAME_INPUT_CONGESTION)?;
+            write_u8(writer, u8::from(*congested))?;
+        }
     }
     writer.flush()?;
     Ok(())
@@ -218,6 +225,9 @@ pub fn read_authority_transport_frame(
                 bytes,
             })
         }
+        AUTHORITY_FRAME_INPUT_CONGESTION => Ok(AuthorityTransportFrame::InputCongestion(
+            read_u8(reader)? != 0,
+        )),
         other => Err(RemoteTransportCodecError::new(format!(
             "unknown authority transport frame tag `{other}`"
         ))),
@@ -418,6 +428,8 @@ fn write_payload(
         ControlPlanePayload::TargetPublished(payload) => {
             write_u8(writer, 9)?;
             write_string(writer, &payload.transport_session_id)?;
+            write_string(writer, &payload.node_instance_id)?;
+            write_u64(writer, payload.revision)?;
             write_optional_string(writer, payload.source_session_name.as_deref())?;
             write_optional_string(writer, payload.selector.as_deref())?;
             write_static_string(writer, payload.availability)?;
@@ -432,7 +444,18 @@ fn write_payload(
         ControlPlanePayload::TargetExited(payload) => {
             write_u8(writer, 10)?;
             write_string(writer, &payload.transport_session_id)?;
+            write_string(writer, &payload.node_instance_id)?;
+            write_u64(writer, payload.revision)?;
             write_optional_string(writer, payload.source_session_name.as_deref())?;
+        }
+        ControlPlanePayload::TargetPublicationAck(payload) => {
+            write_u8(writer, 73)?;
+            write_string(writer, &payload.node_id)?;
+            write_string(writer, &payload.node_instance_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_u64(writer, payload.revision)?;
+            write_target_publication_ack_status(writer, payload.status)?;
+            write_optional_string(writer, payload.message.as_deref())?;
         }
         ControlPlanePayload::Error(payload) => {
             write_u8(writer, 11)?;
@@ -563,6 +586,8 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
         }),
         9 => ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: read_string(reader)?,
+            node_instance_id: read_string(reader)?,
+            revision: read_u64(reader)?,
             source_session_name: read_optional_string(reader)?,
             selector: read_optional_string(reader)?,
             availability: read_known_static_string(reader)?,
@@ -576,7 +601,17 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
         }),
         10 => ControlPlanePayload::TargetExited(TargetExitedPayload {
             transport_session_id: read_string(reader)?,
+            node_instance_id: read_string(reader)?,
+            revision: read_u64(reader)?,
             source_session_name: read_optional_string(reader)?,
+        }),
+        73 => ControlPlanePayload::TargetPublicationAck(TargetPublicationAckPayload {
+            node_id: read_string(reader)?,
+            node_instance_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            revision: read_u64(reader)?,
+            status: read_target_publication_ack_status(reader)?,
+            message: read_optional_string(reader)?,
         }),
         11 => ControlPlanePayload::Error(ErrorPayload {
             code: read_known_static_string(reader)?,
@@ -739,6 +774,33 @@ fn read_task_state(reader: &mut impl Read) -> Result<&'static str, RemoteTranspo
         })
 }
 
+fn write_target_publication_ack_status(
+    writer: &mut impl Write,
+    status: TargetPublicationAckStatus,
+) -> Result<(), RemoteTransportCodecError> {
+    write_u8(
+        writer,
+        match status {
+            TargetPublicationAckStatus::Applied => 1,
+            TargetPublicationAckStatus::StaleRevision => 2,
+            TargetPublicationAckStatus::Failed => 3,
+        },
+    )
+}
+
+fn read_target_publication_ack_status(
+    reader: &mut impl Read,
+) -> Result<TargetPublicationAckStatus, RemoteTransportCodecError> {
+    match read_u8(reader)? {
+        1 => Ok(TargetPublicationAckStatus::Applied),
+        2 => Ok(TargetPublicationAckStatus::StaleRevision),
+        3 => Ok(TargetPublicationAckStatus::Failed),
+        other => Err(RemoteTransportCodecError::new(format!(
+            "unknown target publication ack status `{other}`"
+        ))),
+    }
+}
+
 fn write_optional_static_string(
     writer: &mut impl Write,
     value: Option<&'static str>,
@@ -886,7 +948,8 @@ mod tests {
         CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
         NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload,
         OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-        TargetOutputPayload, TargetPublishedPayload,
+        TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+        TargetPublishedPayload,
     };
 
     #[test]
@@ -980,6 +1043,7 @@ mod tests {
                 seq: 43,
                 bytes: b"\x1b[32mreplay data\r\n".to_vec(),
             },
+            AuthorityTransportFrame::InputCongestion(true),
         ];
         for frame in frames {
             let mut bytes = Vec::new();
@@ -1081,6 +1145,8 @@ mod tests {
             console_id: None,
             payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
                 transport_session_id: "shell-1".to_string(),
+                node_instance_id: "node-inst-1".to_string(),
+                revision: 7,
                 source_session_name: Some("target-host-1".to_string()),
                 selector: Some("wa-local:shell-1".to_string()),
                 availability: "online",
@@ -1091,6 +1157,37 @@ mod tests {
                 attached_clients: 2,
                 window_count: 3,
                 task_state: "input",
+            }),
+        };
+        let mut bytes = Vec::new();
+
+        write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+        let decoded =
+            read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_target_publication_ack() {
+        let envelope = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-ack".to_string(),
+            message_type: "target_publication_ack",
+            timestamp: "2026-06-23T00:00:00Z".to_string(),
+            sender_id: "server".to_string(),
+            correlation_id: Some("corr-ack".to_string()),
+            session_id: None,
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::TargetPublicationAck(TargetPublicationAckPayload {
+                node_id: "peer-a".to_string(),
+                node_instance_id: "node-inst-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                revision: 7,
+                status: TargetPublicationAckStatus::Applied,
+                message: Some("applied".to_string()),
             }),
         };
         let mut bytes = Vec::new();
@@ -1196,6 +1293,8 @@ mod tests {
                 console_id: None,
                 payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
                     transport_session_id: "shell-1".to_string(),
+                    node_instance_id: "node-inst-1".to_string(),
+                    revision: 7,
                     source_session_name: Some("target-host-1".to_string()),
                     selector: Some("wk:shell".to_string()),
                     availability: "online",

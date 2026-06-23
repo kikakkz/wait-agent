@@ -2,7 +2,7 @@ id: task.transport-stability-l1
 kind: task
 version: 1
 title: replace output channel try_send with blocking send and larger buffer
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-transport-stability-design.md

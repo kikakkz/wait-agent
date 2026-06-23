@@ -1424,16 +1424,17 @@ mod tests {
                 true,
             )
             .expect("activation should not require authority registration");
-        let paused = vec![b"ab".to_vec(), b"c".to_vec()];
+        let mut paused = vec![b"ab".to_vec(), b"c".to_vec()];
         let mut console_seq = 7;
 
         let authority_mailbox = runtime
             .ensure_local_connection("peer-a")
             .expect("authority registration should expose mailbox");
-        flush_paused_input(&runtime, &target, &binding, &paused, &mut console_seq)
+        flush_paused_input(&runtime, &target, &binding, &mut paused, &mut console_seq)
             .expect("paused input should flush after authority registration");
 
         assert_eq!(console_seq, 9);
+        assert!(paused.is_empty());
         let envelopes = authority_mailbox.snapshot();
         assert_eq!(envelopes.len(), 2);
         let inputs: Vec<_> = envelopes

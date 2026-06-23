@@ -183,7 +183,7 @@ impl LocalTargetHostRuntime {
                 target_session_name: target_session_name.to_string(),
             },
         ) {
-            Ok(()) => ERROR_LOG.log(format!(
+            Ok(()) => ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] local_catalog_notify_acked socket={} elapsed={:?} stage=local_target_exit",
                 socket_name,
                 t_notify.elapsed()

@@ -289,6 +289,7 @@ mod tests {
             mirror_bootstrap_chunk_envelope(),
             Some(&mut active),
             &BTreeSet::new(),
+            &mut super::super::ReceiverPublicationRevisionTable::default(),
         )
         .expect("bootstrap chunk should route");
         route_transport_envelope(
@@ -297,6 +298,7 @@ mod tests {
             mirror_bootstrap_complete_envelope(),
             Some(&mut active),
             &BTreeSet::new(),
+            &mut super::super::ReceiverPublicationRevisionTable::default(),
         )
         .expect("bootstrap complete should route");
         route_transport_envelope(
@@ -305,6 +307,7 @@ mod tests {
             target_output_envelope(),
             Some(&mut active),
             &BTreeSet::new(),
+            &mut super::super::ReceiverPublicationRevisionTable::default(),
         )
         .expect("target output should route");
 
@@ -411,8 +414,9 @@ mod tests {
             ]),
             published_fingerprints: std::collections::HashMap::new(),
         };
-        let publication_runtime = RemoteTargetPublicationRuntime::from_build_env()
-            .expect("publication runtime should build");
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
 
         route_transport_envelope(
             &publication_runtime,
@@ -420,6 +424,7 @@ mod tests {
             target_exited_envelope_for("shell-a"),
             Some(&mut active),
             &BTreeSet::new(),
+            &mut super::super::ReceiverPublicationRevisionTable::default(),
         )
         .expect("target exited should route");
 
@@ -448,6 +453,62 @@ mod tests {
         }
         let _ = fs::remove_file(socket_path_a);
         let _ = fs::remove_file(socket_path_b);
+    }
+
+    #[test]
+    fn revision_table_acks_and_rejects_stale_target_publications() {
+        let node_id = "peer-revision";
+        let (session_handle, mut outbound_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id, "session-1");
+        let mut active = ActiveNodeIngressSession {
+            session: session_handle,
+            bridges: std::collections::HashMap::new(),
+            published_fingerprints: std::collections::HashMap::new(),
+        };
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
+        let mut revisions = super::super::ReceiverPublicationRevisionTable::default();
+
+        route_transport_envelope(
+            &publication_runtime,
+            node_id,
+            target_published_envelope_with_revision("shell-rev", 2, Some("codex")),
+            Some(&mut active),
+            &BTreeSet::new(),
+            &mut revisions,
+        )
+        .expect("new revision should apply");
+        let ack = outbound_rx
+            .try_recv()
+            .expect("applied publication should be acked");
+        assert_publication_ack(&ack, 2, "applied");
+
+        route_transport_envelope(
+            &publication_runtime,
+            node_id,
+            target_published_envelope_with_revision("shell-rev", 1, Some("bash")),
+            Some(&mut active),
+            &BTreeSet::new(),
+            &mut revisions,
+        )
+        .expect("stale revision should be rejected without failing route");
+        let ack = outbound_rx
+            .try_recv()
+            .expect("stale publication should be acked");
+        assert_publication_ack(&ack, 1, "stale_revision");
+
+        route_transport_envelope(
+            &publication_runtime,
+            node_id,
+            target_exited_envelope_with_revision("shell-rev", 1),
+            Some(&mut active),
+            &BTreeSet::new(),
+            &mut revisions,
+        )
+        .expect("stale exit revision should be rejected without failing route");
+        let ack = outbound_rx.try_recv().expect("stale exit should be acked");
+        assert_publication_ack(&ack, 1, "stale_revision");
     }
 
     #[test]
@@ -724,6 +785,75 @@ mod tests {
         }
     }
 
+    fn assert_publication_ack(envelope: &NodeSessionEnvelope, revision: u64, status: &str) {
+        let Some(Body::TargetPublicationAck(payload)) = envelope.body.as_ref() else {
+            panic!("expected TargetPublicationAck, got {:?}", envelope.body);
+        };
+        assert_eq!(payload.node_id, "peer-revision");
+        assert_eq!(payload.node_instance_id, "client-session-1");
+        assert_eq!(payload.target_id, "remote-peer:peer-revision:shell-rev");
+        assert_eq!(payload.revision, revision);
+        let actual = crate::infra::remote_grpc_proto::v1::TargetPublicationAckStatus::try_from(
+            payload.status,
+        )
+        .expect("ack status should be known");
+        let expected = match status {
+            "applied" => crate::infra::remote_grpc_proto::v1::TargetPublicationAckStatus::Applied,
+            "stale_revision" => {
+                crate::infra::remote_grpc_proto::v1::TargetPublicationAckStatus::StaleRevision
+            }
+            other => panic!("unexpected expected status {other}"),
+        };
+        assert_eq!(actual, expected);
+    }
+
+    fn target_published_envelope_with_revision(
+        session_id: &str,
+        revision: u64,
+        command_name: Option<&str>,
+    ) -> NodeSessionEnvelope {
+        let mut envelope = target_published_envelope_for(session_id);
+        if let Some(Body::TargetPublished(payload)) = envelope.body.as_mut() {
+            payload.target_id = format!("remote-peer:peer-revision:{session_id}");
+            payload.authority_node_id = "peer-revision".to_string();
+            payload.transport_session_id = session_id.to_string();
+            payload.command_name = command_name.map(str::to_string);
+            payload.node_instance_id = "client-session-1".to_string();
+            payload.revision = revision;
+        }
+        envelope.route = Some(RouteContext {
+            authority_node_id: Some("peer-revision".to_string()),
+            target_id: Some(format!("remote-peer:peer-revision:{session_id}")),
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: Some(session_id.to_string()),
+        });
+        envelope
+    }
+
+    fn target_exited_envelope_with_revision(
+        session_id: &str,
+        revision: u64,
+    ) -> NodeSessionEnvelope {
+        let mut envelope = target_exited_envelope_for(session_id);
+        if let Some(Body::TargetExited(payload)) = envelope.body.as_mut() {
+            payload.target_id = format!("remote-peer:peer-revision:{session_id}");
+            payload.transport_session_id = session_id.to_string();
+            payload.node_instance_id = "client-session-1".to_string();
+            payload.revision = revision;
+        }
+        envelope.route = Some(RouteContext {
+            authority_node_id: Some("peer-revision".to_string()),
+            target_id: Some(format!("remote-peer:peer-revision:{session_id}")),
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: Some(session_id.to_string()),
+        });
+        envelope
+    }
+
     fn target_published_envelope_for(session_id: &str) -> NodeSessionEnvelope {
         NodeSessionEnvelope {
             message_id: format!("target-published-{session_id}"),
@@ -753,6 +883,8 @@ mod tests {
                     workspace_key: None,
                     window_count: Some(1),
                     task_state: Some("running".to_string()),
+                    node_instance_id: "client-session-1".to_string(),
+                    revision: 7,
                 },
             )),
         }
@@ -841,6 +973,8 @@ mod tests {
                 crate::infra::remote_grpc_proto::v1::TargetExited {
                     target_id: format!("remote-peer:peer-a:{session_id}"),
                     transport_session_id: session_id.to_string(),
+                    node_instance_id: "client-session-1".to_string(),
+                    revision: 8,
                 },
             )),
         }

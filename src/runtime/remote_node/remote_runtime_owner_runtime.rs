@@ -48,6 +48,9 @@ enum RemoteRuntimeOwnerCommandEnvelope {
     RemoveNode {
         node_id: String,
     },
+    MarkNodeOffline {
+        node_id: String,
+    },
     Snapshot,
 }
 
@@ -75,6 +78,7 @@ impl RemoteRuntimeOwnerRuntime {
 
     #[cfg(test)]
     pub fn new_for_tests(current_executable: PathBuf, network: RemoteNetworkConfig) -> Self {
+        start_remote_runtime_owner_for_tests(&network);
         Self {
             current_executable,
             network,
@@ -197,12 +201,24 @@ impl RemoteRuntimeOwnerRuntime {
         )
     }
 
+    #[allow(dead_code)]
     pub fn remove_node(&self, node_id: &str) -> Result<(), LifecycleError> {
         self.ensure_owner_running()?;
         signal_remote_runtime_owner_command(
             &self.current_executable,
             &self.network,
             RemoteRuntimeOwnerCommandEnvelope::RemoveNode {
+                node_id: node_id.to_string(),
+            },
+        )
+    }
+
+    pub fn mark_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.ensure_owner_running()?;
+        signal_remote_runtime_owner_command(
+            &self.current_executable,
+            &self.network,
+            RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline {
                 node_id: node_id.to_string(),
             },
         )
@@ -351,6 +367,30 @@ impl RemoteRuntimeOwnerRuntime {
     }
 }
 
+#[cfg(test)]
+fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
+    let socket_path = remote_runtime_owner_socket_path(network);
+    let _ = fs::remove_file(&socket_path);
+    let listener =
+        UnixListener::bind(&socket_path).expect("test remote runtime owner socket should bind");
+    let state = RemoteRuntimeOwnerSharedState {
+        records: Arc::new(Mutex::new(HashMap::new())),
+        running: Arc::new(AtomicBool::new(true)),
+    };
+    thread::spawn(move || {
+        for accepted in listener.incoming() {
+            let Ok(mut stream) = accepted else {
+                break;
+            };
+            let response = handle_remote_runtime_owner_client(&state, &mut stream);
+            if let Ok(Some(payload)) = response {
+                let _ = stream.write_all(payload.as_bytes());
+                let _ = stream.flush();
+            }
+        }
+    });
+}
+
 fn handle_remote_runtime_owner_client(
     state: &RemoteRuntimeOwnerSharedState,
     stream: &mut UnixStream,
@@ -399,6 +439,18 @@ fn handle_remote_runtime_owner_client(
             guard.retain(|_, record| record.node_id != node_id);
             Ok(Some("ok\n".to_string()))
         }
+        RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
+            let mut guard = state
+                .records
+                .lock()
+                .expect("remote runtime owner state mutex should not be poisoned");
+            for record in guard.values_mut() {
+                if record.node_id == node_id {
+                    record.session.availability = SessionAvailability::Offline;
+                }
+            }
+            Ok(Some("ok\n".to_string()))
+        }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => {
             let snapshot = render_remote_runtime_owner_snapshot(
                 &state
@@ -427,6 +479,7 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
         RemoteRuntimeOwnerCommandEnvelope::UpsertSession { .. } => "upsert_session",
         RemoteRuntimeOwnerCommandEnvelope::RemoveSession { .. } => "remove_session",
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { .. } => "remove_node",
+        RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { .. } => "mark_node_offline",
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot",
     }
 }
@@ -613,6 +666,9 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
             format!("remove_node\t{}\n", escape_field(node_id))
         }
+        RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
+            format!("mark_node_offline\t{}\n", escape_field(node_id))
+        }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot\n".to_string(),
     }
 }
@@ -673,6 +729,17 @@ fn parse_remote_runtime_owner_command(
                 ));
             }
             Ok(RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id })
+        }
+        "mark_node_offline" => {
+            let node_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("mark_node_offline is missing node id".to_string())
+            })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "mark_node_offline contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id })
         }
         "snapshot" => Ok(RemoteRuntimeOwnerCommandEnvelope::Snapshot),
         other => Err(LifecycleError::Protocol(format!(
@@ -1007,6 +1074,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_runtime_owner_command_round_trips_mark_node_offline() {
+        let rendered = render_remote_runtime_owner_command(
+            &RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline {
+                node_id: "peer-a".to_string(),
+            },
+        );
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
+                assert_eq!(node_id, "peer-a");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_runtime_owner_snapshot_round_trips_sessions() {
         let payload = render_remote_runtime_owner_snapshot(&[super::OwnerStateRecord {
             node_id: "peer-a".to_string(),
@@ -1077,6 +1163,78 @@ mod tests {
             .expect("remote runtime owner state mutex should not be poisoned");
         assert_eq!(records.len(), 1);
         assert!(records.contains_key("peer-b\tremote-peer:peer-b:pty9"));
+    }
+
+    #[test]
+    fn mark_node_offline_command_keeps_sessions_and_marks_matching_node_offline() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty1"),
+                    },
+                ),
+                (
+                    "peer-a\tremote-peer:peer-a:pty2".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty2"),
+                    },
+                ),
+                (
+                    "peer-b\tremote-peer:peer-b:pty9".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-b".to_string(),
+                        session: remote_session("peer-b", "pty9"),
+                    },
+                ),
+            ]))),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline {
+                        node_id: "peer-a".to_string(),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert_eq!(response.as_deref(), Some("ok\n"));
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records["peer-a\tremote-peer:peer-a:pty1"]
+                .session
+                .availability,
+            SessionAvailability::Offline
+        );
+        assert_eq!(
+            records["peer-a\tremote-peer:peer-a:pty2"]
+                .session
+                .availability,
+            SessionAvailability::Offline
+        );
+        assert_eq!(
+            records["peer-b\tremote-peer:peer-b:pty9"]
+                .session
+                .availability,
+            SessionAvailability::Online
+        );
     }
 
     #[test]

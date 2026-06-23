@@ -4,7 +4,9 @@ use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, RawPtyInput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetPublished as GrpcTargetPublished,
+    TargetExited as GrpcTargetExited, TargetPublicationAck as GrpcTargetPublicationAck,
+    TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
+    TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
@@ -12,7 +14,8 @@ use crate::infra::remote_grpc_transport::{
 };
 use crate::infra::remote_protocol::{
     BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
-    ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    ProtocolEnvelope, TargetExitedPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
@@ -83,6 +86,69 @@ struct ActiveNodeIngressSession {
     session: RemoteNodeSessionHandle,
     bridges: HashMap<PathBuf, ActiveAuthoritySocketBridge>,
     published_fingerprints: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PublicationRevisionKey {
+    node_id: String,
+    node_instance_id: String,
+    target_id: String,
+}
+
+#[derive(Debug, Default)]
+struct ReceiverPublicationRevisionTable {
+    latest_applied: HashMap<PublicationRevisionKey, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationRevisionDecision {
+    Legacy,
+    Apply,
+    Stale,
+}
+
+impl ReceiverPublicationRevisionTable {
+    fn decision(
+        &self,
+        node_id: &str,
+        node_instance_id: &str,
+        target_id: &str,
+        revision: u64,
+    ) -> PublicationRevisionDecision {
+        if node_instance_id.is_empty() || revision == 0 {
+            return PublicationRevisionDecision::Legacy;
+        }
+        let key = PublicationRevisionKey {
+            node_id: node_id.to_string(),
+            node_instance_id: node_instance_id.to_string(),
+            target_id: target_id.to_string(),
+        };
+        match self.latest_applied.get(&key) {
+            Some(latest) if revision <= *latest => PublicationRevisionDecision::Stale,
+            _ => PublicationRevisionDecision::Apply,
+        }
+    }
+
+    fn mark_applied(
+        &mut self,
+        node_id: &str,
+        node_instance_id: &str,
+        target_id: &str,
+        revision: u64,
+    ) {
+        if node_instance_id.is_empty() || revision == 0 {
+            return;
+        }
+        let key = PublicationRevisionKey {
+            node_id: node_id.to_string(),
+            node_instance_id: node_instance_id.to_string(),
+            target_id: target_id.to_string(),
+        };
+        self.latest_applied
+            .entry(key)
+            .and_modify(|latest| *latest = (*latest).max(revision))
+            .or_insert(revision);
+    }
 }
 
 enum InternalEvent {
@@ -706,6 +772,7 @@ fn run_node_ingress_server_loop(
 
     let mut high_priority_events = VecDeque::<IngressServerEvent>::new();
     let mut low_priority_events = VecDeque::<IngressServerEvent>::new();
+    let mut publication_revisions = ReceiverPublicationRevisionTable::default();
 
     loop {
         drain_ingress_events(
@@ -743,6 +810,7 @@ fn run_node_ingress_server_loop(
                 &mut sessions,
                 &mut pending_create_sessions,
                 &registered_workspace_sockets,
+                &mut publication_revisions,
                 internal_tx.clone(),
                 event,
             ),
@@ -829,6 +897,7 @@ fn handle_transport_event(
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
     registered_workspace_sockets: &BTreeSet<String>,
+    publication_revisions: &mut ReceiverPublicationRevisionTable,
     internal_tx: mpsc::Sender<InternalEvent>,
     event: RemoteNodeTransportEvent,
 ) {
@@ -887,6 +956,7 @@ fn handle_transport_event(
                     envelope,
                     Some(active),
                     registered_workspace_sockets,
+                    publication_revisions,
                 );
             } else {
                 let _ = route_transport_envelope(
@@ -895,6 +965,7 @@ fn handle_transport_event(
                     envelope,
                     None,
                     registered_workspace_sockets,
+                    publication_revisions,
                 );
             }
         }
@@ -904,7 +975,7 @@ fn handle_transport_event(
             ..
         } => {
             sessions.remove(&session_instance_id);
-            remove_discovered_node_if_last_ingress_session(
+            mark_discovered_node_offline_if_last_ingress_session(
                 publication_runtime,
                 sessions,
                 node_id.as_str(),
@@ -919,7 +990,7 @@ fn handle_transport_event(
                 sessions.remove(&session_instance_id);
             }
             if let Some(node_id) = node_id {
-                remove_discovered_node_if_last_ingress_session(
+                mark_discovered_node_offline_if_last_ingress_session(
                     publication_runtime,
                     sessions,
                     node_id.as_str(),
@@ -938,7 +1009,7 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
-fn remove_discovered_node_if_last_ingress_session(
+fn mark_discovered_node_offline_if_last_ingress_session(
     publication_runtime: &RemoteTargetPublicationRuntime,
     sessions: &HashMap<String, ActiveNodeIngressSession>,
     node_id: &str,
@@ -946,9 +1017,9 @@ fn remove_discovered_node_if_last_ingress_session(
     if has_active_ingress_session_for_node(sessions, node_id) {
         return;
     }
-    if let Err(error) = publication_runtime.remove_discovered_remote_node(node_id) {
+    if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(node_id) {
         ERROR_LOG.log(format!(
-            "[diag] ingress server: failed to remove discovered node {node_id}: {error}"
+            "[diag] ingress server: failed to mark discovered node offline {node_id}: {error}"
         ));
     }
 }
@@ -1194,73 +1265,237 @@ fn handle_internal_event(
     }
 }
 
+fn send_publication_ack(
+    session: Option<&ActiveNodeIngressSession>,
+    node_id: &str,
+    node_instance_id: &str,
+    target_id: &str,
+    revision: u64,
+    status: GrpcTargetPublicationAckStatus,
+    message: Option<String>,
+) {
+    if node_instance_id.is_empty() || revision == 0 {
+        return;
+    }
+    let Some(session) = session else {
+        return;
+    };
+    let envelope = GrpcNodeSessionEnvelope {
+        message_id: format!("publication-ack-{}", now_millis()),
+        sent_at: None,
+        session_instance_id: session.session.session_instance_id().to_string(),
+        correlation_id: None,
+        route: Some(RouteContext {
+            authority_node_id: Some(node_id.to_string()),
+            target_id: Some(target_id.to_string()),
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: None,
+        }),
+        body: Some(Body::TargetPublicationAck(GrpcTargetPublicationAck {
+            node_id: node_id.to_string(),
+            node_instance_id: node_instance_id.to_string(),
+            target_id: target_id.to_string(),
+            revision,
+            status: status as i32,
+            message,
+        })),
+    };
+    if let Err(error) = session.session.send(envelope) {
+        ERROR_LOG.log(format!(
+            "[diag-publication] failed to send publication ack node={node_id} target={target_id} revision={revision}: {error}"
+        ));
+    }
+}
+
 fn target_published_fingerprint(payload: &GrpcTargetPublished) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}",
-        payload.target_id,
-        payload.transport_session_id,
-        payload.availability,
-        payload.selector,
-        payload.transport,
-        payload.command_name,
-        payload.current_path,
-        payload.attached_count,
-        payload.session_role,
-        payload.window_count,
-        payload.task_state
-    )
+    [
+        payload.target_id.clone(),
+        payload.transport_session_id.clone(),
+        payload.availability.clone(),
+        format!("{:?}", payload.selector),
+        payload.transport.clone(),
+        format!("{:?}", payload.command_name),
+        format!("{:?}", payload.current_path),
+        format!("{:?}", payload.attached_count),
+        format!("{:?}", payload.session_role),
+        format!("{:?}", payload.window_count),
+        format!("{:?}", payload.task_state),
+        payload.node_instance_id.clone(),
+        payload.revision.to_string(),
+    ]
+    .join("\u{1f}")
 }
 
 fn route_transport_envelope(
     publication_runtime: &RemoteTargetPublicationRuntime,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,
-    session: Option<&mut ActiveNodeIngressSession>,
+    mut session: Option<&mut ActiveNodeIngressSession>,
     registered_workspace_sockets: &BTreeSet<String>,
+    publication_revisions: &mut ReceiverPublicationRevisionTable,
 ) -> Result<(), LifecycleError> {
     match envelope.body.as_ref() {
         Some(Body::TargetPublished(payload)) => {
-            if let Some(session) = session {
+            let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
+            match publication_revisions.decision(
+                node_id,
+                &payload.node_instance_id,
+                &target_id,
+                payload.revision,
+            ) {
+                PublicationRevisionDecision::Stale => {
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::StaleRevision,
+                        None,
+                    );
+                    return Ok(());
+                }
+                PublicationRevisionDecision::Legacy | PublicationRevisionDecision::Apply => {}
+            }
+            if let Some(active) = session.as_deref_mut() {
                 let fingerprint = target_published_fingerprint(payload);
-                if session
+                if active
                     .published_fingerprints
                     .get(&payload.transport_session_id)
                     == Some(&fingerprint)
                 {
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::Applied,
+                        None,
+                    );
                     return Ok(());
                 }
-                session
+                active
                     .published_fingerprints
                     .insert(payload.transport_session_id.clone(), fingerprint);
             }
             let mapped = map_target_published_envelope(node_id, &envelope, payload)
                 .map_err(remote_node_ingress_error)?;
+            match publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped) {
+                Ok(()) => {
+                    publication_revisions.mark_applied(
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                    );
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::Applied,
+                        None,
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::Failed,
+                        Some(error.to_string()),
+                    );
+                    Err(error)
+                }
+            }
+        }
+        Some(Body::TargetPublicationAck(payload)) => {
+            let mapped = map_target_publication_ack_envelope(node_id, &envelope, payload)
+                .map_err(remote_node_ingress_error)?;
             publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
         }
         Some(Body::TargetExited(payload)) => {
+            let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
+            match publication_revisions.decision(
+                node_id,
+                &payload.node_instance_id,
+                &target_id,
+                payload.revision,
+            ) {
+                PublicationRevisionDecision::Stale => {
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::StaleRevision,
+                        None,
+                    );
+                    return Ok(());
+                }
+                PublicationRevisionDecision::Legacy | PublicationRevisionDecision::Apply => {}
+            }
             let t_exit = std::time::Instant::now();
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-bug] ingress_server route_transport_envelope: received TargetExited node={node_id} session={}",
                 payload.transport_session_id
             ));
             let mapped = map_target_exited_envelope(node_id, &envelope, payload);
             let t_apply = std::time::Instant::now();
-            publication_runtime.apply_discovered_remote_session_envelope_for_sockets(
+            match publication_runtime.apply_discovered_remote_session_envelope_for_sockets(
                 node_id,
                 mapped,
                 &registered_workspace_sockets
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>(),
-            )?;
-            ERROR_LOG.log(format!(
+            ) {
+                Ok(()) => {
+                    publication_revisions.mark_applied(
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                    );
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::Applied,
+                        None,
+                    );
+                }
+                Err(error) => {
+                    send_publication_ack(
+                        session.as_deref(),
+                        node_id,
+                        &payload.node_instance_id,
+                        &target_id,
+                        payload.revision,
+                        GrpcTargetPublicationAckStatus::Failed,
+                        Some(error.to_string()),
+                    );
+                    return Err(error);
+                }
+            }
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] ingress_target_exited_apply node={} session={} elapsed={:?} total={:?} stage=ingress_server",
                 node_id,
                 payload.transport_session_id,
                 t_apply.elapsed(),
                 t_exit.elapsed()
             ));
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-bug] ingress_server: applied TargetExited to live workspaces node={node_id} session={}",
                 payload.transport_session_id
             ));
@@ -1270,7 +1505,6 @@ fn route_transport_envelope(
             let session_id = route_session_id(&envelope)
                 .or_else(|| payload_session_id(&payload.transport_session_id, &payload.target_id))
                 .unwrap_or_else(|| payload.transport_session_id.clone());
-            let target_id = route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone());
             bridge_output_to_authority_transports(
                 node_id,
                 session,
@@ -1282,6 +1516,8 @@ fn route_transport_envelope(
                         target_id,
                         ControlPlanePayload::TargetExited(TargetExitedPayload {
                             transport_session_id: payload.transport_session_id.clone(),
+                            node_instance_id: payload.node_instance_id.clone(),
+                            revision: payload.revision,
                             source_session_name: None,
                         }),
                     )
@@ -1863,6 +2099,12 @@ fn map_authority_command_to_grpc(
                 session_id: payload.session_id,
             })),
         ),
+        RemoteAuthorityCommand::SyncRequest { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sync request is local to authority transport and cannot be mapped to gRPC",
+            ));
+        }
     };
 
     Ok(GrpcNodeSessionEnvelope {
@@ -1894,6 +2136,8 @@ fn map_target_published_envelope(
         console_id: route_console_id(envelope),
         payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: payload.transport_session_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            revision: payload.revision,
             source_session_name: None,
             selector: payload.selector.clone(),
             availability: known_availability(&payload.availability)?,
@@ -1936,8 +2180,53 @@ fn map_target_exited_envelope(
         console_id: route_console_id(envelope),
         payload: ControlPlanePayload::TargetExited(TargetExitedPayload {
             transport_session_id: payload.transport_session_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            revision: payload.revision,
             source_session_name: None,
         }),
+    }
+}
+
+fn map_target_publication_ack_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &GrpcTargetPublicationAck,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "target_publication_ack",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope),
+        target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::TargetPublicationAck(TargetPublicationAckPayload {
+            node_id: payload.node_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            target_id: payload.target_id.clone(),
+            revision: payload.revision,
+            status: target_publication_ack_status(payload.status())?,
+            message: payload.message.clone(),
+        }),
+    })
+}
+
+fn target_publication_ack_status(
+    status: GrpcTargetPublicationAckStatus,
+) -> Result<TargetPublicationAckStatus, io::Error> {
+    match status {
+        GrpcTargetPublicationAckStatus::Applied => Ok(TargetPublicationAckStatus::Applied),
+        GrpcTargetPublicationAckStatus::StaleRevision => {
+            Ok(TargetPublicationAckStatus::StaleRevision)
+        }
+        GrpcTargetPublicationAckStatus::Failed => Ok(TargetPublicationAckStatus::Failed),
+        GrpcTargetPublicationAckStatus::Unspecified => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unspecified target publication ack status",
+        )),
     }
 }
 

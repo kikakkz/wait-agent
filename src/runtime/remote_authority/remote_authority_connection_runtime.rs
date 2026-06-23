@@ -22,8 +22,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
-const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 const AUTHORITY_TRANSPORT_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
@@ -224,6 +225,12 @@ pub(super) fn register_authority_stream_with_timeouts(
     socket_timeout: Duration,
     read_timeout: Duration,
 ) -> Result<(), RemoteAuthorityConnectionError> {
+    let ping_interval = AUTHORITY_TRANSPORT_PING_INTERVAL
+        .min(read_timeout.div_f32(3.0) * 2)
+        .max(socket_timeout);
+    let ping_timeout = read_timeout
+        .saturating_sub(ping_interval)
+        .max(socket_timeout);
     let t_register = std::time::Instant::now();
     let node_id = read_registration_frame(&mut stream)?;
     if node_id != authority_id {
@@ -290,14 +297,22 @@ pub(super) fn register_authority_stream_with_timeouts(
                 Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                     last_received = Instant::now();
                     keepalive_sent_at = None;
-                    // Detect gaps in the output sequence. When frames are
-                    // dropped by the network or channel, the sequence number
-                    // jumps. We track the expected next seq and log a gap
-                    // so the operator can diagnose transport issues.
                     if payload.output_seq > 0
                         && payload.output_seq != next_expected_output_seq
                         && next_expected_output_seq > 1
                     {
+                        let mut buf = Vec::new();
+                        if write_authority_transport_frame(
+                            &mut buf,
+                            &AuthorityTransportFrame::SyncRequest {
+                                expected_seq: next_expected_output_seq,
+                                received_seq: payload.output_seq,
+                            },
+                        )
+                        .is_ok()
+                        {
+                            let _ = pong_writer.write_all(&buf);
+                        }
                         let _ = reader_tx.send(AuthorityTransportEvent::Failed(format!(
                             "output seq gap: expected {}, got {}",
                             next_expected_output_seq, payload.output_seq
@@ -322,18 +337,17 @@ pub(super) fn register_authority_stream_with_timeouts(
                     keepalive_sent_at = None;
                 }
                 Ok(AuthorityTransportFrame::SyncRequest { .. }) => {
-                    // Remote peer is requesting replay from our output cache.
-                    // The cache is managed by the authority target host runtime,
-                    // not this connection loop. For now, consume silently.
-                    // Full SyncRequest handling requires plumbing to the
-                    // output cache (layer 1 ring buffer), which is deferred.
+                    last_received = Instant::now();
+                    keepalive_sent_at = None;
+                }
+                Ok(AuthorityTransportFrame::InputCongestion(_)) => {
                     last_received = Instant::now();
                     keepalive_sent_at = None;
                 }
                 Ok(AuthorityTransportFrame::SyncResponse {
                     session_id,
                     target_id,
-                    seq: _,
+                    seq,
                     bytes,
                 }) => {
                     // Remote peer is replaying frames we requested.
@@ -346,7 +360,7 @@ pub(super) fn register_authority_stream_with_timeouts(
                             payload: RawPtyOutputPayload {
                                 session_id,
                                 target_id,
-                                output_seq: 0, // replayed; no sequence tracking
+                                output_seq: seq,
                                 output_bytes: bytes,
                             },
                         })
@@ -357,7 +371,7 @@ pub(super) fn register_authority_stream_with_timeouts(
                 }
                 Err(ref e) if e.is_read_timeout() => {
                     if let Some(sent_at) = keepalive_sent_at {
-                        if sent_at.elapsed() >= read_timeout {
+                        if sent_at.elapsed() >= ping_timeout {
                             ERROR_LOG.log(
                                 "[diag-timing] reader thread: keepalive timed out, exiting"
                                     .to_string(),
@@ -366,7 +380,7 @@ pub(super) fn register_authority_stream_with_timeouts(
                         }
                         continue;
                     }
-                    if last_received.elapsed() >= read_timeout {
+                    if last_received.elapsed() >= ping_interval {
                         let mut buf = Vec::new();
                         if let Err(error) = write_authority_transport_frame(
                             &mut buf,

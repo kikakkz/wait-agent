@@ -32,7 +32,6 @@ use std::time::Duration;
 mod sync_helpers;
 pub(crate) use sync_helpers::*;
 
-const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
@@ -178,7 +177,6 @@ pub struct RemoteNodeSessionSyncRuntime<
     transport: T,
     local_target_exit_observer: O,
     network: RemoteNetworkConfig,
-    poll_interval: Duration,
     reconnect_delay: Duration,
 }
 
@@ -358,7 +356,6 @@ where
             transport,
             local_target_exit_observer,
             network,
-            poll_interval: SESSION_SYNC_POLL_INTERVAL,
             reconnect_delay: SESSION_SYNC_RECONNECT_DELAY,
         }
     }
@@ -387,7 +384,6 @@ where
                 node_id,
                 endpoint_uri,
                 local_catalog_rx,
-                self.poll_interval,
                 self.reconnect_delay,
                 stop_rx,
             );
@@ -477,7 +473,7 @@ impl SessionSyncAuthorityManager {
         &mut self,
         session_handle: &RemoteNodeSessionHandle,
         event: GrpcAuthorityEvent,
-    ) {
+    ) -> bool {
         match event {
             GrpcAuthorityEvent::Command(command) => {
                 if let Err(error) = self.ensure_and_send_command(session_handle, command) {
@@ -485,27 +481,31 @@ impl SessionSyncAuthorityManager {
                         "[session-sync] failed to handle authority command: {error}"
                     ));
                 }
+                false
             }
             GrpcAuthorityEvent::CreateSessionRequest {
                 payload,
                 correlation_id,
-            } => {
-                if let Err(error) = self.handle_create_session_request(
-                    session_handle,
-                    payload,
-                    correlation_id.as_deref(),
-                ) {
+            } => match self.handle_create_session_request(
+                session_handle,
+                payload,
+                correlation_id.as_deref(),
+            ) {
+                Ok(()) => true,
+                Err(error) => {
                     ERROR_LOG.log(format!(
                         "[session-sync] failed to handle create-session request: {error}"
                     ));
+                    false
                 }
-            }
+            },
             GrpcAuthorityEvent::CreateSessionAccepted(_)
             | GrpcAuthorityEvent::CreateSessionRejected(_)
+            | GrpcAuthorityEvent::TargetPublicationAck(_)
             | GrpcAuthorityEvent::MirrorAccepted
             | GrpcAuthorityEvent::MirrorRejected(_)
             | GrpcAuthorityEvent::Failed(_)
-            | GrpcAuthorityEvent::Closed => {}
+            | GrpcAuthorityEvent::Closed => false,
         }
     }
 

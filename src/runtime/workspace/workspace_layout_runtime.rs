@@ -1166,60 +1166,35 @@ fn resolve_effective_main_pane(
     previous: Option<&TmuxPaneId>,
     suggested: &TmuxPaneId,
 ) -> TmuxPaneId {
-    let Some(previous) = previous else {
-        ERROR_LOG.log(format!(
-            "[diag] resolve_effective_main_pane: no previous, using suggested={:?}",
-            suggested
-        ));
-        return suggested.clone();
-    };
-    if previous == suggested {
-        return suggested.clone();
-    }
-    ERROR_LOG.log(format!(
-        "[diag] resolve_effective_main_pane: previous={:?} != suggested={:?}, checking validity",
-        previous, suggested
-    ));
-    // The previously-configured main pane differs from main_pane_id()'s
-    // suggestion. Check if it's still a valid non-chrome pane — if so,
-    // prefer it to prevent a stale leftover pane (e.g., the 1-cell pane
-    // from create_remote_session_pane which has a lower pane index than
-    // the display pane after swap-pane) from being designated as main.
     let Ok(window) = backend.current_window(workspace) else {
-        ERROR_LOG.log(format!(
-			"[diag] resolve_effective_main_pane: current_window failed, falling back to suggested={:?}",
-			suggested
-		));
         return suggested.clone();
     };
     let Ok(panes) = backend.list_panes(workspace, &window) else {
-        ERROR_LOG.log(format!(
-            "[diag] resolve_effective_main_pane: list_panes failed, falling back to suggested={:?}",
-            suggested
-        ));
         return suggested.clone();
     };
-    let previous_valid = panes.iter().any(|p| {
-        p.pane_id == *previous
-            && !p.is_dead
-            && p.title != SIDEBAR_PANE_TITLE
-            && p.title != FOOTER_PANE_TITLE
-    });
-    ERROR_LOG.log(format!(
-        "[diag] resolve_effective_main_pane: previous={:?} valid={}, going with {}",
-        previous,
-        previous_valid,
-        if previous_valid {
-            "previous"
-        } else {
-            "suggested"
-        }
-    ));
-    if previous_valid {
-        previous.clone()
-    } else {
-        suggested.clone()
+
+    let is_valid_content_pane = |pane_id: &TmuxPaneId| {
+        panes.iter().any(|pane| {
+            pane.pane_id == *pane_id
+                && !pane.is_dead
+                && pane.title != SIDEBAR_PANE_TITLE
+                && pane.title != FOOTER_PANE_TITLE
+        })
+    };
+
+    if previous.is_some_and(|pane| is_valid_content_pane(pane)) {
+        return previous.cloned().unwrap();
     }
+    if is_valid_content_pane(suggested) {
+        return suggested.clone();
+    }
+    panes
+        .iter()
+        .find(|pane| {
+            !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
+        })
+        .map(|pane| pane.pane_id.clone())
+        .unwrap_or_else(|| suggested.clone())
 }
 
 fn tmux_layout_error(error: TmuxError) -> LifecycleError {

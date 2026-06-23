@@ -143,6 +143,57 @@ mod tests {
     }
 
     #[test]
+    fn register_authority_stream_requests_sync_on_raw_output_gap() {
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+
+        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
+        register_authority_stream(server, registry, "peer-a".to_string(), tx)
+            .expect("authority stream should register");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("connected event should arrive"),
+            AuthorityTransportEvent::Connected
+        );
+
+        write_authority_transport_frame(
+            &mut client,
+            &AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 1,
+                output_bytes: b"one".to_vec(),
+            }),
+        )
+        .expect("first raw output should encode");
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Ok(AuthorityTransportEvent::RawPtyOutput { .. })
+        ));
+
+        write_authority_transport_frame(
+            &mut client,
+            &AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                output_seq: 3,
+                output_bytes: b"three".to_vec(),
+            }),
+        )
+        .expect("gapped raw output should encode");
+        let sync =
+            read_authority_transport_frame(&mut client).expect("gap should trigger sync request");
+        assert_eq!(
+            sync,
+            AuthorityTransportFrame::SyncRequest {
+                expected_seq: 2,
+                received_seq: 3,
+            }
+        );
+    }
+
+    #[test]
     fn authority_connection_marks_closed_after_raw_input_write_failure() {
         let registry = RemoteConnectionRegistry::new();
         let (tx, rx) = mpsc::channel();

@@ -2,7 +2,7 @@ id: task.remote-exit-latency-4
 kind: task
 version: 1
 title: validate remote session exit latency end to end and clean temporary diagnostics
-status: ready
+status: done
 priority: medium
 design_ref:
   doc: docs/remote-session-exit-latency-design.md

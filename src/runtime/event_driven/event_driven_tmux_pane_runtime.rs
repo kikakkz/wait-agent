@@ -182,7 +182,7 @@ where
             .map(|session| session.address.qualified_target())
             .collect::<HashSet<_>>();
         for disappeared_target in self.previous_visible_targets.difference(&visible_targets) {
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] sidebar_item_gone target={} socket={} session={} visible={} elapsed={:?} stage=sidebar_snapshot",
                 disappeared_target,
                 command.socket_name,
@@ -195,7 +195,7 @@ where
             if let Some(active_target) = active_target.as_deref() {
                 let active_visible = visible_targets.contains(active_target);
                 if !active_visible {
-                    ERROR_LOG.log(format!(
+                    ERROR_LOG.log_exit_latency(format!(
                         "[diag-exit] sidebar_item_gone target={} socket={} session={} visible={} elapsed={:?} stage=sidebar_snapshot",
                         active_target,
                         command.socket_name,

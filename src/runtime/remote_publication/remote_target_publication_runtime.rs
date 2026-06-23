@@ -17,6 +17,9 @@ use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
+use crate::runtime::remote_workspace_socket_registry_runtime::{
+    live_workspace_socket_names_for_network, retain_live_workspace_socket_names_for_network,
+};
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 
 use std::fs;
@@ -30,10 +33,54 @@ pub(crate) use publication_helpers::*;
 
 #[derive(Clone)]
 pub struct RemoteTargetPublicationRuntime {
-    remote_runtime_owner: RemoteRuntimeOwnerRuntime,
+    remote_runtime_owner: RemoteRuntimeOwnerClient,
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
     network: RemoteNetworkConfig,
+}
+
+#[derive(Clone)]
+enum RemoteRuntimeOwnerClient {
+    Runtime(RemoteRuntimeOwnerRuntime),
+    #[cfg(test)]
+    Noop,
+}
+
+impl RemoteRuntimeOwnerClient {
+    fn upsert_session(
+        &self,
+        node_id: &str,
+        session: &ManagedSessionRecord,
+    ) -> Result<(), LifecycleError> {
+        match self {
+            RemoteRuntimeOwnerClient::Runtime(runtime) => runtime.upsert_session(node_id, session),
+            #[cfg(test)]
+            RemoteRuntimeOwnerClient::Noop => Ok(()),
+        }
+    }
+
+    fn remove_session(
+        &self,
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+    ) -> Result<(), LifecycleError> {
+        match self {
+            RemoteRuntimeOwnerClient::Runtime(runtime) => {
+                runtime.remove_session(node_id, authority_id, transport_session_id)
+            }
+            #[cfg(test)]
+            RemoteRuntimeOwnerClient::Noop => Ok(()),
+        }
+    }
+
+    fn mark_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+        match self {
+            RemoteRuntimeOwnerClient::Runtime(runtime) => runtime.mark_node_offline(node_id),
+            #[cfg(test)]
+            RemoteRuntimeOwnerClient::Noop => Ok(()),
+        }
+    }
 }
 
 impl RemoteTargetPublicationRuntime {
@@ -46,13 +93,25 @@ impl RemoteTargetPublicationRuntime {
         network: RemoteNetworkConfig,
     ) -> Result<Self, LifecycleError> {
         Ok(Self {
-            remote_runtime_owner: RemoteRuntimeOwnerRuntime::from_build_env_with_network(
-                network.clone(),
-            )?,
+            remote_runtime_owner: RemoteRuntimeOwnerClient::Runtime(
+                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
+            ),
             local_tmux: EmbeddedTmuxBackend::from_build_env()
                 .map_err(remote_target_publication_error)?,
             current_executable: current_waitagent_executable()?,
             network,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_route_tests_without_remote_runtime_owner() -> Result<Self, LifecycleError>
+    {
+        Ok(Self {
+            remote_runtime_owner: RemoteRuntimeOwnerClient::Noop,
+            local_tmux: EmbeddedTmuxBackend::from_build_env()
+                .map_err(remote_target_publication_error)?,
+            current_executable: current_waitagent_executable()?,
+            network: RemoteNetworkConfig::default(),
         })
     }
 
@@ -150,13 +209,13 @@ impl RemoteTargetPublicationRuntime {
             }
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] publication_apply_exit_start node={} authority={} session={} stage=publication_apply",
                 node_id, authority_id, transport_session_id
             ));
             let t_remove = std::time::Instant::now();
             self.signal_remote_runtime_owner_remove(node_id, &authority_id, &transport_session_id)?;
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] publication_apply_remove node={} authority={} session={} elapsed={:?} total={:?} stage=publication_apply",
                 node_id,
                 authority_id,
@@ -164,8 +223,20 @@ impl RemoteTargetPublicationRuntime {
                 t_remove.elapsed(),
                 t_total.elapsed()
             ));
+            let t_workspace = std::time::Instant::now();
+            let target = format!("{authority_id}:{transport_session_id}");
+            let signalled = self
+                .signal_remote_target_exited_to_live_workspaces(live_workspace_sockets, &target)?;
+            ERROR_LOG.log_exit_latency(format!(
+                "[diag-exit] publication_apply_workspace_signal node={} target={} signalled={} elapsed={:?} total={:?} stage=publication_apply",
+                node_id,
+                target,
+                signalled,
+                t_workspace.elapsed(),
+                t_total.elapsed()
+            ));
         }
-        ERROR_LOG.log(format!(
+        ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] publication_apply_live_sockets node={} count={} elapsed={:?} total={:?} stage=publication_apply",
             node_id,
             live_workspace_sockets.len(),
@@ -175,7 +246,7 @@ impl RemoteTargetPublicationRuntime {
         if !live_workspace_sockets.is_empty() {
             let t_refresh = std::time::Instant::now();
             self.refresh_live_workspaces(live_workspace_sockets)?;
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] publication_apply_refresh node={} sockets={:?} elapsed={:?} total={:?} stage=publication_apply",
                 node_id,
                 live_workspace_sockets,
@@ -186,8 +257,8 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    pub fn remove_discovered_remote_node(&self, node_id: &str) -> Result<(), LifecycleError> {
-        self.signal_remote_runtime_owner_remove_node(node_id)?;
+    pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.signal_remote_runtime_owner_mark_node_offline(node_id)?;
         let live_workspace_sockets = self.live_workspace_socket_names()?;
         if !live_workspace_sockets.is_empty() {
             self.refresh_live_workspaces(&live_workspace_sockets)?;
@@ -197,10 +268,14 @@ impl RemoteTargetPublicationRuntime {
 
     pub fn mark_source_target_offline(
         &self,
-        _socket_name: &str,
-        _session_name: &str,
-        _target_id: &str,
+        socket_name: &str,
+        session_name: &str,
+        target_id: &str,
     ) -> Result<(), LifecycleError> {
+        let store = crate::infra::published_target_store::PublishedTargetStore::default();
+        if mark_target_offline_in_store(&store, socket_name, session_name, target_id)? {
+            self.refresh_live_workspace_socket(socket_name)?;
+        }
         Ok(())
     }
 
@@ -262,7 +337,7 @@ impl RemoteTargetPublicationRuntime {
         let result =
             self.remote_runtime_owner
                 .remove_session(node_id, authority_id, transport_session_id);
-        ERROR_LOG.log(format!(
+        ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] remote_runtime_owner_remove node={} authority={} session={} ok={} elapsed={:?} stage=publication_apply",
             node_id,
             authority_id,
@@ -273,11 +348,31 @@ impl RemoteTargetPublicationRuntime {
         result
     }
 
-    fn signal_remote_runtime_owner_remove_node(&self, node_id: &str) -> Result<(), LifecycleError> {
-        self.remote_runtime_owner.remove_node(node_id)
+    fn signal_remote_runtime_owner_mark_node_offline(
+        &self,
+        node_id: &str,
+    ) -> Result<(), LifecycleError> {
+        self.remote_runtime_owner.mark_node_offline(node_id)
     }
 
     pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
+        let registered_sockets = live_workspace_socket_names_for_network(&self.network)?;
+        if !registered_sockets.is_empty() {
+            let live_sockets =
+                retain_live_workspace_socket_names_for_network(&self.network, |socket_name| {
+                    self.socket_is_live(socket_name)
+                })?;
+            ERROR_LOG.log_exit_latency(format!(
+                "[diag-exit] publication_live_sockets_registry count={} live={} stage=publication_apply",
+                registered_sockets.len(),
+                live_sockets.len()
+            ));
+            return Ok(live_sockets);
+        }
+        ERROR_LOG.log_exit_latency(
+            "[diag-exit] publication_live_sockets_registry_empty fallback=tmux_scan stage=publication_apply"
+                .to_string(),
+        );
         let mut all_sessions = Vec::new();
         if let Ok(managed_sockets) = self.local_tmux.discover_waitagent_sockets() {
             for socket in &managed_sockets {
@@ -300,11 +395,51 @@ impl RemoteTargetPublicationRuntime {
         Ok(live_workspace_socket_names_from_sessions(&all_sessions))
     }
 
+    fn signal_remote_target_exited_to_live_workspaces(
+        &self,
+        socket_names: &[String],
+        target: &str,
+    ) -> Result<usize, LifecycleError> {
+        let mut signalled = 0;
+        for socket_name in socket_names {
+            let socket = TmuxSocketName::new(socket_name);
+            if !self.local_tmux.socket_is_live(&socket) {
+                continue;
+            }
+            let Ok(sessions) = self.local_tmux.list_sessions_on_socket(&socket) else {
+                continue;
+            };
+            for session in sessions
+                .into_iter()
+                .filter(|session| session.is_workspace_chrome())
+            {
+                let t_spawn = std::time::Instant::now();
+                spawn_waitagent_sidecar(
+                    &self.current_executable,
+                    remote_target_exited_args(socket_name, session.address.session_id(), target),
+                )
+                .map_err(remote_target_publication_error)?;
+                signalled += 1;
+                ERROR_LOG.log_exit_latency(format!(
+                    "[diag-exit] publication_workspace_exit_spawn socket={} session={} target={} elapsed={:?} stage=publication_apply",
+                    socket_name,
+                    session.address.session_id(),
+                    target,
+                    t_spawn.elapsed()
+                ));
+            }
+        }
+        Ok(signalled)
+    }
+
     fn refresh_live_workspaces(&self, socket_names: &[String]) -> Result<(), LifecycleError> {
         for socket_name in socket_names {
+            if !self.socket_is_live(socket_name) {
+                continue;
+            }
             let t_spawn = std::time::Instant::now();
             spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] publication_refresh_spawn socket={} elapsed={:?} stage=publication_apply",
                 socket_name,
                 t_spawn.elapsed()

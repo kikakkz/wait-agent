@@ -23,6 +23,7 @@ pub use remote_node::remote_node_session_runtime;
 pub use remote_node::remote_node_session_sync_runtime;
 pub use remote_node::remote_node_transport_runtime;
 pub use remote_node::remote_runtime_owner_runtime;
+pub use remote_node::remote_workspace_socket_registry_runtime;
 
 pub mod remote_publication;
 pub use remote_publication::remote_target_publication_runtime;

@@ -12,39 +12,63 @@ hot_history_policy:
     - repeated in_progress lifecycle snapshots for older tasks
     - long-tail historical records that are not shaping the active queue
 history:
-  - task_id: task.remote-exit-latency-1
-    status: in_progress
-    summary: active work moves to acknowledged local catalog changed notify for the remote session sync owner so WaitAgent-managed remote session exits can wake sync immediately instead of waiting for the 500ms periodic catalog diff
-    source_of_truth:
-      file: .agents/tasks/current.yaml
-      reference: status
-  - task_id: task.remote-create-9f-acceptance
+  - task_id: task.transport-stability-l4
     status: done
-    summary: corrected Ctrl-W and Ctrl-S behavior is accepted by user validation, covering first connect, existing endpoint session creation, selected remote Ctrl-S creation, and the no-direct-dial design boundary
+    summary: authority transport read timeouts now use a 15s total idle window with 10s production ping interval, short socket polling, Ping/Pong round trips, and gap-safe keepalive tests.
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
-  - task_id: task.remote-create-9e-daemon-parity
+  - task_id: task.transport-stability-l1
     status: done
-    summary: __remote-daemon parity is accepted as part of the corrected Ctrl-W flow; SSH bootstrap default-session publication now matches the manual waitagent --connect contract from the task design
+    summary: target-host output path uses the existing 8192 bounded blocking channel plus a 1024-frame VecDeque replay cache populated for every output frame.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.transport-stability-l2
+    status: done
+    summary: RawPtyInput is queued into a 256KB runtime-owned VecDeque with a dedicated tmux send-input drain thread and local InputCongestion advisory frame support at 75/25 percent watermarks.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.transport-stability-l5
+    status: done
+    summary: shared authority reconnect path already retries while the session is running, uses a 30s maximum delay, and applies deterministic full jitter; owner-runtime tests pass unchanged.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.transport-stability-l3
+    status: done
+    summary: output sequence gaps now emit SyncRequest over the authority transport; target-host handles SyncRequest by replaying cached frames or falling back to a current pane snapshot via SyncResponse.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: next
+  - task_id: task.remote-exit-latency-1
+    status: done
+    summary: acknowledged local catalog changed notify is implemented on the remote session sync owner path; notify is acknowledged by the owner socket and LocalCatalogChanged now wakes sync_local_sessions instead of directly producing TargetExited
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
   - task_id: task.remote-exit-latency-2
-    status: ready
-    summary: next slice will wire WaitAgent-managed target lifecycle paths to the acknowledged notify and remove normal-path dependence on the 500ms sync poll
+    status: done
+    summary: TargetHostRuntime command-close local target paths notify the session sync owner after tmux kill success or already-gone results, reusing the acknowledged LocalCatalogChanged wake without direct UI mutation; full cargo test now passes after isolating route tests from remote runtime owner sidecar readiness
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
   - task_id: task.remote-exit-latency-3
-    status: ready
-    summary: later slice will replace TargetExited hot-path all-socket tmux discovery with a live workspace socket registry
+    status: done
+    summary: TargetExited publication refresh now reads a runtime-owned live workspace socket registry before falling back to tmux discovery; workspace startup, attach, stop, remote-daemon exit, and main-slot workspace-close paths register or unregister live sockets without moving refresh ownership into UI code
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
   - task_id: task.remote-exit-latency-4
-    status: ready
-    summary: final slice will validate end-to-end remote session exit latency and remove temporary diagnostics that are no longer needed
+    status: done
+    summary: remote exit latency E2E is complete; release-build validation records input exit, sync wake, TargetExited publication apply, workspace exit signal, workspace fallback, and sidebar item disappearance, with temporary diagnostics gated behind WAITAGENT_EXIT_LATENCY_DIAG
     source_of_truth:
       file: .agents/tasks/backlog.yaml
       reference: next
+  - task_id: task.remote-main-slot-authority-gap-followup
+    status: done
+    summary: batch follow-up fixed remote main-slot pane survival when authority/control-plane is temporarily unregistered; activation paths now share pane-owned pending resize/input semantics instead of letting authority send failures terminate the pane process.
+    source_of_truth:
+      file: conversation follow-up
+      reference: remote activation from sidebar after remote exit

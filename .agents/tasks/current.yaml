@@ -1,40 +1,25 @@
-id: task.remote-exit-latency-1
+id: task.transport-stability-batch
 kind: task
 version: 1
-title: add acknowledged local catalog notify to the remote session sync event loop
-status: in_progress
+title: complete remote authority transport stability batch
+status: done
 priority: high
 design_ref:
-  doc: docs/remote-session-exit-latency-design.md
+  doc: docs/remote-transport-stability-design.md
   why:
-    - Accepted design requires WaitAgent-managed local target lifecycle changes to wake remote session sync through an acknowledged local IPC event instead of waiting for the 500ms periodic catalog diff.
+    - align authority transport liveness, buffering, reconnect, and replay behavior with the accepted stability design
 source_of_truth:
   file: .agents/tasks/backlog.yaml
   reference: next
-depends_on:
-  - task.remote-create-9f-acceptance
-
-linked_primitives:
-  - primitive.verification-refresh
-  - primitive.task-board-sync
-
 done_criteria:
-  - Session sync owner accepts a LocalCatalogChanged event through a local IPC or hidden runtime boundary.
-  - The notifier waits for an owner acknowledgement before returning success.
-  - Missing owner socket handling ensures the owner is started and retries notify once without mutating remote catalog state directly.
-  - sync_local_sessions remains the only producer of TargetPublished and TargetExited diffs.
+  - task.transport-stability-l4 done
+  - task.transport-stability-l1 done
+  - task.transport-stability-l2 done
+  - task.transport-stability-l5 done
+  - task.transport-stability-l3 done
 verification:
+  - cargo fmt --check
   - cargo check
-  - cargo test remote_node_session_sync_runtime -- --test-threads=1
-  - targeted test: local catalog notify wakes sync owner and receives acknowledgement
-
-touched_paths:
-  - src/runtime/remote_node/remote_node_session_sync_runtime.rs
-  - src/command/dispatch.rs
-  - src/cli.rs
-  - src/infra/tmux_backend.rs
-
+  - cargo test -- --test-threads=1
 notes:
-  - Do not reintroduce periodic polling as the normal low-latency path.
-  - Do not add durable event persistence in this slice.
-  - The local notify is only a wake; catalog diff remains authoritative.
+  - Current focus is selecting the next remote-network completion task.

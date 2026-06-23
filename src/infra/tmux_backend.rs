@@ -957,7 +957,7 @@ impl EmbeddedTmuxBackend {
     }
 
     /// Cheap query: returns (pane_bytes, pane_current_command, pane_title, session_name)
-    /// for every pane on the given socket. Used by PaneActivityWatcher.
+    /// for every pane on the given socket for compatibility UI refresh signals.
     pub(crate) fn pane_activity_on_socket(
         &self,
         socket_name: &TmuxSocketName,

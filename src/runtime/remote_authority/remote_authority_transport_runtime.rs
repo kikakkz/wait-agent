@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(120);
-const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 const AUTHORITY_TRANSPORT_SERVER_ID: &str = "waitagent-main-slot";
 pub struct RemoteAuthorityTransportRuntime {
     node_id: String,
@@ -42,6 +43,10 @@ pub enum RemoteAuthorityCommand {
     CloseMirror(CloseMirrorRequestPayload),
     RawPtyInput(RawPtyInputPayload),
     ApplyResize(ApplyResizePayload),
+    SyncRequest {
+        expected_seq: u64,
+        received_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +68,9 @@ impl RemoteAuthorityTransportRuntime {
         // the reader may be stranded during a gRPC reconnect window on the authority
         // node, and a slow or broken FIFO reader on the output-pump side must not
         // freeze the event loop by back-pressuring the transport writer.
-        stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+        stream
+            .set_read_timeout(Some(AUTHORITY_TRANSPORT_READ_TIMEOUT))
+            .ok();
         writer.set_write_timeout(Some(Duration::from_secs(5))).ok();
         Ok(Self {
             node_id,
@@ -90,6 +97,16 @@ impl RemoteAuthorityTransportRuntime {
                     self.send_transport_frame(AuthorityTransportFrame::Pong)?;
                 }
                 Ok(AuthorityTransportFrame::Pong) => {}
+                Ok(AuthorityTransportFrame::SyncRequest {
+                    expected_seq,
+                    received_seq,
+                }) => {
+                    return Ok(RemoteAuthorityCommand::SyncRequest {
+                        expected_seq,
+                        received_seq,
+                    });
+                }
+                Ok(AuthorityTransportFrame::InputCongestion(_)) => {}
                 Ok(other) => {
                     return Err(RemoteAuthorityTransportError::new(format!(
                         "unexpected authority command frame `{other:?}`"
@@ -194,6 +211,28 @@ impl RemoteAuthorityTransportRuntime {
             .expect("authority transport writer mutex should not be poisoned");
         write_control_plane_envelope(&mut *writer, &envelope)?;
         Ok(())
+    }
+
+    pub fn send_sync_response(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        seq: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_transport_frame(AuthorityTransportFrame::SyncResponse {
+            session_id: session_id.to_string(),
+            target_id: target_id.to_string(),
+            seq,
+            bytes,
+        })
+    }
+
+    pub fn send_input_congestion(
+        &self,
+        congested: bool,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_transport_frame(AuthorityTransportFrame::InputCongestion(congested))
     }
 
     pub fn send_open_mirror_accepted(
@@ -326,6 +365,8 @@ impl RemoteAuthorityTransportRuntime {
             source_session_name,
             ControlPlanePayload::TargetExited(TargetExitedPayload {
                 transport_session_id: transport_session_id.to_string(),
+                node_instance_id: String::new(),
+                revision: 0,
                 source_session_name: Some(source_session_name.to_string()),
             }),
         )
@@ -603,6 +644,12 @@ fn forward_authority_frames_to_control_plane_with_timeouts(
     socket_timeout: Duration,
     read_timeout: Duration,
 ) -> Result<(), RemoteAuthorityTransportError> {
+    let ping_interval = AUTHORITY_TRANSPORT_PING_INTERVAL
+        .min(read_timeout.div_f32(3.0) * 2)
+        .max(socket_timeout);
+    let ping_timeout = read_timeout
+        .saturating_sub(ping_interval)
+        .max(socket_timeout);
     reader.set_read_timeout(Some(socket_timeout)).ok();
     let mut last_received = Instant::now();
     let mut keepalive_sent_at: Option<Instant> = None;
@@ -639,14 +686,14 @@ fn forward_authority_frames_to_control_plane_with_timeouts(
             }
             Err(ref e) if e.is_read_timeout() => {
                 if let Some(sent_at) = keepalive_sent_at {
-                    if sent_at.elapsed() >= read_timeout {
+                    if sent_at.elapsed() >= ping_timeout {
                         return Err(RemoteAuthorityTransportError::new(
                             "authority transport keepalive timed out",
                         ));
                     }
                     continue;
                 }
-                if last_received.elapsed() >= read_timeout {
+                if last_received.elapsed() >= ping_interval {
                     let mut buf = Vec::new();
                     write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Ping)?;
                     reader.write_all(&buf)?;
@@ -685,7 +732,8 @@ fn forward_control_plane_to_authority_frames(
                 }
                 // Sync frames pass through as-is to the external transport.
                 AuthorityTransportFrame::SyncRequest { .. }
-                | AuthorityTransportFrame::SyncResponse { .. } => {
+                | AuthorityTransportFrame::SyncResponse { .. }
+                | AuthorityTransportFrame::InputCongestion(_) => {
                     write_authority_transport_frame(&mut writer, &frame)?;
                 }
                 _ => {}
@@ -941,7 +989,7 @@ mod tests {
             )
         });
 
-        thread::sleep(Duration::from_millis(90));
+        thread::sleep(Duration::from_millis(50));
         let ping = read_authority_transport_frame(&mut transport_writer)
             .expect("bridge should send keepalive ping after idle");
         assert_eq!(ping, AuthorityTransportFrame::Ping);
@@ -1005,6 +1053,39 @@ mod tests {
                 input_seq: 10,
                 input_bytes: b"after-ping".to_vec(),
             })
+        );
+        server.join().expect("server should join cleanly");
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn recv_command_returns_sync_request_frame() {
+        let socket_path = test_socket_path("sync-request-command");
+        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("listener should accept");
+            let _hello =
+                read_control_plane_envelope(&mut stream).expect("client hello should decode");
+            write_server_hello(&mut stream, "waitagent-main-slot")
+                .expect("server hello should encode");
+            write_authority_transport_frame(
+                &mut stream,
+                &AuthorityTransportFrame::SyncRequest {
+                    expected_seq: 4,
+                    received_seq: 8,
+                },
+            )
+            .expect("sync request should encode");
+        });
+
+        let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
+            .expect("authority runtime should connect");
+        assert_eq!(
+            transport.recv_command().expect("command should decode"),
+            RemoteAuthorityCommand::SyncRequest {
+                expected_seq: 4,
+                received_seq: 8,
+            }
         );
         server.join().expect("server should join cleanly");
         let _ = fs::remove_file(&socket_path);

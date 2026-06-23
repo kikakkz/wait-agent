@@ -2,7 +2,7 @@ id: task.transport-stability-l2
 kind: task
 version: 1
 title: replace O_NONBLOCK input FIFO with large blocking ring buffer
-status: ready
+status: done
 priority: medium
 design_ref:
   doc: docs/remote-transport-stability-design.md

@@ -264,35 +264,29 @@ impl RemoteMainSlotPaneRuntime {
         let mut authority_status = waiting_authority_status.clone();
         // Always attempt activation — output_log replay comes from the
         // local mailbox; no need to wait for authority transport.
-        let activated = activate_surface_target_with_mode(
+        match activate_remote_surface_binding(
             &remote_runtime,
             &target,
             &spec,
             &initial_size,
             &mut observer,
-        )
-        .map(Some)?;
-        if let Some((activated_binding, raw)) = activated {
-            raw_input_route.activate(&target, &activated_binding, &spec.console_host_id);
-            schedule_post_activation_resize_probe(event_tx.clone());
-            sync_or_defer_remote_pty_size(
-                &remote_runtime,
-                &target,
-                &activated_binding,
-                &initial_size,
-                &mut pending_pty_size,
-            )?;
-            last_synced_size = initial_size;
-            write_remote_raw_output_with_initial_clear(&raw, &mut raw_screen_initialized)?;
-            binding = Some(activated_binding);
-            flush_paused_input(
-                &remote_runtime,
-                &target,
-                binding.as_ref().unwrap(),
-                &paused_input_buffer,
-                &mut console_seq,
-            )?;
-            paused_input_buffer.clear();
+            &raw_input_route,
+            &mut pending_pty_size,
+            &mut last_synced_size,
+            &mut raw_screen_initialized,
+            &mut paused_input_buffer,
+            &mut console_seq,
+            event_tx.clone(),
+        ) {
+            Ok(activated_binding) => {
+                binding = Some(activated_binding);
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] initial remote activation deferred: {error}"
+                ));
+                authority_status = waiting_authority_status.clone();
+            }
         }
         let run_result = (|| -> Result<(), LifecycleError> {
             let mut reconnecting_since: Option<Instant> = None;
@@ -500,10 +494,9 @@ impl RemoteMainSlotPaneRuntime {
                                     &remote_runtime,
                                     &target,
                                     binding,
-                                    &paused_input_buffer,
+                                    &mut paused_input_buffer,
                                     &mut console_seq,
                                 )?;
-                                paused_input_buffer.clear();
                             }
                             let needs_activation = binding.is_none()
                                 || remote_runtime.is_mirror_pending(&target)
@@ -513,48 +506,23 @@ impl RemoteMainSlotPaneRuntime {
                                 && matches!(authority_status, AuthorityTransportStatus::Connected)
                             {
                                 let size = current_remote_surface_size(&spec, &terminal);
-                                match activate_surface_target_with_mode(
+                                match activate_remote_surface_binding(
                                     &remote_runtime,
                                     &target,
                                     &spec,
                                     &size,
                                     &mut observer,
+                                    &raw_input_route,
+                                    &mut pending_pty_size,
+                                    &mut last_synced_size,
+                                    &mut raw_screen_initialized,
+                                    &mut paused_input_buffer,
+                                    &mut console_seq,
+                                    event_tx.clone(),
                                 ) {
-                                    Ok(result) => {
-                                        raw_input_route.activate(
-                                            &target,
-                                            &result.0,
-                                            &spec.console_host_id,
-                                        );
-                                        schedule_post_activation_resize_probe(event_tx.clone());
-                                        sync_or_defer_remote_pty_size(
-                                            &remote_runtime,
-                                            &target,
-                                            &result.0,
-                                            &size,
-                                            &mut pending_pty_size,
-                                        )?;
-                                        last_synced_size = size;
-                                        write_remote_raw_output_with_initial_clear(
-                                            &result.1,
-                                            &mut raw_screen_initialized,
-                                        )?;
-                                        binding = Some(result.0);
+                                    Ok(activated_binding) => {
+                                        binding = Some(activated_binding);
                                         activated = true;
-                                        flush_pending_pty_size(
-                                            &remote_runtime,
-                                            &target,
-                                            binding.as_ref().unwrap(),
-                                            &mut pending_pty_size,
-                                        )?;
-                                        flush_paused_input(
-                                            &remote_runtime,
-                                            &target,
-                                            binding.as_ref().unwrap(),
-                                            &paused_input_buffer,
-                                            &mut console_seq,
-                                        )?;
-                                        paused_input_buffer.clear();
                                     }
                                     Err(error) => {
                                         authority_status =
@@ -738,49 +706,24 @@ impl RemoteMainSlotPaneRuntime {
                             && matches!(authority_status, AuthorityTransportStatus::Connected)
                         {
                             let size = current_remote_surface_size(&spec, &terminal);
-                            match activate_surface_target_with_mode(
+                            match activate_remote_surface_binding(
                                 &remote_runtime,
                                 &target,
                                 &spec,
                                 &size,
                                 &mut observer,
+                                &raw_input_route,
+                                &mut pending_pty_size,
+                                &mut last_synced_size,
+                                &mut raw_screen_initialized,
+                                &mut paused_input_buffer,
+                                &mut console_seq,
+                                event_tx.clone(),
                             ) {
-                                Ok(result) => {
+                                Ok(activated_binding) => {
                                     reconnecting_since = None;
-                                    raw_input_route.activate(
-                                        &target,
-                                        &result.0,
-                                        &spec.console_host_id,
-                                    );
-                                    schedule_post_activation_resize_probe(event_tx.clone());
-                                    sync_or_defer_remote_pty_size(
-                                        &remote_runtime,
-                                        &target,
-                                        &result.0,
-                                        &size,
-                                        &mut pending_pty_size,
-                                    )?;
-                                    last_synced_size = size;
-                                    write_remote_raw_output_with_initial_clear(
-                                        &result.1,
-                                        &mut raw_screen_initialized,
-                                    )?;
-                                    binding = Some(result.0);
+                                    binding = Some(activated_binding);
                                     activated = true;
-                                    flush_pending_pty_size(
-                                        &remote_runtime,
-                                        &target,
-                                        binding.as_ref().unwrap(),
-                                        &mut pending_pty_size,
-                                    )?;
-                                    flush_paused_input(
-                                        &remote_runtime,
-                                        &target,
-                                        binding.as_ref().unwrap(),
-                                        &paused_input_buffer,
-                                        &mut console_seq,
-                                    )?;
-                                    paused_input_buffer.clear();
                                 }
                                 Err(error) => {
                                     authority_status =
@@ -856,6 +799,11 @@ impl RemoteMainSlotPaneRuntime {
         if let Some(binding) = binding.as_ref() {
             let _ = remote_runtime.close_target(&target, binding);
         }
+        if let Err(error) = &run_result {
+            ERROR_LOG.log(format!(
+                "[diag-timing] remote pane run_result failed: {error}"
+            ));
+        }
         run_result
     }
 
@@ -918,6 +866,44 @@ fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize>
     })
 }
 
+fn activate_remote_surface_binding(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    spec: &RemoteInteractSurfaceSpec,
+    size: &TerminalSize,
+    observer: &mut RemoteObserverRuntime,
+    raw_input_route: &RawPtyInputRoute,
+    pending_pty_size: &mut Option<TerminalSize>,
+    last_synced_size: &mut TerminalSize,
+    raw_screen_initialized: &mut bool,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    event_tx: mpsc::Sender<RemotePaneEvent>,
+) -> Result<RemoteAttachmentBinding, LifecycleError> {
+    let (activated_binding, raw) =
+        activate_surface_target_with_mode(remote_runtime, target, spec, size, observer)?;
+    raw_input_route.activate(target, &activated_binding, &spec.console_host_id);
+    schedule_post_activation_resize_probe(event_tx);
+    sync_or_defer_remote_pty_size(
+        remote_runtime,
+        target,
+        &activated_binding,
+        size,
+        pending_pty_size,
+    )?;
+    *last_synced_size = *size;
+    write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
+    flush_pending_pty_size(remote_runtime, target, &activated_binding, pending_pty_size)?;
+    flush_paused_input(
+        remote_runtime,
+        target,
+        &activated_binding,
+        paused_input_buffer,
+        console_seq,
+    )?;
+    Ok(activated_binding)
+}
+
 fn sync_remote_pty_size(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
@@ -949,7 +935,10 @@ fn sync_or_defer_remote_pty_size(
     }
     match sync_remote_pty_size(remote_runtime, target, binding, size) {
         Ok(()) => Ok(()),
-        Err(error) if !remote_runtime.has_connection(target.address.authority_id()) => {
+        Err(error)
+            if is_remote_authority_unavailable(&error)
+                || !remote_runtime.has_connection(target.address.authority_id()) =>
+        {
             ERROR_LOG.log(format!(
                 "[diag-timing] remote PTY resize deferred after authority unregistered: {error}"
             ));
@@ -972,9 +961,22 @@ fn flush_pending_pty_size(
     if !remote_runtime.has_connection(target.address.authority_id()) {
         return Ok(());
     }
-    sync_remote_pty_size(remote_runtime, target, binding, &size)?;
-    *pending_pty_size = None;
-    Ok(())
+    match sync_remote_pty_size(remote_runtime, target, binding, &size) {
+        Ok(()) => {
+            *pending_pty_size = None;
+            Ok(())
+        }
+        Err(error)
+            if is_remote_authority_unavailable(&error)
+                || !remote_runtime.has_connection(target.address.authority_id()) =>
+        {
+            ERROR_LOG.log(format!(
+                "[diag-timing] pending remote PTY resize kept after authority unregistered: {error}"
+            ));
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn signal_clean_remote_target_exit(
@@ -991,7 +993,7 @@ fn signal_clean_remote_target_exit(
         return Ok(());
     }
 
-    ERROR_LOG.log(format!(
+    ERROR_LOG.log_exit_latency(format!(
         "[diag-exit] signal_clean_exit_start target={} socket={} session={} pane={} stage=signal_clean_exit",
         spec.target,
         spec.socket_name,
@@ -1031,7 +1033,7 @@ fn signal_clean_remote_target_exit(
             &["run-shell".to_string(), "-b".to_string(), shell_command],
         )
         .map_err(remote_pane_error);
-    ERROR_LOG.log(format!(
+    ERROR_LOG.log_exit_latency(format!(
         "[diag-exit] signal_clean_exit_dispatched target={} socket={} session={} pane={} ok={} stage=signal_clean_exit",
         spec.target,
         spec.socket_name,
@@ -1053,14 +1055,47 @@ fn flush_paused_input(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
     binding: &RemoteAttachmentBinding,
-    buffer: &[Vec<u8>],
+    buffer: &mut Vec<Vec<u8>>,
     console_seq: &mut u64,
 ) -> Result<(), LifecycleError> {
-    for chunk in buffer {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    if !remote_runtime.has_connection(target.address.authority_id()) {
+        ERROR_LOG.log(format!(
+            "[diag-timing] paused remote input kept until authority registers: authority={}",
+            target.address.authority_id()
+        ));
+        return Ok(());
+    }
+
+    let mut flushed = 0usize;
+    for chunk in buffer.iter() {
         *console_seq += 1;
-        remote_runtime.send_raw_pty_input(target, binding, *console_seq, chunk.clone())?;
+        match remote_runtime.send_raw_pty_input(target, binding, *console_seq, chunk.clone()) {
+            Ok(()) => {
+                flushed += 1;
+            }
+            Err(error)
+                if is_remote_authority_unavailable(&error)
+                    || !remote_runtime.has_connection(target.address.authority_id()) =>
+            {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] paused remote input kept after authority unregistered: {error}"
+                ));
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if flushed > 0 {
+        buffer.drain(..flushed);
     }
     Ok(())
+}
+
+fn is_remote_authority_unavailable(error: &LifecycleError) -> bool {
+    matches!(error, LifecycleError::Protocol(message) if message.contains("remote control-plane connection for node") && message.contains("is not registered"))
 }
 
 #[cfg(test)]

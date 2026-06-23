@@ -206,6 +206,8 @@ mod tests {
         assert_eq!(published.channel, NodeSessionChannel::Publication);
         match published.envelope.payload {
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                node_instance_id,
+                revision,
                 transport_session_id,
                 source_session_name,
                 selector,
@@ -218,6 +220,8 @@ mod tests {
                 window_count,
                 task_state,
             }) => {
+                assert_eq!(node_instance_id, "");
+                assert_eq!(revision, 0);
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name.as_deref(), Some("target-host-1"));
                 assert_eq!(selector.as_deref(), Some("wk:shell"));
@@ -238,6 +242,8 @@ mod tests {
             exited.envelope.payload,
             ControlPlanePayload::TargetExited(TargetExitedPayload {
                 transport_session_id: "shell-1".to_string(),
+                node_instance_id: String::new(),
+                revision: 0,
                 source_session_name: Some("target-host-1".to_string()),
             })
         );

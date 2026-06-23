@@ -142,10 +142,14 @@ mod tests {
             .expect("publication envelope should arrive");
         match envelope.payload {
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                node_instance_id,
+                revision,
                 transport_session_id,
                 source_session_name,
                 ..
             }) => {
+                assert_eq!(node_instance_id, "");
+                assert_eq!(revision, 0);
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name.as_deref(), Some("target-host-1"));
             }
@@ -408,6 +412,8 @@ mod tests {
             .expect("publication envelope should arrive");
         match envelope.payload {
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                node_instance_id,
+                revision,
                 transport_session_id,
                 source_session_name,
                 selector,
@@ -420,6 +426,8 @@ mod tests {
                 workspace_key,
                 task_state,
             }) => {
+                assert_eq!(node_instance_id, "");
+                assert_eq!(revision, 0);
                 assert_eq!(transport_session_id, "shell-1");
                 assert_eq!(source_session_name, None);
                 assert_eq!(selector.as_deref(), Some("wk:shell"));

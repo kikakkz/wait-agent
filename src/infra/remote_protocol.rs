@@ -61,6 +61,7 @@ pub enum ControlPlanePayload {
     CreateSessionRejected(CreateSessionRejectedPayload),
     TargetPublished(TargetPublishedPayload),
     TargetExited(TargetExitedPayload),
+    TargetPublicationAck(TargetPublicationAckPayload),
     Error(ErrorPayload),
 }
 
@@ -87,6 +88,7 @@ impl ControlPlanePayload {
             Self::CreateSessionRejected(_) => "create_session_rejected",
             Self::TargetPublished(_) => "target_published",
             Self::TargetExited(_) => "target_exited",
+            Self::TargetPublicationAck(_) => "target_publication_ack",
             Self::Error(_) => "error",
         }
     }
@@ -261,6 +263,8 @@ pub struct CreateSessionRejectedPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetPublishedPayload {
     pub transport_session_id: String,
+    pub node_instance_id: String,
+    pub revision: u64,
     pub source_session_name: Option<String>,
     pub selector: Option<String>,
     pub availability: &'static str,
@@ -276,7 +280,26 @@ pub struct TargetPublishedPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetExitedPayload {
     pub transport_session_id: String,
+    pub node_instance_id: String,
+    pub revision: u64,
     pub source_session_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetPublicationAckStatus {
+    Applied,
+    StaleRevision,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPublicationAckPayload {
+    pub node_id: String,
+    pub node_instance_id: String,
+    pub target_id: String,
+    pub revision: u64,
+    pub status: TargetPublicationAckStatus,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

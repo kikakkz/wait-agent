@@ -1,7 +1,106 @@
 kind: state
 version: 1
-last_updated_from: task.remote-create-9e/task.remote-create-9f user acceptance refreshed on 2026-06-20
+last_updated_from: remote main-slot authority-gap follow-up validation on 2026-06-23
 checks:
+  - id: remote-main-slot-authority-gap-cargo-check
+    command: cargo check after making remote main-slot pane keep pending resize/input while authority control-plane is unregistered
+    status: pass
+  - id: remote-main-slot-authority-gap-cargo-build
+    command: cargo build to refresh target/debug/waitagent before tmux-spawned integration repro
+    status: pass
+  - id: remote-main-slot-authority-gap-repro
+    command: env WAITAGENT_EXIT_LATENCY_DIAG=1 cargo test remote_activation_from_sidebar_after_remote_exit_restores_focus_to_remote_main_pane -- --test-threads=1 --nocapture
+    status: pass
+  - id: remote-main-slot-authority-gap-pane-runtime
+    command: cargo test remote_main_slot_pane_runtime -- --test-threads=1
+    status: pass
+  - id: remote-main-slot-authority-gap-main-slot-runtime
+    command: cargo test main_slot_runtime -- --test-threads=1
+    status: pass
+  - id: transport-stability-cargo-test-full-suite
+    command: cargo test -- --test-threads=1 after L4 read-timeout/ping-pong, L1 output replay cache, L2 input ring buffer/congestion frame, L5 reconnect verification, and L3 SyncRequest gap recovery
+    status: pass
+  - id: transport-stability-cargo-check
+    command: cargo check after transport stability batch implementation
+    status: pass
+  - id: transport-stability-cargo-test-targeted
+    command: cargo test remote_transport_codec -- --test-threads=1; cargo test remote_authority_connection_runtime -- --test-threads=1; cargo test remote_authority_transport_runtime -- --test-threads=1; cargo test remote_authority_target_host_runtime -- --test-threads=1; cargo test remote_node_session_owner_runtime -- --test-threads=1
+    status: pass
+  - id: remote-exit-latency-4-cargo-build-release
+    command: cargo build --release after gating temporary exit-latency diagnostics behind WAITAGENT_EXIT_LATENCY_DIAG
+    status: pass
+  - id: remote-exit-latency-4-cargo-check
+    command: cargo check after gating temporary exit-latency diagnostics behind WAITAGENT_EXIT_LATENCY_DIAG
+    status: pass
+  - id: remote-exit-latency-4-cargo-fmt-check
+    command: cargo fmt --check after gating temporary exit-latency diagnostics behind WAITAGENT_EXIT_LATENCY_DIAG
+    status: pass
+  - id: remote-exit-latency-4-cargo-test-session-sync-runtime
+    command: cargo test remote_node_session_sync_runtime -- --test-threads=1 after diagnostic gating
+    status: pass
+  - id: remote-exit-latency-4-cargo-test-publication-runtime
+    command: cargo test remote_target_publication_runtime -- --test-threads=1 after diagnostic gating
+    status: pass
+  - id: remote-exit-latency-4-cargo-test-target-host-runtime
+    command: cargo test target_host_runtime -- --test-threads=1 after diagnostic gating
+    status: pass
+  - id: remote-exit-latency-4-cargo-test-main-slot-runtime
+    command: cargo test main_slot_runtime -- --test-threads=1 after diagnostic gating; an earlier concurrent run with other tmux tests failed on tmux pane disappearance, but the failed remote_target_exit_activates_existing_next_remote_pane test and the full main_slot_runtime group passed on isolated rerun
+    status: pass
+  - id: remote-exit-latency-4-manual-e2e
+    command: manual E2E with WAITAGENT_EXIT_LATENCY_DIAG=1 using release waitagent on ports 37474 and 37475; create selected remote session 10.1.26.84#37475:2a2f9b0908b6fc5b, send exit through server main pane, observe sync_event_received, sync_exit_send, publication_apply_remove, publication_workspace_exit_spawn, ingress_target_exited_apply, workspace_remote_exit_start, sidebar_item_gone, active target fallback to 10.1.26.84#37475:34e39b017c52ff8d, and client tmux session removal
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-main-slot-runtime-final
+    command: cargo test main_slot_runtime -- --test-threads=1 after adding live workspace socket registry unregister on workspace-owned main-slot close paths
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-publication-runtime-final
+    command: cargo test remote_target_publication_runtime -- --test-threads=1 after RemoteTargetPublicationRuntime switched TargetExited refresh socket resolution to the live registry before tmux fallback
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-registry-runtime-final
+    command: cargo test remote_workspace_socket_registry_runtime -- --test-threads=1 after adding the runtime-owned file-backed live workspace socket registry
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-live-workspace-socket-names
+    command: cargo test live_workspace_socket_names -- --test-threads=1 after adding registry-first publication socket resolution coverage
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-ingress-server-runtime
+    command: cargo test remote_node_ingress_server_runtime -- --test-threads=1 after introducing the live workspace socket registry alongside existing ingress owner registration
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-target-host-runtime
+    command: cargo test target_host_runtime -- --test-threads=1 after preserving task.remote-exit-latency-2 local close notify behavior
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-session-sync-runtime
+    command: cargo test remote_node_session_sync_runtime -- --test-threads=1 after preserving acknowledged LocalCatalogChanged wake semantics
+    status: pass
+  - id: remote-exit-latency-3-cargo-check-final
+    command: cargo check after task.remote-exit-latency-3 registry and publication changes
+    status: pass
+  - id: remote-exit-latency-3-cargo-fmt-check-final
+    command: cargo fmt --check after task.remote-exit-latency-3 registry and publication changes
+    status: pass
+  - id: remote-exit-latency-3-cargo-test-full-suite-observed
+    command: cargo test -- --test-threads=1 after task.remote-exit-latency-3; observed 598 passed, 1 failed, 1 ignored, then the failed last_remote_main_pane_exit_activates_local_target_when_one_exists and main_slot_runtime group both passed on immediate rerun; failure was tmux respawn-pane cannot find pane and left test sidecars that were cleaned
+    status: flaky
+  - id: remote-exit-latency-2-cargo-test-full-suite-final
+    command: cargo test -- --test-threads=1 after wiring TargetHostRuntime local target close notify and isolating route tests from remote runtime owner sidecar readiness
+    status: pass
+  - id: remote-exit-latency-2-cargo-check-final
+    command: cargo check after task.remote-exit-latency-2 implementation and test-isolation fix
+    status: pass
+  - id: remote-exit-latency-2-cargo-fmt-check-final
+    command: cargo fmt --check after task.remote-exit-latency-2 implementation and test-isolation fix
+    status: pass
+  - id: remote-exit-latency-2-cargo-test-target-host-runtime
+    command: cargo test target_host_runtime -- --test-threads=1 after wiring TargetHostRuntime command-close local target paths to acknowledged session sync notify
+    status: pass
+  - id: remote-exit-latency-2-cargo-test-session-sync-runtime
+    command: cargo test remote_node_session_sync_runtime -- --test-threads=1 after keeping LocalCatalogChanged on the sync_local_sessions event path
+    status: pass
+  - id: remote-exit-latency-2-cargo-test-ingress-server-runtime
+    command: cargo test remote_node_ingress_server_runtime -- --test-threads=1 after isolating TargetExited route tests from the remote runtime owner sidecar
+    status: pass
+  - id: remote-exit-latency-2-cargo-test-main-slot-runtime
+    command: cargo test main_slot_runtime -- --test-threads=1 after providing an in-process test remote runtime owner socket for owner-backed catalog tests
+    status: pass
   - id: remote-create-9f-user-acceptance-ctrl-w-ctrl-s
     command: manual user acceptance on 2026-06-20: corrected Ctrl-W and Ctrl-S remote-host workflows are accepted, including first Ctrl-W default-session activation, repeated Ctrl-W or existing endpoint session creation, Ctrl-S creation on selected remote session, and no reintroduction of direct server-to-remote create-session dialing
     status: pass

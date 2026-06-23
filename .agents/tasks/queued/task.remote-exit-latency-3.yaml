@@ -2,7 +2,7 @@ id: task.remote-exit-latency-3
 kind: task
 version: 1
 title: replace TargetExited hot-path tmux socket scan with live workspace socket registry
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-session-exit-latency-design.md

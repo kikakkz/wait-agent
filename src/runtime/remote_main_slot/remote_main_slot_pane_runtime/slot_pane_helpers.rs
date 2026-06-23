@@ -557,7 +557,7 @@ fn log_exit_submit_if_detected(route: &RawPtyInputRouteState, input_seq: u64, by
     if command != "exit" {
         return;
     }
-    ERROR_LOG.log(format!(
+    ERROR_LOG.log_exit_latency(format!(
         "[diag-exit] input_exit_enter target={} session={} attachment={} console={} input_seq={} bytes={} stage=input_enter",
         route.target_id,
         route.session_id,
@@ -678,7 +678,7 @@ pub(super) fn spawn_target_presence_watcher(
                 *guard = is_present;
             }
             if is_present != last_present {
-                ERROR_LOG.log(format!(
+                ERROR_LOG.log_exit_latency(format!(
                     "[diag-exit] presence_changed target={} present={} raw_present={} consecutive_misses={} stage=presence_watcher",
                     target_id,
                     is_present,
@@ -800,7 +800,7 @@ pub(crate) fn apply_authority_envelope(
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
         ControlPlanePayload::TargetExited(payload) => {
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] authority_target_exited target={} session={} source_session={:?} sender={} stage=authority_envelope",
                 target.address.qualified_target(),
                 payload.transport_session_id,

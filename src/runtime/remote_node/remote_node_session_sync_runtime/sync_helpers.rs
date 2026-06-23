@@ -13,7 +13,10 @@ use crate::infra::remote_grpc_proto::v1::{
 use crate::infra::remote_grpc_transport::{
     OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
 };
-use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope};
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, ErrorPayload, NodeSessionChannel, ProtocolEnvelope,
+    TargetPublicationAckPayload, TargetPublicationAckStatus,
+};
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
@@ -44,8 +47,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{
     LocalSessionCatalog, LocalTargetExitObserver, NoopAuthorityPublicationGateway,
     OutboundRemoteNodeTransport, SessionSyncAuthorityHost, SessionSyncAuthorityManager,
-    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
+    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL,
+    WAITAGENT_ACTIVE_TARGET_OPTION,
 };
+
+const SOURCE_PUBLICATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const SOURCE_PUBLICATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalCatalogChangeReason {
@@ -78,10 +85,274 @@ impl LocalCatalogChangeReason {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SourcePublicationState {
+    session: ManagedSessionRecord,
+    exited: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct PendingSourcePublication {
+    pub(super) target_id: String,
+    pub(super) revision: u64,
+    pub(super) envelope: GrpcNodeSessionEnvelope,
+    pub(super) retry_attempt: u32,
+    pub(super) next_retry_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct SourcePublicationRecord {
+    last_state: Option<SourcePublicationState>,
+    latest_revision: u64,
+    pending: Option<PendingSourcePublication>,
+    acked_revision: u64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SourcePublicationTracker {
+    records: HashMap<String, SourcePublicationRecord>,
+    connected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourcePublicationAckOutcome {
+    Cleared,
+    Retained,
+    Ignored,
+}
+
+impl SourcePublicationTracker {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn on_connected(&mut self) {
+        self.connected = true;
+        for record in self.records.values_mut() {
+            if let Some(pending) = record.pending.as_mut() {
+                pending.next_retry_at = None;
+            }
+        }
+    }
+
+    pub(super) fn on_disconnected(&mut self) {
+        self.connected = false;
+    }
+
+    pub(super) fn on_state_changed(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+    ) -> Option<PendingSourcePublication> {
+        let target_id = format!("remote-peer:{node_id}:{}", session.address.session_id());
+        let state = SourcePublicationState {
+            session: session.clone(),
+            exited: false,
+        };
+        let record = self.records.entry(target_id.clone()).or_default();
+        if record.last_state.as_ref() == Some(&state) {
+            return None;
+        }
+        record.latest_revision += 1;
+        record.last_state = Some(state);
+        next_message_id_increment(next_message_id);
+        let mut envelope = remote_session_published_envelope(
+            node_id,
+            session_instance_id,
+            *next_message_id,
+            session,
+        );
+        if let Some(Body::TargetPublished(payload)) = envelope.body.as_mut() {
+            payload.node_instance_id = session_instance_id.to_string();
+            payload.revision = record.latest_revision;
+        }
+        let pending = PendingSourcePublication {
+            target_id,
+            revision: record.latest_revision,
+            envelope,
+            retry_attempt: 0,
+            next_retry_at: None,
+        };
+        record.pending = Some(pending.clone());
+        Some(pending)
+    }
+
+    pub(super) fn on_target_exited(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        transport_session_id: &str,
+    ) -> PendingSourcePublication {
+        let target_id = format!("remote-peer:{node_id}:{transport_session_id}");
+        let record = self.records.entry(target_id.clone()).or_default();
+        record.latest_revision += 1;
+        record.last_state = Some(SourcePublicationState {
+            session: exited_source_publication_state(node_id, transport_session_id),
+            exited: true,
+        });
+        next_message_id_increment(next_message_id);
+        let mut envelope = remote_session_exited_envelope(
+            node_id,
+            session_instance_id,
+            *next_message_id,
+            transport_session_id,
+        );
+        if let Some(Body::TargetExited(payload)) = envelope.body.as_mut() {
+            payload.node_instance_id = session_instance_id.to_string();
+            payload.revision = record.latest_revision;
+        }
+        let pending = PendingSourcePublication {
+            target_id,
+            revision: record.latest_revision,
+            envelope,
+            retry_attempt: 0,
+            next_retry_at: None,
+        };
+        record.pending = Some(pending.clone());
+        pending
+    }
+
+    pub(super) fn on_ack(
+        &mut self,
+        ack: &TargetPublicationAckPayload,
+    ) -> SourcePublicationAckOutcome {
+        let Some(record) = self.records.get_mut(&ack.target_id) else {
+            return SourcePublicationAckOutcome::Ignored;
+        };
+        let Some(pending) = record.pending.as_ref() else {
+            return SourcePublicationAckOutcome::Ignored;
+        };
+        if pending.revision != ack.revision {
+            return SourcePublicationAckOutcome::Ignored;
+        }
+        match ack.status {
+            TargetPublicationAckStatus::Applied | TargetPublicationAckStatus::StaleRevision => {
+                record.acked_revision = ack.revision;
+                record.pending = None;
+                SourcePublicationAckOutcome::Cleared
+            }
+            TargetPublicationAckStatus::Failed => SourcePublicationAckOutcome::Retained,
+        }
+    }
+
+    pub(super) fn on_publication_sent(&mut self, target_id: &str, revision: u64, now: Instant) {
+        let Some(record) = self.records.get_mut(target_id) else {
+            return;
+        };
+        let Some(pending) = record.pending.as_mut() else {
+            return;
+        };
+        if pending.revision != revision {
+            return;
+        }
+        pending.retry_attempt = pending.retry_attempt.saturating_add(1);
+        pending.next_retry_at = Some(now + source_publication_retry_delay(pending.retry_attempt));
+    }
+
+    pub(super) fn pending_replay_publications(&self) -> Vec<PendingSourcePublication> {
+        if !self.connected {
+            return Vec::new();
+        }
+        self.records
+            .values()
+            .filter_map(|record| {
+                record
+                    .pending
+                    .as_ref()
+                    .filter(|pending| pending.next_retry_at.is_none())
+                    .cloned()
+            })
+            .collect()
+    }
+
+    pub(super) fn due_retry_publications(&self, now: Instant) -> Vec<PendingSourcePublication> {
+        if !self.connected {
+            return Vec::new();
+        }
+        self.records
+            .values()
+            .filter_map(|record| {
+                record
+                    .pending
+                    .as_ref()
+                    .filter(|pending| {
+                        pending
+                            .next_retry_at
+                            .is_some_and(|retry_at| retry_at <= now)
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+
+    pub(super) fn next_retry_delay(&self, now: Instant) -> Option<Duration> {
+        if !self.connected {
+            return None;
+        }
+        self.records
+            .values()
+            .filter_map(|record| record.pending.as_ref())
+            .filter_map(|pending| {
+                pending
+                    .next_retry_at
+                    .map(|retry_at| retry_at.saturating_duration_since(now))
+            })
+            .min()
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn pending_publications(&self) -> Vec<PendingSourcePublication> {
+        if !self.connected {
+            return Vec::new();
+        }
+        self.records
+            .values()
+            .filter_map(|record| record.pending.clone())
+            .collect()
+    }
+}
+
+fn source_publication_retry_delay(attempt: u32) -> Duration {
+    let factor = 1_u32
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    SOURCE_PUBLICATION_RETRY_INITIAL_DELAY
+        .saturating_mul(factor)
+        .min(SOURCE_PUBLICATION_RETRY_MAX_DELAY)
+}
+
+fn exited_source_publication_state(
+    node_id: &str,
+    transport_session_id: &str,
+) -> ManagedSessionRecord {
+    ManagedSessionRecord {
+        address: crate::domain::session_catalog::ManagedSessionAddress::remote_peer(
+            node_id,
+            transport_session_id.to_string(),
+        ),
+        selector: None,
+        availability: crate::domain::session_catalog::SessionAvailability::Exited,
+        workspace_dir: None,
+        workspace_key: None,
+        session_role: None,
+        opened_by: Vec::new(),
+        attached_clients: 0,
+        window_count: 0,
+        command_name: None,
+        current_path: None,
+        task_state: ManagedSessionTaskState::Unknown,
+    }
+}
+
 #[derive(Debug)]
 enum SessionSyncEvent {
     Transport(RemoteNodeTransportEvent),
     LocalCatalogChanged(LocalCatalogChangeReason),
+    RetryDue,
     Stop,
 }
 
@@ -93,7 +364,6 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     node_id: String,
     endpoint_uri: String,
     local_catalog_rx: mpsc::Receiver<LocalCatalogChangeReason>,
-    _poll_interval: Duration,
     reconnect_delay: Duration,
     stop_rx: mpsc::Receiver<()>,
 ) where
@@ -113,6 +383,8 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
         };
     let local_target_socket_name = gateway.local_target_socket_name().map(str::to_string);
     let mut next_message_id = 0_u64;
+    let mut publication_tracker = SourcePublicationTracker::new();
+    let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
     loop {
         if should_stop(&stop_rx) {
             return;
@@ -128,6 +400,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
         ) {
             Ok(guard) => guard,
             Err(_) => {
+                publication_tracker.on_disconnected();
                 if wait_or_stop(&stop_rx, reconnect_delay) {
                     return;
                 }
@@ -136,17 +409,20 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
         };
 
         let mut active_session = None;
-        let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
         let mut authority_manager =
             SessionSyncAuthorityManager::new(network.clone(), local_target_socket_name.clone());
         let mut should_reconnect = false;
 
         while !should_reconnect {
-            let event =
-                match recv_session_sync_event(&transport_event_rx, &local_catalog_rx, &stop_rx) {
-                    Some(event) => event,
-                    None => return,
-                };
+            let event = match recv_session_sync_event(
+                &transport_event_rx,
+                &local_catalog_rx,
+                &stop_rx,
+                publication_tracker.next_retry_delay(Instant::now()),
+            ) {
+                Some(event) => event,
+                None => return,
+            };
 
             match event {
                 SessionSyncEvent::Transport(event) => {
@@ -160,23 +436,36 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                         &node_id,
                     );
                     should_reconnect |= outcome.should_reconnect;
+                    if outcome.should_reconnect {
+                        publication_tracker.on_disconnected();
+                    }
+                    handle_publication_ack_outcome(
+                        &mut publication_tracker,
+                        outcome.publication_ack.as_ref(),
+                    );
+                    if outcome.local_catalog_changed {
+                        should_reconnect |= sync_local_sessions_after_catalog_transport_event(
+                            &gateway,
+                            &node_id,
+                            active_session.as_ref(),
+                            &local_target_exit_observer,
+                            &mut synced_sessions,
+                            &mut next_message_id,
+                            &mut publication_tracker,
+                            "local catalog transport event",
+                        );
+                    }
                     if session_opened {
-                        if let Some(session_handle) = active_session.as_ref() {
-                            if let Err(_) = sync_local_sessions(
-                                &gateway,
-                                &node_id,
-                                session_handle,
-                                &local_target_exit_observer,
-                                &mut synced_sessions,
-                                &mut next_message_id,
-                            ) {
-                                ERROR_LOG.log(
-                                    "[diag-sync] sync_local_sessions after SessionOpened failed, will reconnect"
-                                        .to_string(),
-                                );
-                                should_reconnect = true;
-                            }
-                        }
+                        should_reconnect |= sync_after_session_opened(
+                            &gateway,
+                            &node_id,
+                            active_session.as_ref(),
+                            &local_target_exit_observer,
+                            &mut synced_sessions,
+                            &mut next_message_id,
+                            &mut publication_tracker,
+                            "SessionOpened",
+                        );
                     }
                     while let Ok(event) = transport_event_rx.try_recv() {
                         let session_opened =
@@ -189,45 +478,67 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             &node_id,
                         );
                         should_reconnect |= outcome.should_reconnect;
+                        if outcome.should_reconnect {
+                            publication_tracker.on_disconnected();
+                        }
+                        handle_publication_ack_outcome(
+                            &mut publication_tracker,
+                            outcome.publication_ack.as_ref(),
+                        );
+                        if outcome.local_catalog_changed {
+                            should_reconnect |= sync_local_sessions_after_catalog_transport_event(
+                                &gateway,
+                                &node_id,
+                                active_session.as_ref(),
+                                &local_target_exit_observer,
+                                &mut synced_sessions,
+                                &mut next_message_id,
+                                &mut publication_tracker,
+                                "queued local catalog transport event",
+                            );
+                        }
                         if session_opened {
-                            if let Some(session_handle) = active_session.as_ref() {
-                                if let Err(_) = sync_local_sessions(
-                                    &gateway,
-                                    &node_id,
-                                    session_handle,
-                                    &local_target_exit_observer,
-                                    &mut synced_sessions,
-                                    &mut next_message_id,
-                                ) {
-                                    ERROR_LOG.log(
-                                        "[diag-sync] sync_local_sessions after queued SessionOpened failed, will reconnect"
-                                            .to_string(),
-                                    );
-                                    should_reconnect = true;
-                                }
-                            }
+                            should_reconnect |= sync_after_session_opened(
+                                &gateway,
+                                &node_id,
+                                active_session.as_ref(),
+                                &local_target_exit_observer,
+                                &mut synced_sessions,
+                                &mut next_message_id,
+                                &mut publication_tracker,
+                                "queued SessionOpened",
+                            );
+                        }
+                    }
+                }
+                SessionSyncEvent::RetryDue => {
+                    if let Some(session_handle) = active_session.as_ref() {
+                        let due = publication_tracker.due_retry_publications(Instant::now());
+                        if !due.is_empty() {
+                            ERROR_LOG.log(format!(
+                                "[diag-publication] retrying pending source publications count={}",
+                                due.len()
+                            ));
+                        }
+                        if let Err(error) = send_pending_source_publications(
+                            session_handle,
+                            &mut publication_tracker,
+                            due,
+                        ) {
+                            ERROR_LOG.log(format!(
+                                "[diag-publication] source publication retry failed, will reconnect: {error}"
+                            ));
+                            publication_tracker.on_disconnected();
+                            should_reconnect = true;
                         }
                     }
                 }
                 SessionSyncEvent::LocalCatalogChanged(reason) => {
-                    ERROR_LOG.log(format!(
+                    ERROR_LOG.log_exit_latency(format!(
                         "[diag-exit] sync_event_received reason={} stage=session_sync",
                         reason.as_str()
                     ));
                     if let Some(session_handle) = active_session.as_ref() {
-                        if let Err(_) = sync_explicit_local_catalog_change(
-                            &node_id,
-                            session_handle,
-                            &reason,
-                            &mut synced_sessions,
-                            &mut next_message_id,
-                        ) {
-                            ERROR_LOG.log(
-                                "[diag-sync] explicit local catalog change sync failed, will reconnect"
-                                    .to_string(),
-                            );
-                            should_reconnect = true;
-                        }
                         if let Err(_) = sync_local_sessions(
                             &gateway,
                             &node_id,
@@ -235,6 +546,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             &local_target_exit_observer,
                             &mut synced_sessions,
                             &mut next_message_id,
+                            &mut publication_tracker,
                         ) {
                             ERROR_LOG.log(
                                 "[diag-sync] sync_local_sessions after local catalog change failed, will reconnect"
@@ -255,11 +567,120 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     }
 }
 
+fn sync_after_session_opened<G, O>(
+    gateway: &G,
+    node_id: &str,
+    session_handle: Option<&RemoteNodeSessionHandle>,
+    local_target_exit_observer: &O,
+    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
+    reason: &str,
+) -> bool
+where
+    G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
+{
+    publication_tracker.on_connected();
+    let Some(session_handle) = session_handle else {
+        return false;
+    };
+    if let Err(_) = sync_local_sessions(
+        gateway,
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        synced_sessions,
+        next_message_id,
+        publication_tracker,
+    ) {
+        ERROR_LOG.log(format!(
+            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ));
+        publication_tracker.on_disconnected();
+        return true;
+    }
+    let replay = publication_tracker.pending_replay_publications();
+    if !replay.is_empty() {
+        ERROR_LOG.log(format!(
+            "[diag-publication] replaying pending source publications after {reason} count={}",
+            replay.len()
+        ));
+    }
+    if let Err(error) =
+        send_pending_source_publications(session_handle, publication_tracker, replay)
+    {
+        ERROR_LOG.log(format!(
+            "[diag-publication] pending source publication replay after {reason} failed, will reconnect: {error}"
+        ));
+        publication_tracker.on_disconnected();
+        return true;
+    }
+    false
+}
+
+fn handle_publication_ack_outcome(
+    tracker: &mut SourcePublicationTracker,
+    ack: Option<&TargetPublicationAckPayload>,
+) {
+    let Some(ack) = ack else {
+        return;
+    };
+    match tracker.on_ack(ack) {
+        SourcePublicationAckOutcome::Cleared => ERROR_LOG.log(format!(
+            "[diag-publication] source publication ack cleared target={} revision={}",
+            ack.target_id, ack.revision
+        )),
+        SourcePublicationAckOutcome::Retained => ERROR_LOG.log(format!(
+            "[diag-publication] source publication ack failed target={} revision={}",
+            ack.target_id, ack.revision
+        )),
+        SourcePublicationAckOutcome::Ignored => {}
+    }
+}
+
+pub(super) fn sync_local_sessions_after_catalog_transport_event<G, O>(
+    gateway: &G,
+    node_id: &str,
+    session_handle: Option<&RemoteNodeSessionHandle>,
+    local_target_exit_observer: &O,
+    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
+    reason: &str,
+) -> bool
+where
+    G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
+{
+    let Some(session_handle) = session_handle else {
+        return false;
+    };
+    if let Err(_) = sync_local_sessions(
+        gateway,
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        synced_sessions,
+        next_message_id,
+        publication_tracker,
+    ) {
+        ERROR_LOG.log(format!(
+            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ));
+        publication_tracker.on_disconnected();
+        return true;
+    }
+    false
+}
+
 fn recv_session_sync_event(
     transport_event_rx: &mpsc::Receiver<RemoteNodeTransportEvent>,
     local_catalog_rx: &mpsc::Receiver<LocalCatalogChangeReason>,
     stop_rx: &mpsc::Receiver<()>,
+    retry_delay: Option<Duration>,
 ) -> Option<SessionSyncEvent> {
+    let retry_deadline = retry_delay.map(|delay| Instant::now() + delay);
     loop {
         if stop_rx.try_recv().is_ok() {
             return Some(SessionSyncEvent::Stop);
@@ -267,7 +688,17 @@ fn recv_session_sync_event(
         if let Ok(reason) = local_catalog_rx.try_recv() {
             return Some(SessionSyncEvent::LocalCatalogChanged(reason));
         }
-        match transport_event_rx.recv_timeout(Duration::from_millis(25)) {
+        if retry_deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Some(SessionSyncEvent::RetryDue);
+        }
+        let wait_duration = retry_deadline
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL)
+            })
+            .unwrap_or(SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL);
+        match transport_event_rx.recv_timeout(wait_duration) {
             Ok(event) => return Some(SessionSyncEvent::Transport(event)),
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return None,
@@ -278,6 +709,8 @@ fn recv_session_sync_event(
 #[derive(Debug, Default)]
 pub(super) struct TransportEventOutcome {
     pub(super) should_reconnect: bool,
+    pub(super) local_catalog_changed: bool,
+    pub(super) publication_ack: Option<TargetPublicationAckPayload>,
 }
 
 pub(super) fn handle_transport_event(
@@ -297,11 +730,19 @@ pub(super) fn handle_transport_event(
                 return TransportEventOutcome::default();
             };
             if let Some(event) = map_inbound_grpc_authority_event(envelope) {
-                authority_manager.handle_event(session_handle, event);
+                if let crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent::TargetPublicationAck(payload) = event {
+                    return TransportEventOutcome {
+                        publication_ack: Some(payload),
+                        ..TransportEventOutcome::default()
+                    };
+                }
+                return TransportEventOutcome {
+                    should_reconnect: false,
+                    local_catalog_changed: authority_manager.handle_event(session_handle, event),
+                    ..TransportEventOutcome::default()
+                };
             }
-            TransportEventOutcome {
-                should_reconnect: false,
-            }
+            TransportEventOutcome::default()
         }
         RemoteNodeTransportEvent::SessionClosed {
             node_id: event_node_id,
@@ -312,12 +753,13 @@ pub(super) fn handle_transport_event(
                 "[diag-sync] SessionClosed for node {node_id}, will reconnect"
             ));
             if let Some(publication_runtime) = publication_runtime {
-                let _ = publication_runtime.remove_discovered_remote_node(node_id);
+                let _ = publication_runtime.mark_discovered_remote_node_offline(node_id);
             }
             authority_manager.shutdown();
             *active_session = None;
             TransportEventOutcome {
                 should_reconnect: true,
+                ..TransportEventOutcome::default()
             }
         }
         RemoteNodeTransportEvent::TransportFailed {
@@ -330,48 +772,35 @@ pub(super) fn handle_transport_event(
                 "[diag-sync] TransportFailed node={node_id} msg={message}, will reconnect"
             ));
             if let Some(publication_runtime) = publication_runtime {
-                let _ = publication_runtime.remove_discovered_remote_node(node_id);
+                let _ = publication_runtime.mark_discovered_remote_node_offline(node_id);
             }
             authority_manager.shutdown();
             *active_session = None;
             TransportEventOutcome {
                 should_reconnect: true,
+                ..TransportEventOutcome::default()
             }
         }
     }
 }
 
-pub(crate) fn sync_explicit_local_catalog_change(
-    node_id: &str,
+fn send_source_publication(
     session_handle: &RemoteNodeSessionHandle,
-    reason: &LocalCatalogChangeReason,
-    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
-    next_message_id: &mut u64,
-) -> Result<(), io::Error> {
-    match reason {
-        LocalCatalogChangeReason::LocalTargetExited {
-            target_session_name,
-        } => {
-            let t_exit = Instant::now();
-            synced_sessions
-                .retain(|_, session| session.address.session_id() != target_session_name.as_str());
-            next_message_id_increment(next_message_id);
-            session_handle
-                .send(remote_session_exited_envelope(
-                    node_id,
-                    session_handle.session_instance_id(),
-                    *next_message_id,
-                    target_session_name,
-                ))
-                .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
-            ERROR_LOG.log(format!(
-                "[diag-exit] sync_exit_send node={} target=remote-peer:{}:{} elapsed={:?} stage=session_sync explicit=true",
-                node_id,
-                node_id,
-                target_session_name,
-                t_exit.elapsed()
-            ));
-        }
+    tracker: &mut SourcePublicationTracker,
+    publication: &PendingSourcePublication,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    session_handle.send(publication.envelope.clone())?;
+    tracker.on_publication_sent(&publication.target_id, publication.revision, Instant::now());
+    Ok(())
+}
+
+fn send_pending_source_publications(
+    session_handle: &RemoteNodeSessionHandle,
+    tracker: &mut SourcePublicationTracker,
+    publications: Vec<PendingSourcePublication>,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    for publication in publications {
+        send_source_publication(session_handle, tracker, &publication)?;
     }
     Ok(())
 }
@@ -383,6 +812,7 @@ pub(super) fn sync_local_sessions<G, O>(
     local_target_exit_observer: &O,
     synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
     next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
 ) -> Result<(), io::Error>
 where
     G: LocalSessionCatalog,
@@ -456,13 +886,17 @@ where
 
     for session in &delta.publish {
         let t_send = Instant::now();
-        next_message_id_increment(next_message_id);
-        if let Err(error) = session_handle.send(remote_session_published_envelope(
+        let Some(publication) = publication_tracker.on_state_changed(
             node_id,
             session_handle.session_instance_id(),
-            *next_message_id,
+            next_message_id,
             session,
-        )) {
+        ) else {
+            continue;
+        };
+        if let Err(error) =
+            send_source_publication(session_handle, publication_tracker, &publication)
+        {
             ERROR_LOG.log(format!("[diag-sync] session_handle.send failed: {error}"));
             ERROR_LOG.log(format!(
                 "[diag-newhost] sync_local_sessions publish_send FAILED node={} target={} elapsed={:?} total={:?}",
@@ -484,7 +918,7 @@ where
 
     for previous in &delta.exit {
         let t_exit = Instant::now();
-        ERROR_LOG.log(format!(
+        ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] sync_exit_start node={} target={} total={:?} stage=session_sync",
             node_id,
             previous.address.qualified_target(),
@@ -502,7 +936,7 @@ where
                     previous.address.session_id()
                 ));
             }
-            ERROR_LOG.log(format!(
+            ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] sync_exit_observe_local node={} target={} elapsed={:?} total={:?} stage=session_sync",
                 node_id,
                 previous.address.qualified_target(),
@@ -511,16 +945,15 @@ where
             ));
         }
         let t_send = Instant::now();
-        next_message_id_increment(next_message_id);
-        session_handle
-            .send(remote_session_exited_envelope(
-                node_id,
-                session_handle.session_instance_id(),
-                *next_message_id,
-                previous.address.session_id(),
-            ))
+        let publication = publication_tracker.on_target_exited(
+            node_id,
+            session_handle.session_instance_id(),
+            next_message_id,
+            previous.address.session_id(),
+        );
+        send_source_publication(session_handle, publication_tracker, &publication)
             .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
-        ERROR_LOG.log(format!(
+        ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] sync_exit_send node={} target={} elapsed={:?} total={:?} exit_total={:?} stage=session_sync",
             node_id,
             previous.address.qualified_target(),
@@ -764,6 +1197,7 @@ pub(super) fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::SyncRequest { .. } => "",
     }
 }
 
@@ -1068,6 +1502,7 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::SyncRequest { .. } => None,
     };
     let payload = match command {
         RemoteAuthorityCommand::OpenMirror(payload) => {
@@ -1078,6 +1513,11 @@ fn authority_command_envelope(
         }
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
+        RemoteAuthorityCommand::SyncRequest { .. } => ControlPlanePayload::Error(ErrorPayload {
+            code: "local_sync_request_not_routable",
+            message: "sync request is local to authority transport".to_string(),
+            details: None,
+        }),
     };
     ProtocolEnvelope {
         protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION.to_string(),
@@ -1142,6 +1582,8 @@ pub(crate) fn remote_session_published_envelope(
             workspace_key: session.workspace_key.clone(),
             window_count: Some(session.window_count as u64),
             task_state: Some(session.task_state.as_str().to_string()),
+            node_instance_id: session_instance_id.to_string(),
+            revision: 0,
         })),
     }
 }
@@ -1169,6 +1611,8 @@ pub(crate) fn remote_session_exited_envelope(
         body: Some(Body::TargetExited(TargetExited {
             target_id,
             transport_session_id: transport_session_id.to_string(),
+            node_instance_id: session_instance_id.to_string(),
+            revision: 0,
         })),
     }
 }

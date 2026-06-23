@@ -45,9 +45,26 @@ completed_task_compact_summaries:
       - remote daemon startup or default-session publication is modified
       - first Ctrl-W to an unconnected endpoint stops activating the default published session
   - task_id: task.remote-exit-latency-1
-    why_it_matters_now: active task; it adds acknowledged local catalog changed notify into the remote session sync event loop without changing catalog diff authority
+    why_it_matters_now: completed task; it added acknowledged local catalog changed notify into the remote session sync owner event loop while preserving sync_local_sessions as the catalog-diff authority
     load_full_history_only_if:
-      - local notify delivery or session sync owner ownership becomes unclear
+      - local notify delivery, session sync owner ownership, or catalog-diff authority becomes unclear
+  - task_id: task.remote-exit-latency-2
+    why_it_matters_now: completed task; WaitAgent-managed local target close paths now wake the acknowledged session sync owner notify boundary after tmux kill success or already-gone results without direct sidebar mutation
+    load_full_history_only_if:
+      - lifecycle exit ownership or notify retry behavior becomes unclear
+  - task_id: task.remote-exit-latency-3
+    why_it_matters_now: completed task; TargetExited publication refresh uses a runtime-owned live workspace socket registry before tmux fallback, preserving runtime-owned refresh boundaries
+    load_full_history_only_if:
+      - publication refresh socket resolution or registry ownership becomes unclear
+  - task_id: task.remote-exit-latency-4
+    why_it_matters_now: completed task; release E2E confirms remote session exit now wakes sync, applies TargetExited publication, signals workspace fallback, prunes stale workspace registry entries, and gates investigation diagnostics behind WAITAGENT_EXIT_LATENCY_DIAG
+    load_full_history_only_if:
+      - remote exit timing instrumentation, manual E2E validation, or diagnostic cleanup scope becomes unclear
+  - task_id: task.remote-main-slot-authority-gap-followup
+    why_it_matters_now: completed batch follow-up; remote main-slot pane activation now treats missing authority/control-plane registration as pane-internal pending state for resize and input rather than a fatal process exit
+    load_full_history_only_if:
+      - remote main-slot panes exit while remote authority is offline or reconnecting
+      - sidebar remote reactivation after a remote exit stops restoring focus to the remote main pane
 load_heavy_state_only_when:
   task_history:
     file: .agents/state/task-history.yaml

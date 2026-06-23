@@ -4,12 +4,12 @@ mod tests {
         live_workspace_socket_names_from_sessions, mark_target_offline_in_store,
         parse_publication_agent_command, parse_publication_sender_command,
         publication_socket_hook_tmux_command, published_remote_target_from_local,
-        published_remote_target_record_from_payload, remote_target_publication_agent_args,
-        remote_target_publication_agent_socket_path, remote_target_publication_sender_args,
-        remote_target_publication_sender_socket_path, remote_target_publication_server_args,
-        render_publication_agent_command, render_publication_sender_command,
-        socket_lifecycle_publication_action, PublicationAgentCommand, PublicationSenderCommand,
-        SocketLifecyclePublicationAction,
+        published_remote_target_record_from_payload, remote_target_exited_args,
+        remote_target_publication_agent_args, remote_target_publication_agent_socket_path,
+        remote_target_publication_sender_args, remote_target_publication_sender_socket_path,
+        remote_target_publication_server_args, render_publication_agent_command,
+        render_publication_sender_command, socket_lifecycle_publication_action,
+        PublicationAgentCommand, PublicationSenderCommand, SocketLifecyclePublicationAction,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -18,6 +18,10 @@ mod tests {
     use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::TargetPublishedPayload;
     use crate::infra::tmux::RemoteTargetPublicationBinding;
+    use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+    use crate::runtime::remote_workspace_socket_registry_runtime::{
+        workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -26,6 +30,8 @@ mod tests {
             "peer-a",
             &TargetPublishedPayload {
                 transport_session_id: "shell-1".to_string(),
+                node_instance_id: String::new(),
+                revision: 0,
                 source_session_name: Some("target-host-1".to_string()),
                 selector: Some("wa-local:shell-host".to_string()),
                 availability: "online",
@@ -55,6 +61,8 @@ mod tests {
             "peer-a",
             &TargetPublishedPayload {
                 transport_session_id: "shell-1".to_string(),
+                node_instance_id: String::new(),
+                revision: 0,
                 source_session_name: None,
                 selector: None,
                 availability: "weird",
@@ -286,6 +294,35 @@ mod tests {
     }
 
     #[test]
+    fn live_workspace_socket_names_prunes_stale_registry_entries_before_tmux_scan() {
+        let network = RemoteNetworkConfig {
+            port: 31988,
+            connect: None,
+            node_id: None,
+            public_endpoint: None,
+        };
+        let path = workspace_socket_registry_path(&network);
+        let _ = std::fs::remove_file(&path);
+        let registry = RemoteWorkspaceSocketRegistryRuntime::new(network.clone());
+        registry
+            .register_workspace_socket("wa-registry-a")
+            .expect("workspace socket should register");
+
+        let runtime = RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())
+            .expect("publication runtime should build");
+        let sockets = runtime
+            .live_workspace_socket_names()
+            .expect("live workspace sockets should resolve");
+
+        assert!(sockets.is_empty());
+        assert!(registry
+            .live_workspace_socket_names()
+            .expect("workspace socket registry should read")
+            .is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn live_workspace_socket_names_only_include_local_workspace_sessions() {
         let sockets = live_workspace_socket_names_from_sessions(&[
             ManagedSessionRecord {
@@ -409,6 +446,22 @@ mod tests {
         assert_eq!(
             chrome_refresh_socket_args("wa-local"),
             vec!["__chrome-refresh-socket", "--socket-name", "wa-local"]
+        );
+    }
+
+    #[test]
+    fn remote_target_exited_args_target_hidden_workspace_exit_command() {
+        assert_eq!(
+            remote_target_exited_args("wa-local", "workspace-1", "peer-a:shell-1"),
+            vec![
+                "__remote-target-exited",
+                "--socket-name",
+                "wa-local",
+                "--session-name",
+                "workspace-1",
+                "--target",
+                "peer-a:shell-1",
+            ]
         );
     }
 

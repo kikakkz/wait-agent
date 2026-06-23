@@ -4,7 +4,6 @@ use crate::domain::session_catalog::{
     SessionTransport,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
-#[cfg(test)]
 use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
@@ -878,7 +877,6 @@ pub(super) fn discovered_remote_session_from_envelope(
     }
 }
 
-#[cfg(test)]
 pub(super) fn mark_target_offline_in_store(
     store: &PublishedTargetStore,
     socket_name: &str,
@@ -934,6 +932,22 @@ pub(super) fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
         "__chrome-refresh-socket".to_string(),
         "--socket-name".to_string(),
         socket_name.to_string(),
+    ]
+}
+
+pub(super) fn remote_target_exited_args(
+    socket_name: &str,
+    session_name: &str,
+    target: &str,
+) -> Vec<String> {
+    vec![
+        "__remote-target-exited".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+        "--session-name".to_string(),
+        session_name.to_string(),
+        "--target".to_string(),
+        target.to_string(),
     ]
 }
 

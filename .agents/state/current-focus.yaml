@@ -1,13 +1,8 @@
 kind: state
 version: 1
-current_task: task.remote-exit-latency-1
+current_task: null
 focus_statement: >
-  task.remote-create-9e-daemon-parity and task.remote-create-9f-acceptance are
-  complete after user acceptance of the corrected Ctrl-W and Ctrl-S remote-host
-  workflows. Current focus is task.remote-exit-latency-1: add an acknowledged
-  local catalog changed notify into the remote session sync owner event loop so
-  WaitAgent-managed remote session exits no longer wait for the normal 500ms
-  catalog sync interval.
+  remote exit latency and transport stability batch is closed, including the follow-up fix that keeps remote main-slot panes alive when authority/control-plane registration is temporarily absent by deferring pane-owned resize and input state. Current focus is selecting the next remote-network completion task or deciding whether to un-defer workspace snapshot persistence.
 last_updated_from:
-  file: .agents/tasks/backlog.yaml
-  reference: task.remote-exit-latency-1
+  file: .agents/state/task-history.yaml
+  reference: task.remote-main-slot-authority-gap-followup.done

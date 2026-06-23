@@ -7,7 +7,9 @@ use crate::infra::remote_grpc_proto::v1::{
     CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, RawPtyInput, RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited,
-    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
+    TargetOutput as GrpcTargetOutput, TargetPublicationAck as GrpcTargetPublicationAck,
+    TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
+    TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
@@ -18,7 +20,8 @@ use crate::infra::remote_protocol::{
     CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
     NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
     ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -83,6 +86,7 @@ pub(crate) enum GrpcAuthorityEvent {
     CreateSessionRejected(CreateSessionRejectedPayload),
     MirrorAccepted,
     MirrorRejected(OpenMirrorRejectedPayload),
+    TargetPublicationAck(crate::infra::remote_protocol::TargetPublicationAckPayload),
     Failed(String),
     Closed,
 }
@@ -256,6 +260,8 @@ impl RemoteNodeSessionRuntime {
             target.address.id().as_str(),
             "publication-msg",
             ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                node_instance_id: String::new(),
+                revision: 0,
                 transport_session_id: target.address.session_id().to_string(),
                 source_session_name: source_session_name.map(str::to_string),
                 selector: target.selector.clone(),
@@ -290,6 +296,8 @@ impl RemoteNodeSessionRuntime {
             &target_id,
             "publication-msg",
             ControlPlanePayload::TargetExited(TargetExitedPayload {
+                node_instance_id: String::new(),
+                revision: 0,
                 transport_session_id: transport_session_id.to_string(),
                 source_session_name: source_session_name.map(str::to_string),
             }),
@@ -363,6 +371,8 @@ impl RemoteNodeSessionRuntime {
                 "publication-msg",
                 ControlPlanePayload::TargetPublished(TargetPublishedPayload {
                     transport_session_id: transport_session_id.clone(),
+                    node_instance_id: String::new(),
+                    revision: 0,
                     source_session_name: source_session_name.clone(),
                     selector: selector.clone(),
                     availability,
@@ -386,6 +396,8 @@ impl RemoteNodeSessionRuntime {
                 "publication-msg",
                 ControlPlanePayload::TargetExited(TargetExitedPayload {
                     transport_session_id: transport_session_id.clone(),
+                    node_instance_id: String::new(),
+                    revision: 0,
                     source_session_name: source_session_name.clone(),
                 }),
             ),
@@ -536,6 +548,9 @@ fn grpc_authority_event_to_node_event(
         GrpcAuthorityEvent::CreateSessionRejected(payload) => {
             Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(payload))
         }
+        GrpcAuthorityEvent::TargetPublicationAck(_) => Err(RemoteNodeSessionError::new(
+            "unexpected target publication ack while waiting for authority event",
+        )),
         GrpcAuthorityEvent::MirrorAccepted => Err(RemoteNodeSessionError::new(
             "unexpected grpc mirror acceptance while waiting for authority event",
         )),
@@ -776,6 +791,19 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 message: payload.reason,
             },
         )),
+        Some(GrpcBody::TargetPublicationAck(payload)) => {
+            let status = grpc_target_publication_ack_status_to_protocol(payload.status())?;
+            Some(GrpcAuthorityEvent::TargetPublicationAck(
+                TargetPublicationAckPayload {
+                    node_id: payload.node_id,
+                    node_instance_id: payload.node_instance_id,
+                    target_id: payload.target_id,
+                    revision: payload.revision,
+                    status,
+                    message: payload.message,
+                },
+            ))
+        }
         Some(GrpcBody::TargetExited(_)) | Some(GrpcBody::TargetPublished(_)) => {
             // Publication-channel messages — handled by the ingress worker's
             // route_grpc_envelope, not by the authority event channel.
@@ -948,6 +976,18 @@ pub(crate) fn map_outbound_grpc_envelope(
                 workspace_key: payload.workspace_key.clone(),
                 window_count: Some(payload.window_count as u64),
                 task_state: Some(payload.task_state.to_string()),
+                node_instance_id: payload.node_instance_id.clone(),
+                revision: payload.revision,
+            }))
+        }
+        (NodeSessionChannel::Publication, ControlPlanePayload::TargetPublicationAck(payload)) => {
+            Some(GrpcBody::TargetPublicationAck(GrpcTargetPublicationAck {
+                node_id: payload.node_id.clone(),
+                node_instance_id: payload.node_instance_id.clone(),
+                target_id: payload.target_id.clone(),
+                revision: payload.revision,
+                status: grpc_target_publication_ack_status(payload.status) as i32,
+                message: payload.message.clone(),
             }))
         }
         (_, ControlPlanePayload::TargetExited(payload)) => {
@@ -956,6 +996,8 @@ pub(crate) fn map_outbound_grpc_envelope(
                     format!("remote-peer:{node_id}:{}", payload.transport_session_id)
                 }),
                 transport_session_id: payload.transport_session_id.clone(),
+                node_instance_id: payload.node_instance_id.clone(),
+                revision: payload.revision,
             }))
         }
         _ => None,
@@ -976,6 +1018,29 @@ pub(crate) fn map_outbound_grpc_envelope(
         route,
         body: Some(body),
     })
+}
+
+fn grpc_target_publication_ack_status_to_protocol(
+    status: GrpcTargetPublicationAckStatus,
+) -> Option<TargetPublicationAckStatus> {
+    match status {
+        GrpcTargetPublicationAckStatus::Applied => Some(TargetPublicationAckStatus::Applied),
+        GrpcTargetPublicationAckStatus::StaleRevision => {
+            Some(TargetPublicationAckStatus::StaleRevision)
+        }
+        GrpcTargetPublicationAckStatus::Failed => Some(TargetPublicationAckStatus::Failed),
+        GrpcTargetPublicationAckStatus::Unspecified => None,
+    }
+}
+
+fn grpc_target_publication_ack_status(
+    status: TargetPublicationAckStatus,
+) -> GrpcTargetPublicationAckStatus {
+    match status {
+        TargetPublicationAckStatus::Applied => GrpcTargetPublicationAckStatus::Applied,
+        TargetPublicationAckStatus::StaleRevision => GrpcTargetPublicationAckStatus::StaleRevision,
+        TargetPublicationAckStatus::Failed => GrpcTargetPublicationAckStatus::Failed,
+    }
 }
 
 fn known_grpc_availability(value: &str) -> Option<&'static str> {

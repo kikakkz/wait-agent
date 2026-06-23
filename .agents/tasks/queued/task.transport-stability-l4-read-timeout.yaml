@@ -2,7 +2,7 @@ id: task.transport-stability-l4
 kind: task
 version: 1
 title: shorten authority transport read timeout and add ping/pong liveness
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-transport-stability-design.md

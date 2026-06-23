@@ -25,6 +25,7 @@ mod tests {
     use crate::runtime::current_executable::waitagent_test_executable;
     use crate::runtime::network_state_runtime::persist_workspace_network_config;
     use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
+    use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
     use crate::runtime::target_host_runtime::TargetHostRuntime;
     use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
     use crate::runtime::workspace_layout_runtime::{
@@ -689,7 +690,20 @@ mod tests {
 
     #[test]
     fn last_local_main_pane_exit_stops_workspace_server() {
-        assert_last_local_main_pane_exit_stops_workspace_server("local-main-pane-exit", true);
+        assert_last_local_main_pane_exit_stops_workspace_server(
+            "local-main-pane-exit",
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn stale_generation_dead_current_local_main_pane_exit_stops_workspace_server() {
+        assert_last_local_main_pane_exit_stops_workspace_server(
+            "local-main-pane-exit-stale-dead-current",
+            true,
+            true,
+        );
     }
 
     #[test]
@@ -697,12 +711,14 @@ mod tests {
         assert_last_local_main_pane_exit_stops_workspace_server(
             "local-main-pane-exit-legacy-hook",
             false,
+            false,
         );
     }
 
     fn assert_last_local_main_pane_exit_stops_workspace_server(
         workspace_prefix: &str,
         include_generation: bool,
+        bump_generation_after_hook: bool,
     ) {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()
@@ -785,11 +801,42 @@ mod tests {
                 .backend
                 .show_session_option(
                     &workspace.workspace_handle,
-                    "@waitagent_main_pane_generation",
+                    WAITAGENT_MAIN_PANE_GENERATION_OPTION,
                 )
                 .expect("main pane generation should read")
                 .unwrap_or_default()
         });
+        if bump_generation_after_hook {
+            backend
+                .kill_pane(
+                    &workspace.workspace_handle,
+                    &crate::infra::tmux::TmuxPaneId::new(main_pane_id.clone()),
+                )
+                .expect("current main pane should become dead");
+            wait_for_condition(|| {
+                !pane_is_live(&backend, &workspace.workspace_handle, &main_pane_id)
+            });
+            let current_generation = runtime
+                .backend
+                .show_session_option(
+                    &workspace.workspace_handle,
+                    WAITAGENT_MAIN_PANE_GENERATION_OPTION,
+                )
+                .expect("main pane generation should read before bump")
+                .unwrap_or_default();
+            let next_generation = current_generation
+                .parse::<u64>()
+                .expect("main pane generation should be numeric")
+                + 1;
+            runtime
+                .backend
+                .set_session_option(
+                    &workspace.workspace_handle,
+                    WAITAGENT_MAIN_PANE_GENERATION_OPTION,
+                    &next_generation.to_string(),
+                )
+                .expect("main pane generation should bump");
+        }
         runtime
             .run_main_pane_died(MainPaneDiedCommand {
                 socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
@@ -1696,6 +1743,9 @@ mod tests {
             .expect("workspace bootstrap should succeed");
         persist_workspace_network_config(&backend, &workspace.workspace_handle, &network)
             .expect("workspace network config should persist");
+        RemoteWorkspaceSocketRegistryRuntime::new(network.clone())
+            .register_workspace_socket(workspace.workspace_handle.socket_name.as_str())
+            .expect("workspace socket should register");
         let target_host = backend
             .ensure_workspace(
                 &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
@@ -1776,6 +1826,10 @@ mod tests {
                 workspace.workspace_handle.socket_name.as_str().to_string(),
             ))
         });
+        assert!(RemoteWorkspaceSocketRegistryRuntime::new(network.clone())
+            .live_workspace_socket_names()
+            .expect("workspace socket registry should read")
+            .is_empty());
 
         let _ = fs::remove_dir_all(workspace_dir);
     }

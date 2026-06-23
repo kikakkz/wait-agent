@@ -427,3 +427,7 @@ During migration:
 - Integration test network disconnect keeps item visible as disconnected.
 - Integration test reconnect replays state and restores online item.
 - Integration test old revision cannot overwrite newer state.
+
+## Known Follow-up
+
+- `remote_activation_from_sidebar_after_remote_exit_restores_focus_to_remote_main_pane` currently exposes a remote main-slot pane lifecycle issue after reliable offline semantics keep the remote row visible. Treat this as a batch-end follow-up, not a blocker for the ACK/revision/reliable refresh protocol work.

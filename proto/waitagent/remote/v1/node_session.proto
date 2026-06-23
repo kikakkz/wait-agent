@@ -27,6 +27,7 @@ message NodeSessionEnvelope {
 
     TargetPublished target_published = 20;
     TargetExited target_exited = 21;
+    TargetPublicationAck target_publication_ack = 22;
 
     OpenMirrorRequest open_mirror_request = 30;
     OpenMirrorAccepted open_mirror_accepted = 31;
@@ -146,11 +147,31 @@ message TargetPublished {
   optional string workspace_key = 11;
   optional uint64 window_count = 12;
   optional string task_state = 13;
+  string node_instance_id = 14;
+  uint64 revision = 15;
 }
 
 message TargetExited {
   string target_id = 1;
   string transport_session_id = 2;
+  string node_instance_id = 3;
+  uint64 revision = 4;
+}
+
+enum TargetPublicationAckStatus {
+  TARGET_PUBLICATION_ACK_STATUS_UNSPECIFIED = 0;
+  TARGET_PUBLICATION_ACK_STATUS_APPLIED = 1;
+  TARGET_PUBLICATION_ACK_STATUS_STALE_REVISION = 2;
+  TARGET_PUBLICATION_ACK_STATUS_FAILED = 3;
+}
+
+message TargetPublicationAck {
+  string node_id = 1;
+  string node_instance_id = 2;
+  string target_id = 3;
+  uint64 revision = 4;
+  TargetPublicationAckStatus status = 5;
+  optional string message = 6;
 }
 
 message OpenMirrorRequest {

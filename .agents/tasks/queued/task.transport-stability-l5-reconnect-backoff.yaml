@@ -2,7 +2,7 @@ id: task.transport-stability-l5
 kind: task
 version: 1
 title: extend shared authority reconnect backoff for indefinite retry
-status: ready
+status: done
 priority: medium
 design_ref:
   doc: docs/remote-transport-stability-design.md

@@ -2,7 +2,7 @@ id: task.remote-exit-latency-2
 kind: task
 version: 1
 title: wire WaitAgent-managed target lifecycle exits to session sync notify
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/remote-session-exit-latency-design.md

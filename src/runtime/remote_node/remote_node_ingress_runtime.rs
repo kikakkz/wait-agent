@@ -5,7 +5,9 @@ use crate::infra::remote_grpc_proto::v1::{
     CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
-    TargetOutput as GrpcTargetOutput, TargetPublished as GrpcTargetPublished,
+    TargetOutput as GrpcTargetOutput, TargetPublicationAck as GrpcTargetPublicationAck,
+    TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
+    TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
@@ -16,7 +18,8 @@ use crate::infra::remote_protocol::{
     CreateSessionRejectedPayload, CreateSessionRequestPayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyOutputPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -314,6 +317,11 @@ pub(crate) fn route_grpc_envelope(
         Some(Body::TargetPublished(payload)) => publication_sink
             .publish(map_target_published_envelope(node_id, &envelope, payload)?)
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string())),
+        Some(Body::TargetPublicationAck(payload)) => publication_sink
+            .publish(map_target_publication_ack_envelope(
+                node_id, &envelope, payload,
+            )?)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string())),
         Some(Body::TargetExited(payload)) => {
             // Also forward to the authority session so the pane runtime can
             // perform a clean shutdown instead of entering reconnection.
@@ -331,6 +339,8 @@ pub(crate) fn route_grpc_envelope(
                     console_id: None,
                     payload: ControlPlanePayload::TargetExited(TargetExitedPayload {
                         transport_session_id: payload.transport_session_id.clone(),
+                        node_instance_id: payload.node_instance_id.clone(),
+                        revision: payload.revision,
                         source_session_name: None,
                     }),
                 });
@@ -649,6 +659,8 @@ fn map_target_published_envelope(
         console_id: route_console_id(envelope),
         payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: payload.transport_session_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            revision: payload.revision,
             source_session_name: None,
             selector: payload.selector.clone(),
             availability: known_availability(&payload.availability)?,
@@ -691,8 +703,53 @@ fn map_target_exited_envelope(
         console_id: route_console_id(envelope),
         payload: ControlPlanePayload::TargetExited(TargetExitedPayload {
             transport_session_id: payload.transport_session_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            revision: payload.revision,
             source_session_name: None,
         }),
+    }
+}
+
+fn map_target_publication_ack_envelope(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &GrpcTargetPublicationAck,
+) -> Result<ProtocolEnvelope<ControlPlanePayload>, io::Error> {
+    Ok(ProtocolEnvelope {
+        protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+        message_id: envelope.message_id.clone(),
+        message_type: "target_publication_ack",
+        timestamp: timestamp_string(envelope),
+        sender_id: node_id.to_string(),
+        correlation_id: envelope.correlation_id.clone(),
+        session_id: route_session_id(envelope),
+        target_id: route_target_id(envelope).or_else(|| Some(payload.target_id.clone())),
+        attachment_id: route_attachment_id(envelope),
+        console_id: route_console_id(envelope),
+        payload: ControlPlanePayload::TargetPublicationAck(TargetPublicationAckPayload {
+            node_id: payload.node_id.clone(),
+            node_instance_id: payload.node_instance_id.clone(),
+            target_id: payload.target_id.clone(),
+            revision: payload.revision,
+            status: target_publication_ack_status(payload.status())?,
+            message: payload.message.clone(),
+        }),
+    })
+}
+
+fn target_publication_ack_status(
+    status: GrpcTargetPublicationAckStatus,
+) -> Result<TargetPublicationAckStatus, io::Error> {
+    match status {
+        GrpcTargetPublicationAckStatus::Applied => Ok(TargetPublicationAckStatus::Applied),
+        GrpcTargetPublicationAckStatus::StaleRevision => {
+            Ok(TargetPublicationAckStatus::StaleRevision)
+        }
+        GrpcTargetPublicationAckStatus::Failed => Ok(TargetPublicationAckStatus::Failed),
+        GrpcTargetPublicationAckStatus::Unspecified => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unspecified target publication ack status",
+        )),
     }
 }
 

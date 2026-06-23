@@ -89,7 +89,6 @@ impl PublishedTargetStore {
             .collect())
     }
 
-    #[cfg(test)]
     pub fn upsert_target_from_source(
         &self,
         source_socket_name: &str,
@@ -400,7 +399,6 @@ fn parse_published_target_record(line: &str) -> Result<PublishedTargetRecord, Tm
     })
 }
 
-#[cfg(test)]
 fn validate_published_remote_target(target: &ManagedSessionRecord) -> Result<(), TmuxError> {
     if target.address.transport() != &crate::domain::session_catalog::SessionTransport::RemotePeer {
         return Err(TmuxError::new(format!(

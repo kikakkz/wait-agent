@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.36`
+Version: `v1.37`
 Status: `Active`
-Date: `2026-06-20`
+Date: `2026-06-23`
 
 ## 1. Purpose
 
@@ -35,15 +35,15 @@ Current phase:
 
 Current gate:
 
-- `task.remote-exit-latency-1` add acknowledged local catalog notify so WaitAgent-managed remote session exits no longer wait for the periodic session-sync interval
+- none selected; last closed gate was remote exit latency plus authority transport stability batch, including remote main-slot authority-gap follow-up
 
-Why this is the current gate:
+Why the last gate closed:
 
 - corrected Ctrl-W and Ctrl-S remote-host creation behavior is accepted by user validation
 - `__remote-daemon` parity with manual `waitagent --connect` default-session publication is accepted as part of that corrected flow
-- the remaining user-visible remote workflow issue is exit responsiveness: after `exit` in a remote session, the sidebar item can disappear noticeably later than expected
-- the accepted latency design identifies two concrete hot-path costs: waiting up to `500ms` for periodic remote session sync and scanning all WaitAgent tmux sockets on each `TargetExited`
-- the current implementation gate is the first bounded slice: add an acknowledged local catalog changed notify into the remote session sync owner event loop without changing catalog-diff authority, adding durable persistence, or bypassing the unified runtime event model
+- remote session exit responsiveness has now been validated end to end: release-build E2E records input exit, sync wake, TargetExited publication apply, workspace fallback, and sidebar item disappearance
+- the accepted latency design costs are addressed on the hot path: session sync is explicitly woken, publication uses the runtime-owned live workspace socket registry, stale registry entries are pruned, and investigation diagnostics are gated behind `WAITAGENT_EXIT_LATENCY_DIAG`
+- the final follow-up fixed remote main-slot pane survival when authority/control-plane registration is temporarily absent; the pane now owns pending resize and input state instead of exiting on unregistered authority sends
 
 ## 3. Current Snapshot
 
@@ -182,9 +182,8 @@ Execution tracks at human-summary level:
 
 Current focus:
 
-- add acknowledged local catalog changed notify to the remote session sync owner event loop, preserving catalog diff as the only producer of `TargetPublished` and `TargetExited`
-- keep Ctrl-W/Ctrl-S creation semantics stable while improving the post-`exit` visible disappearance latency for remote session rows
-- after notify lands, continue the accepted remote-exit-latency queue: wire WaitAgent-managed lifecycle paths to notify, replace hot-path all-socket tmux discovery with a live workspace socket registry, then validate E2E latency and remove temporary diagnostics
+- remote exit latency and transport stability batch is complete, including the follow-up remote main-slot authority-gap fix
+- select the next remote-network completion task or decide whether to un-defer workspace snapshot persistence
 
 Accepted local architecture direction:
 
@@ -210,10 +209,15 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.remote-exit-latency-1` Add acknowledged local catalog notify to the remote session sync event loop
-2. `task.remote-exit-latency-2` Wire WaitAgent-managed target lifecycle exits to session sync notify
-3. `task.remote-exit-latency-3` Replace `TargetExited` hot-path tmux socket scan with live workspace socket registry
-4. `task.remote-exit-latency-4` Validate remote session exit latency end to end and clean temporary diagnostics
+1. `task.remote-exit-latency-1` Add acknowledged local catalog notify to the remote session sync event loop (done)
+2. `task.remote-exit-latency-2` Wire WaitAgent-managed target lifecycle exits to session sync notify (done)
+3. `task.remote-exit-latency-3` Replace `TargetExited` hot-path tmux socket scan with live workspace socket registry (done)
+4. `task.remote-exit-latency-4` Validate remote session exit latency end to end and clean temporary diagnostics (done)
+5. `task.transport-stability-l4` Shorten authority transport read timeout and add ping/pong liveness (done)
+6. `task.transport-stability-l1` Replace output channel drops with blocking send plus replay cache (done)
+7. `task.transport-stability-l2` Add authority-side input ring buffer and congestion advisory frame (done)
+8. `task.transport-stability-l5` Verify shared authority reconnect indefinite jittered backoff (done)
+9. `task.transport-stability-l3` Add output gap SyncRequest/SyncResponse recovery (done)
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

@@ -17,7 +17,7 @@ read_on_demand:
   - .agents/tasks/templates/local-acceptance-cycle.yaml
   - .agents/tasks/templates/network-implementation-slice.yaml
 entrypoints:
-  default_task: task.remote-exit-latency-1
+  default_task: null
   default_runbook: runbook.continue-default-work
   next_task_runbook: runbook.select-next-task
   self_maintenance_runbook: runbook.update-agents-control-plane
@@ -50,7 +50,7 @@ directories:
 active_context:
   project_phase: phase-2
   current_stage: remote-network-completion
-  current_focus: continue phase-2 remote work with task.remote-exit-latency-1 so WaitAgent-managed remote session exits wake session sync through acknowledged local catalog notifications instead of waiting for the 500ms periodic sync interval
+  current_focus: remote exit latency and transport stability batch is complete, including remote main-slot authority-gap follow-up; select next task
 recommended_primitives:
   - primitive.read-current-task
   - primitive.task-board-sync

@@ -5,8 +5,8 @@ use crate::domain::session_catalog::{
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceSessionRole};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
-    ControlPlanePayload, CreateSessionRequestPayload, NodeSessionChannel, ProtocolEnvelope,
-    REMOTE_PROTOCOL_VERSION,
+    ControlPlanePayload, CreateSessionRequestPayload, ErrorPayload, NodeSessionChannel,
+    ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
@@ -964,6 +964,7 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::SyncRequest { .. } => "",
     }
 }
 
@@ -1435,6 +1436,7 @@ pub(super) fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::SyncRequest { .. } => None,
     };
     let payload = match command {
         RemoteAuthorityCommand::OpenMirror(payload) => {
@@ -1445,6 +1447,11 @@ pub(super) fn authority_command_envelope(
         }
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
+        RemoteAuthorityCommand::SyncRequest { .. } => ControlPlanePayload::Error(ErrorPayload {
+            code: "local_sync_request_not_routable",
+            message: "sync request is local to authority transport".to_string(),
+            details: None,
+        }),
     };
     ProtocolEnvelope {
         protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),

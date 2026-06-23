@@ -247,7 +247,13 @@ watcher or a durable outbox. They are intentionally excluded here.
 
 ## 8. Observability
 
-Keep or add timing logs until validation closes the slice:
+Exit-latency timing logs are kept behind an explicit environment gate so normal runs do not continuously write temporary investigation data:
+
+```text
+WAITAGENT_EXIT_LATENCY_DIAG=1
+```
+
+When that variable is set, the exit-latency chain records:
 
 ```text
 exit_enter
@@ -264,7 +270,7 @@ publication_refresh_spawn
 sidebar_item_gone
 ```
 
-The logs must distinguish:
+The gated logs must distinguish:
 
 - event delivery time
 - catalog diff time
