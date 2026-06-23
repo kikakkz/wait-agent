@@ -145,7 +145,7 @@ GitHub Markdown does not provide real tabs in README files, so the system matrix
 |---|---|
 | Native Windows binary | Not supported |
 | WSL2 Linux build | Supported |
-| Recommended networking | Mirrored networking with DNS tunneling, firewall integration, and auto proxy |
+| Recommended networking | Mirrored networking or NAT with Windows portproxy |
 | Remote host bootstrap | Supported when the remote host can reach the WSL listener endpoint |
 
 WSL configuration is documented in [WSL2 Setup](#wsl2-setup).
@@ -221,7 +221,7 @@ cargo build --release
 
 ### WSL2 Setup
 
-WaitAgent works in WSL2 through the Linux build. For remote host workflows, WSL networking must allow the remote machine to dial back into the WaitAgent listener shown in the footer. Use mirrored networking with DNS tunneling, Windows firewall integration, and Windows proxy propagation.
+WaitAgent works in WSL2 through the Linux build. For remote host workflows, WSL networking must allow the remote machine to dial back into the WaitAgent listener shown in the footer. Windows WSL can use either mirrored networking or the default NAT mode with a Windows portproxy rule. Mirrored networking is simpler, but Windows WSL mirrored networking has known stability bugs; use NAT plus portproxy when mirrored mode is unreliable.
 
 1. Update WSL from Windows PowerShell:
 
@@ -230,7 +230,9 @@ wsl --update
 wsl --version
 ```
 
-2. Create or edit `%UserProfile%\.wslconfig` on Windows:
+2. Choose a WSL networking mode.
+
+Option A: mirrored networking. This is the simplest configuration when it works, but Windows WSL mirrored networking has known stability bugs.
 
 ```ini
 [wsl2]
@@ -240,7 +242,7 @@ firewall=true
 autoProxy=true
 ```
 
-3. Restart WSL:
+Restart WSL after changing `.wslconfig`:
 
 ```powershell
 wsl --shutdown
@@ -248,13 +250,40 @@ wsl --shutdown
 
 Then reopen your Linux distribution.
 
-4. Install WaitAgent inside WSL:
+Option B: default WSL NAT with Windows portproxy. Leave `networkingMode` unset or remove the mirrored `.wslconfig` entries, restart WSL, then run the following commands from an elevated Windows PowerShell. The `connectaddress` must be the current WSL NAT IP; it can be read from inside WSL with `hostname -I` or from Windows through `wsl.exe`.
+
+```powershell
+$WslIp = ((wsl.exe hostname -I) -split "\s+" |
+    Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" } |
+    Select-Object -First 1)
+
+netsh interface portproxy delete v4tov4 `
+    listenaddress=0.0.0.0 `
+    listenport=7474
+
+netsh interface portproxy add v4tov4 `
+    listenaddress=0.0.0.0 `
+    listenport=7474 `
+    connectaddress=$WslIp `
+    connectport=7474
+
+New-NetFirewallRule `
+    -DisplayName "WSL-WaitAgent-7474" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 7474 `
+    -Action Allow
+```
+
+WSL NAT IPs can change after WSL restarts. Re-run the portproxy commands when the WSL IP changes. The firewall rule only needs to exist once for the selected local port; if it already exists, keep the existing rule or remove it before creating a replacement.
+
+3. Install WaitAgent inside WSL:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
 ```
 
-5. Start a listener workspace inside WSL:
+4. Start a listener workspace inside WSL:
 
 ```bash
 waitagent --port 7474
