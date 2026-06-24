@@ -21,9 +21,10 @@ use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -32,7 +33,6 @@ use std::time::Duration;
 mod sync_helpers;
 pub(crate) use sync_helpers::*;
 
-const SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
@@ -250,15 +250,20 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             let _ = fs::remove_file(&socket_path);
         }
         let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(remote_session_sync_error)?;
         let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let owner_socket = listener.try_clone().map_err(remote_session_sync_error)?;
+        let _owner_command_worker =
+            serve_owner_commands(owner_socket, local_catalog_tx, shutdown_tx);
         let _guard = Self::from_build_env_with_network_and_socket(network, &command.socket_name)?
             .start_with_local_catalog_changes(local_catalog_rx)?;
-        while backend_socket_still_exists(&command.socket_name) {
-            let _ = drain_owner_commands(&listener, &local_catalog_tx);
-            thread::sleep(SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL);
+        loop {
+            if shutdown_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
+                break;
+            }
+            if !backend_socket_still_exists(&command.socket_name) {
+                break;
+            }
         }
         let _ = fs::remove_file(&socket_path);
         Ok(())
@@ -276,6 +281,28 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
                 socket_name,
                 t_owner.elapsed()
             ));
+            return Ok(());
+        }
+        let lock_path = owner_startup_lock_path(&socket_path);
+        let Some(_startup_lock) = OwnerStartupLock::try_acquire(&lock_path)? else {
+            for attempt in 0..REMOTE_SESSION_SYNC_OWNER_READY_RETRIES {
+                if remote_session_sync_owner_available(&socket_path) {
+                    ERROR_LOG.log(format!(
+                        "[diag-newhost] ensure_session_sync_owner socket={} ready_by_peer attempt={} elapsed={:?}",
+                        socket_name,
+                        attempt,
+                        t_owner.elapsed()
+                    ));
+                    return Ok(());
+                }
+                thread::sleep(REMOTE_SESSION_SYNC_OWNER_READY_SLEEP);
+            }
+            return Err(LifecycleError::Protocol(format!(
+                "remote session sync owner for socket `{socket_name}` did not become ready while another starter held {}",
+                lock_path.display()
+            )));
+        };
+        if remote_session_sync_owner_available(&socket_path) {
             return Ok(());
         }
         if socket_path.exists() {
@@ -337,6 +364,36 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             }
         }
     }
+}
+
+struct OwnerStartupLock {
+    path: PathBuf,
+}
+
+impl OwnerStartupLock {
+    fn try_acquire(path: &Path) -> Result<Option<Self>, LifecycleError> {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => Ok(Some(Self {
+                path: path.to_path_buf(),
+            })),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(remote_session_sync_error(error)),
+        }
+    }
+}
+
+impl Drop for OwnerStartupLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn owner_startup_lock_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("sock.lock")
 }
 
 impl<G, T, O> RemoteNodeSessionSyncRuntime<G, T, O>

@@ -19,6 +19,7 @@ use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
 use crate::runtime::remote_workspace_socket_registry_runtime::{
     live_workspace_socket_names_for_network, retain_live_workspace_socket_names_for_network,
+    RemoteWorkspaceSocketRegistryRuntime,
 };
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 
@@ -357,7 +358,9 @@ impl RemoteTargetPublicationRuntime {
 
     pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
         let registered_sockets = live_workspace_socket_names_for_network(&self.network)?;
-        if !registered_sockets.is_empty() {
+        if !registered_sockets.is_empty()
+            || RemoteWorkspaceSocketRegistryRuntime::new(self.network.clone()).registry_exists()
+        {
             let live_sockets =
                 retain_live_workspace_socket_names_for_network(&self.network, |socket_name| {
                     self.socket_is_live(socket_name)

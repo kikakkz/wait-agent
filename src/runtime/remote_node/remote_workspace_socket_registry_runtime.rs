@@ -45,6 +45,20 @@ impl RemoteWorkspaceSocketRegistryRuntime {
     pub fn live_workspace_socket_names(&self) -> Result<BTreeSet<String>, LifecycleError> {
         read_socket_registry(&self.network)
     }
+
+    pub fn live_workspace_socket_names_retaining<F>(
+        &self,
+        is_live: F,
+    ) -> Result<BTreeSet<String>, LifecycleError>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.retain_workspace_sockets(is_live)
+    }
+
+    pub fn registry_exists(&self) -> bool {
+        workspace_socket_registry_path(&self.network).exists()
+    }
 }
 
 pub(crate) fn live_workspace_socket_names_for_network(

@@ -4,6 +4,7 @@ use crate::application::target_registry_service::{
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -34,6 +35,7 @@ const MAIN_PANE_DIED_HOOK: &str = "pane-died[10]";
 
 pub struct RemoteMainSlotPaneRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+    backend: EmbeddedTmuxBackend,
     authority_connections: Box<dyn AuthorityConnectionStarter>,
     external_authority_streams: Option<QueuedAuthorityStreamSink>,
 }
@@ -72,8 +74,10 @@ impl RemoteMainSlotPaneRuntime {
             DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
                 .map_err(remote_pane_error)?,
         );
+        let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_pane_error)?;
         Ok(Self::new_with_external_authority_streams_and_network(
             target_registry,
+            backend,
             current_executable,
             network,
         ))
@@ -82,12 +86,14 @@ impl RemoteMainSlotPaneRuntime {
     #[cfg(test)]
     pub fn new(
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        backend: EmbeddedTmuxBackend,
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         current_executable: PathBuf,
         _network: RemoteNetworkConfig,
     ) -> Self {
         Self::new_with_optional_external_authority_streams(
             target_registry,
+            backend,
             authority_connections,
             None,
             current_executable,
@@ -96,12 +102,14 @@ impl RemoteMainSlotPaneRuntime {
 
     fn new_with_optional_external_authority_streams(
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        backend: EmbeddedTmuxBackend,
         authority_connections: Box<dyn AuthorityConnectionStarter>,
         external_authority_streams: Option<QueuedAuthorityStreamSink>,
         _current_executable: PathBuf,
     ) -> Self {
         Self {
             target_registry,
+            backend,
             authority_connections,
             external_authority_streams,
         }
@@ -110,10 +118,12 @@ impl RemoteMainSlotPaneRuntime {
     #[cfg(test)]
     pub fn new_with_external_authority_streams(
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        backend: EmbeddedTmuxBackend,
         current_executable: PathBuf,
     ) -> Self {
         Self::new_with_external_authority_streams_and_network(
             target_registry,
+            backend,
             current_executable,
             RemoteNetworkConfig::default(),
         )
@@ -121,12 +131,14 @@ impl RemoteMainSlotPaneRuntime {
 
     pub fn new_with_external_authority_streams_and_network(
         target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+        backend: EmbeddedTmuxBackend,
         current_executable: PathBuf,
         _network: RemoteNetworkConfig,
     ) -> Self {
         let (starter, sink) = QueuedAuthorityStreamStarter::channel();
         Self::new_with_optional_external_authority_streams(
             target_registry,
+            backend,
             Box::new(starter),
             Some(sink),
             current_executable,
@@ -232,6 +244,9 @@ impl RemoteMainSlotPaneRuntime {
         let target_presence = Arc::new(Mutex::new(true));
         spawn_target_presence_watcher(
             self.target_registry.clone(),
+            self.backend.clone(),
+            spec.socket_name.clone(),
+            spec.surface_scope.clone(),
             spec.target.clone(),
             target_presence.clone(),
             event_tx.clone(),
@@ -375,9 +390,7 @@ impl RemoteMainSlotPaneRuntime {
                             // flag).  The publication runtime updates the
                             // catalog within tens of milliseconds after the
                             // target host sends TargetExited.
-                            let in_catalog =
-                                target_exists_in_catalog(&self.target_registry, &spec.target);
-                            let target_gone = !in_catalog;
+                            let target_gone = !target_is_present(&target_presence);
                             if elapsed > slot_pane_helpers::RECONNECT_TIMEOUT || target_gone {
                                 if target_gone {
                                     ERROR_LOG.log(
@@ -654,17 +667,15 @@ impl RemoteMainSlotPaneRuntime {
                     },
                     RemotePaneEvent::TargetPresenceChanged(is_present) => {
                         if !is_present {
-                            let in_catalog =
-                                target_exists_in_catalog(&self.target_registry, &spec.target);
                             let should_exit = should_exit_surface_for_target_presence_loss(
-                                in_catalog,
+                                false,
                                 remote_runtime.has_connection(target.address.authority_id()),
                                 reconnecting_since.is_some(),
                             );
                             if should_exit {
                                 ERROR_LOG.log(format!(
                                     "[diag-timing] target presence loss classified as exit: in_catalog={} authority_connected={} reconnecting={}",
-                                    in_catalog,
+                                    false,
                                     remote_runtime.has_connection(target.address.authority_id()),
                                     reconnecting_since.is_some(),
                                 ));

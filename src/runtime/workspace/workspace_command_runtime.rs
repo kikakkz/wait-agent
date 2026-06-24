@@ -12,7 +12,7 @@ use crate::cli::{
     LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
     NewSelectedRemoteSessionCommand, NewTargetCommand, RemoteNetworkConfig,
     RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
-    ToggleFullscreenCommand,
+    ToggleFullscreenCommand, UiPaneCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -20,6 +20,7 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -32,7 +33,10 @@ use crate::runtime::remote_host::remote_host_connect_runtime::{
 use crate::runtime::remote_host::remote_host_history_store::RemoteHostHistoryStore;
 use crate::runtime::remote_host::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
 use crate::runtime::remote_node_ingress_server_runtime::RemoteNodeIngressServerRuntime;
-use crate::runtime::remote_node_session_sync_runtime::RemoteNodeSessionSyncRuntime;
+use crate::runtime::remote_node_session_sync_runtime::{
+    remote_session_sync_owner_socket_path, shutdown_remote_session_sync_owner,
+    LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
+};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
@@ -63,6 +67,10 @@ pub struct WorkspaceCommandRuntime {
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
     backend: EmbeddedTmuxBackend,
     network: RemoteNetworkConfig,
+}
+
+fn runtime_command_override_seq(value: &str) -> Option<u64> {
+    value.split_once(':')?.0.parse::<u64>().ok()
 }
 
 struct RemoteSessionCreateGuard<'a> {
@@ -370,6 +378,28 @@ impl WorkspaceCommandRuntime {
             .run_chrome_refresh_on_socket(socket_name)
     }
 
+    fn refresh_registered_remote_session_signal(
+        &self,
+        socket_name: &str,
+    ) -> Result<(), LifecycleError> {
+        self.remote_target_publication_runtime
+            .ensure_configured_publications_on_socket(socket_name)?;
+        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
+            .run_chrome_refresh_signal_on_socket(socket_name)
+    }
+
+    fn signal_workspace_chrome_refresh(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
+            .run_chrome_refresh_signal(UiPaneCommand {
+                socket_name: socket_name.to_string(),
+                session_name: session_name.to_string(),
+            })
+    }
+
     fn claim_remote_session_create<'a>(
         &'a self,
         workspace: &TmuxWorkspaceHandle,
@@ -488,7 +518,10 @@ impl WorkspaceCommandRuntime {
         &self,
         command: LocalTargetExitedCommand,
     ) -> Result<(), LifecycleError> {
-        self.local_target_host_runtime.run_target_exited(command)
+        let socket_name = command.socket_name.clone();
+        let result = self.local_target_host_runtime.run_target_exited(command);
+        let _ = self.refresh_registered_remote_session_signal(&socket_name);
+        result
     }
 
     pub fn run_main_pane_died(&self, command: MainPaneDiedCommand) -> Result<(), LifecycleError> {
@@ -499,7 +532,11 @@ impl WorkspaceCommandRuntime {
         &self,
         command: RemoteTargetExitedCommand,
     ) -> Result<(), LifecycleError> {
-        self.main_slot_runtime.run_remote_target_exited(command)
+        let socket_name = command.socket_name.clone();
+        let session_name = command.session_name.clone();
+        let result = self.main_slot_runtime.run_remote_target_exited(command);
+        let _ = self.signal_workspace_chrome_refresh(&socket_name, &session_name);
+        result
     }
 
     pub fn run_toggle_fullscreen(
@@ -634,6 +671,8 @@ impl WorkspaceCommandRuntime {
     }
 
     fn unregister_live_workspace_socket(&self, socket_name: &str) {
+        let _ =
+            shutdown_remote_session_sync_owner(&remote_session_sync_owner_socket_path(socket_name));
         if let Err(error) = self
             .remote_workspace_socket_registry_runtime
             .unregister_workspace_socket(socket_name)
@@ -643,6 +682,16 @@ impl WorkspaceCommandRuntime {
                 socket_name, error
             ));
         }
+        if let Err(error) = RemoteNodeIngressServerRuntime::unregister_owner_workspace_socket(
+            socket_name,
+            &self.network,
+        ) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] ingress_owner_unregister_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
+        let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
     }
 
     fn start_remote_session_sync(&self, socket_name: &str) -> Result<(), LifecycleError> {
@@ -655,6 +704,51 @@ impl WorkspaceCommandRuntime {
 
     fn start_remote_node_ingress(&self, socket_name: &str) -> Result<(), LifecycleError> {
         RemoteNodeIngressServerRuntime::ensure_owner_running(socket_name, &self.network)
+    }
+
+    pub fn signal_runtime_command_changed(
+        &self,
+        socket_name: &str,
+        target_session_name: Option<&str>,
+        command_name: Option<&str>,
+        event_seq: Option<u64>,
+    ) -> Result<(), LifecycleError> {
+        if let (Some(target_session_name), Some(command_name)) = (target_session_name, command_name)
+        {
+            let workspace = TmuxWorkspaceHandle {
+                workspace_id: WorkspaceInstanceId::new(target_session_name),
+                socket_name: TmuxSocketName::new(socket_name),
+                session_name: TmuxSessionName::new(target_session_name),
+            };
+            let command_override = event_seq
+                .map(|seq| format!("{seq}:{command_name}"))
+                .unwrap_or_else(|| command_name.to_string());
+            if let Some(seq) = event_seq {
+                if let Some(current) = self
+                    .backend
+                    .show_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+                    .map_err(tmux_runtime_error)?
+                {
+                    if runtime_command_override_seq(&current)
+                        .is_some_and(|current_seq| current_seq > seq)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            self.backend
+                .set_session_option(
+                    &workspace,
+                    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                    &command_override,
+                )
+                .map_err(tmux_runtime_error)?;
+        }
+        RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
+            socket_name,
+            &self.network,
+            LocalCatalogChangeReason::LocalRuntimeChanged,
+        )
     }
 
     pub fn run_remote_node_ingress_server(

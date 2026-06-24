@@ -560,10 +560,10 @@ mod tests {
             let _ = fs::remove_file(&socket_path);
         }
         let listener = UnixListener::bind(&socket_path).expect("owner socket should bind");
-        listener
-            .set_nonblocking(true)
-            .expect("owner socket should become nonblocking");
         let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel();
+        let _owner_worker =
+            super::super::serve_owner_commands(listener, local_catalog_tx, shutdown_tx);
 
         let notifier = thread::spawn({
             let socket_path = socket_path.clone();
@@ -578,24 +578,15 @@ mod tests {
             }
         });
 
-        let start = std::time::Instant::now();
-        loop {
-            super::super::drain_owner_commands(&listener, &local_catalog_tx)
-                .expect("owner commands should drain");
-            if start.elapsed() > Duration::from_secs(1) {
-                panic!("timed out waiting for owner notify");
+        let reason = local_catalog_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("owner notify should arrive without polling");
+        assert_eq!(
+            reason,
+            LocalCatalogChangeReason::LocalTargetExited {
+                target_session_name: "shell-1".to_string(),
             }
-            if let Ok(reason) = local_catalog_rx.try_recv() {
-                assert_eq!(
-                    reason,
-                    LocalCatalogChangeReason::LocalTargetExited {
-                        target_session_name: "shell-1".to_string(),
-                    }
-                );
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
+        );
         notifier.join().expect("notifier should join");
         let _ = fs::remove_file(&socket_path);
     }
@@ -812,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_workspace_runtime_projects_active_target_host_runtime() {
+    fn overlay_workspace_runtime_does_not_override_explicit_target_runtime() {
         let sessions = overlay_workspace_runtime_onto_active_local_target_hosts(
             vec![
                 ManagedSessionRecord {
@@ -836,12 +827,12 @@ mod tests {
             .into_iter()
             .find(|session| session.address.session_id() == "shell-1")
             .expect("target-host session should exist");
-        assert_eq!(projected.command_name.as_deref(), Some("codex"));
+        assert_eq!(projected.command_name.as_deref(), Some("bash"));
         assert_eq!(
             projected.current_path.as_deref(),
-            Some(Path::new("/tmp/workspace"))
+            Some(Path::new("/tmp/host"))
         );
-        assert_eq!(projected.task_state, ManagedSessionTaskState::Input);
+        assert_eq!(projected.task_state, ManagedSessionTaskState::Running);
     }
 
     #[test]

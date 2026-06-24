@@ -1,9 +1,10 @@
 mod tests {
     use super::super::{
-        discover_authority_socket_paths, enqueue_ingress_event, extract_target_component,
-        handle_internal_event, has_active_ingress_session_for_node, next_ingress_event,
-        route_transport_envelope, ActiveAuthoritySocketBridge, ActiveNodeIngressSession,
-        IngressServerEvent, InternalEvent, RemoteNodeIngressServerRuntime,
+        apply_owner_lifecycle_event, discover_authority_socket_paths, enqueue_ingress_event,
+        extract_target_component, handle_internal_event, has_active_ingress_session_for_node,
+        next_ingress_event, route_transport_envelope, ActiveAuthoritySocketBridge,
+        ActiveNodeIngressSession, IngressServerEvent, InternalEvent, OwnerLifecycleEvent,
+        RemoteNodeIngressServerRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -87,6 +88,55 @@ mod tests {
         assert!(reply_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .is_ok());
+    }
+
+    #[test]
+    fn unregister_workspace_socket_event_updates_ingress_registry() {
+        let mut sessions = std::collections::HashMap::new();
+        let mut registered = BTreeSet::from(["wa-test".to_string()]);
+        let (internal_tx, _internal_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+
+        handle_internal_event(
+            &mut sessions,
+            &mut registered,
+            internal_tx,
+            InternalEvent::UnregisterWorkspaceSocket {
+                socket_name: "wa-test".to_string(),
+                reply_tx,
+            },
+        );
+
+        assert!(!registered.contains("wa-test"));
+        assert!(reply_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok());
+    }
+
+    #[test]
+    fn owner_lifecycle_exits_after_last_registered_workspace_unregisters() {
+        let mut live_workspace_sockets = BTreeSet::new();
+        let mut saw_workspace = false;
+
+        apply_owner_lifecycle_event(
+            &mut live_workspace_sockets,
+            &mut saw_workspace,
+            OwnerLifecycleEvent::WorkspaceRegistered("wa-test".to_string()),
+        );
+        assert!(saw_workspace);
+        assert_eq!(
+            live_workspace_sockets.into_iter().collect::<Vec<_>>(),
+            vec!["wa-test".to_string()]
+        );
+
+        let mut live_workspace_sockets = BTreeSet::from(["wa-test".to_string()]);
+        apply_owner_lifecycle_event(
+            &mut live_workspace_sockets,
+            &mut saw_workspace,
+            OwnerLifecycleEvent::WorkspaceUnregistered("wa-test".to_string()),
+        );
+        assert!(saw_workspace);
+        assert!(live_workspace_sockets.is_empty());
     }
 
     #[test]

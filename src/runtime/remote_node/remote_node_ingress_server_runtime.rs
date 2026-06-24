@@ -31,12 +31,15 @@ use crate::runtime::remote_node_session_runtime::{
 };
 use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use crate::runtime::remote_workspace_socket_registry_runtime::{
+    workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
+};
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -48,6 +51,7 @@ const BRIDGE_DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const BRIDGE_DISCOVERY_RETRY_ATTEMPTS: u8 = 20;
 const REMOTE_NODE_INGRESS_OWNER_READY_RETRIES: usize = 20;
 const REMOTE_NODE_INGRESS_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
+const REMOTE_NODE_INGRESS_OWNER_IDLE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const OWNER_CONTROL_MAGIC: &[u8; 4] = b"waOC";
 const OWNER_CONTROL_REPLY_OK: u8 = 0;
 const OWNER_CONTROL_REPLY_PENDING: u8 = 1;
@@ -173,10 +177,24 @@ enum InternalEvent {
         socket_name: String,
         reply_tx: mpsc::Sender<AuthoritySocketReadyReply>,
     },
+    UnregisterWorkspaceSocket {
+        socket_name: String,
+        reply_tx: mpsc::Sender<AuthoritySocketReadyReply>,
+    },
+    ShutdownOwner {
+        reply_tx: mpsc::Sender<AuthoritySocketReadyReply>,
+    },
     RetrySocketDiscovery {
         attempts_remaining: u8,
     },
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OwnerLifecycleEvent {
+    WorkspaceRegistered(String),
+    WorkspaceUnregistered(String),
+    WorkspaceRegistryChanged(BTreeSet<String>),
 }
 
 impl RemoteNodeIngressServerRuntime {
@@ -198,18 +216,35 @@ impl RemoteNodeIngressServerRuntime {
             let _ = fs::remove_file(&socket_path);
         }
         let listener = UnixListener::bind(&socket_path).map_err(remote_node_ingress_error)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(remote_node_ingress_error)?;
         let guard = self.start()?;
         let Some(owner_tx) = guard.owner_event_sender() else {
             return Err(LifecycleError::Protocol(
                 "remote node ingress owner did not expose local control channel".to_string(),
             ));
         };
-        while any_live_workspace_exists()? {
-            let _ = drain_owner_requests(&listener, &owner_tx);
-            thread::sleep(BRIDGE_REFRESH_INTERVAL);
+        let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
+        let _workspace_registry_watcher = match start_workspace_registry_lifecycle_watcher(
+            self.network.clone(),
+            lifecycle_tx.clone(),
+        ) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] workspace registry watcher failed: {error}"
+                ));
+                None
+            }
+        };
+        let _owner_acceptor = start_owner_control_acceptor(listener, &owner_tx, lifecycle_tx);
+        let initial_workspace_sockets = live_workspace_sockets(&self.network)?;
+        let mut live_workspace_sockets = initial_workspace_sockets.clone();
+        let mut saw_workspace = !initial_workspace_sockets.is_empty();
+        while let Some(event) = next_owner_lifecycle_event(&lifecycle_rx, saw_workspace) {
+            apply_owner_lifecycle_event(&mut live_workspace_sockets, &mut saw_workspace, event);
+            if saw_workspace && live_workspace_sockets.is_empty() {
+                let _ = owner_tx.send(InternalEvent::Shutdown);
+                break;
+            }
         }
         let _ = fs::remove_file(&socket_path);
         Ok(())
@@ -220,6 +255,25 @@ impl RemoteNodeIngressServerRuntime {
         network: &RemoteNetworkConfig,
     ) -> Result<(), LifecycleError> {
         let socket_path = remote_node_ingress_owner_socket_path(network);
+        if remote_node_ingress_owner_available(&socket_path) {
+            register_workspace_socket_with_owner(network, socket_name)?;
+            return Ok(());
+        }
+        let lock_path = owner_startup_lock_path(&socket_path);
+        let Some(_startup_lock) = OwnerStartupLock::try_acquire(&lock_path)? else {
+            for _ in 0..REMOTE_NODE_INGRESS_OWNER_READY_RETRIES {
+                if remote_node_ingress_owner_available(&socket_path) {
+                    register_workspace_socket_with_owner(network, socket_name)?;
+                    return Ok(());
+                }
+                thread::sleep(REMOTE_NODE_INGRESS_OWNER_READY_SLEEP);
+            }
+            return Err(LifecycleError::Protocol(format!(
+                "remote node ingress owner for listener `{}` did not become ready while another starter held {}",
+                network.listener_addr(),
+                lock_path.display()
+            )));
+        };
         if remote_node_ingress_owner_available(&socket_path) {
             register_workspace_socket_with_owner(network, socket_name)?;
             return Ok(());
@@ -241,6 +295,28 @@ impl RemoteNodeIngressServerRuntime {
             "remote node ingress owner for listener `{}` did not become ready",
             network.listener_addr()
         )))
+    }
+
+    pub fn unregister_owner_workspace_socket(
+        socket_name: &str,
+        network: &RemoteNetworkConfig,
+    ) -> Result<(), LifecycleError> {
+        if socket_name == "__shared__" || socket_name.is_empty() {
+            return Ok(());
+        }
+        let socket_path = remote_node_ingress_owner_socket_path(network);
+        if !remote_node_ingress_owner_available(&socket_path) {
+            return Ok(());
+        }
+        unregister_workspace_socket_with_owner(network, socket_name)
+    }
+
+    pub fn shutdown_owner(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
+        let socket_path = remote_node_ingress_owner_socket_path(network);
+        if !remote_node_ingress_owner_available(&socket_path) {
+            return Ok(());
+        }
+        shutdown_owner_with_control_socket(network)
     }
 
     pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
@@ -267,6 +343,36 @@ impl RemoteNodeIngressServerRuntime {
             shutdown_tx: Some(shutdown_tx),
         })
     }
+}
+
+struct OwnerStartupLock {
+    path: PathBuf,
+}
+
+impl OwnerStartupLock {
+    fn try_acquire(path: &Path) -> Result<Option<Self>, LifecycleError> {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => Ok(Some(Self {
+                path: path.to_path_buf(),
+            })),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(remote_node_ingress_error(error)),
+        }
+    }
+}
+
+impl Drop for OwnerStartupLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn owner_startup_lock_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("sock.lock")
 }
 
 pub(crate) fn notify_authority_socket_ready(
@@ -320,6 +426,46 @@ fn register_workspace_socket_with_owner(
     }
 }
 
+fn unregister_workspace_socket_with_owner(
+    network: &RemoteNetworkConfig,
+    socket_name: &str,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
+        .map_err(remote_node_ingress_error)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(remote_node_ingress_error)?;
+    write_owner_control_unregister_workspace_socket(&mut stream, socket_name)
+        .map_err(remote_node_ingress_error)?;
+    match read_owner_control_reply(&mut stream).map_err(remote_node_ingress_error)? {
+        AuthoritySocketReadyReply {
+            status: AuthoritySocketReadyStatus::Registered,
+            ..
+        } => Ok(()),
+        AuthoritySocketReadyReply { message, .. } => Err(LifecycleError::Protocol(format!(
+            "remote node ingress owner rejected workspace socket unregistration `{socket_name}`: {message}"
+        ))),
+    }
+}
+
+fn shutdown_owner_with_control_socket(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
+        .map_err(remote_node_ingress_error)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(remote_node_ingress_error)?;
+    write_owner_control_shutdown(&mut stream).map_err(remote_node_ingress_error)?;
+    match read_owner_control_reply(&mut stream).map_err(remote_node_ingress_error)? {
+        AuthoritySocketReadyReply {
+            status: AuthoritySocketReadyStatus::Registered,
+            ..
+        } => Ok(()),
+        AuthoritySocketReadyReply { message, .. } => Err(LifecycleError::Protocol(format!(
+            "remote node ingress owner rejected shutdown: {message}"
+        ))),
+    }
+}
+
 pub(crate) fn remote_node_ingress_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-node-ingress-{}.sock",
@@ -345,20 +491,37 @@ fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-fn drain_owner_requests(
-    listener: &UnixListener,
+fn start_owner_control_acceptor(
+    listener: UnixListener,
     owner_tx: &mpsc::Sender<InternalEvent>,
-) -> io::Result<()> {
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => handle_owner_stream(stream, owner_tx.clone()),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(error) => return Err(error),
+    lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
+) -> thread::JoinHandle<()> {
+    let owner_tx = owner_tx.clone();
+    thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            handle_owner_stream(stream, owner_tx.clone(), lifecycle_tx.clone());
         }
+    })
+}
+
+fn next_owner_lifecycle_event(
+    lifecycle_rx: &mpsc::Receiver<OwnerLifecycleEvent>,
+    saw_workspace: bool,
+) -> Option<OwnerLifecycleEvent> {
+    if saw_workspace {
+        lifecycle_rx.recv().ok()
+    } else {
+        lifecycle_rx
+            .recv_timeout(REMOTE_NODE_INGRESS_OWNER_IDLE_STARTUP_TIMEOUT)
+            .ok()
     }
 }
 
-fn handle_owner_stream(mut stream: UnixStream, owner_tx: mpsc::Sender<InternalEvent>) {
+fn handle_owner_stream(
+    mut stream: UnixStream,
+    owner_tx: mpsc::Sender<InternalEvent>,
+    lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
+) {
     thread::spawn(move || {
         let mut prefix = [0_u8; 4];
         if stream.read_exact(&mut prefix).is_err() {
@@ -398,6 +561,7 @@ fn handle_owner_stream(mut stream: UnixStream, owner_tx: mpsc::Sender<InternalEv
                 }
                 Ok(OwnerControlMessage::RegisterWorkspaceSocket { socket_name }) => {
                     let (reply_tx, reply_rx) = mpsc::channel();
+                    let registered_socket_name = socket_name.clone();
                     if owner_tx
                         .send(InternalEvent::RegisterWorkspaceSocket {
                             socket_name,
@@ -419,6 +583,66 @@ fn handle_owner_stream(mut stream: UnixStream, owner_tx: mpsc::Sender<InternalEv
                         .unwrap_or_else(|_| AuthoritySocketReadyReply {
                             status: AuthoritySocketReadyStatus::Pending,
                             message: "workspace socket registration is pending".to_string(),
+                        });
+                    if reply.status == AuthoritySocketReadyStatus::Registered {
+                        let _ = lifecycle_tx.send(OwnerLifecycleEvent::WorkspaceRegistered(
+                            registered_socket_name,
+                        ));
+                    }
+                    let _ = write_owner_control_reply(&mut stream, &reply);
+                }
+                Ok(OwnerControlMessage::UnregisterWorkspaceSocket { socket_name }) => {
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    let unregistered_socket_name = socket_name.clone();
+                    if owner_tx
+                        .send(InternalEvent::UnregisterWorkspaceSocket {
+                            socket_name,
+                            reply_tx,
+                        })
+                        .is_err()
+                    {
+                        let _ = write_owner_control_reply(
+                            &mut stream,
+                            &AuthoritySocketReadyReply {
+                                status: AuthoritySocketReadyStatus::Error,
+                                message: "remote-node-ingress owner loop is closed".to_string(),
+                            },
+                        );
+                        return;
+                    }
+                    let reply = reply_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap_or_else(|_| AuthoritySocketReadyReply {
+                            status: AuthoritySocketReadyStatus::Pending,
+                            message: "workspace socket unregistration is pending".to_string(),
+                        });
+                    if reply.status == AuthoritySocketReadyStatus::Registered {
+                        let _ = lifecycle_tx.send(OwnerLifecycleEvent::WorkspaceUnregistered(
+                            unregistered_socket_name,
+                        ));
+                    }
+                    let _ = write_owner_control_reply(&mut stream, &reply);
+                }
+                Ok(OwnerControlMessage::Shutdown) => {
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    if owner_tx
+                        .send(InternalEvent::ShutdownOwner { reply_tx })
+                        .is_err()
+                    {
+                        let _ = write_owner_control_reply(
+                            &mut stream,
+                            &AuthoritySocketReadyReply {
+                                status: AuthoritySocketReadyStatus::Error,
+                                message: "remote-node-ingress owner loop is closed".to_string(),
+                            },
+                        );
+                        return;
+                    }
+                    let reply = reply_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap_or_else(|_| AuthoritySocketReadyReply {
+                            status: AuthoritySocketReadyStatus::Pending,
+                            message: "remote-node-ingress shutdown is pending".to_string(),
                         });
                     let _ = write_owner_control_reply(&mut stream, &reply);
                 }
@@ -490,6 +714,10 @@ enum OwnerControlMessage {
     RegisterWorkspaceSocket {
         socket_name: String,
     },
+    UnregisterWorkspaceSocket {
+        socket_name: String,
+    },
+    Shutdown,
 }
 fn write_owner_control_authority_socket_ready(
     writer: &mut impl Write,
@@ -510,6 +738,22 @@ fn write_owner_control_register_workspace_socket(
     writer.write_all(OWNER_CONTROL_MAGIC)?;
     writer.write_all(&[2])?;
     write_owner_control_string(writer, socket_name)?;
+    writer.flush()
+}
+
+fn write_owner_control_unregister_workspace_socket(
+    writer: &mut impl Write,
+    socket_name: &str,
+) -> io::Result<()> {
+    writer.write_all(OWNER_CONTROL_MAGIC)?;
+    writer.write_all(&[3])?;
+    write_owner_control_string(writer, socket_name)?;
+    writer.flush()
+}
+
+fn write_owner_control_shutdown(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(OWNER_CONTROL_MAGIC)?;
+    writer.write_all(&[4])?;
     writer.flush()
 }
 
@@ -561,6 +805,11 @@ fn read_owner_control_message(reader: &mut impl Read) -> io::Result<OwnerControl
             let socket_name = read_owner_control_string(reader)?;
             Ok(OwnerControlMessage::RegisterWorkspaceSocket { socket_name })
         }
+        3 => {
+            let socket_name = read_owner_control_string(reader)?;
+            Ok(OwnerControlMessage::UnregisterWorkspaceSocket { socket_name })
+        }
+        4 => Ok(OwnerControlMessage::Shutdown),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unknown remote-node-ingress owner control message",
@@ -591,14 +840,112 @@ fn read_owner_control_string(reader: &mut impl Read) -> io::Result<String> {
     })
 }
 
-fn any_live_workspace_exists() -> Result<bool, LifecycleError> {
+fn live_workspace_sockets(
+    network: &RemoteNetworkConfig,
+) -> Result<BTreeSet<String>, LifecycleError> {
     let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_node_ingress_error)?;
-    let sockets = backend
-        .discover_waitagent_sockets()
-        .map_err(remote_node_ingress_error)?;
-    Ok(sockets
-        .iter()
-        .any(|socket_name| backend.socket_is_live(socket_name)))
+    let registry = RemoteWorkspaceSocketRegistryRuntime::new(network.clone());
+    registry.live_workspace_socket_names_retaining(|socket_name| {
+        backend.socket_is_live(&crate::infra::tmux::TmuxSocketName::new(socket_name))
+    })
+}
+
+fn apply_owner_lifecycle_event(
+    live_workspace_sockets: &mut BTreeSet<String>,
+    saw_workspace: &mut bool,
+    event: OwnerLifecycleEvent,
+) {
+    match event {
+        OwnerLifecycleEvent::WorkspaceRegistered(socket_name) => {
+            if socket_name != "__shared__" && !socket_name.is_empty() {
+                live_workspace_sockets.insert(socket_name);
+                *saw_workspace = true;
+            }
+        }
+        OwnerLifecycleEvent::WorkspaceUnregistered(socket_name) => {
+            live_workspace_sockets.remove(&socket_name);
+        }
+        OwnerLifecycleEvent::WorkspaceRegistryChanged(sockets) => {
+            if !sockets.is_empty() {
+                *saw_workspace = true;
+            }
+            *live_workspace_sockets = sockets;
+        }
+    }
+}
+
+fn start_workspace_registry_lifecycle_watcher(
+    network: RemoteNetworkConfig,
+    lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
+) -> io::Result<thread::JoinHandle<()>> {
+    let registry_path = workspace_socket_registry_path(&network);
+    let registry_dir = registry_path.parent().unwrap_or_else(|| Path::new("/tmp"));
+    fs::create_dir_all(registry_dir)?;
+    let watched_name = registry_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_string();
+    let path = registry_dir.to_string_lossy().into_owned();
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let c_path = std::ffi::CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid tmux socket dir"))?;
+    let wd = unsafe {
+        libc::inotify_add_watch(
+            fd,
+            c_path.as_ptr(),
+            (libc::IN_CREATE | libc::IN_CLOSE_WRITE | libc::IN_DELETE | libc::IN_MOVED_TO) as u32,
+        )
+    };
+    if wd < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+
+    Ok(thread::spawn(move || {
+        let event_size = std::mem::size_of::<libc::inotify_event>();
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+
+            let mut off = 0;
+            while off + event_size <= n as usize {
+                // SAFETY: kernel wrote a complete inotify_event into the buffer.
+                let event = unsafe { &*(buf[off..].as_ptr() as *const libc::inotify_event) };
+                let name_len = event.len as usize;
+                let name_off = off + event_size;
+                if name_len > 0 && name_off + name_len <= n as usize {
+                    let end = buf[name_off..name_off + name_len]
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(name_len);
+                    if let Ok(name) = std::str::from_utf8(&buf[name_off..name_off + end]) {
+                        if name == watched_name {
+                            let sockets = live_workspace_sockets(&network).unwrap_or_default();
+                            if lifecycle_tx
+                                .send(OwnerLifecycleEvent::WorkspaceRegistryChanged(sockets))
+                                .is_err()
+                            {
+                                unsafe { libc::close(fd) };
+                                return;
+                            }
+                        }
+                    }
+                }
+                off += event_size + name_len;
+            }
+        }
+
+        unsafe { libc::close(fd) };
+    }))
 }
 
 /// Watches the temp directory for new authority socket files and sends
@@ -815,6 +1162,13 @@ fn run_node_ingress_server_loop(
                 event,
             ),
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
+            IngressServerEvent::Internal(InternalEvent::ShutdownOwner { reply_tx }) => {
+                let _ = reply_tx.send(AuthoritySocketReadyReply {
+                    status: AuthoritySocketReadyStatus::Registered,
+                    message: "remote-node-ingress owner shutting down".to_string(),
+                });
+                break;
+            }
             IngressServerEvent::Internal(InternalEvent::LocalCreateSession {
                 envelope,
                 reply_tx,
@@ -1249,6 +1603,16 @@ fn handle_internal_event(
                 message: "workspace socket registered".to_string(),
             });
         }
+        InternalEvent::UnregisterWorkspaceSocket {
+            socket_name,
+            reply_tx,
+        } => {
+            registered_workspace_sockets.remove(&socket_name);
+            let _ = reply_tx.send(AuthoritySocketReadyReply {
+                status: AuthoritySocketReadyStatus::Registered,
+                message: "workspace socket unregistered".to_string(),
+            });
+        }
         InternalEvent::SocketDirChanged => {
             refresh_authority_bridges_for_sessions(
                 sessions,
@@ -1260,6 +1624,7 @@ fn handle_internal_event(
             refresh_authority_bridges_for_sessions(sessions, internal_tx, attempts_remaining);
         }
         InternalEvent::Shutdown
+        | InternalEvent::ShutdownOwner { .. }
         | InternalEvent::LocalCreateSession { .. }
         | InternalEvent::LocalCreateSessionTimedOut { .. } => {}
     }

@@ -6,7 +6,7 @@ mod tests {
         flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
         placeholder_lines, should_draw_remote_snapshot, should_exit_surface_for_target_presence,
         should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
-        spawn_mailbox_watcher, sync_or_defer_remote_pty_size, target_exists_in_catalog,
+        spawn_mailbox_watcher, sync_or_defer_remote_pty_size,
         write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, RawPtyInputRoute,
         RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
         RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
@@ -26,6 +26,7 @@ mod tests {
         TargetOutputPayload,
     };
     use crate::infra::remote_transport_codec::write_registration_frame;
+    use crate::infra::tmux::EmbeddedTmuxBackend;
     use crate::runtime::remote_authority_connection_runtime::{
         spawn_authority_listener, AuthorityConnectionRequest, AuthorityTransportEvent,
     };
@@ -220,6 +221,7 @@ mod tests {
         );
         let runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             PathBuf::from("/tmp/waitagent"),
         );
 
@@ -237,6 +239,7 @@ mod tests {
         );
         let runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             PathBuf::from("/tmp/waitagent"),
         );
         let registry = RemoteConnectionRegistry::new();
@@ -275,6 +278,7 @@ mod tests {
         );
         let runtime = RemoteMainSlotPaneRuntime::new(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             Box::new(crate::runtime::remote_authority_connection_runtime::LocalAuthoritySocketBridgeStarter),
             PathBuf::from("/tmp/waitagent"),
             RemoteNetworkConfig::default(),
@@ -838,21 +842,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
-    struct StaticTargetCatalogGateway {
-        targets: Vec<ManagedSessionRecord>,
-    }
-
-    impl crate::application::target_registry_service::TargetCatalogGateway
-        for StaticTargetCatalogGateway
-    {
-        type Error = std::io::Error;
-
-        fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-            Ok(self.targets.clone())
-        }
-    }
-
     #[test]
     fn target_presence_loss_exits_when_target_is_removed_even_if_authority_stays_connected() {
         assert!(should_exit_surface_for_target_presence_loss(
@@ -873,20 +862,6 @@ mod tests {
         assert!(!should_exit_surface_for_target_presence_loss(
             true, false, true
         ));
-    }
-
-    #[test]
-    fn target_exists_in_catalog_reports_presence_by_target_id() {
-        let target = remote_target();
-        let registry = TargetRegistryService::new(StaticTargetCatalogGateway {
-            targets: vec![target.clone()],
-        });
-
-        assert!(target_exists_in_catalog(
-            &registry,
-            &target.address.qualified_target()
-        ));
-        assert!(!target_exists_in_catalog(&registry, "peer-a:missing-shell"));
     }
 
     #[test]

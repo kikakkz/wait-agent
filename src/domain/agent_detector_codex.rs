@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::AgentDetector;
+use crate::domain::agent_detector::{AgentDetector, SHELL_NAMES};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 pub struct CodexDetector;
@@ -42,10 +42,13 @@ impl AgentDetector for CodexDetector {
 
     fn detect_from_pane_text(
         &self,
-        _current_command: &str,
+        current_command: &str,
         pane_text: &str,
     ) -> Option<&'static str> {
         let lowered = pane_text.to_ascii_lowercase();
+        if SHELL_NAMES.contains(&current_command) {
+            return detect_active_codex_from_shell_pane(pane_text);
+        }
         if lowered.contains("skip") && lowered.contains("codex") {
             return Some("codex");
         }
@@ -160,4 +163,28 @@ impl AgentDetector for CodexDetector {
 
         Some(ManagedSessionTaskState::Running)
     }
+}
+
+fn detect_active_codex_from_shell_pane(pane_text: &str) -> Option<&'static str> {
+    let normalized_lines: Vec<&str> = pane_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let recent_start = normalized_lines.len().saturating_sub(8);
+
+    for line in normalized_lines.iter().skip(recent_start) {
+        let lowered = line.to_ascii_lowercase();
+        if lowered.contains("type your message") || lowered.contains("send a message") {
+            return Some("codex");
+        }
+        if line.starts_with('›') {
+            return Some("codex");
+        }
+        if lowered.contains("skip") && lowered.contains("codex") {
+            return Some("codex");
+        }
+    }
+
+    None
 }

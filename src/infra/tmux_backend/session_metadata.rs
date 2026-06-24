@@ -80,6 +80,22 @@ fn pane_content_signature(pane_text: &str) -> u64 {
     )
 }
 
+fn runtime_command_override_name(value: &str) -> String {
+    value
+        .split_once(':')
+        .map(|(_, command_name)| command_name)
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn runtime_command_override_is_prompt(value: &str) -> bool {
+    let command_name = value
+        .split_once(':')
+        .map(|(_, command_name)| command_name)
+        .unwrap_or(value);
+    command_name == "bash"
+}
+
 /// Like `pane_content_signature` but with an explicit content boundary line
 /// index, used when ANSI-based background color analysis provides a more
 /// accurate boundary than the separator/prompt heuristic.
@@ -159,13 +175,30 @@ impl EmbeddedTmuxBackend {
         let pane_text = strip_ansi(&pane_ansi);
         let current_command = main_pane.current_command.as_deref().unwrap_or_default();
         let foreground_argv = super::foreground_process_argv_for_pane_shell(main_pane.pane_pid);
-        let command_name = self.registry.detect_command_name(
+        let detected_command_name = self.registry.detect_command_name(
             current_command,
             foreground_argv.as_deref(),
             &pane_text,
         );
+        let workspace = crate::infra::tmux_types::TmuxWorkspaceHandle {
+            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(session_name),
+            socket_name: socket_name.clone(),
+            session_name: crate::infra::tmux_types::TmuxSessionName::new(session_name),
+        };
+        let runtime_override = self
+            .show_session_option(&workspace, super::WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+            .ok()
+            .flatten();
+        let prompt_override = runtime_override
+            .as_deref()
+            .is_some_and(runtime_command_override_is_prompt);
+        let command_name = runtime_override
+            .map(|override_value| runtime_command_override_name(&override_value))
+            .unwrap_or(detected_command_name);
         let task_state = if main_pane.in_mode {
             ManagedSessionTaskState::Running
+        } else if prompt_override {
+            ManagedSessionTaskState::Input
         } else {
             let mut state = self
                 .registry
@@ -249,7 +282,7 @@ impl EmbeddedTmuxBackend {
         let args = vec![
             "list-panes".to_string(),
             "-t".to_string(),
-            target.to_string(),
+            super::exact_session_target(target),
             "-F".to_string(),
             "#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_in_mode}"
                 .to_string(),

@@ -3105,6 +3105,7 @@ mod tests {
             session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         }
     }
 

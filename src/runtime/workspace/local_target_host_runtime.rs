@@ -3,17 +3,21 @@ use crate::cli::{
     RemoteNetworkConfig,
 };
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::tmux::TmuxProgram;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxPaneId, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
     TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_node_ingress_server_runtime::RemoteNodeIngressServerRuntime;
 use crate::runtime::remote_node_session_sync_runtime::{
-    LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
+    shutdown_remote_session_sync_owner, LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -44,15 +48,23 @@ impl LocalTargetHostRuntime {
     }
 
     pub fn run_host(&self, command: LocalTargetHostCommand) -> Result<(), LifecycleError> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let mut child = Command::new(&shell)
+        let shell_program = runtime_event_shell_program(
+            &self.current_executable,
+            &command.socket_name,
+            &command.target_session_name,
+            None,
+            &self.network,
+        )?;
+        let program = shell_program.program();
+        let mut child_command = Command::new(&program.program);
+        child_command
+            .args(&program.args)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| {
-                LifecycleError::Io("failed to spawn local target shell".to_string(), error)
-            })?;
+            .stderr(Stdio::inherit());
+        let mut child = child_command.spawn().map_err(|error| {
+            LifecycleError::Io("failed to spawn local target shell".to_string(), error)
+        })?;
         let status = child.wait().map_err(|error| {
             LifecycleError::Io("failed to wait for local target shell".to_string(), error)
         })?;
@@ -126,6 +138,7 @@ impl LocalTargetHostRuntime {
                 .kill_server(&TmuxSocketName::new(&command.socket_name))
             {
                 Ok(()) => {
+                    self.unregister_live_workspace_socket(&command.socket_name);
                     self.notify_session_sync_local_target_exited(
                         &command.socket_name,
                         &command.target_session_name,
@@ -133,6 +146,7 @@ impl LocalTargetHostRuntime {
                     Ok(())
                 }
                 Err(error) if error.is_command_failure() => {
+                    self.unregister_live_workspace_socket(&command.socket_name);
                     self.notify_session_sync_local_target_exited(
                         &command.socket_name,
                         &command.target_session_name,
@@ -195,6 +209,32 @@ impl LocalTargetHostRuntime {
                 t_notify.elapsed()
             )),
         }
+    }
+
+    fn unregister_live_workspace_socket(&self, socket_name: &str) {
+        let _ = shutdown_remote_session_sync_owner(
+            &crate::runtime::remote_node_session_sync_runtime::remote_session_sync_owner_socket_path(
+                socket_name,
+            ),
+        );
+        if let Err(error) = RemoteWorkspaceSocketRegistryRuntime::new(self.network.clone())
+            .unregister_workspace_socket(socket_name)
+        {
+            ERROR_LOG.log(format!(
+                "[diag-exit] local_target_registry_unregister_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
+        if let Err(error) = RemoteNodeIngressServerRuntime::unregister_owner_workspace_socket(
+            socket_name,
+            &self.network,
+        ) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] local_target_ingress_unregister_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
+        let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
     }
 
     fn exit_is_owned_by_workspace_main_pane(
@@ -307,25 +347,152 @@ impl LocalTargetHostRuntime {
     }
 }
 
-pub(crate) fn local_target_host_program(
+pub(crate) struct RuntimeEventShellProgram {
+    program: TmuxProgram,
+    _hooks: ShellRuntimeHooks,
+}
+
+impl RuntimeEventShellProgram {
+    pub(crate) fn program(&self) -> &TmuxProgram {
+        &self.program
+    }
+}
+
+struct ShellRuntimeHooks {
+    rcfile: Option<std::path::PathBuf>,
+}
+
+impl ShellRuntimeHooks {
+    fn for_shell(shell: &str, signal_command: &str) -> Result<Self, LifecycleError> {
+        let shell_name = std::path::Path::new(shell)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        if shell_name != "bash" {
+            return Ok(Self { rcfile: None });
+        }
+        let path = std::env::temp_dir().join(format!(
+            "waitagent-bash-runtime-hooks-{}-{}.bashrc",
+            std::process::id(),
+            next_hook_nonce()
+        ));
+        let mut file = std::fs::File::create(&path).map_err(|error| {
+            LifecycleError::Io(
+                "failed to create waitagent bash runtime hook".to_string(),
+                error,
+            )
+        })?;
+        file.write_all(b"if [ -r ~/.bashrc ]; then . ~/.bashrc; fi\n")
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to write waitagent bash runtime hook".to_string(),
+                    error,
+                )
+            })?;
+        writeln!(
+            file,
+            "__waitagent_signal_runtime() {{ if [ -n \"${{__WAITAGENT_RUNTIME_SIGNALING:-}}\" ]; then return 0; fi; local __waitagent_cmd=\"$1\"; if [ -z \"$__waitagent_cmd\" ]; then __waitagent_cmd=bash; fi; __WAITAGENT_RUNTIME_EVENT_SEQ=$(( ${{__WAITAGENT_RUNTIME_EVENT_SEQ:-0}} + 1 )); local __waitagent_seq=$__WAITAGENT_RUNTIME_EVENT_SEQ; __WAITAGENT_RUNTIME_SIGNALING=1; ({} --command-name \"$__waitagent_cmd\" --event-seq \"$__waitagent_seq\") >/dev/null 2>&1 & __WAITAGENT_RUNTIME_SIGNALING=; }}",
+            signal_command
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
+        file.write_all(
+            b"__waitagent_command_name() { local __waitagent_line=\"$1\"; __waitagent_line=${__waitagent_line#${__waitagent_line%%[![:space:]]*}}; local __waitagent_cmd=${__waitagent_line%%[[:space:];|&<>]*}; __waitagent_cmd=${__waitagent_cmd##*/}; printf '%s' \"$__waitagent_cmd\"; }\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
+        file.write_all(
+            b"__waitagent_preexec() { local __waitagent_command_line=\"$1\"; case \"$__waitagent_command_line\" in ''|__waitagent_*|*__chrome-refresh*|*__remote-session-sync-owner*|*__remote-node-ingress-server*) return 0;; esac; local __waitagent_trap; __waitagent_trap=$(trap -p DEBUG); trap - DEBUG; local __waitagent_cmd; __waitagent_cmd=$(__waitagent_command_name \"$__waitagent_command_line\"); if [ -n \"$__waitagent_cmd\" ]; then __WAITAGENT_COMMAND_RUNNING=1; __waitagent_signal_runtime \"$__waitagent_cmd\"; fi; eval \"$__waitagent_trap\"; }\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
+        file.write_all(
+            b"__WAITAGENT_ORIGINAL_PROMPT_COMMAND=${PROMPT_COMMAND-}\n__waitagent_prompt_command() { local __waitagent_trap; __waitagent_trap=$(trap -p DEBUG); trap - DEBUG; if [ \"${__WAITAGENT_COMMAND_RUNNING:-}\" = 1 ]; then __WAITAGENT_COMMAND_RUNNING=; __waitagent_signal_runtime bash; fi; if [ -n \"${__WAITAGENT_ORIGINAL_PROMPT_COMMAND:-}\" ]; then eval \"$__WAITAGENT_ORIGINAL_PROMPT_COMMAND\"; fi; eval \"$__waitagent_trap\"; }\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
+        file.write_all(
+            b"PROMPT_COMMAND=__waitagent_prompt_command\ntrap '__waitagent_preexec \"$BASH_COMMAND\"' DEBUG\n__waitagent_signal_runtime bash\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to write waitagent bash runtime hook".to_string(),
+                error,
+            )
+        })?;
+        Ok(Self { rcfile: Some(path) })
+    }
+
+    fn shell_args(&self) -> Vec<String> {
+        self.rcfile.as_ref().map_or_else(Vec::new, |path| {
+            vec![
+                "--rcfile".to_string(),
+                path.display().to_string(),
+                "-i".to_string(),
+            ]
+        })
+    }
+}
+
+impl Drop for ShellRuntimeHooks {
+    fn drop(&mut self) {
+        // The rcfile is consumed asynchronously by the shell started through
+        // tmux. Removing it when the spawn/respawn command returns races with
+        // bash opening `--rcfile`, so stale hook files are cleaned by the
+        // startup/test cleanup path instead.
+    }
+}
+
+fn next_hook_nonce() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn shell_command(executable: &std::path::Path, args: Vec<String>) -> String {
+    let mut parts = vec![shell_escape(&executable.display().to_string())];
+    parts.extend(args.iter().map(|arg| shell_escape(arg)));
+    parts.join(" ")
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub(crate) fn runtime_event_shell_program(
     executable: &std::path::Path,
     socket_name: &str,
     target_session_name: &str,
-    workspace_dir: &std::path::Path,
+    workspace_dir: Option<&std::path::Path>,
     network: &RemoteNetworkConfig,
-) -> crate::infra::tmux::TmuxProgram {
-    crate::infra::tmux::TmuxProgram::new(executable.display().to_string())
-        .with_args(prepend_global_network_args(
+) -> Result<RuntimeEventShellProgram, LifecycleError> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let signal_command = shell_command(
+        executable,
+        prepend_global_network_args(
             vec![
-                "__local-target-host".to_string(),
+                "__chrome-refresh-socket-signal".to_string(),
                 "--socket-name".to_string(),
                 socket_name.to_string(),
                 "--target-session-name".to_string(),
                 target_session_name.to_string(),
             ],
             network,
-        ))
-        .with_start_directory(workspace_dir)
+        ),
+    );
+    let shell_hooks = ShellRuntimeHooks::for_shell(&shell, &signal_command)?;
+    let mut program = TmuxProgram::new(shell).with_args(shell_hooks.shell_args());
+    if let Some(workspace_dir) = workspace_dir {
+        program = program.with_start_directory(workspace_dir);
+    }
+    Ok(RuntimeEventShellProgram {
+        program,
+        _hooks: shell_hooks,
+    })
 }
 
 fn local_target_host_error(error: crate::infra::tmux::TmuxError) -> LifecycleError {
@@ -337,7 +504,7 @@ fn local_target_host_error(error: crate::infra::tmux::TmuxError) -> LifecycleErr
 
 #[cfg(test)]
 mod tests {
-    use super::LocalTargetHostRuntime;
+    use super::{shell_command, LocalTargetHostRuntime, ShellRuntimeHooks};
     use crate::application::workspace_service::WorkspaceService;
     use crate::cli::{LocalTargetExitedCommand, RemoteNetworkConfig};
     use crate::domain::workspace::WorkspaceInstanceConfig;
@@ -349,6 +516,34 @@ mod tests {
     use crate::runtime::workspace_runtime::WorkspaceRuntime;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn bash_runtime_hooks_use_rcfile_and_socket_signal_command() {
+        let command = shell_command(
+            std::path::Path::new("/tmp/wait agent"),
+            vec![
+                "__chrome-refresh-socket-signal".to_string(),
+                "--socket-name".to_string(),
+                "wa-1".to_string(),
+                "--target-session-name".to_string(),
+                "target-1".to_string(),
+            ],
+        );
+        let hooks = ShellRuntimeHooks::for_shell("/bin/bash", &command)
+            .expect("bash runtime hooks should be created");
+        let args = hooks.shell_args();
+        assert_eq!(args.first().map(String::as_str), Some("--rcfile"));
+        assert_eq!(args.last().map(String::as_str), Some("-i"));
+        let rcfile = args.get(1).expect("rcfile path should exist");
+        let content = std::fs::read_to_string(rcfile).expect("rcfile should be readable");
+        assert!(content.contains("__chrome-refresh-socket-signal"));
+        assert!(content.contains("--target-session-name"));
+        assert!(content.contains("--command-name"));
+        assert!(content.contains("__waitagent_preexec"));
+        assert!(content.contains("__waitagent_prompt_command"));
+        assert!(content.contains("trap '__waitagent_preexec \"$BASH_COMMAND\"' DEBUG"));
+        assert!(content.contains("PROMPT_COMMAND"));
+    }
 
     #[test]
     fn connect_workspace_stops_server_when_last_target_host_exits() {
@@ -839,6 +1034,7 @@ mod tests {
             session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         }
     }
 }

@@ -510,7 +510,7 @@ impl TmuxLayoutGateway for EmbeddedTmuxBackend {
         let args = vec![
             "set-option".to_string(),
             "-t".to_string(),
-            workspace.session_name.as_str().to_string(),
+            super::exact_session_target(workspace.session_name.as_str()),
             option_name.to_string(),
             value.to_string(),
         ];

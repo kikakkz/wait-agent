@@ -324,6 +324,28 @@ impl WorkspaceLayoutRuntime {
         result
     }
 
+    pub fn run_chrome_refresh_signal_on_socket(
+        &self,
+        socket_name: &str,
+    ) -> Result<(), LifecycleError> {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())
+                .map_err(tmux_layout_error)?,
+        );
+        let sessions = target_registry
+            .list_local_workspace_chrome_targets_on_authority(socket_name)
+            .map_err(tmux_layout_error)?;
+        for session in sessions {
+            self.backend
+                .signal_chrome_refresh_on_socket(
+                    session.address.server_id(),
+                    session.address.session_id(),
+                )
+                .map_err(tmux_layout_error)?;
+        }
+        Ok(())
+    }
+
     fn refresh_workspace_chrome_targets(
         &self,
         sessions: &[crate::domain::session_catalog::ManagedSessionRecord],

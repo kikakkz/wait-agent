@@ -801,6 +801,7 @@ mod tests {
                 session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
                 initial_rows: None,
                 initial_cols: None,
+                initial_program: None,
             })
             .expect("workspace should be created");
         crate::runtime::network_state_runtime::persist_socket_network_config(

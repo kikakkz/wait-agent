@@ -146,7 +146,7 @@ fn recover_network_config_for_command(
     use crate::cli::Command;
 
     match command {
-        Command::ChromeRefreshSocket(command) => {
+        Command::ChromeRefreshSocket(command) | Command::ChromeRefreshSocketSignal(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }
         Command::UiSidebar(command)
@@ -322,6 +322,7 @@ mod tests {
             session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         };
         let workspace = backend
             .ensure_workspace(&config)

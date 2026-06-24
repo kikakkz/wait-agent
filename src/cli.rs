@@ -129,6 +129,7 @@ pub fn prepend_global_network_args(
 pub enum Command {
     Workspace,
     ChromeRefreshSocket(SocketNameCommand),
+    ChromeRefreshSocketSignal(SocketNameCommand),
     UiSidebar(UiPaneCommand),
     UiFooter(UiPaneCommand),
     LocalTargetHost(LocalTargetHostCommand),
@@ -197,6 +198,9 @@ pub struct UiPaneCommand {
 #[derive(Debug, Clone, Default)]
 pub struct SocketNameCommand {
     pub socket_name: String,
+    pub target_session_name: Option<String>,
+    pub command_name: Option<String>,
+    pub event_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -434,6 +438,10 @@ impl Cli {
             "__chrome-refresh-socket" => {
                 args.remove(0);
                 Command::ChromeRefreshSocket(parse_socket_name_command(args)?)
+            }
+            "__chrome-refresh-socket-signal" => {
+                args.remove(0);
+                Command::ChromeRefreshSocketSignal(parse_socket_name_command(args)?)
             }
             "__ui-sidebar" => {
                 args.remove(0);
@@ -770,10 +778,25 @@ fn parse_ui_pane(args: Vec<String>) -> Result<UiPaneCommand, CliError> {
 fn parse_socket_name_command(args: Vec<String>) -> Result<SocketNameCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
+    let mut target_session_name = None;
+    let mut command_name = None;
+    let mut event_seq = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--target-session-name" => {
+                target_session_name = Some(expect_value("--target-session-name", &mut iter)?)
+            }
+            "--command-name" => command_name = Some(expect_value("--command-name", &mut iter)?),
+            "--event-seq" => {
+                let value = expect_value("--event-seq", &mut iter)?;
+                event_seq = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| CliError::InvalidValue("--event-seq".to_string(), value))?,
+                );
+            }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -782,6 +805,9 @@ fn parse_socket_name_command(args: Vec<String>) -> Result<SocketNameCommand, Cli
     Ok(SocketNameCommand {
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        target_session_name,
+        command_name,
+        event_seq,
     })
 }
 
@@ -2094,6 +2120,32 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_chrome_refresh_socket_signal_command() {
+        match parse(&[
+            "waitagent",
+            "__chrome-refresh-socket-signal",
+            "--socket-name",
+            "wa-1",
+            "--target-session-name",
+            "target-1",
+            "--command-name",
+            "codex",
+            "--event-seq",
+            "7",
+        ])
+        .command
+        {
+            Command::ChromeRefreshSocketSignal(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.target_session_name.as_deref(), Some("target-1"));
+                assert_eq!(command.command_name.as_deref(), Some("codex"));
+                assert_eq!(command.event_seq, Some(7));
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -350,6 +350,14 @@ impl TmuxGlueBuildPlan {
         let artifacts = self.prepare().map_err(TmuxGlueBuildError::from)?;
         let orchestration = self.orchestration().map_err(TmuxGlueBuildError::from)?;
 
+        if self.artifacts_are_current(&artifacts, &orchestration.steps) {
+            return Ok(TmuxGlueExecutionReport {
+                metadata: orchestration.metadata,
+                artifacts,
+                completed_steps: Vec::new(),
+            });
+        }
+
         if let Some(toolchain_report) = executor.toolchain_report(&orchestration) {
             if !toolchain_report.is_complete() {
                 return Err(TmuxGlueBuildError::ToolchainIncomplete(toolchain_report));
@@ -389,6 +397,29 @@ impl TmuxGlueBuildPlan {
                 message: error.to_string(),
             }
         })
+    }
+
+    fn artifacts_are_current(
+        &self,
+        artifacts: &TmuxGlueArtifacts,
+        steps: &[TmuxGlueBuildStep],
+    ) -> bool {
+        artifacts.tmux_binary_path.is_file()
+            && artifacts.build_stamp_path.is_file()
+            && steps
+                .iter()
+                .all(|step| self.step_stamp_matches(step, artifacts))
+    }
+
+    fn step_stamp_matches(&self, step: &TmuxGlueBuildStep, artifacts: &TmuxGlueArtifacts) -> bool {
+        let stamp_path = match step.kind {
+            TmuxGlueBuildStepKind::Autogen => return true,
+            TmuxGlueBuildStepKind::Configure => &artifacts.configure_stamp_path,
+            TmuxGlueBuildStepKind::Build => &artifacts.build_stamp_path,
+        };
+        fs::read_to_string(stamp_path)
+            .map(|stamp| stamp == step.command.render())
+            .unwrap_or(false)
     }
 }
 

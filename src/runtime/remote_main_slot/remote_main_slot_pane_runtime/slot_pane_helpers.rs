@@ -1,5 +1,5 @@
 use crate::application::target_registry_service::{
-    DefaultTargetCatalogGateway, TargetCatalogGateway, TargetRegistryService,
+    DefaultTargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::RemoteMainSlotCommand;
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord};
@@ -9,6 +9,7 @@ use crate::infra::remote_protocol::{
     RemoteConsoleDescriptor,
 };
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_connection_runtime::AuthorityTransportEvent;
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
@@ -34,7 +35,6 @@ const SIGWINCH: c_int = 28;
 const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
 const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
 pub(super) const CLEAR_SCREEN_HOME_ESCAPE: &str = "\x1b[2J\x1b[H";
-const TARGET_PRESENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET_PRESENCE_MISS_GRACE_POLLS: usize = 4;
 pub(crate) const RECONNECT_ANIMATION_INTERVAL: Duration = Duration::from_millis(200);
 pub(crate) const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -651,6 +651,9 @@ pub(super) fn spawn_mailbox_watcher(mailbox: LocalNodeMailbox, tx: mpsc::Sender<
 
 pub(super) fn spawn_target_presence_watcher(
     target_registry: TargetRegistryService<DefaultTargetCatalogGateway>,
+    backend: EmbeddedTmuxBackend,
+    socket_name: String,
+    session_name: String,
     target_id: String,
     state: Arc<Mutex<bool>>,
     tx: mpsc::Sender<RemotePaneEvent>,
@@ -659,6 +662,9 @@ pub(super) fn spawn_target_presence_watcher(
         let mut last_present = true;
         let mut consecutive_misses = 0usize;
         loop {
+            if wait_for_presence_signal(&backend, &socket_name, &session_name).is_err() {
+                break;
+            }
             let raw_present = target_registry
                 .find_target(&target_id)
                 .ok()
@@ -693,29 +699,22 @@ pub(super) fn spawn_target_presence_watcher(
                     break;
                 }
             }
-            thread::sleep(TARGET_PRESENCE_POLL_INTERVAL);
         }
     });
+}
+
+fn wait_for_presence_signal(
+    backend: &EmbeddedTmuxBackend,
+    socket_name: &str,
+    session_name: &str,
+) -> Result<(), TmuxError> {
+    backend.wait_for_chrome_refresh_on_socket(socket_name, session_name)
 }
 
 pub(super) fn target_is_present(state: &Arc<Mutex<bool>>) -> bool {
     *state
         .lock()
         .expect("target presence mutex should not be poisoned")
-}
-
-pub(super) fn target_exists_in_catalog<G>(
-    target_registry: &TargetRegistryService<G>,
-    target_id: &str,
-) -> bool
-where
-    G: TargetCatalogGateway,
-{
-    target_registry
-        .find_target(target_id)
-        .ok()
-        .flatten()
-        .is_some()
 }
 
 pub(crate) fn apply_authority_envelope(

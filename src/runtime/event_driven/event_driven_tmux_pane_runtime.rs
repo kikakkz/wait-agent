@@ -15,7 +15,7 @@ use crate::runtime::event_driven_ui_pane_runtime::{
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -37,7 +37,7 @@ pub struct EventDrivenTmuxPaneRuntime<G, R = G> {
     pane_runtime: EventDrivenUiPaneRuntime,
     network: RemoteNetworkConfig,
     previous_visible_targets: HashSet<String>,
-    previous_active_runtime: Option<LocalRuntimeSignature>,
+    previous_local_runtimes: BTreeMap<String, LocalRuntimeSignature>,
 }
 
 impl<G> EventDrivenTmuxPaneRuntime<G, G>
@@ -53,7 +53,7 @@ where
             pane_runtime: EventDrivenUiPaneRuntime::new(),
             network: RemoteNetworkConfig::default(),
             previous_visible_targets: HashSet::new(),
-            previous_active_runtime: None,
+            previous_local_runtimes: BTreeMap::new(),
         }
     }
 }
@@ -76,7 +76,7 @@ where
             pane_runtime: EventDrivenUiPaneRuntime::new(),
             network,
             previous_visible_targets: HashSet::new(),
-            previous_active_runtime: None,
+            previous_local_runtimes: BTreeMap::new(),
         }
     }
 
@@ -236,11 +236,7 @@ where
                 .map(|session| session.address.qualified_target())
                 .collect::<Vec<_>>()
         ));
-        self.notify_session_sync_on_active_runtime_change(
-            &command.socket_name,
-            active_target.as_deref(),
-            &visible_sessions,
-        );
+        self.notify_session_sync_on_local_runtime_change(&command.socket_name, &visible_sessions);
         let update = self.pane_runtime.publish_session_snapshot(
             &command.socket_name,
             &command.session_name,
@@ -258,19 +254,16 @@ where
         Ok(update)
     }
 
-    fn notify_session_sync_on_active_runtime_change(
+    fn notify_session_sync_on_local_runtime_change(
         &mut self,
         socket_name: &str,
-        active_target: Option<&str>,
         visible_sessions: &[ManagedSessionRecord],
     ) {
-        let next = active_target.and_then(|target| {
-            active_local_runtime_signature(socket_name, target, visible_sessions)
-        });
-        if self.previous_active_runtime == next {
+        let next = local_runtime_signatures(socket_name, visible_sessions);
+        if self.previous_local_runtimes == next {
             return;
         }
-        self.previous_active_runtime = next;
+        self.previous_local_runtimes = next;
         if let Err(error) = RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
             socket_name,
             &self.network,
@@ -284,25 +277,30 @@ where
     }
 }
 
-fn active_local_runtime_signature(
+fn local_runtime_signatures(
     socket_name: &str,
-    active_target: &str,
     visible_sessions: &[ManagedSessionRecord],
-) -> Option<LocalRuntimeSignature> {
+) -> BTreeMap<String, LocalRuntimeSignature> {
     visible_sessions
         .iter()
-        .find(|session| {
+        .filter(|session| {
             session.address.transport() == &SessionTransport::LocalTmux
                 && session.address.server_id() == socket_name
-                && session.address.qualified_target() == active_target
                 && session.is_target_host()
         })
-        .map(|session| LocalRuntimeSignature {
-            target: active_target.to_string(),
-            command_name: session.command_name.clone(),
-            current_path: session.current_path.clone(),
-            task_state: session.task_state,
+        .map(|session| {
+            let target = session.address.qualified_target();
+            (
+                target.clone(),
+                LocalRuntimeSignature {
+                    target,
+                    command_name: session.command_name.clone(),
+                    current_path: session.current_path.clone(),
+                    task_state: session.task_state,
+                },
+            )
         })
+        .collect()
 }
 
 fn workspace_handle(command: &UiPaneCommand) -> TmuxWorkspaceHandle {
@@ -343,7 +341,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_local_runtime_signature, EventDrivenTmuxPaneRuntime, WAITAGENT_ACTIVE_TARGET_OPTION,
+        local_runtime_signatures, EventDrivenTmuxPaneRuntime, WAITAGENT_ACTIVE_TARGET_OPTION,
         WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION,
     };
     use crate::cli::UiPaneCommand;
@@ -551,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn active_runtime_signature_tracks_active_local_target_metadata() {
+    fn local_runtime_signatures_track_all_local_target_metadata() {
         let sessions = vec![
             session_with_role(
                 "wa-1",
@@ -560,10 +558,24 @@ mod tests {
                 WorkspaceSessionRole::WorkspaceChrome,
             ),
             session_with_role("wa-1", "target-a", "kimi", WorkspaceSessionRole::TargetHost),
+            session_with_role(
+                "wa-1",
+                "target-b",
+                "codex",
+                WorkspaceSessionRole::TargetHost,
+            ),
+            session_with_role(
+                "peer-a",
+                "target-c",
+                "claude",
+                WorkspaceSessionRole::TargetHost,
+            ),
         ];
 
-        let signature = active_local_runtime_signature("wa-1", "wa-1:target-a", &sessions)
-            .expect("active local target should have a runtime signature");
+        let signatures = local_runtime_signatures("wa-1", &sessions);
+        let signature = signatures
+            .get("wa-1:target-a")
+            .expect("local target should have a runtime signature");
 
         assert_eq!(signature.target, "wa-1:target-a");
         assert_eq!(signature.command_name.as_deref(), Some("kimi"));
@@ -572,7 +584,13 @@ mod tests {
             Some(Path::new("/tmp/demo"))
         );
         assert_eq!(signature.task_state, ManagedSessionTaskState::Input);
-        assert!(active_local_runtime_signature("wa-1", "peer-a:target-a", &sessions).is_none());
+        assert_eq!(
+            signatures
+                .get("wa-1:target-b")
+                .and_then(|signature| signature.command_name.as_deref()),
+            Some("codex")
+        );
+        assert!(!signatures.contains_key("peer-a:target-c"));
     }
 
     #[test]

@@ -59,6 +59,14 @@ mod tests {
             registry.detect_command_name("bash", None, "Type your message here"),
             "codex"
         );
+
+        let stale_codex_then_shell = "│ >_ OpenAI Codex (v0.142.0) │\n\
+                                      │ › old prompt                 │\n\
+                                      root@host:~#";
+        assert_eq!(
+            registry.detect_command_name("bash", None, stale_codex_then_shell),
+            "bash"
+        );
     }
 
     #[test]
@@ -142,6 +150,7 @@ mod tests {
             session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         }
     }
 
@@ -277,6 +286,7 @@ mod tests {
             session_role: WorkspaceSessionRole::TargetHost,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         };
         let target = backend
             .ensure_workspace(&target_config)
@@ -354,6 +364,7 @@ mod tests {
             session_role: WorkspaceSessionRole::TargetHost,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         };
         let target = backend
             .ensure_workspace(&target_config)
@@ -720,6 +731,7 @@ mod tests {
             session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         }
     }
 

@@ -32,6 +32,8 @@ const WAITAGENT_SESSION_ROLE_ENV: &str = "WAITAGENT_SESSION_ROLE";
 const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
 pub(crate) const WAITAGENT_PANE_PIPE_OWNER_OPTION: &str = "@waitagent_pane_pipe_owner";
+pub(crate) const WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION: &str =
+    "@waitagent_runtime_command_override";
 pub(crate) const WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV: &str =
     "WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID";
 pub(crate) const WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV: &str =
@@ -247,7 +249,7 @@ impl EmbeddedTmuxBackend {
                 "show-options".to_string(),
                 "-qv".to_string(),
                 "-t".to_string(),
-                workspace.session_name.as_str().to_string(),
+                exact_session_target(workspace.session_name.as_str()),
                 option_name.to_string(),
             ],
         )?;
@@ -372,7 +374,7 @@ impl EmbeddedTmuxBackend {
         let args = vec![
             "show-environment".to_string(),
             "-t".to_string(),
-            session_name.to_string(),
+            exact_session_target(session_name),
         ];
         let output = self.run_on_socket(socket_name, &args)?;
         for line in output.stdout.lines() {
@@ -397,7 +399,7 @@ impl EmbeddedTmuxBackend {
                 "show-options".to_string(),
                 "-q".to_string(),
                 "-t".to_string(),
-                workspace.session_name.as_str().to_string(),
+                exact_session_target(workspace.session_name.as_str()),
                 option_name.to_string(),
             ],
         )?;
@@ -424,7 +426,7 @@ impl EmbeddedTmuxBackend {
                 "set-option".to_string(),
                 "-u".to_string(),
                 "-t".to_string(),
-                workspace.session_name.as_str().to_string(),
+                exact_session_target(workspace.session_name.as_str()),
                 option_name.to_string(),
             ],
         )
@@ -450,7 +452,6 @@ impl EmbeddedTmuxBackend {
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<(), TmuxError> {
         let window_name = default_window_name();
-        let default_shell = default_shell_path().unwrap_or_else(|| "/bin/bash".to_string());
         let mut args = vec![
             "set-option".to_string(),
             "-g".to_string(),
@@ -489,7 +490,16 @@ impl EmbeddedTmuxBackend {
             "-F".to_string(),
             "#{session_name}".to_string(),
         ]);
-        args.push(default_shell);
+        if let Some(program) = config.initial_program.as_ref() {
+            for (key, value) in &program.environment {
+                args.push("-e".to_string());
+                args.push(format!("{key}={value}"));
+            }
+            args.push(tmux_shell_command(&program.program, &program.args));
+        } else {
+            let default_shell = default_shell_path().unwrap_or_else(|| "/bin/bash".to_string());
+            args.push(default_shell);
+        }
         let output = self.run_workspace_command(workspace, &args)?;
         let session_name = parse_tmux_identifier(&output.stdout, "session name")?;
         if session_name != workspace.session_name.as_str() {
@@ -956,31 +966,6 @@ impl EmbeddedTmuxBackend {
         })
     }
 
-    /// Cheap query: returns (pane_bytes, pane_current_command, pane_title, session_name)
-    /// for every pane on the given socket for compatibility UI refresh signals.
-    pub(crate) fn pane_activity_on_socket(
-        &self,
-        socket_name: &TmuxSocketName,
-    ) -> Result<Vec<(u64, String, String, String)>, TmuxError> {
-        let args = vec![
-            "list-panes".to_string(),
-            "-s".to_string(),
-            "-F".to_string(),
-            "#{pane_bytes}\t#{pane_current_command}\t#{pane_title}\t#{session_name}".to_string(),
-        ];
-        let output = self.run_on_socket(socket_name, &args)?;
-        let mut results = Vec::new();
-        for line in output.stdout.lines() {
-            let mut parts = line.splitn(4, '\t');
-            let bytes = parts.next().unwrap_or_default().parse::<u64>().unwrap_or(0);
-            let command = parts.next().unwrap_or_default().to_string();
-            let title = parts.next().unwrap_or_default().to_string();
-            let session = parts.next().unwrap_or_default().to_string();
-            results.push((bytes, command, title, session));
-        }
-        Ok(results)
-    }
-
     fn wait_for_workspace_channel_on_socket(
         &self,
         socket_name: &str,
@@ -1108,6 +1093,20 @@ impl EmbeddedTmuxBackend {
         args.extend(program.args.iter().cloned());
         args
     }
+}
+
+pub(crate) fn exact_session_target(session_name: &str) -> String {
+    format!("={session_name}:")
+}
+
+fn tmux_shell_command(program: &str, program_args: &[String]) -> String {
+    let mut parts = vec![shell_escape(program)];
+    parts.extend(program_args.iter().map(|arg| shell_escape(arg)));
+    parts.join(" ")
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(crate) mod process_inspector;

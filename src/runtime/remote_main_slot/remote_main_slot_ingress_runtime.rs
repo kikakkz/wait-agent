@@ -285,6 +285,7 @@ mod tests {
         ProtocolVersion, RouteContext, TargetOutput,
     };
     use crate::infra::remote_protocol::RemoteConsoleDescriptor;
+    use crate::infra::tmux::EmbeddedTmuxBackend;
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityTransportEvent,
     };
@@ -370,6 +371,7 @@ mod tests {
         );
         let pane_runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             PathBuf::from("/tmp/waitagent"),
         );
         let runtime = RemoteMainSlotIngressRuntime::new(
@@ -419,6 +421,7 @@ mod tests {
         );
         let pane_runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             PathBuf::from("/tmp/waitagent"),
         );
         let runtime = RemoteMainSlotIngressRuntime::new(
@@ -531,6 +534,7 @@ mod tests {
         );
         let pane_runtime = RemoteMainSlotPaneRuntime::new_with_external_authority_streams(
             target_registry,
+            EmbeddedTmuxBackend::from_build_env().expect("tmux backend should build"),
             PathBuf::from("/tmp/waitagent"),
         );
         let runtime = RemoteMainSlotIngressRuntime::new(

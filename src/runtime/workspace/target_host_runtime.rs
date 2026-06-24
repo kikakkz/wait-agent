@@ -9,7 +9,7 @@ use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, Tmux
 use crate::lifecycle::LifecycleError;
 #[cfg(test)]
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::local_target_host_runtime::local_target_host_program;
+use crate::runtime::local_target_host_runtime::runtime_event_shell_program;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
@@ -80,9 +80,26 @@ impl TargetHostRuntime {
 
     pub fn ensure_target_host(
         &self,
-        config: WorkspaceInstanceConfig,
+        mut config: WorkspaceInstanceConfig,
     ) -> Result<BootstrappedWorkspace, TmuxError> {
         let t_total = Instant::now();
+        let shell_program = runtime_event_shell_program(
+            &self.current_executable,
+            &config.socket_name,
+            &config.session_name,
+            Some(&config.workspace_dir),
+            &self.network,
+        )
+        .map_err(|error| {
+            TmuxError::new(format!(
+                "failed to prepare target runtime shell hooks: {error}"
+            ))
+        })?;
+        config = config.with_initial_program(
+            shell_program.program().program.clone(),
+            shell_program.program().args.clone(),
+            shell_program.program().environment.clone(),
+        );
         let workspace = self.workspace_runtime.ensure_workspace_for_config(config)?;
         ERROR_LOG.log(format!(
             "[diag-newhost] target_host ensure_workspace socket={} session={} elapsed={:?}",
@@ -90,13 +107,6 @@ impl TargetHostRuntime {
             workspace.workspace_handle.session_name.as_str(),
             t_total.elapsed()
         ));
-        let program = local_target_host_program(
-            &self.current_executable,
-            workspace.workspace_handle.socket_name.as_str(),
-            workspace.workspace_handle.session_name.as_str(),
-            &workspace.workspace_dir,
-            &self.network,
-        );
         let t_pane = Instant::now();
         let pane = self.backend.target_main_pane_on_socket(
             workspace.workspace_handle.socket_name.as_str(),
@@ -112,7 +122,7 @@ impl TargetHostRuntime {
         ));
         let t_respawn = Instant::now();
         self.backend
-            .respawn_pane(&workspace.workspace_handle, &pane, &program)?;
+            .respawn_pane(&workspace.workspace_handle, &pane, shell_program.program())?;
         ERROR_LOG.log(format!(
             "[diag-newhost] target_host respawn_pane socket={} session={} pane={} elapsed={:?} total={:?}",
             workspace.workspace_handle.socket_name.as_str(),
@@ -401,6 +411,7 @@ mod target_host_runtime_test {
             session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: None,
             initial_cols: None,
+            initial_program: None,
         }
     }
 }

@@ -50,6 +50,14 @@ pub struct WorkspaceInstanceConfig {
     pub session_role: WorkspaceSessionRole,
     pub initial_rows: Option<u16>,
     pub initial_cols: Option<u16>,
+    pub initial_program: Option<WorkspaceInitialProgram>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkspaceInitialProgram {
+    pub program: String,
+    pub args: Vec<String>,
+    pub environment: Vec<(String, String)>,
 }
 
 impl WorkspaceInstanceConfig {
@@ -72,6 +80,7 @@ impl WorkspaceInstanceConfig {
             session_role: WorkspaceSessionRole::WorkspaceChrome,
             initial_rows: rows,
             initial_cols: cols,
+            initial_program: None,
         }
     }
 
@@ -90,7 +99,22 @@ impl WorkspaceInstanceConfig {
             session_role: WorkspaceSessionRole::TargetHost,
             initial_rows: rows,
             initial_cols: cols,
+            initial_program: None,
         }
+    }
+
+    pub fn with_initial_program(
+        mut self,
+        program: impl Into<String>,
+        args: impl IntoIterator<Item = String>,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.initial_program = Some(WorkspaceInitialProgram {
+            program: program.into(),
+            args: args.into_iter().collect(),
+            environment: environment.into_iter().collect(),
+        });
+        self
     }
 }
 

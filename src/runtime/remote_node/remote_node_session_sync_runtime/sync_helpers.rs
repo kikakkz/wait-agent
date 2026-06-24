@@ -47,8 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{
     LocalSessionCatalog, LocalTargetExitObserver, NoopAuthorityPublicationGateway,
     OutboundRemoteNodeTransport, SessionSyncAuthorityHost, SessionSyncAuthorityManager,
-    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL,
-    WAITAGENT_ACTIVE_TARGET_OPTION,
+    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
 };
 
 const SOURCE_PUBLICATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
@@ -273,6 +272,13 @@ impl SourcePublicationTracker {
             .collect()
     }
 
+    pub(super) fn is_current_pending(&self, target_id: &str, revision: u64) -> bool {
+        self.records
+            .get(target_id)
+            .and_then(|record| record.pending.as_ref())
+            .is_some_and(|pending| pending.revision == revision)
+    }
+
     pub(super) fn due_retry_publications(&self, now: Instant) -> Vec<PendingSourcePublication> {
         if !self.connected {
             return Vec::new();
@@ -389,11 +395,29 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     let mut next_message_id = 0_u64;
     let mut publication_tracker = SourcePublicationTracker::new();
     let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let (session_event_tx, session_event_rx) = mpsc::channel::<SessionSyncEvent>();
+    {
+        let session_event_tx = session_event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(reason) = local_catalog_rx.recv() {
+                if session_event_tx
+                    .send(SessionSyncEvent::LocalCatalogChanged(reason))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    }
+    {
+        let session_event_tx = session_event_tx.clone();
+        thread::spawn(move || {
+            if stop_rx.recv().is_ok() {
+                let _ = session_event_tx.send(SessionSyncEvent::Stop);
+            }
+        });
+    }
     loop {
-        if should_stop(&stop_rx) {
-            return;
-        }
-
         let (transport_event_tx, transport_event_rx) = mpsc::channel();
         let _transport_guard = match transport.connect_outbound(
             OutboundNodeSessionRequest {
@@ -405,12 +429,25 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
             Ok(guard) => guard,
             Err(_) => {
                 publication_tracker.on_disconnected();
-                if wait_or_stop(&stop_rx, reconnect_delay) {
+                if wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
                     return;
                 }
                 continue;
             }
         };
+        {
+            let session_event_tx = session_event_tx.clone();
+            thread::spawn(move || {
+                while let Ok(event) = transport_event_rx.recv() {
+                    if session_event_tx
+                        .send(SessionSyncEvent::Transport(event))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
 
         let mut active_session = None;
         let mut authority_manager =
@@ -419,9 +456,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
 
         while !should_reconnect {
             let event = match recv_session_sync_event(
-                &transport_event_rx,
-                &local_catalog_rx,
-                &stop_rx,
+                &session_event_rx,
                 publication_tracker.next_retry_delay(Instant::now()),
             ) {
                 Some(event) => event,
@@ -470,49 +505,6 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             &mut publication_tracker,
                             "SessionOpened",
                         );
-                    }
-                    while let Ok(event) = transport_event_rx.try_recv() {
-                        let session_opened =
-                            matches!(event, RemoteNodeTransportEvent::SessionOpened { .. });
-                        let outcome = handle_transport_event(
-                            event,
-                            &mut active_session,
-                            &mut authority_manager,
-                            publication_runtime.as_ref(),
-                            &node_id,
-                        );
-                        should_reconnect |= outcome.should_reconnect;
-                        if outcome.should_reconnect {
-                            publication_tracker.on_disconnected();
-                        }
-                        handle_publication_ack_outcome(
-                            &mut publication_tracker,
-                            outcome.publication_ack.as_ref(),
-                        );
-                        if outcome.local_catalog_changed {
-                            should_reconnect |= sync_local_sessions_after_catalog_transport_event(
-                                &gateway,
-                                &node_id,
-                                active_session.as_ref(),
-                                &local_target_exit_observer,
-                                &mut synced_sessions,
-                                &mut next_message_id,
-                                &mut publication_tracker,
-                                "queued local catalog transport event",
-                            );
-                        }
-                        if session_opened {
-                            should_reconnect |= sync_after_session_opened(
-                                &gateway,
-                                &node_id,
-                                active_session.as_ref(),
-                                &local_target_exit_observer,
-                                &mut synced_sessions,
-                                &mut next_message_id,
-                                &mut publication_tracker,
-                                "queued SessionOpened",
-                            );
-                        }
                     }
                 }
                 SessionSyncEvent::RetryDue => {
@@ -564,7 +556,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
             }
         }
 
-        if wait_or_stop(&stop_rx, reconnect_delay) {
+        if wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
             return;
         }
         authority_manager.shutdown();
@@ -589,6 +581,7 @@ where
     let Some(session_handle) = session_handle else {
         return false;
     };
+    let replay = publication_tracker.pending_replay_publications();
     if let Err(_) = sync_local_sessions(
         gateway,
         node_id,
@@ -604,7 +597,6 @@ where
         publication_tracker.on_disconnected();
         return true;
     }
-    let replay = publication_tracker.pending_replay_publications();
     if !replay.is_empty() {
         ERROR_LOG.log(format!(
             "[diag-publication] replaying pending source publications after {reason} count={}",
@@ -679,33 +671,34 @@ where
 }
 
 fn recv_session_sync_event(
-    transport_event_rx: &mpsc::Receiver<RemoteNodeTransportEvent>,
-    local_catalog_rx: &mpsc::Receiver<LocalCatalogChangeReason>,
-    stop_rx: &mpsc::Receiver<()>,
+    session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
     retry_delay: Option<Duration>,
 ) -> Option<SessionSyncEvent> {
-    let retry_deadline = retry_delay.map(|delay| Instant::now() + delay);
+    match retry_delay {
+        Some(delay) => match session_event_rx.recv_timeout(delay) {
+            Ok(event) => Some(event),
+            Err(mpsc::RecvTimeoutError::Timeout) => Some(SessionSyncEvent::RetryDue),
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        },
+        None => session_event_rx.recv().ok(),
+    }
+}
+
+fn wait_for_reconnect_delay_or_stop(
+    session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
+    duration: Duration,
+) -> bool {
+    let deadline = Instant::now() + duration;
     loop {
-        if stop_rx.try_recv().is_ok() {
-            return Some(SessionSyncEvent::Stop);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
         }
-        if let Ok(reason) = local_catalog_rx.try_recv() {
-            return Some(SessionSyncEvent::LocalCatalogChanged(reason));
-        }
-        if retry_deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-            return Some(SessionSyncEvent::RetryDue);
-        }
-        let wait_duration = retry_deadline
-            .map(|deadline| {
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL)
-            })
-            .unwrap_or(SESSION_SYNC_OWNER_COMMAND_CHECK_INTERVAL);
-        match transport_event_rx.recv_timeout(wait_duration) {
-            Ok(event) => return Some(SessionSyncEvent::Transport(event)),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        match session_event_rx.recv_timeout(remaining) {
+            Ok(SessionSyncEvent::Stop) => return true,
+            Ok(_) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return true,
         }
     }
 }
@@ -793,6 +786,9 @@ fn send_source_publication(
     tracker: &mut SourcePublicationTracker,
     publication: &PendingSourcePublication,
 ) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    if !tracker.is_current_pending(&publication.target_id, publication.revision) {
+        return Ok(());
+    }
     session_handle.send(publication.envelope.clone())?;
     tracker.on_publication_sent(&publication.target_id, publication.revision, Instant::now());
     Ok(())
@@ -1099,6 +1095,9 @@ fn should_overlay_active_target_runtime(
     session: &ManagedSessionRecord,
     workspace_runtime: &ManagedSessionRecord,
 ) -> bool {
+    if session_has_explicit_runtime(session) {
+        return false;
+    }
     workspace_runtime
         .command_name
         .as_deref()
@@ -1112,6 +1111,17 @@ fn should_overlay_active_target_runtime(
             ManagedSessionTaskState::Unknown
                 | ManagedSessionTaskState::Running
                 | ManagedSessionTaskState::Input
+        )
+}
+
+fn session_has_explicit_runtime(session: &ManagedSessionRecord) -> bool {
+    session
+        .command_name
+        .as_deref()
+        .is_some_and(|name| !name.is_empty())
+        && matches!(
+            session.task_state,
+            ManagedSessionTaskState::Input | ManagedSessionTaskState::Running
         )
 }
 
@@ -1631,14 +1641,6 @@ fn timestamp_now() -> prost_types::Timestamp {
     }
 }
 
-fn should_stop(stop_rx: &mpsc::Receiver<()>) -> bool {
-    stop_rx.try_recv().is_ok()
-}
-
-fn wait_or_stop(stop_rx: &mpsc::Receiver<()>, duration: Duration) -> bool {
-    stop_rx.recv_timeout(duration).is_ok()
-}
-
 pub(super) fn remote_session_sync_owner_args(
     socket_name: &str,
     network: &RemoteNetworkConfig,
@@ -1674,38 +1676,50 @@ pub(crate) fn notify_remote_session_sync_owner(
     )
 }
 
-pub(super) fn drain_owner_commands(
-    listener: &UnixListener,
-    local_catalog_tx: &mpsc::Sender<LocalCatalogChangeReason>,
-) -> io::Result<()> {
-    loop {
-        match listener.accept() {
-            Ok((mut stream, _addr)) => {
-                let mut request = String::new();
-                let _ = stream.read_to_string(&mut request);
-                let response = match parse_owner_command(request.trim()) {
-                    OwnerCommand::Ping => "ok\n".to_string(),
-                    OwnerCommand::LocalCatalogChanged(reason) => {
-                        if local_catalog_tx.send(reason).is_ok() {
-                            "ok\n".to_string()
-                        } else {
-                            "error local-catalog-channel-closed\n".to_string()
-                        }
+pub(crate) fn shutdown_remote_session_sync_owner(socket_path: &Path) -> Result<(), LifecycleError> {
+    send_owner_command(socket_path, "shutdown\n")
+}
+
+pub(super) fn serve_owner_commands(
+    listener: UnixListener,
+    local_catalog_tx: mpsc::Sender<LocalCatalogChangeReason>,
+    shutdown_tx: mpsc::Sender<()>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let mut request = String::new();
+            let _ = stream.read_to_string(&mut request);
+            let response = match parse_owner_command(request.trim()) {
+                OwnerCommand::Ping => "ok\n".to_string(),
+                OwnerCommand::LocalCatalogChanged(reason) => {
+                    if local_catalog_tx.send(reason).is_ok() {
+                        "ok\n".to_string()
+                    } else {
+                        "error local-catalog-channel-closed\n".to_string()
                     }
-                    OwnerCommand::Invalid(message) => format!("error {message}\n"),
-                };
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(error) => return Err(error),
+                }
+                OwnerCommand::Shutdown => {
+                    if shutdown_tx.send(()).is_ok() {
+                        "ok\n".to_string()
+                    } else {
+                        "error shutdown-channel-closed\n".to_string()
+                    }
+                }
+                OwnerCommand::Invalid(message) => format!("error {message}\n"),
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         }
-    }
+    })
 }
 
 enum OwnerCommand {
     Ping,
     LocalCatalogChanged(LocalCatalogChangeReason),
+    Shutdown,
     Invalid(String),
 }
 
@@ -1717,6 +1731,9 @@ fn parse_owner_command(request: &str) -> OwnerCommand {
         return LocalCatalogChangeReason::parse(reason)
             .map(OwnerCommand::LocalCatalogChanged)
             .unwrap_or_else(|| OwnerCommand::Invalid(format!("unknown-reason-{reason}")));
+    }
+    if request == "shutdown" {
+        return OwnerCommand::Shutdown;
     }
     OwnerCommand::Invalid("unknown-command".to_string())
 }

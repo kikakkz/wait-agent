@@ -421,11 +421,6 @@ fn spawn_pane_event_stream(
         Arc::clone(&pending_refreshes),
         tx.clone(),
     );
-    crate::runtime::session_state::spawn_pane_activity_watcher(
-        backend,
-        command.socket_name.clone(),
-        command.session_name.clone(),
-    );
     thread::spawn(move || {
         let _keep_resize_watcher_alive = _resize_watcher;
         thread::park();

@@ -75,6 +75,19 @@ impl CommandDispatcher {
                 .layout_runtime
                 .run_chrome_refresh_on_socket(&command.socket_name)
                 .map_err(AppError::from),
+            Command::ChromeRefreshSocketSignal(command) => {
+                self.workspace_runtime
+                    .signal_runtime_command_changed(
+                        &command.socket_name,
+                        command.target_session_name.as_deref(),
+                        command.command_name.as_deref(),
+                        command.event_seq,
+                    )
+                    .map_err(AppError::from)?;
+                self.layout_runtime
+                    .run_chrome_refresh_signal_on_socket(&command.socket_name)
+                    .map_err(AppError::from)
+            }
             Command::UiSidebar(command) => self
                 .pane_runtime
                 .run_sidebar(command)

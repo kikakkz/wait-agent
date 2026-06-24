@@ -1,4 +1,6 @@
-use super::{EmbeddedTmuxBackend, TmuxError, WAITAGENT_PANE_PIPE_OWNER_OPTION};
+use super::{
+    exact_session_target, EmbeddedTmuxBackend, TmuxError, WAITAGENT_PANE_PIPE_OWNER_OPTION,
+};
 use crate::infra::tmux::{TmuxPaneId, TmuxSocketName};
 use std::str;
 
@@ -36,7 +38,7 @@ impl EmbeddedTmuxBackend {
                 "show-options".to_string(),
                 "-qv".to_string(),
                 "-t".to_string(),
-                target_session_name.to_string(),
+                exact_session_target(target_session_name),
                 WAITAGENT_MAIN_PANE_OPTION.to_string(),
             ],
         ) {
