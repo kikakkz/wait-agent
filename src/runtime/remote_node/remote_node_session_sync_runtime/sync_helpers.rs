@@ -359,7 +359,7 @@ fn exited_source_publication_state(
 }
 
 #[derive(Debug)]
-enum SessionSyncEvent {
+pub(super) enum SessionSyncEvent {
     Transport(RemoteNodeTransportEvent),
     LocalCatalogChanged(LocalCatalogChangeReason),
     RetryDue,
@@ -395,6 +395,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     let mut next_message_id = 0_u64;
     let mut publication_tracker = SourcePublicationTracker::new();
     let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let mut pending_local_catalog_sync = false;
     let (session_event_tx, session_event_rx) = mpsc::channel::<SessionSyncEvent>();
     {
         let session_event_tx = session_event_tx.clone();
@@ -429,8 +430,12 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
             Ok(guard) => guard,
             Err(_) => {
                 publication_tracker.on_disconnected();
-                if wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
-                    return;
+                match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
+                    ReconnectWaitOutcome::Stop => return,
+                    ReconnectWaitOutcome::LocalCatalogChanged => {
+                        pending_local_catalog_sync = true;
+                    }
+                    ReconnectWaitOutcome::Elapsed => {}
                 }
                 continue;
             }
@@ -505,6 +510,25 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             &mut publication_tracker,
                             "SessionOpened",
                         );
+                        if !should_reconnect && pending_local_catalog_sync {
+                            ERROR_LOG.log(
+                                "[diag-sync] replaying pending local catalog change after SessionOpened"
+                                    .to_string(),
+                            );
+                            should_reconnect |= sync_local_sessions_after_catalog_transport_event(
+                                &gateway,
+                                &node_id,
+                                active_session.as_ref(),
+                                &local_target_exit_observer,
+                                &mut synced_sessions,
+                                &mut next_message_id,
+                                &mut publication_tracker,
+                                "pending local catalog change",
+                            );
+                            if !should_reconnect {
+                                pending_local_catalog_sync = false;
+                            }
+                        }
                     }
                 }
                 SessionSyncEvent::RetryDue => {
@@ -550,14 +574,20 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             );
                             should_reconnect = true;
                         }
+                    } else {
+                        pending_local_catalog_sync = true;
                     }
                 }
                 SessionSyncEvent::Stop => return,
             }
         }
 
-        if wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
-            return;
+        match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
+            ReconnectWaitOutcome::Stop => return,
+            ReconnectWaitOutcome::LocalCatalogChanged => {
+                pending_local_catalog_sync = true;
+            }
+            ReconnectWaitOutcome::Elapsed => {}
         }
         authority_manager.shutdown();
     }
@@ -684,21 +714,46 @@ fn recv_session_sync_event(
     }
 }
 
-fn wait_for_reconnect_delay_or_stop(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconnectWaitOutcome {
+    Elapsed,
+    LocalCatalogChanged,
+    Stop,
+}
+
+pub(super) fn wait_for_reconnect_delay_or_stop(
     session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
     duration: Duration,
-) -> bool {
+) -> ReconnectWaitOutcome {
     let deadline = Instant::now() + duration;
+    let mut saw_local_catalog_change = false;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return false;
+            return if saw_local_catalog_change {
+                ReconnectWaitOutcome::LocalCatalogChanged
+            } else {
+                ReconnectWaitOutcome::Elapsed
+            };
         }
         match session_event_rx.recv_timeout(remaining) {
-            Ok(SessionSyncEvent::Stop) => return true,
+            Ok(SessionSyncEvent::Stop) => return ReconnectWaitOutcome::Stop,
+            Ok(SessionSyncEvent::LocalCatalogChanged(reason)) => {
+                ERROR_LOG.log_exit_latency(format!(
+                    "[diag-exit] sync_event_queued_for_reconnect reason={} stage=session_sync",
+                    reason.as_str()
+                ));
+                saw_local_catalog_change = true;
+            }
             Ok(_) => continue,
-            Err(mpsc::RecvTimeoutError::Timeout) => return false,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return if saw_local_catalog_change {
+                    ReconnectWaitOutcome::LocalCatalogChanged
+                } else {
+                    ReconnectWaitOutcome::Elapsed
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ReconnectWaitOutcome::Stop,
         }
     }
 }
@@ -1644,15 +1699,18 @@ fn timestamp_now() -> prost_types::Timestamp {
 pub(super) fn remote_session_sync_owner_args(
     socket_name: &str,
     network: &RemoteNetworkConfig,
+    ready_socket: Option<&Path>,
 ) -> Vec<String> {
-    prepend_global_network_args(
-        vec![
-            "__remote-session-sync-owner".to_string(),
-            "--socket-name".to_string(),
-            socket_name.to_string(),
-        ],
-        network,
-    )
+    let mut args = vec![
+        "__remote-session-sync-owner".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+    ];
+    if let Some(ready_socket) = ready_socket {
+        args.push("--ready-socket".to_string());
+        args.push(ready_socket.display().to_string());
+    }
+    prepend_global_network_args(args, network)
 }
 
 pub(crate) fn remote_session_sync_owner_socket_path(socket_name: &str) -> PathBuf {

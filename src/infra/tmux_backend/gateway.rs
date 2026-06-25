@@ -9,13 +9,6 @@ use crate::infra::tmux_types::{
 
 // Channel helpers — free functions used by the main EmbeddedTmuxBackend impl
 
-pub(super) fn workspace_chrome_refresh_channel(session_name: &str) -> String {
-    format!(
-        "{}-{session_name}",
-        crate::infra::tmux_backend::WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX
-    )
-}
-
 pub(super) fn workspace_sidebar_ready_channel(session_name: &str) -> String {
     format!(
         "{}-{session_name}",

@@ -17,6 +17,7 @@ use crate::infra::tmux::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::local_target_host_runtime::main_pane_output_event_bridge_command;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -256,6 +257,21 @@ impl WorkspaceLayoutRuntime {
             socket_name: TmuxSocketName::new(command.socket_name),
             session_name: TmuxSessionName::new(command.session_name),
         };
+        if self.layout_reconcile_event_is_stale(&workspace, command.pane_generation.as_deref())? {
+            ERROR_LOG.log(format!(
+                "[diag-newhost] layout_reconcile skip_stale socket={} session={} event_generation={:?}",
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+                command.pane_generation
+            ));
+            return self
+                .backend
+                .signal_chrome_refresh_on_socket(
+                    workspace.socket_name.as_str(),
+                    workspace.session_name.as_str(),
+                )
+                .map_err(tmux_layout_error);
+        }
         self.reconcile_layout(
             &workspace,
             &workspace_dir,
@@ -279,6 +295,12 @@ impl WorkspaceLayoutRuntime {
     pub fn run_chrome_refresh_signal(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
         self.backend
             .signal_chrome_refresh_on_socket(&command.socket_name, &command.session_name)
+            .map_err(tmux_layout_error)
+    }
+
+    pub fn run_chrome_refresh_owner(&self, command: UiPaneCommand) -> Result<(), LifecycleError> {
+        self.backend
+            .run_chrome_refresh_owner_on_socket(&command.socket_name, &command.session_name)
             .map_err(tmux_layout_error)
     }
 
@@ -366,7 +388,7 @@ impl WorkspaceLayoutRuntime {
                 socket_name: TmuxSocketName::new(session.address.server_id()),
                 session_name: TmuxSessionName::new(session.address.session_id()),
             };
-            self.refresh_chrome(&workspace, workspace_dir)?;
+            self.refresh_workspace_chrome(&workspace, workspace_dir)?;
             ERROR_LOG.log(format!(
                 "[diag-newhost] chrome_refresh_target done target={} elapsed={:?} total={:?}",
                 session.address.qualified_target(),
@@ -499,7 +521,6 @@ impl WorkspaceLayoutRuntime {
         let t_total = Instant::now();
         let sidebar_program = self.sidebar_program(workspace, workspace_dir);
         let footer_program = self.footer_program(workspace, workspace_dir);
-        let reconcile_command = self.layout_reconcile_hook_command(workspace, workspace_dir);
         let main_pane_pipe_command =
             self.main_pane_output_bridge_shell_command(workspace, workspace_dir);
         let t_generation = Instant::now();
@@ -517,6 +538,8 @@ impl WorkspaceLayoutRuntime {
             t_generation.elapsed(),
             t_total.elapsed()
         ));
+        let reconcile_command =
+            self.layout_reconcile_hook_command(workspace, workspace_dir, &pane_generation);
         let pane_died_command = self.main_pane_died_hook_command(workspace, &pane_generation);
         let t_options = Instant::now();
         let transition_active = self
@@ -670,6 +693,24 @@ impl WorkspaceLayoutRuntime {
         Ok(main_pane.as_deref().is_none_or(str::is_empty))
     }
 
+    fn layout_reconcile_event_is_stale(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        event_generation: Option<&str>,
+    ) -> Result<bool, LifecycleError> {
+        let Some(event_generation) = event_generation.filter(|generation| !generation.is_empty())
+        else {
+            return Ok(false);
+        };
+        let current_generation = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_GENERATION_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|generation| !generation.is_empty())
+            .unwrap_or_else(|| "0".to_string());
+        Ok(current_generation != event_generation)
+    }
+
     fn ensure_main_pane_output_bridge(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -730,7 +771,7 @@ impl WorkspaceLayoutRuntime {
             .show_session_option(workspace, WAITAGENT_MAIN_PANE_OUTPUT_BRIDGE_OPTION)
             .map_err(tmux_layout_error)?
             .as_deref()
-            != Some(MAIN_PANE_OUTPUT_BRIDGE_DISABLED))
+            == Some(MAIN_PANE_OUTPUT_BRIDGE_ENABLED))
     }
 
     fn wait_for_initial_chrome_render(
@@ -924,11 +965,13 @@ impl WorkspaceLayoutRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
+        pane_generation: &str,
     ) -> String {
         let shell_command = layout_reconcile_hook_shell_command(
             self.current_executable.to_string_lossy().as_ref(),
             workspace,
             &workspace_dir.display().to_string(),
+            pane_generation,
             &self.network,
         );
         format!(
@@ -1101,6 +1144,7 @@ fn layout_reconcile_hook_shell_command(
     executable: &str,
     workspace: &TmuxWorkspaceHandle,
     workspace_dir: &str,
+    pane_generation: &str,
     network: &RemoteNetworkConfig,
 ) -> String {
     shell_command_with_network(
@@ -1113,6 +1157,8 @@ fn layout_reconcile_hook_shell_command(
             workspace.session_name.as_str().to_string(),
             "--workspace-dir".to_string(),
             workspace_dir.to_string(),
+            "--pane-generation".to_string(),
+            pane_generation.to_string(),
         ],
         network,
     )
@@ -1148,18 +1194,12 @@ fn main_pane_output_bridge_shell_command(
     _workspace_dir: &str,
     network: &RemoteNetworkConfig,
 ) -> String {
-    let signal_command = shell_command_with_network(
-        executable,
-        vec![
-            "__chrome-refresh-signal".to_string(),
-            "--socket-name".to_string(),
-            workspace.socket_name.as_str().to_string(),
-            "--session-name".to_string(),
-            workspace.session_name.as_str().to_string(),
-        ],
+    main_pane_output_event_bridge_command(
+        std::path::Path::new(executable),
+        workspace.socket_name.as_str(),
+        None,
         network,
-    );
-    format!("while IFS= read -r _; do {signal_command}; done")
+    )
 }
 
 fn shell_command_with_network(
@@ -1359,12 +1399,13 @@ mod tests {
             "/tmp/wait agent",
             &workspace,
             "/tmp/demo path",
+            "7",
             &RemoteNetworkConfig::default(),
         );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '--port' '7474' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path'"
+            "'/tmp/wait agent' '--port' '7474' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path' '--pane-generation' '7'"
         );
     }
 
@@ -1397,7 +1438,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "while IFS= read -r _; do '/tmp/wait agent' '--port' '7474' '__chrome-refresh-signal' '--socket-name' 'wa-1' '--session-name' 'session-1'; done"
+            "'/tmp/wait agent' '--port' '7474' '__main-pane-output-event-bridge' '--socket-name' 'wa-1'"
         );
     }
 

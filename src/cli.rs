@@ -128,6 +128,7 @@ pub fn prepend_global_network_args(
 #[derive(Debug, Clone)]
 pub enum Command {
     Workspace,
+    ChromeRefreshOwner(UiPaneCommand),
     ChromeRefreshSocket(SocketNameCommand),
     ChromeRefreshSocketSignal(SocketNameCommand),
     UiSidebar(UiPaneCommand),
@@ -164,6 +165,7 @@ pub enum Command {
     LayoutReconcile(LayoutReconcileCommand),
     ChromeRefresh(LayoutReconcileCommand),
     ChromeRefreshSignal(UiPaneCommand),
+    MainPaneOutputEventBridge(SocketNameCommand),
     ChromeRefreshAll,
     ShowErrorLog,
     Attach(AttachCommand),
@@ -284,18 +286,22 @@ pub struct RemoteTargetPublicationOwnerCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteSessionSyncOwnerCommand {
     pub socket_name: String,
+    pub ready_socket: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RemoteNodeIngressServerCommand {
     pub socket_name: String,
+    pub ready_socket: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RemoteDaemonCommand;
 
 #[derive(Debug, Clone, Default)]
-pub struct RemoteRuntimeOwnerCommand;
+pub struct RemoteRuntimeOwnerCommand {
+    pub ready_socket: Option<String>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RemoteTargetBindPublicationCommand {
@@ -322,6 +328,7 @@ pub struct LayoutReconcileCommand {
     pub socket_name: String,
     pub session_name: String,
     pub workspace_dir: String,
+    pub pane_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -435,6 +442,10 @@ impl Cli {
         }
 
         let command = match args[0].as_str() {
+            "__chrome-refresh-owner" => {
+                args.remove(0);
+                Command::ChromeRefreshOwner(parse_ui_pane(args)?)
+            }
             "__chrome-refresh-socket" => {
                 args.remove(0);
                 Command::ChromeRefreshSocket(parse_socket_name_command(args)?)
@@ -586,6 +597,10 @@ impl Cli {
             "__chrome-refresh-signal" => {
                 args.remove(0);
                 Command::ChromeRefreshSignal(parse_ui_pane(args)?)
+            }
+            "__main-pane-output-event-bridge" => {
+                args.remove(0);
+                Command::MainPaneOutputEventBridge(parse_socket_name_command(args)?)
             }
             "__chrome-refresh-all" => {
                 args.remove(0);
@@ -1080,8 +1095,18 @@ fn parse_remote_target_publication_sender(
 }
 
 fn parse_remote_runtime_owner(args: Vec<String>) -> Result<RemoteRuntimeOwnerCommand, CliError> {
-    parse_no_args(args)?;
-    Ok(RemoteRuntimeOwnerCommand)
+    let mut iter = args.into_iter();
+    let mut ready_socket = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--ready-socket" => ready_socket = Some(expect_value("--ready-socket", &mut iter)?),
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteRuntimeOwnerCommand { ready_socket })
 }
 
 fn parse_remote_daemon(args: Vec<String>) -> Result<RemoteDaemonCommand, CliError> {
@@ -1094,10 +1119,12 @@ fn parse_remote_session_sync_owner(
 ) -> Result<RemoteSessionSyncOwnerCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
+    let mut ready_socket = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--ready-socket" => ready_socket = Some(expect_value("--ready-socket", &mut iter)?),
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1106,6 +1133,7 @@ fn parse_remote_session_sync_owner(
     Ok(RemoteSessionSyncOwnerCommand {
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        ready_socket,
     })
 }
 
@@ -1114,10 +1142,12 @@ fn parse_remote_node_ingress_server(
 ) -> Result<RemoteNodeIngressServerCommand, CliError> {
     let mut iter = args.into_iter();
     let mut socket_name = None;
+    let mut ready_socket = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--ready-socket" => ready_socket = Some(expect_value("--ready-socket", &mut iter)?),
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1126,6 +1156,7 @@ fn parse_remote_node_ingress_server(
     Ok(RemoteNodeIngressServerCommand {
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        ready_socket,
     })
 }
 
@@ -1219,12 +1250,16 @@ fn parse_layout_reconcile(args: Vec<String>) -> Result<LayoutReconcileCommand, C
     let mut socket_name = None;
     let mut session_name = None;
     let mut workspace_dir = None;
+    let mut pane_generation = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
             "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
             "--workspace-dir" => workspace_dir = Some(expect_value("--workspace-dir", &mut iter)?),
+            "--pane-generation" => {
+                pane_generation = Some(expect_value("--pane-generation", &mut iter)?)
+            }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1237,6 +1272,7 @@ fn parse_layout_reconcile(args: Vec<String>) -> Result<LayoutReconcileCommand, C
             .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
         workspace_dir: workspace_dir
             .ok_or_else(|| CliError::MissingValue("--workspace-dir".to_string()))?,
+        pane_generation,
     })
 }
 
@@ -2120,6 +2156,33 @@ mod tests {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
+                assert_eq!(command.pane_generation, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_layout_reconcile_command_with_generation() {
+        match parse(&[
+            "waitagent",
+            "__layout-reconcile",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--workspace-dir",
+            "/tmp/workspace",
+            "--pane-generation",
+            "7",
+        ])
+        .command
+        {
+            Command::LayoutReconcile(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.workspace_dir, "/tmp/workspace");
+                assert_eq!(command.pane_generation.as_deref(), Some("7"));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2146,6 +2209,26 @@ mod tests {
                 assert_eq!(command.target_session_name.as_deref(), Some("target-1"));
                 assert_eq!(command.command_name.as_deref(), Some("codex"));
                 assert_eq!(command.event_seq, Some(7));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_main_pane_output_event_bridge_command() {
+        match parse(&[
+            "waitagent",
+            "__main-pane-output-event-bridge",
+            "--socket-name",
+            "wa-1",
+        ])
+        .command
+        {
+            Command::MainPaneOutputEventBridge(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.target_session_name, None);
+                assert_eq!(command.command_name, None);
+                assert_eq!(command.event_seq, None);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2348,11 +2431,17 @@ mod tests {
             "__remote-session-sync-owner",
             "--socket-name",
             "wa-1",
+            "--ready-socket",
+            "/tmp/session-sync-ready.sock",
         ])
         .command
         {
             Command::RemoteSessionSyncOwner(command) => {
                 assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(
+                    command.ready_socket.as_deref(),
+                    Some("/tmp/session-sync-ready.sock")
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2365,11 +2454,34 @@ mod tests {
             "__remote-node-ingress-server",
             "--socket-name",
             "wa-1",
+            "--ready-socket",
+            "/tmp/ready.sock",
         ])
         .command
         {
             Command::RemoteNodeIngressServer(command) => {
                 assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.ready_socket.as_deref(), Some("/tmp/ready.sock"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_runtime_owner_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-runtime-owner",
+            "--ready-socket",
+            "/tmp/runtime-ready.sock",
+        ])
+        .command
+        {
+            Command::RemoteRuntimeOwner(command) => {
+                assert_eq!(
+                    command.ready_socket.as_deref(),
+                    Some("/tmp/runtime-ready.sock")
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -15,9 +15,18 @@ use crate::infra::tmux_types::{
     TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::runtime::remote_authority_target_host_runtime::RemoteTargetTerminalFlags;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 mod control;
 mod layout;
@@ -42,12 +51,16 @@ pub(crate) const WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV: &str =
     "WAITAGENT_REMOTE_PUBLICATION_SELECTOR";
 pub(crate) const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub(crate) const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
-const WAITAGENT_CHROME_REFRESH_CHANNEL_PREFIX: &str = "waitagent-chrome-refresh";
 const WAITAGENT_SIDEBAR_READY_CHANNEL_PREFIX: &str = "waitagent-sidebar-ready";
 const WAITAGENT_FOOTER_READY_CHANNEL_PREFIX: &str = "waitagent-footer-ready";
 const WAITAGENT_SIDEBAR_READY_OPTION: &str = "@waitagent_sidebar_ready_pane";
 const WAITAGENT_FOOTER_READY_OPTION: &str = "@waitagent_footer_ready_pane";
 const DEFAULT_HISTORY_LIMIT: &str = "100000";
+
+thread_local! {
+    static CHROME_REFRESH_SUBSCRIBERS: RefCell<HashMap<PathBuf, UnixStream>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedTmuxBackend {
@@ -741,14 +754,7 @@ impl EmbeddedTmuxBackend {
         socket_name: &str,
         session_name: &str,
     ) -> Result<(), TmuxError> {
-        self.run_on_socket(
-            &TmuxSocketName::new(socket_name),
-            &[
-                "wait-for".to_string(),
-                workspace_chrome_refresh_channel(session_name),
-            ],
-        )
-        .map(|_| ())
+        wait_for_reliable_chrome_refresh(socket_name, session_name)
     }
 
     pub(crate) fn signal_chrome_refresh_on_socket(
@@ -756,15 +762,22 @@ impl EmbeddedTmuxBackend {
         socket_name: &str,
         session_name: &str,
     ) -> Result<(), TmuxError> {
-        self.run_on_socket(
-            &TmuxSocketName::new(socket_name),
-            &[
-                "wait-for".to_string(),
-                "-S".to_string(),
-                workspace_chrome_refresh_channel(session_name),
-            ],
-        )
-        .map(|_| ())
+        signal_reliable_chrome_refresh(socket_name, session_name)
+    }
+
+    pub(crate) fn run_chrome_refresh_owner_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<(), TmuxError> {
+        let socket_path = chrome_refresh_owner_socket_path(socket_name, session_name);
+        let listener = match bind_chrome_refresh_owner_socket(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => return Ok(()),
+            Err(error) => return Err(chrome_refresh_tmux_error(error)),
+        };
+        run_chrome_refresh_owner(listener, socket_path);
+        Ok(())
     }
 
     pub(crate) fn wait_for_sidebar_ready_on_socket(
@@ -1109,6 +1122,390 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn wait_for_reliable_chrome_refresh(
+    socket_name: &str,
+    session_name: &str,
+) -> Result<(), TmuxError> {
+    let socket_path = chrome_refresh_owner_socket_path(socket_name, session_name);
+    for attempt in 0..2 {
+        let result = CHROME_REFRESH_SUBSCRIBERS.with(|subscribers| {
+            let mut subscribers = subscribers.borrow_mut();
+            if !subscribers.contains_key(&socket_path) {
+                let stream =
+                    connect_chrome_refresh_subscriber(socket_name, session_name, &socket_path)?;
+                subscribers.insert(socket_path.clone(), stream);
+            }
+            let stream = subscribers
+                .get_mut(&socket_path)
+                .expect("chrome refresh subscriber should be inserted");
+            let mut event = [0u8; 1];
+            stream
+                .read_exact(&mut event)
+                .map_err(chrome_refresh_tmux_error)
+        });
+        if result.is_ok() {
+            return Ok(());
+        }
+        CHROME_REFRESH_SUBSCRIBERS.with(|subscribers| {
+            subscribers.borrow_mut().remove(&socket_path);
+        });
+        if attempt == 1 {
+            return result;
+        }
+    }
+    unreachable!("chrome refresh wait retry loop always returns");
+}
+
+fn signal_reliable_chrome_refresh(socket_name: &str, session_name: &str) -> Result<(), TmuxError> {
+    let socket_path = chrome_refresh_owner_socket_path(socket_name, session_name);
+    let Some(mut stream) = connect_chrome_refresh_owner_if_available(&socket_path)? else {
+        return Ok(());
+    };
+    writeln!(stream, "SIGNAL").map_err(chrome_refresh_tmux_error)?;
+    stream.flush().map_err(chrome_refresh_tmux_error)?;
+    read_chrome_refresh_ok(&mut stream)
+}
+
+fn connect_chrome_refresh_subscriber(
+    socket_name: &str,
+    session_name: &str,
+    socket_path: &Path,
+) -> Result<UnixStream, TmuxError> {
+    ensure_chrome_refresh_owner(socket_name, session_name, socket_path)?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        TmuxError::new(format!(
+            "failed to connect chrome refresh owner `{}`: {error}",
+            socket_path.display()
+        ))
+    })?;
+    writeln!(stream, "SUBSCRIBE").map_err(chrome_refresh_tmux_error)?;
+    stream.flush().map_err(chrome_refresh_tmux_error)?;
+    read_chrome_refresh_ok(&mut stream)?;
+    Ok(stream)
+}
+
+fn connect_chrome_refresh_owner_if_available(
+    socket_path: &Path,
+) -> Result<Option<UnixStream>, TmuxError> {
+    match chrome_refresh_owner_status(socket_path) {
+        ChromeRefreshOwnerStatus::Ready => UnixStream::connect(socket_path)
+            .map(Some)
+            .map_err(chrome_refresh_tmux_error),
+        ChromeRefreshOwnerStatus::Starting => {
+            if wait_for_chrome_refresh_owner(socket_path).is_err() {
+                return Ok(None);
+            }
+            UnixStream::connect(socket_path)
+                .map(Some)
+                .map_err(chrome_refresh_tmux_error)
+        }
+        ChromeRefreshOwnerStatus::Stale => {
+            let _ = fs::remove_file(socket_path);
+            Ok(None)
+        }
+    }
+}
+
+fn read_chrome_refresh_ok(stream: &mut UnixStream) -> Result<(), TmuxError> {
+    let response = read_chrome_refresh_line(stream).map_err(chrome_refresh_tmux_error)?;
+    if response.trim() == "OK" {
+        Ok(())
+    } else {
+        Err(TmuxError::new(format!(
+            "chrome refresh owner returned unexpected response `{}`",
+            response.trim()
+        )))
+    }
+}
+
+fn read_chrome_refresh_line(stream: &mut UnixStream) -> io::Result<String> {
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while response.len() < 128 {
+        let read = stream.read(&mut byte)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "chrome refresh owner closed the connection",
+            ));
+        }
+        if byte[0] == b'\n' {
+            return String::from_utf8(response)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()));
+        }
+        response.push(byte[0]);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "chrome refresh owner response is too long",
+    ))
+}
+
+fn ensure_chrome_refresh_owner(
+    _socket_name: &str,
+    _session_name: &str,
+    socket_path: &Path,
+) -> Result<(), TmuxError> {
+    match chrome_refresh_owner_status(socket_path) {
+        ChromeRefreshOwnerStatus::Ready => return Ok(()),
+        ChromeRefreshOwnerStatus::Starting => {
+            if wait_for_chrome_refresh_owner(socket_path).is_ok() {
+                return Ok(());
+            }
+        }
+        ChromeRefreshOwnerStatus::Stale => {}
+    }
+    #[cfg(not(test))]
+    {
+        return spawn_chrome_refresh_owner_process(_socket_name, _session_name, socket_path);
+    }
+    #[cfg(test)]
+    match bind_chrome_refresh_owner_socket(socket_path) {
+        Ok(listener) => {
+            let socket_path = socket_path.to_path_buf();
+            thread::Builder::new()
+                .name("chrome-refresh-owner".to_string())
+                .spawn(move || run_chrome_refresh_owner(listener, socket_path))
+                .map_err(chrome_refresh_tmux_error)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            wait_for_chrome_refresh_owner(socket_path)
+        }
+        Err(error) => Err(chrome_refresh_tmux_error(error)),
+    }
+}
+
+fn bind_chrome_refresh_owner_socket(socket_path: &Path) -> io::Result<UnixListener> {
+    match UnixListener::bind(socket_path) {
+        Ok(listener) => return Ok(listener),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+        Err(error) => return Err(error),
+    }
+    match chrome_refresh_owner_status(socket_path) {
+        ChromeRefreshOwnerStatus::Ready => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "chrome refresh owner is already running",
+        )),
+        ChromeRefreshOwnerStatus::Starting => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "chrome refresh owner is starting",
+        )),
+        ChromeRefreshOwnerStatus::Stale => {
+            let _ = fs::remove_file(socket_path);
+            UnixListener::bind(socket_path)
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn spawn_chrome_refresh_owner_process(
+    socket_name: &str,
+    session_name: &str,
+    socket_path: &Path,
+) -> Result<(), TmuxError> {
+    let current_exe = std::env::current_exe().map_err(chrome_refresh_tmux_error)?;
+    Command::new(current_exe)
+        .args([
+            "__chrome-refresh-owner",
+            "--socket-name",
+            socket_name,
+            "--session-name",
+            session_name,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(chrome_refresh_tmux_error)?;
+    wait_for_chrome_refresh_owner(socket_path)
+}
+
+fn run_chrome_refresh_owner(listener: UnixListener, socket_path: PathBuf) {
+    if listener.set_nonblocking(true).is_err() {
+        let _ = fs::remove_file(socket_path);
+        return;
+    }
+    let mut subscribers: Vec<UnixStream> = Vec::new();
+    let mut had_subscriber = false;
+    loop {
+        if had_subscriber && subscribers.is_empty() {
+            break;
+        }
+
+        let mut poll_fds = Vec::with_capacity(subscribers.len() + 1);
+        poll_fds.push(libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        for subscriber in &subscribers {
+            poll_fds.push(libc::pollfd {
+                fd: subscriber.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            });
+        }
+
+        let poll_result =
+            unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, -1) };
+        if poll_result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+
+        let mut dead_subscribers = Vec::new();
+        for (index, poll_fd) in poll_fds.iter().enumerate().skip(1) {
+            if subscriber_disconnected(poll_fd.revents, &mut subscribers[index - 1]) {
+                dead_subscribers.push(index - 1);
+            }
+        }
+        for index in dead_subscribers.into_iter().rev() {
+            subscribers.remove(index);
+        }
+
+        if poll_fds[0].revents & libc::POLLIN == 0 {
+            continue;
+        }
+
+        loop {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    let _ = fs::remove_file(socket_path);
+                    return;
+                }
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let request = match read_chrome_refresh_line(&mut stream) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
+            let request = request.trim();
+            if request == "PING" {
+                let _ = writeln!(stream, "OK");
+            } else if request == "SIGNAL" {
+                let _ = writeln!(stream, "OK");
+                let mut live_subscribers = Vec::with_capacity(subscribers.len());
+                for mut subscriber in subscribers.drain(..) {
+                    if subscriber.write_all(b"R").is_ok() && subscriber.flush().is_ok() {
+                        live_subscribers.push(subscriber);
+                    }
+                }
+                subscribers = live_subscribers;
+            } else if request == "SUBSCRIBE" {
+                if writeln!(stream, "OK").is_ok() && stream.flush().is_ok() {
+                    let _ = stream.set_read_timeout(None);
+                    subscribers.push(stream);
+                    had_subscriber = true;
+                }
+            } else {
+                let _ = writeln!(stream, "ERR unknown-command");
+            }
+        }
+    }
+    let _ = fs::remove_file(socket_path);
+}
+
+fn subscriber_disconnected(revents: i16, subscriber: &mut UnixStream) -> bool {
+    if revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return true;
+    }
+    if revents & libc::POLLIN == 0 {
+        return false;
+    }
+    let mut buf = [0u8; 1];
+    let received = unsafe {
+        libc::recv(
+            subscriber.as_raw_fd(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if received == 0 {
+        return true;
+    }
+    if received > 0 {
+        return false;
+    }
+    let error = io::Error::last_os_error();
+    error.kind() != io::ErrorKind::WouldBlock
+}
+
+fn chrome_refresh_owner_available(socket_path: &Path) -> bool {
+    matches!(
+        chrome_refresh_owner_status(socket_path),
+        ChromeRefreshOwnerStatus::Ready
+    )
+}
+
+enum ChromeRefreshOwnerStatus {
+    Ready,
+    Starting,
+    Stale,
+}
+
+fn chrome_refresh_owner_status(socket_path: &Path) -> ChromeRefreshOwnerStatus {
+    let Ok(mut stream) = UnixStream::connect(socket_path) else {
+        return ChromeRefreshOwnerStatus::Stale;
+    };
+    if writeln!(stream, "PING").is_err() || stream.flush().is_err() {
+        return ChromeRefreshOwnerStatus::Stale;
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    if read_chrome_refresh_ok(&mut stream).is_ok() {
+        ChromeRefreshOwnerStatus::Ready
+    } else {
+        ChromeRefreshOwnerStatus::Starting
+    }
+}
+
+fn wait_for_chrome_refresh_owner(socket_path: &Path) -> Result<(), TmuxError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if chrome_refresh_owner_available(socket_path) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err(TmuxError::new(format!(
+        "chrome refresh owner `{}` did not become ready",
+        socket_path.display()
+    )))
+}
+
+fn chrome_refresh_owner_socket_path(socket_name: &str, session_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-chrome-refresh-{}.sock",
+        stable_socket_hash(&[socket_name, session_name])
+    ))
+}
+
+fn stable_socket_hash(values: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for value in values {
+        for byte in value.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn chrome_refresh_tmux_error(
+    error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> TmuxError {
+    TmuxError::new(format!(
+        "chrome refresh signal channel failed: {}",
+        error.into()
+    ))
+}
+
 pub(crate) mod process_inspector;
 pub(crate) use process_inspector::foreground_process_argv_for_pane_shell;
 
@@ -1116,8 +1513,8 @@ pub(crate) use crate::infra::tmux_error::parse_tmux_id;
 
 mod gateway;
 use gateway::{
-    default_shell_path, default_window_name, workspace_chrome_refresh_channel,
-    workspace_footer_ready_channel, workspace_sidebar_ready_channel,
+    default_shell_path, default_window_name, workspace_footer_ready_channel,
+    workspace_sidebar_ready_channel,
 };
 
 #[cfg(test)]

@@ -11,8 +11,7 @@ use crate::cli::{
     ActivateTargetCommand, AttachCommand, ConnectRemoteHostCommand, DetachCommand,
     LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
     NewSelectedRemoteSessionCommand, NewTargetCommand, RemoteNetworkConfig,
-    RemoteNodeIngressServerCommand, RemoteTargetExitedCommand, StopCommand,
-    ToggleFullscreenCommand, UiPaneCommand,
+    RemoteTargetExitedCommand, StopCommand, ToggleFullscreenCommand, UiPaneCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -44,12 +43,12 @@ use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
-use std::io;
+use std::io::{self, Read};
+use std::thread;
 use std::time::Instant;
 
 const WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION: &str = "@waitagent_sidebar_selected_target";
 const WAITAGENT_REMOTE_SESSION_CREATE_LOCK_PREFIX: &str = "waitagent-remote-session-create-";
-
 // This runtime owns the accepted default local command path for workspace
 // bootstrap, attach, target activation, fullscreen, and detach semantics.
 // Event-r4 keeps these user-facing entrypoints off historical polling paths.
@@ -89,6 +88,18 @@ impl Drop for RemoteSessionCreateGuard<'_> {
                 self.lock_name.clone(),
             ],
         );
+    }
+}
+
+struct LiveWorkspaceRegistration<'a> {
+    runtime: &'a WorkspaceCommandRuntime,
+    socket_name: String,
+}
+
+impl Drop for LiveWorkspaceRegistration<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .unregister_live_workspace_socket(self.socket_name.as_str());
     }
 }
 
@@ -170,7 +181,8 @@ impl WorkspaceCommandRuntime {
     pub fn run_remote_daemon(&self) -> Result<(), LifecycleError> {
         let workspace_dir = self.resolve_workspace_dir(None)?;
         let workspace = self.entry_runtime.bootstrap_workspace(&workspace_dir)?;
-        self.register_live_workspace_socket(workspace.workspace_handle.socket_name.as_str())?;
+        let _live_workspace_registration =
+            self.register_live_workspace(workspace.workspace_handle.socket_name.as_str())?;
         self.remote_runtime_owner_runtime.ensure_owner_running()?;
         self.main_slot_runtime.ensure_initial_target_materialized(
             &workspace.workspace_handle,
@@ -188,7 +200,6 @@ impl WorkspaceCommandRuntime {
         {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        self.unregister_live_workspace_socket(workspace.workspace_handle.socket_name.as_str());
         Ok(())
     }
 
@@ -210,12 +221,18 @@ impl WorkspaceCommandRuntime {
             workspace.workspace_handle.session_name.as_str(),
             t_entry.elapsed()
         ));
-        self.register_live_workspace_socket(workspace.workspace_handle.socket_name.as_str())?;
+        let _live_workspace_registration =
+            self.register_live_workspace(workspace.workspace_handle.socket_name.as_str())?;
         self.remote_runtime_owner_runtime.ensure_owner_running()?;
         ERROR_LOG.log(format!(
             "[diag-newhost] workspace_entry remote_runtime_owner ready elapsed={:?}",
             t_entry.elapsed()
         ));
+        let socket_name = workspace.workspace_handle.socket_name.as_str().to_string();
+        let ingress_handle =
+            start_remote_node_ingress_on_thread(socket_name.clone(), self.network.clone());
+        let session_sync_handle =
+            start_remote_session_sync_on_thread(socket_name.clone(), self.network.clone());
         self.main_slot_runtime.ensure_initial_target_materialized(
             &workspace.workspace_handle,
             &workspace.workspace_dir,
@@ -232,12 +249,12 @@ impl WorkspaceCommandRuntime {
             "[diag-newhost] workspace_entry publications configured elapsed={:?}",
             t_entry.elapsed()
         ));
-        self.start_remote_node_ingress(workspace.workspace_handle.socket_name.as_str())?;
+        join_sidecar_start("remote_node_ingress", ingress_handle)?;
         ERROR_LOG.log(format!(
             "[diag-newhost] workspace_entry remote_node_ingress ready elapsed={:?}",
             t_entry.elapsed()
         ));
-        self.start_remote_session_sync(workspace.workspace_handle.socket_name.as_str())?;
+        join_sidecar_start("remote_session_sync", session_sync_handle)?;
         ERROR_LOG.log(format!(
             "[diag-newhost] workspace_entry remote_session_sync ready elapsed={:?}",
             t_entry.elapsed()
@@ -546,22 +563,6 @@ impl WorkspaceCommandRuntime {
         self.fullscreen_runtime.run_toggle(command)
     }
 
-    pub fn run_list(&self) -> Result<(), LifecycleError> {
-        let sessions = self
-            .session_service
-            .list_sessions()
-            .map_err(tmux_runtime_error)?;
-        if sessions.is_empty() {
-            println!("no waitagent tmux sessions running");
-            return Ok(());
-        }
-
-        for session in sessions {
-            println!("{}", session.summary_line());
-        }
-        Ok(())
-    }
-
     pub fn run_detach(&self, command: DetachCommand) -> Result<(), LifecycleError> {
         if let Some(target) = command.target.clone() {
             let session = self.attachable_session(target)?;
@@ -670,6 +671,17 @@ impl WorkspaceCommandRuntime {
             .register_workspace_socket(socket_name)
     }
 
+    fn register_live_workspace(
+        &self,
+        socket_name: &str,
+    ) -> Result<LiveWorkspaceRegistration<'_>, LifecycleError> {
+        self.register_live_workspace_socket(socket_name)?;
+        Ok(LiveWorkspaceRegistration {
+            runtime: self,
+            socket_name: socket_name.to_string(),
+        })
+    }
+
     fn unregister_live_workspace_socket(&self, socket_name: &str) {
         let _ =
             shutdown_remote_session_sync_owner(&remote_session_sync_owner_socket_path(socket_name));
@@ -692,6 +704,12 @@ impl WorkspaceCommandRuntime {
             ));
         }
         let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
+        if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] remote_runtime_owner_shutdown_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
     }
 
     fn start_remote_session_sync(&self, socket_name: &str) -> Result<(), LifecycleError> {
@@ -713,37 +731,44 @@ impl WorkspaceCommandRuntime {
         command_name: Option<&str>,
         event_seq: Option<u64>,
     ) -> Result<(), LifecycleError> {
-        if let (Some(target_session_name), Some(command_name)) = (target_session_name, command_name)
-        {
+        if let Some(target_session_name) = target_session_name {
             let workspace = TmuxWorkspaceHandle {
                 workspace_id: WorkspaceInstanceId::new(target_session_name),
                 socket_name: TmuxSocketName::new(socket_name),
                 session_name: TmuxSessionName::new(target_session_name),
             };
-            let command_override = event_seq
-                .map(|seq| format!("{seq}:{command_name}"))
-                .unwrap_or_else(|| command_name.to_string());
-            if let Some(seq) = event_seq {
-                if let Some(current) = self
-                    .backend
-                    .show_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
-                    .map_err(tmux_runtime_error)?
-                {
-                    if runtime_command_override_seq(&current)
-                        .is_some_and(|current_seq| current_seq > seq)
+            if let Some(command_name) = command_name {
+                let command_override = event_seq
+                    .map(|seq| format!("{seq}:{command_name}"))
+                    .unwrap_or_else(|| command_name.to_string());
+                if let Some(seq) = event_seq {
+                    if let Some(current) = self
+                        .backend
+                        .show_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+                        .map_err(tmux_runtime_error)?
                     {
-                        return Ok(());
+                        if runtime_command_override_seq(&current)
+                            .is_some_and(|current_seq| current_seq > seq)
+                        {
+                            return Ok(());
+                        }
                     }
                 }
+                self.backend
+                    .set_session_option(
+                        &workspace,
+                        WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                        &command_override,
+                    )
+                    .map_err(tmux_runtime_error)?;
+            } else {
+                self.backend
+                    .unset_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+                    .map_err(tmux_runtime_error)?;
             }
-            self.backend
-                .set_session_option(
-                    &workspace,
-                    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
-                    &command_override,
-                )
-                .map_err(tmux_runtime_error)?;
         }
+        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
+            .run_chrome_refresh_signal_on_socket(socket_name)?;
         RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
             socket_name,
             &self.network,
@@ -751,19 +776,35 @@ impl WorkspaceCommandRuntime {
         )
     }
 
-    pub fn run_remote_node_ingress_server(
+    pub fn run_main_pane_output_event_bridge(
         &self,
-        command: RemoteNodeIngressServerCommand,
+        command: crate::cli::SocketNameCommand,
     ) -> Result<(), LifecycleError> {
-        RemoteNodeIngressServerRuntime::from_build_env_with_network_and_socket(
-            self.network.clone(),
-            command.socket_name,
-        )?
-        .run_owner()
-    }
-
-    pub fn network_config(&self) -> RemoteNetworkConfig {
-        self.network.clone()
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        let mut buffer = [0_u8; 4096];
+        let mut signaled = false;
+        loop {
+            match stdin.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(_) if !signaled => {
+                    self.signal_runtime_command_changed(
+                        &command.socket_name,
+                        command.target_session_name.as_deref(),
+                        None,
+                        None,
+                    )?;
+                    signaled = true;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(LifecycleError::Io(
+                        "failed to read main pane output bridge stdin".to_string(),
+                        error,
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -773,6 +814,39 @@ fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandl
         socket_name: TmuxSocketName::new(socket_name),
         session_name: TmuxSessionName::new(session_name),
     }
+}
+
+fn start_remote_node_ingress_on_thread(
+    socket_name: String,
+    network: RemoteNetworkConfig,
+) -> thread::JoinHandle<Result<(), LifecycleError>> {
+    thread::spawn(move || {
+        RemoteNodeIngressServerRuntime::ensure_owner_running(&socket_name, &network)
+    })
+}
+
+fn start_remote_session_sync_on_thread(
+    socket_name: String,
+    network: RemoteNetworkConfig,
+) -> thread::JoinHandle<Result<(), LifecycleError>> {
+    thread::spawn(move || {
+        if network.connect.is_none() {
+            return Ok(());
+        }
+        RemoteNodeSessionSyncRuntime::ensure_owner_running(&socket_name, &network)
+    })
+}
+
+fn join_sidecar_start(
+    label: &str,
+    handle: thread::JoinHandle<Result<(), LifecycleError>>,
+) -> Result<(), LifecycleError> {
+    handle.join().map_err(|_| {
+        LifecycleError::Io(
+            format!("{label} startup worker panicked"),
+            io::Error::new(io::ErrorKind::Other, "sidecar startup worker panicked"),
+        )
+    })?
 }
 
 fn tmux_runtime_error(error: TmuxError) -> LifecycleError {

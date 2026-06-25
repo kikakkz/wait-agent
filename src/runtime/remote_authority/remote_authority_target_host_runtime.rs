@@ -1,9 +1,15 @@
+use crate::application::target_registry_service::{
+    DefaultTargetCatalogGateway, TargetRegistryService,
+};
 use crate::cli::{
     prepend_global_network_args, RemoteAuthorityOutputPumpCommand, RemoteAuthorityPaneDiedCommand,
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxPaneId};
+use crate::infra::tmux::{
+    EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSessionName, TmuxSocketName,
+    TmuxWorkspaceHandle, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -23,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirrorState {
@@ -198,6 +204,14 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
 
     fn clear_pane_died_hook(&self, socket_name: &str, pane: &TmuxPaneId)
         -> Result<(), Self::Error>;
+
+    fn clear_runtime_command_override(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn signal_chrome_refresh_targets(&self, socket_name: &str) -> Result<(), Self::Error>;
 }
 
 impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
@@ -303,6 +317,34 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
     ) -> Result<(), Self::Error> {
         self.unset_pane_hook_on_socket(socket_name, pane, REMOTE_AUTHORITY_PANE_DIED_HOOK)
     }
+
+    fn clear_runtime_command_override(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), Self::Error> {
+        let workspace = TmuxWorkspaceHandle {
+            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(target_session_name),
+            socket_name: TmuxSocketName::new(socket_name),
+            session_name: TmuxSessionName::new(target_session_name),
+        };
+        self.unset_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+    }
+
+    fn signal_chrome_refresh_targets(&self, socket_name: &str) -> Result<(), Self::Error> {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())?,
+        );
+        let sessions =
+            target_registry.list_local_workspace_chrome_targets_on_authority(socket_name)?;
+        for session in sessions {
+            self.signal_chrome_refresh_on_socket(
+                session.address.server_id(),
+                session.address.session_id(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
@@ -326,6 +368,8 @@ pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<(), LifecycleError>;
+
+    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError>;
 }
 
 impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
@@ -366,6 +410,10 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
     ) -> Result<(), LifecycleError> {
         self.signal_source_session_closed(socket_name, target_session_name)
     }
+
+    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        self.signal_local_runtime_changed(socket_name)
+    }
 }
 
 pub struct RemoteAuthorityTargetHostRuntime<
@@ -382,6 +430,7 @@ enum AuthorityHostEvent {
     OutputChunk { stream_id: u64, bytes: Vec<u8> },
     OutputClosed { stream_id: u64 },
     PaneDied { pane_id: String },
+    RuntimeRefreshDue,
     TransportClosed,
 }
 
@@ -392,6 +441,7 @@ const INPUT_CONGESTION_HIGH_WATERMARK: usize = INPUT_RING_BUFFER_CAP * 3 / 4;
 const INPUT_CONGESTION_LOW_WATERMARK: usize = INPUT_RING_BUFFER_CAP / 4;
 const INPUT_DRAIN_CHUNK_MAX: usize = 4096;
 const REMOTE_AUTHORITY_PANE_DIED_HOOK: &str = "pane-died[20]";
+const RUNTIME_CHANGE_SIGNAL_MIN_INTERVAL: Duration = Duration::from_millis(150);
 
 #[derive(Clone)]
 enum AuthorityOutputMessage {
@@ -449,6 +499,64 @@ impl InputRingBuffer {
             queue: Mutex::new(VecDeque::with_capacity(INPUT_RING_BUFFER_CAP)),
             available: Condvar::new(),
         }
+    }
+}
+
+struct RuntimeChangeSignal {
+    state: Arc<Mutex<RuntimeChangeSignalState>>,
+    event_tx: mpsc::Sender<AuthorityHostEvent>,
+    min_interval: Duration,
+}
+
+#[derive(Default)]
+struct RuntimeChangeSignalState {
+    last_signal_at: Option<Instant>,
+    timer_pending: bool,
+}
+
+impl RuntimeChangeSignal {
+    fn new(event_tx: mpsc::Sender<AuthorityHostEvent>, min_interval: Duration) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RuntimeChangeSignalState::default())),
+            event_tx,
+            min_interval,
+        }
+    }
+
+    fn should_emit_now(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime change signal mutex should not be poisoned");
+        let now = Instant::now();
+        let Some(last_signal_at) = state.last_signal_at else {
+            state.last_signal_at = Some(now);
+            state.timer_pending = false;
+            return true;
+        };
+        let elapsed = now.saturating_duration_since(last_signal_at);
+        if elapsed >= self.min_interval {
+            state.last_signal_at = Some(now);
+            state.timer_pending = false;
+            return true;
+        }
+        if !state.timer_pending {
+            state.timer_pending = true;
+            let delay = self.min_interval - elapsed;
+            let tx = self.event_tx.clone();
+            let state_ref = self.state.clone();
+            thread::spawn(move || {
+                thread::sleep(delay);
+                {
+                    let mut state = state_ref
+                        .lock()
+                        .expect("runtime change signal mutex should not be poisoned");
+                    state.timer_pending = false;
+                }
+                let _ = tx.send(AuthorityHostEvent::RuntimeRefreshDue);
+            });
+        }
+        false
     }
 }
 
@@ -576,6 +684,8 @@ where
         let mut output_seq = 0_u64;
         let mut next_stream_id = 0_u64;
         let mut mirror_state = MirrorState::Inactive;
+        let runtime_signal =
+            RuntimeChangeSignal::new(event_tx.clone(), RUNTIME_CHANGE_SIGNAL_MIN_INTERVAL);
 
         let health = Arc::new(EventLoopHealth::new());
 
@@ -808,6 +918,10 @@ where
                     {
                         continue;
                     };
+                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    {
+                        break Err(error);
+                    }
                     output_seq += 1;
                     // Always use TargetOutput: capture-pane produces plain text
                     // that needs terminal-engine interpretation on the client.
@@ -861,6 +975,13 @@ where
                     ));
                     if current_pane.as_deref() == Some(pane_id.as_str()) {
                         break Ok(());
+                    }
+                }
+                AuthorityHostEvent::RuntimeRefreshDue => {
+                    health.record_event();
+                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    {
+                        break Err(error);
                     }
                 }
                 AuthorityHostEvent::TransportClosed => {
@@ -1188,6 +1309,35 @@ where
         )
         .map_err(remote_authority_error)?;
     Ok(())
+}
+
+fn emit_runtime_change_signal<G, P>(
+    runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
+    command: &RemoteAuthorityTargetHostCommand,
+    signal: &RuntimeChangeSignal,
+) -> Result<(), LifecycleError>
+where
+    G: RemoteTargetPtyGateway,
+    P: RemoteAuthorityPublicationGateway,
+{
+    if !signal.should_emit_now() {
+        return Ok(());
+    }
+    ERROR_LOG.log(format!(
+        "[diag-runtime] target host output event signaling local runtime changed socket={} session={} target={}",
+        command.socket_name, command.target_session_name, command.target_id
+    ));
+    runtime
+        .gateway
+        .clear_runtime_command_override(&command.socket_name, &command.target_session_name)
+        .map_err(remote_authority_error)?;
+    runtime
+        .gateway
+        .signal_chrome_refresh_targets(&command.socket_name)
+        .map_err(remote_authority_error)?;
+    runtime
+        .publication_gateway
+        .signal_local_runtime_changed(&command.socket_name)
 }
 
 fn spawn_output_ingest_thread(

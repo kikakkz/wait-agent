@@ -44,6 +44,8 @@ mod tests {
         input_calls: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
         hook_calls: Arc<Mutex<Vec<(String, String)>>>,
         clear_hook_calls: Arc<Mutex<Vec<String>>>,
+        clear_runtime_override_calls: Arc<Mutex<Vec<String>>>,
+        chrome_refresh_calls: Arc<Mutex<Vec<String>>>,
         capture_bootstrap_screen: Arc<Mutex<String>>,
         cursor_position: Arc<Mutex<(usize, usize)>>,
         terminal_flags: Arc<Mutex<RemoteTargetTerminalFlags>>,
@@ -60,6 +62,8 @@ mod tests {
                 input_calls: Arc::new(Mutex::new(Vec::new())),
                 hook_calls: Arc::new(Mutex::new(Vec::new())),
                 clear_hook_calls: Arc::new(Mutex::new(Vec::new())),
+                clear_runtime_override_calls: Arc::new(Mutex::new(Vec::new())),
+                chrome_refresh_calls: Arc::new(Mutex::new(Vec::new())),
                 capture_bootstrap_screen: Arc::new(Mutex::new(String::new())),
                 cursor_position: Arc::new(Mutex::new((0, 0))),
                 terminal_flags: Arc::new(Mutex::new(RemoteTargetTerminalFlags::default())),
@@ -222,6 +226,26 @@ mod tests {
                 .push(pane.as_str().to_string());
             Ok(())
         }
+
+        fn clear_runtime_command_override(
+            &self,
+            _socket_name: &str,
+            target_session_name: &str,
+        ) -> Result<(), Self::Error> {
+            self.clear_runtime_override_calls
+                .lock()
+                .expect("clear runtime override calls mutex should not be poisoned")
+                .push(target_session_name.to_string());
+            Ok(())
+        }
+
+        fn signal_chrome_refresh_targets(&self, socket_name: &str) -> Result<(), Self::Error> {
+            self.chrome_refresh_calls
+                .lock()
+                .expect("chrome refresh calls mutex should not be poisoned")
+                .push(socket_name.to_string());
+            Ok(())
+        }
     }
 
     struct FakeLiveSession {
@@ -235,6 +259,7 @@ mod tests {
     struct FakePublicationGateway {
         live_session: Arc<Mutex<Option<FakeLiveSession>>>,
         closed_sessions: Arc<Mutex<Vec<String>>>,
+        runtime_changed_sockets: Arc<Mutex<Vec<String>>>,
     }
 
     impl RemoteAuthorityPublicationGateway for FakePublicationGateway {
@@ -301,6 +326,14 @@ mod tests {
                 .lock()
                 .expect("closed sessions mutex should not be poisoned")
                 .push(target_session_name.to_string());
+            Ok(())
+        }
+
+        fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+            self.runtime_changed_sockets
+                .lock()
+                .expect("runtime changed sockets mutex should not be poisoned")
+                .push(socket_name.to_string());
             Ok(())
         }
     }
@@ -398,6 +431,7 @@ mod tests {
             ..FakeGateway::default()
         };
         let fake_publication_gateway = FakePublicationGateway::default();
+        let fake_publication_gateway_for_assert = fake_publication_gateway.clone();
         let runtime = RemoteAuthorityTargetHostRuntime::new(
             fake_gateway.clone(),
             fake_publication_gateway,
@@ -604,6 +638,30 @@ mod tests {
             .expect("pipe calls mutex should not be poisoned")[0]
             .1
             .contains("__remote-authority-output-pump"));
+        assert_eq!(
+            fake_gateway
+                .clear_runtime_override_calls
+                .lock()
+                .expect("clear runtime override calls mutex should not be poisoned")
+                .clone(),
+            vec!["target-1".to_string()]
+        );
+        assert_eq!(
+            fake_gateway
+                .chrome_refresh_calls
+                .lock()
+                .expect("chrome refresh calls mutex should not be poisoned")
+                .clone(),
+            vec![socket_name.clone()]
+        );
+        assert_eq!(
+            fake_publication_gateway_for_assert
+                .runtime_changed_sockets
+                .lock()
+                .expect("runtime changed sockets mutex should not be poisoned")
+                .clone(),
+            vec![socket_name.clone()]
+        );
         let _ = fs::remove_file(&transport_socket_path);
     }
 

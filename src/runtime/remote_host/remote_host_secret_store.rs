@@ -136,7 +136,7 @@ pub struct FileRemoteHostSecretStore {
     root: PathBuf,
 }
 
-const FILE_SECRET_HEADER: &str = "waitagent-secret-v1";
+const FILE_SECRET_HEADER: &str = "waitagent-secret-v2";
 
 impl Default for FileRemoteHostSecretStore {
     fn default() -> Self {
@@ -243,7 +243,7 @@ const OPENSSL_SALTED_PREFIX: &[u8; 8] = b"Salted__";
 const OPENSSL_SALT_LEN: usize = 8;
 const AES_256_KEY_LEN: usize = 32;
 const AES_CBC_IV_LEN: usize = 16;
-const SECRET_PBKDF2_ITERATIONS: u32 = 200_000;
+const SECRET_PBKDF2_ITERATIONS: u32 = 1;
 
 fn encode_secret_file(
     id: &RemoteHostSecretId,
@@ -349,7 +349,7 @@ fn machine_bound_passphrase(id: &RemoteHostSecretId) -> Result<String, RemoteHos
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
     Ok(format!(
-        "waitagent-secret-v1:{}:{}:{}:{}",
+        "waitagent-secret:{}:{}:{}:{}",
         machine_id.trim(),
         user,
         home,

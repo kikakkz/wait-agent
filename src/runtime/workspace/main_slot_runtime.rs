@@ -219,8 +219,9 @@ impl MainSlotRuntime {
             workspace_dir: workspace_dir.to_path_buf(),
         };
         let t_list = Instant::now();
-        let sessions = self
-            .target_registry
+        let socket_scoped_registry =
+            self.target_registry_for_socket(workspace.socket_name.as_str())?;
+        let sessions = socket_scoped_registry
             .list_targets_on_authority(workspace.socket_name.as_str())
             .map_err(main_slot_error)?;
         ERROR_LOG.log(format!(
@@ -1951,6 +1952,12 @@ impl MainSlotRuntime {
                 socket_name, error
             ));
         }
+        if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] main_slot_remote_runtime_owner_shutdown_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
     }
 
     fn set_active_target(
@@ -2386,12 +2393,15 @@ impl MainSlotRuntime {
     fn configure_main_pane_output_bridge_for_active_target(
         &self,
         workspace: &TmuxWorkspaceHandle,
-        _target: Option<&str>,
+        target: Option<&str>,
     ) -> Result<(), LifecycleError> {
-        // State publication now flows through the session-sync event loop;
-        // the legacy per-output-line bridge is redundant and causes signal storms.
-        self.layout_runtime
-            .disable_main_pane_output_bridge(workspace)
+        if target.is_some() {
+            self.layout_runtime
+                .enable_main_pane_output_bridge(workspace)
+        } else {
+            self.layout_runtime
+                .disable_main_pane_output_bridge(workspace)
+        }
     }
 
     /// One-time migration: find and kill a stale isolation pane (`sleep

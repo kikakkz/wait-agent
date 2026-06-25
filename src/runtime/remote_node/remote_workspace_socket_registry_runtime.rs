@@ -34,11 +34,14 @@ impl RemoteWorkspaceSocketRegistryRuntime {
         F: FnMut(&str) -> bool,
     {
         let sockets = self.live_workspace_socket_names()?;
+        let previous_sockets = sockets.clone();
         let live_sockets = sockets
             .into_iter()
             .filter(|socket_name| is_live(socket_name))
             .collect::<BTreeSet<_>>();
-        write_socket_registry(&self.network, &live_sockets)?;
+        if live_sockets != previous_sockets {
+            write_socket_registry(&self.network, &live_sockets)?;
+        }
         Ok(live_sockets)
     }
 
@@ -103,6 +106,13 @@ fn write_socket_registry(
     sockets: &BTreeSet<String>,
 ) -> Result<(), LifecycleError> {
     let path = workspace_socket_registry_path(network);
+    if sockets.is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(registry_error(error)),
+        }
+    }
     let mut content = String::new();
     for socket in sockets {
         content.push_str(socket);
@@ -215,6 +225,43 @@ mod tests {
             .live_workspace_socket_names()
             .expect("registry should read after retain");
         assert_eq!(sockets.into_iter().collect::<Vec<_>>(), vec!["wa-live"]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn registry_retain_workspace_sockets_does_not_rewrite_unchanged_registry() {
+        let network = RemoteNetworkConfig {
+            port: 31990,
+            connect: None,
+            node_id: None,
+            public_endpoint: None,
+        };
+        let path = workspace_socket_registry_path(&network);
+        let _ = std::fs::remove_file(&path);
+        let registry = RemoteWorkspaceSocketRegistryRuntime::new(network.clone());
+
+        registry
+            .register_workspace_socket("wa-live")
+            .expect("live socket should register");
+        let before = std::fs::metadata(&path)
+            .expect("registry metadata should read")
+            .modified()
+            .expect("registry mtime should read");
+
+        let live_sockets = registry
+            .retain_workspace_sockets(|socket_name| socket_name == "wa-live")
+            .expect("unchanged retain should succeed");
+        let after = std::fs::metadata(&path)
+            .expect("registry metadata should read after retain")
+            .modified()
+            .expect("registry mtime should read after retain");
+
+        assert_eq!(
+            live_sockets.into_iter().collect::<Vec<_>>(),
+            vec!["wa-live".to_string()]
+        );
+        assert_eq!(before, after);
 
         let _ = std::fs::remove_file(path);
     }

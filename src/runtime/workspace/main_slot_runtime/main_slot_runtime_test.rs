@@ -1209,6 +1209,124 @@ mod tests {
     }
 
     #[test]
+    fn stale_layout_reconcile_generation_does_not_rewrite_main_pane_hook() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("stale-layout-generation-skip");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+        let waitagent_executable = waitagent_test_executable();
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        let target_host = backend
+            .ensure_workspace(
+                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                    &workspace_dir,
+                    workspace.workspace_handle.socket_name.as_str(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("target host bootstrap should succeed");
+
+        let runtime = MainSlotRuntime::new(
+            backend.clone(),
+            TargetHostRuntime::from_build_env(backend.clone())
+                .expect("target host runtime should build"),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            RemoteNetworkConfig::default(),
+        );
+
+        let target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            target_host.session_name.as_str()
+        );
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target,
+            })
+            .expect("local target activation should succeed");
+
+        let main_pane_id = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read")
+            .expect("main pane option should be populated");
+        let generation = backend
+            .show_session_option(
+                &workspace.workspace_handle,
+                WAITAGENT_MAIN_PANE_GENERATION_OPTION,
+            )
+            .expect("main pane generation should read")
+            .expect("main pane generation should be populated");
+        let hook_before = pane_hook_command(
+            &backend,
+            &workspace.workspace_handle,
+            &main_pane_id,
+            "pane-died[10]",
+        )
+        .expect("main pane should have a pane-died hook before stale reconcile");
+
+        WorkspaceLayoutRuntime::new_for_tests(
+            backend.clone(),
+            waitagent_executable,
+            RemoteNetworkConfig::default(),
+        )
+        .expect("workspace layout runtime should build")
+        .run_reconcile(crate::cli::LayoutReconcileCommand {
+            socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+            session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+            workspace_dir: workspace_dir.display().to_string(),
+            pane_generation: Some("0".to_string()),
+        })
+        .expect("stale layout reconcile should be ignored");
+
+        let generation_after = backend
+            .show_session_option(
+                &workspace.workspace_handle,
+                WAITAGENT_MAIN_PANE_GENERATION_OPTION,
+            )
+            .expect("main pane generation should read after stale reconcile")
+            .expect("main pane generation should remain populated");
+        assert_eq!(generation_after, generation);
+        let hook_after = pane_hook_command(
+            &backend,
+            &workspace.workspace_handle,
+            &main_pane_id,
+            "pane-died[10]",
+        )
+        .expect("main pane should have a pane-died hook after stale reconcile");
+        assert_eq!(hook_after, hook_before);
+
+        kill_server(&backend, &workspace.workspace_handle);
+        let _ = fs::remove_dir_all(workspace_dir);
+    }
+
+    #[test]
     fn concurrent_local_target_activation_keeps_main_pane_identity_consistent() {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()

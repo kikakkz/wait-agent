@@ -653,6 +653,107 @@ mod tests {
     }
 
     #[test]
+    fn chrome_refresh_signal_buffers_between_wait_calls() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("chrome-refresh-buffered"))
+            .expect("workspace bootstrap should succeed");
+        let backend_for_waiter = backend.clone();
+        let socket_name = workspace.socket_name.as_str().to_string();
+        let session_name = workspace.session_name.as_str().to_string();
+        let (first_done_tx, first_done_rx) = mpsc::channel();
+        let (start_second_tx, start_second_rx) = mpsc::channel();
+        let (second_done_tx, second_done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            backend_for_waiter
+                .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
+                .expect("first wait should unblock");
+            first_done_tx
+                .send(())
+                .expect("first waiter completion should be reported");
+            start_second_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("second wait should be released by the test");
+            backend_for_waiter
+                .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
+                .expect("second wait should consume buffered refresh");
+            second_done_tx
+                .send(())
+                .expect("second waiter completion should be reported");
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        backend
+            .signal_chrome_refresh_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("first chrome refresh signal should succeed");
+        first_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first waiter should wake");
+
+        backend
+            .signal_chrome_refresh_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("second chrome refresh signal should succeed");
+        start_second_tx
+            .send(())
+            .expect("second wait should be released");
+        second_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second waiter should consume buffered refresh");
+        kill_server(&backend, &workspace);
+    }
+
+    #[test]
+    fn chrome_refresh_owner_exits_when_last_subscriber_disconnects() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("chrome-refresh-owner-exit"))
+            .expect("workspace bootstrap should succeed");
+        let socket_path = super::super::chrome_refresh_owner_socket_path(
+            workspace.socket_name.as_str(),
+            workspace.session_name.as_str(),
+        );
+        let backend_for_waiter = backend.clone();
+        let socket_name = workspace.socket_name.as_str().to_string();
+        let session_name = workspace.session_name.as_str().to_string();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            backend_for_waiter
+                .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
+                .expect("wait should unblock");
+            done_tx.send(()).expect("waiter should report completion");
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        backend
+            .signal_chrome_refresh_on_socket(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+            )
+            .expect("chrome refresh signal should succeed");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter should wake");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while socket_path.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !socket_path.exists(),
+            "owner socket should be removed after the last subscriber disconnects"
+        );
+        kill_server(&backend, &workspace);
+    }
+
+    #[test]
     fn initial_chrome_ready_signals_wake_sidebar_and_footer_waiters() {
         let backend = EmbeddedTmuxBackend::from_build_env()
             .expect("vendored tmux backend should discover build env");

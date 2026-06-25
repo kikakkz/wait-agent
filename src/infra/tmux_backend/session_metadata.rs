@@ -96,6 +96,24 @@ fn runtime_command_override_is_prompt(value: &str) -> bool {
     command_name == "bash"
 }
 
+fn has_stable_agent_input_prompt(command_name: &str, pane_text: &str) -> bool {
+    if command_name != "codex" && command_name != "claude" {
+        return false;
+    }
+    let lines = pane_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let recent_start = lines.len().saturating_sub(3);
+    lines.iter().skip(recent_start).any(|line| {
+        let after_codex_prompt = line.trim_start_matches('›').trim_start();
+        let after_claude_prompt = line.trim_start_matches('❯').trim_start();
+        (line.starts_with('›') && !after_codex_prompt.starts_with("1."))
+            || (line.starts_with('❯') && !after_claude_prompt.starts_with("1."))
+    })
+}
+
 /// Like `pane_content_signature` but with an explicit content boundary line
 /// index, used when ANSI-based background color analysis provides a more
 /// accurate boundary than the separator/prompt heuristic.
@@ -154,21 +172,11 @@ impl EmbeddedTmuxBackend {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let panes = self.list_panes_on_target(socket_name, session_name)?;
-        let Some(main_pane) = panes
-            .iter()
-            .find(|pane| {
-                !pane.is_dead
-                    && pane.title != super::WAITAGENT_SIDEBAR_PANE_TITLE
-                    && pane.title != super::WAITAGENT_FOOTER_PANE_TITLE
-            })
-            .or_else(|| {
-                panes.iter().find(|pane| {
-                    pane.title != super::WAITAGENT_SIDEBAR_PANE_TITLE
-                        && pane.title != super::WAITAGENT_FOOTER_PANE_TITLE
-                })
-            })
-        else {
+        let main_pane = match self.session_presentation_pane_info(socket_name, session_name)? {
+            Some(pane) => Some(pane),
+            None => self.session_main_pane_info(socket_name, session_name)?,
+        };
+        let Some(main_pane) = main_pane else {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
         let pane_ansi = self.capture_pane_text(socket_name, &main_pane.pane_id)?;
@@ -210,6 +218,14 @@ impl EmbeddedTmuxBackend {
             // This distinguishes the "awaiting user input" Input state from the
             // "prompt visible during active execution" false positive.
             if state == ManagedSessionTaskState::Input {
+                if has_stable_agent_input_prompt(&command_name, &pane_text) {
+                    return Ok(TmuxSessionRuntimeMetadata {
+                        command_name: Some(command_name.clone()),
+                        current_path: main_pane.current_path.clone(),
+                        task_state: state,
+                        is_dead: main_pane.is_dead,
+                    });
+                }
                 let session_key = format!("{}:{}", socket_name.as_str(), session_name);
                 let plain_lines: Vec<&str> = pane_text.lines().map(|l| l.trim_end()).collect();
                 let content_end = pane_content_boundary(&plain_lines);
@@ -272,6 +288,43 @@ impl EmbeddedTmuxBackend {
             task_state,
             is_dead: main_pane.is_dead,
         })
+    }
+
+    fn session_presentation_pane_info(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
+        let Ok(pane_id) =
+            self.target_presentation_pane_on_socket(socket_name.as_str(), session_name)
+        else {
+            return Ok(None);
+        };
+        let session_name = self.pane_session_name_on_socket(socket_name.as_str(), &pane_id)?;
+        let panes = self.list_panes_on_target(socket_name, &session_name)?;
+        Ok(panes.into_iter().find(|pane| pane.pane_id == pane_id))
+    }
+
+    fn session_main_pane_info(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
+        let panes = self.list_panes_on_target(socket_name, session_name)?;
+        Ok(panes
+            .iter()
+            .find(|pane| {
+                !pane.is_dead
+                    && pane.title != super::WAITAGENT_SIDEBAR_PANE_TITLE
+                    && pane.title != super::WAITAGENT_FOOTER_PANE_TITLE
+            })
+            .or_else(|| {
+                panes.iter().find(|pane| {
+                    pane.title != super::WAITAGENT_SIDEBAR_PANE_TITLE
+                        && pane.title != super::WAITAGENT_FOOTER_PANE_TITLE
+                })
+            })
+            .cloned())
     }
 
     pub(super) fn list_panes_on_target(
@@ -414,6 +467,19 @@ mod tests {
         let sig1 = pane_content_signature(pane);
         let sig2 = pane_content_signature(pane);
         assert_eq!(sig1, sig2, "same content → same signature");
+    }
+
+    #[test]
+    fn stable_agent_input_prompt_matches_empty_codex_prompt_near_footer() {
+        let pane = "╭────────────────────────────────────────────╮\n\
+                    │ >_ OpenAI Codex                          │\n\
+                    ╰────────────────────────────────────────────╯\n\
+                    \n\
+                    › Write tests for @filename\n\
+                    \n\
+                      gpt-5.5 high · ~";
+
+        assert!(has_stable_agent_input_prompt("codex", pane));
     }
 
     #[test]

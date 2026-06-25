@@ -146,10 +146,13 @@ fn recover_network_config_for_command(
     use crate::cli::Command;
 
     match command {
-        Command::ChromeRefreshSocket(command) | Command::ChromeRefreshSocketSignal(command) => {
+        Command::ChromeRefreshSocket(command)
+        | Command::ChromeRefreshSocketSignal(command)
+        | Command::MainPaneOutputEventBridge(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }
-        Command::UiSidebar(command)
+        Command::ChromeRefreshOwner(command)
+        | Command::UiSidebar(command)
         | Command::UiFooter(command)
         | Command::ChromeRefreshSignal(command) => recover_network_config_for_workspace(
             backend,

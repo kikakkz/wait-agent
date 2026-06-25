@@ -4,24 +4,20 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-const REMOTE_RUNTIME_OWNER_READY_RETRIES: usize = 100;
-const REMOTE_RUNTIME_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
-const REMOTE_RUNTIME_OWNER_LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRuntimeOwnerRuntime {
@@ -52,6 +48,7 @@ enum RemoteRuntimeOwnerCommandEnvelope {
         node_id: String,
     },
     Snapshot,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,29 +87,36 @@ impl RemoteRuntimeOwnerRuntime {
         self.network.clone()
     }
 
-    pub fn run_owner(&self, _command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
+    pub fn run_owner(&self, command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
         let socket_path = remote_runtime_owner_socket_path(&self.network);
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(remote_runtime_owner_error)?;
+        let listener = match (|| -> Result<UnixListener, LifecycleError> {
+            if socket_path.exists() {
+                let _ = fs::remove_file(&socket_path);
+            }
+            UnixListener::bind(&socket_path).map_err(remote_runtime_owner_error)
+        })() {
+            Ok(listener) => {
+                if let Err(error) =
+                    notify_remote_runtime_owner_ready(command.ready_socket.as_deref(), Ok(()))
+                {
+                    ERROR_LOG.log(format!(
+                        "[diag-newhost] remote_runtime_owner ready notification failed: {error}"
+                    ));
+                }
+                listener
+            }
+            Err(error) => {
+                let _ = notify_remote_runtime_owner_ready(
+                    command.ready_socket.as_deref(),
+                    Err(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         };
-        let watcher_running = Arc::clone(&state.running);
-        let watcher_socket_path = socket_path.clone();
-        let liveness_watcher = thread::spawn(move || {
-            while watcher_running.load(Ordering::Relaxed) {
-                thread::sleep(REMOTE_RUNTIME_OWNER_LIVENESS_CHECK_INTERVAL);
-                if any_backend_socket_still_live() {
-                    continue;
-                }
-                watcher_running.store(false, Ordering::Relaxed);
-                let _ = UnixStream::connect(&watcher_socket_path);
-                break;
-            }
-        });
         while state.running.load(Ordering::Relaxed) {
             let accepted = match listener.accept() {
                 Ok((stream, _)) => Ok(stream),
@@ -158,7 +162,6 @@ impl RemoteRuntimeOwnerRuntime {
         }
         state.running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&socket_path);
-        let _ = liveness_watcher.join();
         let _ = fs::remove_file(&socket_path);
         Ok(())
     }
@@ -222,6 +225,25 @@ impl RemoteRuntimeOwnerRuntime {
                 node_id: node_id.to_string(),
             },
         )
+    }
+
+    pub fn shutdown_owner_if_unused(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
+        let sockets =
+            crate::runtime::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network(network)?;
+        if !sockets.is_empty() {
+            return Ok(());
+        }
+        try_signal_remote_runtime_owner_command(
+            network,
+            &RemoteRuntimeOwnerCommandEnvelope::Shutdown,
+        )
+        .or_else(|error| {
+            if remote_runtime_owner_unavailable_error(&error) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
     }
 
     #[cfg(test)]
@@ -463,6 +485,10 @@ fn handle_remote_runtime_owner_client(
             );
             Ok(Some(snapshot))
         }
+        RemoteRuntimeOwnerCommandEnvelope::Shutdown => {
+            state.running.store(false, Ordering::Relaxed);
+            Ok(Some("ok\n".to_string()))
+        }
     };
     ERROR_LOG.log(format!(
         "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
@@ -481,6 +507,7 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { .. } => "remove_node",
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { .. } => "mark_node_offline",
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot",
+        RemoteRuntimeOwnerCommandEnvelope::Shutdown => "shutdown",
     }
 }
 
@@ -492,25 +519,39 @@ pub(crate) fn ensure_remote_runtime_owner_process_running(
     if remote_runtime_owner_available(&socket_path) {
         return Ok(());
     }
+    let lock_path = remote_runtime_owner_startup_lock_path(&socket_path);
+    let Some(_startup_lock) = RemoteRuntimeOwnerStartupLock::try_acquire(&lock_path)? else {
+        let _startup_lock = RemoteRuntimeOwnerStartupLock::acquire(&lock_path)?;
+        if remote_runtime_owner_available(&socket_path) {
+            return Ok(());
+        }
+        return Err(LifecycleError::Protocol(format!(
+            "remote runtime owner for listener `{}` was not ready after startup lock {} released",
+            network.listener_addr(),
+            lock_path.display()
+        )));
+    };
+    if remote_runtime_owner_available(&socket_path) {
+        return Ok(());
+    }
     if socket_path.exists() {
         let _ = fs::remove_file(&socket_path);
     }
 
-    spawn_waitagent_sidecar(current_executable, remote_runtime_owner_args(network))
-        .map_err(remote_runtime_owner_error)?;
-
-    for _ in 0..REMOTE_RUNTIME_OWNER_READY_RETRIES {
-        if remote_runtime_owner_available(&socket_path) {
-            return Ok(());
-        }
-        thread::sleep(REMOTE_RUNTIME_OWNER_READY_SLEEP);
+    let ready_socket = remote_runtime_owner_ready_socket_path(&socket_path);
+    if ready_socket.exists() {
+        let _ = fs::remove_file(&ready_socket);
     }
+    let ready_listener = UnixListener::bind(&ready_socket).map_err(remote_runtime_owner_error)?;
 
-    Err(LifecycleError::Protocol(format!(
-        "remote runtime owner for listener `{}` did not become ready at {}",
-        network.listener_addr(),
-        socket_path.display()
-    )))
+    let child = spawn_waitagent_sidecar_child(
+        current_executable,
+        remote_runtime_owner_args(network, Some(&ready_socket)),
+    )
+    .map_err(remote_runtime_owner_error)?;
+    let ready = wait_for_remote_runtime_owner_ready(ready_listener, &ready_socket, child);
+    let _ = fs::remove_file(&ready_socket);
+    ready
 }
 
 fn remote_runtime_owner_available(socket_path: &Path) -> bool {
@@ -535,19 +576,50 @@ fn remote_runtime_owner_available(socket_path: &Path) -> bool {
         && parse_remote_runtime_owner_snapshot(&response).is_ok()
 }
 
-fn any_backend_socket_still_live() -> bool {
-    let Ok(backend) = EmbeddedTmuxBackend::from_build_env() else {
-        return false;
-    };
-    let Ok(sockets) = backend.discover_waitagent_sockets() else {
-        return false;
-    };
-    for socket in &sockets {
-        if backend.socket_is_live(socket) {
-            return true;
+struct RemoteRuntimeOwnerStartupLock {
+    _file: fs::File,
+}
+
+impl RemoteRuntimeOwnerStartupLock {
+    fn try_acquire(path: &Path) -> Result<Option<Self>, LifecycleError> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(remote_runtime_owner_error)?;
+        match flock_remote_runtime_owner_startup_lock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(remote_runtime_owner_error(error)),
         }
     }
-    false
+
+    fn acquire(path: &Path) -> Result<Self, LifecycleError> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(remote_runtime_owner_error)?;
+        flock_remote_runtime_owner_startup_lock(&file, libc::LOCK_EX)
+            .map_err(remote_runtime_owner_error)?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn remote_runtime_owner_startup_lock_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("sock.lock")
+}
+
+fn flock_remote_runtime_owner_startup_lock(
+    file: &fs::File,
+    operation: libc::c_int,
+) -> io::Result<()> {
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub(crate) fn remote_runtime_owner_socket_path(network: &RemoteNetworkConfig) -> PathBuf {
@@ -557,8 +629,103 @@ pub(crate) fn remote_runtime_owner_socket_path(network: &RemoteNetworkConfig) ->
     ))
 }
 
-pub(crate) fn remote_runtime_owner_args(network: &RemoteNetworkConfig) -> Vec<String> {
-    prepend_global_network_args(vec!["__remote-runtime-owner".to_string()], network)
+fn remote_runtime_owner_ready_socket_path(owner_socket_path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    owner_socket_path.with_extension(format!("ready-{pid}.sock"))
+}
+
+fn notify_remote_runtime_owner_ready(
+    ready_socket: Option<&str>,
+    result: Result<(), String>,
+) -> io::Result<()> {
+    let Some(ready_socket) = ready_socket else {
+        return Ok(());
+    };
+    let mut stream = UnixStream::connect(ready_socket)?;
+    match result {
+        Ok(()) => stream.write_all(b"ok\n")?,
+        Err(error) => {
+            stream.write_all(b"err\t")?;
+            stream.write_all(error.as_bytes())?;
+            stream.write_all(b"\n")?;
+        }
+    }
+    stream.flush()
+}
+
+fn wait_for_remote_runtime_owner_ready(
+    listener: UnixListener,
+    ready_socket: &Path,
+    mut child: std::process::Child,
+) -> Result<(), LifecycleError> {
+    enum RemoteRuntimeOwnerReadyEvent {
+        Ready(io::Result<String>),
+        Exited(io::Result<std::process::ExitStatus>),
+    }
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let ready_tx = event_tx.clone();
+    thread::spawn(move || {
+        let response = listener.accept().and_then(|(mut stream, _)| {
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        });
+        let _ = ready_tx.send(RemoteRuntimeOwnerReadyEvent::Ready(response));
+    });
+
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = event_tx.send(RemoteRuntimeOwnerReadyEvent::Exited(status));
+    });
+
+    loop {
+        match event_rx.recv() {
+            Ok(RemoteRuntimeOwnerReadyEvent::Ready(Ok(response))) => {
+                let response = response.trim();
+                if response == "ok" {
+                    return Ok(());
+                }
+                if let Some(error) = response.strip_prefix("err\t") {
+                    return Err(LifecycleError::Protocol(format!(
+                        "remote runtime owner failed to start: {error}"
+                    )));
+                }
+                return Err(LifecycleError::Protocol(format!(
+                    "remote runtime owner sent invalid ready response `{response}`"
+                )));
+            }
+            Ok(RemoteRuntimeOwnerReadyEvent::Ready(Err(error))) => {
+                return Err(remote_runtime_owner_error(error));
+            }
+            Ok(RemoteRuntimeOwnerReadyEvent::Exited(Ok(status))) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "remote runtime owner exited before reporting ready: {status}"
+                )));
+            }
+            Ok(RemoteRuntimeOwnerReadyEvent::Exited(Err(error))) => {
+                return Err(remote_runtime_owner_error(error));
+            }
+            Err(_) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "remote runtime owner ready socket `{}` closed before reporting ready",
+                    ready_socket.display()
+                )));
+            }
+        }
+    }
+}
+
+pub(crate) fn remote_runtime_owner_args(
+    network: &RemoteNetworkConfig,
+    ready_socket: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec!["__remote-runtime-owner".to_string()];
+    if let Some(ready_socket) = ready_socket {
+        args.push("--ready-socket".to_string());
+        args.push(ready_socket.display().to_string());
+    }
+    prepend_global_network_args(args, network)
 }
 
 fn signal_remote_runtime_owner_command(
@@ -590,7 +757,7 @@ fn try_signal_remote_runtime_owner_command(
     let command_label = remote_runtime_owner_command_label(command);
     let t_connect = Instant::now();
     let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(network))
-        .map_err(remote_runtime_owner_error)?;
+        .map_err(remote_runtime_owner_io_error)?;
     ERROR_LOG.log(format!(
         "[diag-newhost] remote_owner signal connect listener={} command={} elapsed={:?} total={:?}",
         network.listener_addr(),
@@ -601,11 +768,11 @@ fn try_signal_remote_runtime_owner_command(
     let t_write = Instant::now();
     stream
         .write_all(render_remote_runtime_owner_command(command).as_bytes())
-        .map_err(remote_runtime_owner_error)?;
-    stream.flush().map_err(remote_runtime_owner_error)?;
+        .map_err(remote_runtime_owner_io_error)?;
+    stream.flush().map_err(remote_runtime_owner_io_error)?;
     stream
         .shutdown(Shutdown::Write)
-        .map_err(remote_runtime_owner_error)?;
+        .map_err(remote_runtime_owner_io_error)?;
     ERROR_LOG.log(format!(
         "[diag-newhost] remote_owner signal write listener={} command={} elapsed={:?} total={:?}",
         network.listener_addr(),
@@ -618,7 +785,7 @@ fn try_signal_remote_runtime_owner_command(
     let t_read = Instant::now();
     stream
         .read_to_string(&mut response)
-        .map_err(remote_runtime_owner_error)?;
+        .map_err(remote_runtime_owner_io_error)?;
     ERROR_LOG.log(format!(
         "[diag-newhost] remote_owner signal read listener={} command={} bytes={} elapsed={:?} total={:?}",
         network.listener_addr(),
@@ -642,6 +809,20 @@ fn remote_runtime_owner_ack_error(error: &LifecycleError) -> bool {
         LifecycleError::Protocol(message) => {
             message.starts_with("remote runtime owner command was not acknowledged")
         }
+        _ => false,
+    }
+}
+
+fn remote_runtime_owner_unavailable_error(error: &LifecycleError) -> bool {
+    match error {
+        LifecycleError::Io(_, error) => matches!(
+            error.kind(),
+            ErrorKind::NotFound
+                | ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+        ),
         _ => false,
     }
 }
@@ -670,6 +851,7 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
             format!("mark_node_offline\t{}\n", escape_field(node_id))
         }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot\n".to_string(),
+        RemoteRuntimeOwnerCommandEnvelope::Shutdown => "shutdown\n".to_string(),
     }
 }
 
@@ -741,7 +923,22 @@ fn parse_remote_runtime_owner_command(
             }
             Ok(RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id })
         }
-        "snapshot" => Ok(RemoteRuntimeOwnerCommandEnvelope::Snapshot),
+        "snapshot" => {
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "snapshot contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::Snapshot)
+        }
+        "shutdown" => {
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "shutdown contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::Shutdown)
+        }
         other => Err(LifecycleError::Protocol(format!(
             "unsupported remote runtime owner command `{other}`"
         ))),
@@ -954,6 +1151,10 @@ fn remote_runtime_owner_error(
     LifecycleError::Io("remote runtime owner operation failed".to_string(), error)
 }
 
+fn remote_runtime_owner_io_error(error: io::Error) -> LifecycleError {
+    LifecycleError::Io("remote runtime owner operation failed".to_string(), error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1002,7 +1203,7 @@ mod tests {
             public_endpoint: None,
         };
 
-        let args = remote_runtime_owner_args(&network);
+        let args = remote_runtime_owner_args(&network, None);
 
         assert_eq!(
             args,
@@ -1014,6 +1215,21 @@ mod tests {
                 "__remote-runtime-owner",
             ]
         );
+    }
+
+    #[test]
+    fn remote_runtime_owner_args_include_ready_socket_when_requested() {
+        let network = RemoteNetworkConfig {
+            port: 9001,
+            connect: Some("10.0.0.8:7474".to_string()),
+            node_id: None,
+            public_endpoint: None,
+        };
+
+        let args = remote_runtime_owner_args(&network, Some(Path::new("/tmp/runtime-ready.sock")));
+
+        assert!(args.iter().any(|arg| arg == "--ready-socket"));
+        assert!(args.iter().any(|arg| arg == "/tmp/runtime-ready.sock"));
     }
 
     #[test]
@@ -1090,6 +1306,17 @@ mod tests {
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_runtime_owner_command_round_trips_shutdown() {
+        let rendered =
+            render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Shutdown);
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        assert_eq!(parsed, RemoteRuntimeOwnerCommandEnvelope::Shutdown);
     }
 
     #[test]
@@ -1235,6 +1462,30 @@ mod tests {
                 .availability,
             SessionAvailability::Online
         );
+    }
+
+    #[test]
+    fn shutdown_command_marks_owner_not_running() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Shutdown)
+                    .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert_eq!(response.as_deref(), Some("ok\n"));
+        assert!(!state.running.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

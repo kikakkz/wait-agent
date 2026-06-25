@@ -17,12 +17,15 @@ use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublica
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
-use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use crate::runtime::sidecar_process_runtime::{
+    spawn_waitagent_sidecar, spawn_waitagent_sidecar_child,
+};
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +38,6 @@ pub(crate) use sync_helpers::*;
 
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
-const REMOTE_SESSION_SYNC_OWNER_READY_RETRIES: usize = 20;
-const REMOTE_SESSION_SYNC_OWNER_READY_SLEEP: Duration = Duration::from_millis(25);
 pub(super) const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
 pub(super) const LIVE_AUTHORITY_SERVER_ID: &str = "waitagent-live-authority-owner";
 pub(super) const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
@@ -246,17 +247,45 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
         }));
 
         let socket_path = remote_session_sync_owner_socket_path(&command.socket_name);
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
+        let startup = (|| -> Result<
+            (
+                mpsc::Receiver<()>,
+                RemoteNodeSessionSyncGuard,
+                thread::JoinHandle<()>,
+            ),
+            LifecycleError,
+        > {
+            if socket_path.exists() {
+                let _ = fs::remove_file(&socket_path);
+            }
+            let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
+            let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+            let (shutdown_tx, shutdown_rx) = mpsc::channel();
+            let owner_socket = listener.try_clone().map_err(remote_session_sync_error)?;
+            let owner_command_worker =
+                serve_owner_commands(owner_socket, local_catalog_tx, shutdown_tx);
+            let guard =
+                Self::from_build_env_with_network_and_socket(network, &command.socket_name)?
+                    .start_with_local_catalog_changes(local_catalog_rx)?;
+            Ok((shutdown_rx, guard, owner_command_worker))
+        })();
+        let (shutdown_rx, _guard, _owner_command_worker) = match startup {
+            Ok(startup) => startup,
+            Err(error) => {
+                let _ = notify_remote_session_sync_owner_ready(
+                    command.ready_socket.as_deref(),
+                    Err(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            notify_remote_session_sync_owner_ready(command.ready_socket.as_deref(), Ok(()))
+        {
+            ERROR_LOG.log(format!(
+                "[diag-newhost] session_sync_owner ready notification failed: {error}"
+            ));
         }
-        let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
-        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let owner_socket = listener.try_clone().map_err(remote_session_sync_error)?;
-        let _owner_command_worker =
-            serve_owner_commands(owner_socket, local_catalog_tx, shutdown_tx);
-        let _guard = Self::from_build_env_with_network_and_socket(network, &command.socket_name)?
-            .start_with_local_catalog_changes(local_catalog_rx)?;
         loop {
             if shutdown_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
                 break;
@@ -285,20 +314,17 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
         }
         let lock_path = owner_startup_lock_path(&socket_path);
         let Some(_startup_lock) = OwnerStartupLock::try_acquire(&lock_path)? else {
-            for attempt in 0..REMOTE_SESSION_SYNC_OWNER_READY_RETRIES {
-                if remote_session_sync_owner_available(&socket_path) {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] ensure_session_sync_owner socket={} ready_by_peer attempt={} elapsed={:?}",
-                        socket_name,
-                        attempt,
-                        t_owner.elapsed()
-                    ));
-                    return Ok(());
-                }
-                thread::sleep(REMOTE_SESSION_SYNC_OWNER_READY_SLEEP);
+            let _startup_lock = OwnerStartupLock::acquire(&lock_path)?;
+            if remote_session_sync_owner_available(&socket_path) {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] ensure_session_sync_owner socket={} ready_by_peer elapsed={:?}",
+                    socket_name,
+                    t_owner.elapsed()
+                ));
+                return Ok(());
             }
             return Err(LifecycleError::Protocol(format!(
-                "remote session sync owner for socket `{socket_name}` did not become ready while another starter held {}",
+                "remote session sync owner for socket `{socket_name}` was not ready after startup lock {} released",
                 lock_path.display()
             )));
         };
@@ -309,9 +335,15 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             let _ = fs::remove_file(&socket_path);
         }
         let current_executable = current_waitagent_executable()?;
-        spawn_waitagent_sidecar(
+        let ready_socket = remote_session_sync_owner_ready_socket_path(&socket_path);
+        if ready_socket.exists() {
+            let _ = fs::remove_file(&ready_socket);
+        }
+        let ready_listener =
+            UnixListener::bind(&ready_socket).map_err(remote_session_sync_error)?;
+        let child = spawn_waitagent_sidecar_child(
             &current_executable,
-            remote_session_sync_owner_args(socket_name, network),
+            remote_session_sync_owner_args(socket_name, network, Some(&ready_socket)),
         )
         .map_err(remote_session_sync_error)?;
         ERROR_LOG.log(format!(
@@ -319,26 +351,15 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             socket_name,
             t_owner.elapsed()
         ));
-        for attempt in 0..REMOTE_SESSION_SYNC_OWNER_READY_RETRIES {
-            if remote_session_sync_owner_available(&socket_path) {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] ensure_session_sync_owner socket={} ready attempt={} elapsed={:?}",
-                    socket_name,
-                    attempt,
-                    t_owner.elapsed()
-                ));
-                return Ok(());
-            }
-            thread::sleep(REMOTE_SESSION_SYNC_OWNER_READY_SLEEP);
-        }
+        let ready = wait_for_remote_session_sync_owner_ready(ready_listener, &ready_socket, child);
+        let _ = fs::remove_file(&ready_socket);
+        ready?;
         ERROR_LOG.log(format!(
-            "[diag-newhost] ensure_session_sync_owner socket={} timeout elapsed={:?}",
+            "[diag-newhost] ensure_session_sync_owner socket={} ready elapsed={:?}",
             socket_name,
             t_owner.elapsed()
         ));
-        Err(LifecycleError::Protocol(format!(
-            "remote session sync owner for socket `{socket_name}` did not become ready"
-        )))
+        Ok(())
     }
 
     pub fn notify_local_catalog_changed(
@@ -367,33 +388,132 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
 }
 
 struct OwnerStartupLock {
-    path: PathBuf,
+    _file: fs::File,
 }
 
 impl OwnerStartupLock {
     fn try_acquire(path: &Path) -> Result<Option<Self>, LifecycleError> {
-        match fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(path)
-        {
-            Ok(_) => Ok(Some(Self {
-                path: path.to_path_buf(),
-            })),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
+            .map_err(remote_session_sync_error)?;
+        match flock_owner_startup_lock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(remote_session_sync_error(error)),
         }
     }
-}
 
-impl Drop for OwnerStartupLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+    fn acquire(path: &Path) -> Result<Self, LifecycleError> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(remote_session_sync_error)?;
+        flock_owner_startup_lock(&file, libc::LOCK_EX).map_err(remote_session_sync_error)?;
+        Ok(Self { _file: file })
     }
 }
 
 fn owner_startup_lock_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("sock.lock")
+}
+
+fn flock_owner_startup_lock(file: &fs::File, operation: libc::c_int) -> io::Result<()> {
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn remote_session_sync_owner_ready_socket_path(owner_socket_path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    owner_socket_path.with_extension(format!("ready-{pid}.sock"))
+}
+
+fn notify_remote_session_sync_owner_ready(
+    ready_socket: Option<&str>,
+    result: Result<(), String>,
+) -> io::Result<()> {
+    let Some(ready_socket) = ready_socket else {
+        return Ok(());
+    };
+    let mut stream = UnixStream::connect(ready_socket)?;
+    match result {
+        Ok(()) => stream.write_all(b"ok\n")?,
+        Err(error) => {
+            stream.write_all(b"err\t")?;
+            stream.write_all(error.as_bytes())?;
+            stream.write_all(b"\n")?;
+        }
+    }
+    stream.flush()
+}
+
+fn wait_for_remote_session_sync_owner_ready(
+    listener: UnixListener,
+    ready_socket: &Path,
+    mut child: std::process::Child,
+) -> Result<(), LifecycleError> {
+    enum SessionSyncOwnerReadyEvent {
+        Ready(io::Result<String>),
+        Exited(io::Result<std::process::ExitStatus>),
+    }
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let ready_tx = event_tx.clone();
+    thread::spawn(move || {
+        let response = listener.accept().and_then(|(mut stream, _)| {
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        });
+        let _ = ready_tx.send(SessionSyncOwnerReadyEvent::Ready(response));
+    });
+
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = event_tx.send(SessionSyncOwnerReadyEvent::Exited(status));
+    });
+
+    loop {
+        match event_rx.recv() {
+            Ok(SessionSyncOwnerReadyEvent::Ready(Ok(response))) => {
+                let response = response.trim();
+                if response == "ok" {
+                    return Ok(());
+                }
+                if let Some(error) = response.strip_prefix("err\t") {
+                    return Err(LifecycleError::Protocol(format!(
+                        "remote session sync owner failed to start: {error}"
+                    )));
+                }
+                return Err(LifecycleError::Protocol(format!(
+                    "remote session sync owner sent invalid ready response `{response}`"
+                )));
+            }
+            Ok(SessionSyncOwnerReadyEvent::Ready(Err(error))) => {
+                return Err(remote_session_sync_error(error));
+            }
+            Ok(SessionSyncOwnerReadyEvent::Exited(Ok(status))) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "remote session sync owner exited before reporting ready: {status}"
+                )));
+            }
+            Ok(SessionSyncOwnerReadyEvent::Exited(Err(error))) => {
+                return Err(remote_session_sync_error(error));
+            }
+            Err(_) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "remote session sync owner ready socket `{}` closed before reporting ready",
+                    ready_socket.display()
+                )));
+            }
+        }
+    }
 }
 
 impl<G, T, O> RemoteNodeSessionSyncRuntime<G, T, O>
@@ -819,6 +939,10 @@ impl RemoteAuthorityPublicationGateway for NoopAuthorityPublicationGateway {
         _socket_name: &str,
         _target_session_name: &str,
     ) -> Result<(), LifecycleError> {
+        Ok(())
+    }
+
+    fn signal_local_runtime_changed(&self, _socket_name: &str) -> Result<(), LifecycleError> {
         Ok(())
     }
 }

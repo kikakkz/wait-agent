@@ -2,9 +2,9 @@ mod tests {
     use super::super::{
         apply_owner_lifecycle_event, discover_authority_socket_paths, enqueue_ingress_event,
         extract_target_component, handle_internal_event, has_active_ingress_session_for_node,
-        next_ingress_event, route_transport_envelope, ActiveAuthoritySocketBridge,
-        ActiveNodeIngressSession, IngressServerEvent, InternalEvent, OwnerLifecycleEvent,
-        RemoteNodeIngressServerRuntime,
+        next_ingress_event, remote_node_ingress_owner_args, route_transport_envelope,
+        ActiveAuthoritySocketBridge, ActiveNodeIngressSession, IngressServerEvent, InternalEvent,
+        OwnerLifecycleEvent, RemoteNodeIngressServerRuntime,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -25,6 +25,21 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn owner_registry_empty_snapshot_does_not_clear_saw_workspace() {
+        let mut live_workspace_sockets = BTreeSet::from(["wa-live".to_string()]);
+        let mut saw_workspace = true;
+
+        apply_owner_lifecycle_event(
+            &mut live_workspace_sockets,
+            &mut saw_workspace,
+            OwnerLifecycleEvent::WorkspaceRegistryChanged(BTreeSet::new()),
+        );
+
+        assert!(saw_workspace);
+        assert!(live_workspace_sockets.is_empty());
+    }
 
     #[test]
     fn local_create_session_event_is_prioritized_over_periodic_publication() {
@@ -73,11 +88,13 @@ mod tests {
         let mut registered = BTreeSet::new();
         let (internal_tx, _internal_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
+        let mut retry_scheduled = false;
 
         handle_internal_event(
             &mut sessions,
             &mut registered,
             internal_tx,
+            &mut retry_scheduled,
             InternalEvent::RegisterWorkspaceSocket {
                 socket_name: "wa-test".to_string(),
                 reply_tx,
@@ -96,11 +113,13 @@ mod tests {
         let mut registered = BTreeSet::from(["wa-test".to_string()]);
         let (internal_tx, _internal_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
+        let mut retry_scheduled = false;
 
         handle_internal_event(
             &mut sessions,
             &mut registered,
             internal_tx,
+            &mut retry_scheduled,
             InternalEvent::UnregisterWorkspaceSocket {
                 socket_name: "wa-test".to_string(),
                 reply_tx,
@@ -166,6 +185,24 @@ mod tests {
             first,
             IngressServerEvent::Internal(InternalEvent::SocketDirChanged)
         ));
+    }
+
+    #[test]
+    fn socket_discovery_retry_is_coalesced_while_timer_is_pending() {
+        use super::super::schedule_socket_discovery_retry;
+        let (internal_tx, internal_rx) = mpsc::channel();
+        let mut retry_scheduled = false;
+
+        schedule_socket_discovery_retry(internal_tx.clone(), 2, &mut retry_scheduled);
+        assert!(retry_scheduled);
+        schedule_socket_discovery_retry(internal_tx, 2, &mut retry_scheduled);
+
+        assert!(internal_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok());
+        assert!(internal_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
     }
 
     #[test]
@@ -954,6 +991,21 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         format!("{prefix}-{unique}")
+    }
+
+    #[test]
+    fn remote_node_ingress_owner_args_include_ready_socket_when_requested() {
+        let network = RemoteNetworkConfig {
+            port: 7474,
+            connect: Some("10.0.0.8:7474".to_string()),
+            node_id: Some("node-a".to_string()),
+            public_endpoint: None,
+        };
+        let args =
+            remote_node_ingress_owner_args(&network, Some(std::path::Path::new("/tmp/ready.sock")));
+
+        assert!(args.iter().any(|arg| arg == "--ready-socket"));
+        assert!(args.iter().any(|arg| arg == "/tmp/ready.sock"));
     }
 
     fn mirror_bootstrap_chunk_envelope() -> NodeSessionEnvelope {

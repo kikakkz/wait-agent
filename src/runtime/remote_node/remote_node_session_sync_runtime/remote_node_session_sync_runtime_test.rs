@@ -4,10 +4,11 @@ mod tests {
         exportable_local_sessions_for_socket, local_sessions_by_local_id,
         notify_remote_session_sync_owner, overlay_workspace_runtime_onto_active_local_target_hosts,
         remote_session_exited_envelope, remote_session_published_envelope,
-        remote_session_sync_owner_available, remote_session_sync_owner_socket_path,
-        sync_local_sessions, AuthorityHostSignal, LocalCatalogChangeReason, LocalSessionCatalog,
-        LocalTargetExitObserver, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
-        SessionSyncAuthorityHost, SourcePublicationAckOutcome, SourcePublicationTracker,
+        remote_session_sync_owner_args, remote_session_sync_owner_available,
+        remote_session_sync_owner_socket_path, sync_local_sessions, AuthorityHostSignal,
+        LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
+        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
+        SourcePublicationAckOutcome, SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -700,6 +701,62 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_wait_preserves_local_catalog_change_signal() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(super::super::SessionSyncEvent::LocalCatalogChanged(
+            LocalCatalogChangeReason::LocalRuntimeChanged,
+        ))
+        .expect("local catalog event should send");
+
+        assert_eq!(
+            super::super::wait_for_reconnect_delay_or_stop(&rx, Duration::from_millis(1)),
+            super::super::ReconnectWaitOutcome::LocalCatalogChanged
+        );
+    }
+
+    #[test]
+    fn pending_runtime_change_after_session_open_publishes_latest_state() {
+        let (handle, mut receiver) =
+            RemoteNodeSessionHandle::new_for_tests("node-a", "server-session-1");
+        let observer = RecordingLocalTargetExitObserver::default();
+        let mut previous = session("wa-1", "shell-1");
+        previous.command_name = Some("bash".to_string());
+        previous.task_state = ManagedSessionTaskState::Input;
+        let mut current = previous.clone();
+        current.command_name = Some("codex".to_string());
+        current.task_state = ManagedSessionTaskState::Input;
+        let mut synced_sessions = local_sessions_by_local_id(vec![previous]);
+        let mut next_message_id = 0;
+        let mut publication_tracker = SourcePublicationTracker::new();
+        publication_tracker.on_connected();
+
+        let should_reconnect = super::super::sync_local_sessions_after_catalog_transport_event(
+            &FakeGateway {
+                sessions: vec![current],
+            },
+            "node-a",
+            Some(&handle),
+            &observer,
+            &mut synced_sessions,
+            &mut next_message_id,
+            &mut publication_tracker,
+            "pending local catalog change",
+        );
+
+        assert!(!should_reconnect);
+        let envelope = receiver
+            .try_recv()
+            .expect("pending runtime change should publish latest state");
+        let Some(Body::TargetPublished(payload)) = envelope.body else {
+            panic!("expected target_published body");
+        };
+        assert_eq!(payload.transport_session_id, "shell-1");
+        assert_eq!(payload.command_name.as_deref(), Some("codex"));
+        assert_eq!(payload.task_state.as_deref(), Some("input"));
+        assert_eq!(payload.revision, 1);
+    }
+
+    #[test]
     fn catalog_transport_event_syncs_newly_created_target_into_baseline() {
         let (handle, mut receiver) =
             RemoteNodeSessionHandle::new_for_tests("10.0.0.2", "server-session-1");
@@ -922,6 +979,25 @@ mod tests {
         assert!(remote_session_sync_owner_available(&socket_path));
         handle.join().expect("fake owner should join");
         let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn remote_session_sync_owner_args_include_ready_socket_when_requested() {
+        let network = RemoteNetworkConfig {
+            port: 9001,
+            connect: Some("10.0.0.8:7474".to_string()),
+            node_id: None,
+            public_endpoint: None,
+        };
+
+        let args = remote_session_sync_owner_args(
+            "wa-1",
+            &network,
+            Some(Path::new("/tmp/sync-ready.sock")),
+        );
+
+        assert!(args.iter().any(|arg| arg == "--ready-socket"));
+        assert!(args.iter().any(|arg| arg == "/tmp/sync-ready.sock"));
     }
 
     #[derive(Clone, Default)]

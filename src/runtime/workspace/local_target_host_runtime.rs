@@ -13,6 +13,7 @@ use crate::runtime::remote_node_ingress_server_runtime::RemoteNodeIngressServerR
 use crate::runtime::remote_node_session_sync_runtime::{
     shutdown_remote_session_sync_owner, LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
@@ -235,6 +236,12 @@ impl LocalTargetHostRuntime {
             ));
         }
         let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
+        if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] local_target_remote_runtime_owner_shutdown_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
     }
 
     fn exit_is_owned_by_workspace_main_pane(
@@ -457,6 +464,24 @@ fn shell_command(executable: &std::path::Path, args: Vec<String>) -> String {
     let mut parts = vec![shell_escape(&executable.display().to_string())];
     parts.extend(args.iter().map(|arg| shell_escape(arg)));
     parts.join(" ")
+}
+
+pub(crate) fn main_pane_output_event_bridge_command(
+    executable: &std::path::Path,
+    socket_name: &str,
+    target_session_name: Option<&str>,
+    network: &RemoteNetworkConfig,
+) -> String {
+    let mut args = vec![
+        "__main-pane-output-event-bridge".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+    ];
+    if let Some(target_session_name) = target_session_name {
+        args.push("--target-session-name".to_string());
+        args.push(target_session_name.to_string());
+    }
+    shell_command(executable, prepend_global_network_args(args, network))
 }
 
 fn shell_escape(value: &str) -> String {

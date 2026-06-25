@@ -14,6 +14,9 @@ use crate::infra::tmux::{
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
+use crate::runtime::remote_node_session_sync_runtime::{
+    LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
+};
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
@@ -634,6 +637,14 @@ impl RemoteTargetPublicationRuntime {
             PublicationOwnerCommand::Stop,
         );
         Ok(())
+    }
+
+    pub fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
+            socket_name,
+            &self.network,
+            LocalCatalogChangeReason::LocalRuntimeChanged,
+        )
     }
 
     pub fn signal_source_session_refresh(

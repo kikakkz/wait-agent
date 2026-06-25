@@ -2,10 +2,19 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 
 pub fn spawn_waitagent_sidecar(current_executable: &Path, args: Vec<String>) -> io::Result<()> {
+    let child = spawn_waitagent_sidecar_child(current_executable, args)?;
+    reap_waitagent_sidecar(child);
+    Ok(())
+}
+
+pub fn spawn_waitagent_sidecar_child(
+    current_executable: &Path,
+    args: Vec<String>,
+) -> io::Result<Child> {
     let mut command = Command::new(current_executable);
     command
         .args(args)
@@ -23,9 +32,11 @@ pub fn spawn_waitagent_sidecar(current_executable: &Path, args: Vec<String>) -> 
         });
     }
 
-    let mut child = command.spawn()?;
+    command.spawn()
+}
+
+pub fn reap_waitagent_sidecar(mut child: Child) {
     thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
 }
