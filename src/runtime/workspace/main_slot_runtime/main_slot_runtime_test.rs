@@ -318,6 +318,21 @@ mod tests {
             .as_deref(),
             Some("on")
         );
+        assert!(
+            workspace_main_pane_pipe(&backend, &workspace.workspace_handle).as_deref() == Some("0"),
+            "remote mirror pane must not keep the main pane output bridge active"
+        );
+        runtime
+            .layout_runtime
+            .enable_main_pane_output_bridge(&workspace.workspace_handle)
+            .expect("test should be able to enable the bridge option");
+        runtime
+            .ensure_initial_target_materialized(&workspace.workspace_handle, &workspace_dir)
+            .expect("materializing a remote target should succeed");
+        assert!(
+            workspace_main_pane_pipe(&backend, &workspace.workspace_handle).as_deref() == Some("0"),
+            "materializing an active remote target must not reinstall the output bridge"
+        );
 
         let target_host_handle = TmuxWorkspaceHandle {
             workspace_id: WorkspaceInstanceId::new(target_host.session_name.as_str().to_string()),

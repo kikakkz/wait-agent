@@ -47,6 +47,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_session_id: "target-1".to_string(),
+            transport_socket_path: "/tmp/unused.sock".to_string(),
             socket_path: test_socket_path("buffered-live-route"),
             running: Arc::new(AtomicBool::new(true)),
             writer: Arc::new(Mutex::new(None)),

@@ -19,6 +19,7 @@ use crate::runtime::remote_node::remote_runtime_owner_runtime::RemoteRuntimeOwne
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
+use crate::runtime::remote_target_publication_runtime::signal_publication_sender_live_session_refreshed;
 use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
@@ -1746,6 +1747,7 @@ impl MainSlotRuntime {
             self.find_local_target_pane_by_identity(workspace, target_session_name)?
         {
             self.set_workspace_main_pane(workspace, &pane)?;
+            self.signal_local_target_presentation_refresh(workspace, target_session_name);
             return Ok(pane);
         }
         if let Some(pane) = self.read_live_session_pane_option_for_target(
@@ -1754,12 +1756,25 @@ impl MainSlotRuntime {
             target_session_name,
         )? {
             self.set_local_target_pane_identity(workspace, &pane, target_session_name)?;
+            self.signal_local_target_presentation_refresh(workspace, target_session_name);
             return Ok(pane);
         }
         let pane = self.local_target_parking_pane(workspace, qualified_target)?;
         self.set_local_target_pane_identity(workspace, &pane, target_session_name)?;
         self.set_workspace_main_pane(workspace, &pane)?;
+        self.signal_local_target_presentation_refresh(workspace, target_session_name);
         Ok(pane)
+    }
+
+    fn signal_local_target_presentation_refresh(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        target_session_name: &str,
+    ) {
+        let _ = signal_publication_sender_live_session_refreshed(
+            workspace.socket_name.as_str(),
+            target_session_name,
+        );
     }
 
     fn local_target_parking_pane(
@@ -2395,7 +2410,17 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         target: Option<&str>,
     ) -> Result<(), LifecycleError> {
-        if target.is_some() {
+        let Some(target) = target else {
+            return self
+                .layout_runtime
+                .disable_main_pane_output_bridge(workspace);
+        };
+        if self.active_target_is_remote(workspace.socket_name.as_str(), Some(target))? {
+            return self
+                .layout_runtime
+                .disable_main_pane_output_bridge(workspace);
+        }
+        if target_socket_name(target) == Some(workspace.socket_name.as_str()) {
             self.layout_runtime
                 .enable_main_pane_output_bridge(workspace)
         } else {

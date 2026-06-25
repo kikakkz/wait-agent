@@ -252,6 +252,7 @@ pub struct RemoteAuthorityTargetHostCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteAuthorityOutputPumpCommand {
     pub ingest_socket_path: String,
+    pub input_socket_path: Option<String>,
     pub socket_name: String,
     pub stream_id: u64,
 }
@@ -952,6 +953,7 @@ fn parse_remote_authority_output_pump(
 ) -> Result<RemoteAuthorityOutputPumpCommand, CliError> {
     let mut iter = args.into_iter();
     let mut ingest_socket_path = None;
+    let mut input_socket_path = None;
     let mut socket_name = None;
     let mut stream_id = None;
 
@@ -959,6 +961,9 @@ fn parse_remote_authority_output_pump(
         match arg.as_str() {
             "--ingest-socket-path" => {
                 ingest_socket_path = Some(expect_value("--ingest-socket-path", &mut iter)?)
+            }
+            "--input-socket-path" => {
+                input_socket_path = Some(expect_value("--input-socket-path", &mut iter)?)
             }
             "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
             "--stream-id" => {
@@ -977,6 +982,7 @@ fn parse_remote_authority_output_pump(
     Ok(RemoteAuthorityOutputPumpCommand {
         ingest_socket_path: ingest_socket_path
             .ok_or_else(|| CliError::MissingValue("--ingest-socket-path".to_string()))?,
+        input_socket_path,
         socket_name: socket_name
             .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
         stream_id: stream_id.ok_or_else(|| CliError::MissingValue("--stream-id".to_string()))?,
@@ -2042,6 +2048,8 @@ mod tests {
             "__remote-authority-output-pump",
             "--ingest-socket-path",
             "/tmp/output.sock",
+            "--input-socket-path",
+            "/tmp/input.sock",
             "--socket-name",
             "wa-test",
             "--stream-id",
@@ -2051,6 +2059,10 @@ mod tests {
         {
             Command::RemoteAuthorityOutputPump(command) => {
                 assert_eq!(command.ingest_socket_path, "/tmp/output.sock");
+                assert_eq!(
+                    command.input_socket_path.as_deref(),
+                    Some("/tmp/input.sock")
+                );
                 assert_eq!(command.socket_name, "wa-test");
                 assert_eq!(command.stream_id, 42);
             }

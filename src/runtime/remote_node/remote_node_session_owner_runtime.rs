@@ -90,6 +90,11 @@ impl RemoteNodeSessionOwnerRuntime {
                             &mut authority_sessions,
                         )?;
                     }
+                    PublicationSenderCommand::RefreshLiveSession {
+                        target_session_name,
+                    } => {
+                        refresh_live_session_route(&target_session_name, &mut live_sessions);
+                    }
                     PublicationSenderCommand::UnregisterLiveSession {
                         target_session_name,
                     } => {

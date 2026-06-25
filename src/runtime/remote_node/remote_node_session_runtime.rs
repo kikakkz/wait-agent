@@ -402,6 +402,7 @@ impl RemoteNodeSessionRuntime {
                 }),
             ),
             PublicationSenderCommand::RegisterLiveSession { .. }
+            | PublicationSenderCommand::RefreshLiveSession { .. }
             | PublicationSenderCommand::UnregisterLiveSession { .. } => {
                 Err(RemoteNodeSessionError::new(
                     "live session registration commands cannot be sent over the node session",

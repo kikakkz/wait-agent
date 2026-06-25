@@ -59,6 +59,9 @@ pub(crate) enum PublicationSenderCommand {
         target_id: String,
         transport_socket_path: String,
     },
+    RefreshLiveSession {
+        target_session_name: String,
+    },
     UnregisterLiveSession {
         target_session_name: String,
     },
@@ -305,6 +308,12 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
             base64::engine::general_purpose::STANDARD.encode(target_id.as_bytes()),
             base64::engine::general_purpose::STANDARD.encode(transport_socket_path.as_bytes())
         ),
+        PublicationSenderCommand::RefreshLiveSession {
+            target_session_name,
+        } => format!(
+            "refresh_live_session\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(target_session_name.as_bytes())
+        ),
         PublicationSenderCommand::UnregisterLiveSession {
             target_session_name,
         } => format!(
@@ -491,6 +500,22 @@ pub(super) fn parse_publication_sender_command(
                 authority_id,
                 target_id,
                 transport_socket_path,
+            })
+        }
+        "refresh_live_session" => {
+            let target_session_name =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "refresh_live_session is missing target session field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "refresh_live_session contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::RefreshLiveSession {
+                target_session_name,
             })
         }
         "unregister_live_session" => {
@@ -1084,6 +1109,18 @@ pub(crate) fn signal_publication_sender_live_session_unregistered(
     signal_publication_sender_command(
         socket_name,
         PublicationSenderCommand::UnregisterLiveSession {
+            target_session_name: target_session_name.to_string(),
+        },
+    )
+}
+
+pub(crate) fn signal_publication_sender_live_session_refreshed(
+    socket_name: &str,
+    target_session_name: &str,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::RefreshLiveSession {
             target_session_name: target_session_name.to_string(),
         },
     )

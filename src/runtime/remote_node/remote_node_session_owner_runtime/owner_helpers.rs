@@ -8,11 +8,16 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, CreateSessionRequestPayload, ErrorPayload, NodeSessionChannel,
     ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
 };
+#[cfg(test)]
+use crate::infra::remote_transport_codec::{
+    read_authority_transport_frame, AuthorityTransportFrame,
+};
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, write_control_plane_envelope,
 };
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_authority_target_host_runtime::authority_event_socket_path;
 use crate::runtime::remote_authority_target_host_runtime::remote_authority_target_host_args;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_runtime::{
@@ -27,7 +32,7 @@ use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -48,6 +53,7 @@ pub(super) struct LiveSessionRoute {
     pub(super) authority_id: String,
     pub(super) target_id: String,
     pub(super) transport_session_id: String,
+    pub(super) transport_socket_path: String,
     pub(super) socket_path: PathBuf,
     pub(super) running: Arc<AtomicBool>,
     pub(super) writer: Arc<Mutex<Option<UnixStream>>>,
@@ -208,6 +214,7 @@ pub(super) fn dispatch_publication_sender_command(
 ) -> Result<(), LifecycleError> {
     match command {
         PublicationSenderCommand::RegisterLiveSession { .. }
+        | PublicationSenderCommand::RefreshLiveSession { .. }
         | PublicationSenderCommand::UnregisterLiveSession { .. } => Ok(()),
         PublicationSenderCommand::PublishTarget {
             authority_id,
@@ -523,6 +530,7 @@ fn ensure_live_session_route_with_target_host_mode(
         authority_id: authority_id.to_string(),
         target_id: target_id.to_string(),
         transport_session_id,
+        transport_socket_path: transport_socket_path.to_string(),
         socket_path: live_authority_session_socket_path(socket_name, target_session_name),
         running: Arc::new(AtomicBool::new(true)),
         writer: Arc::new(Mutex::new(None)),
@@ -584,6 +592,23 @@ pub(super) fn stop_live_session_route(
             authority_sessions.remove(&route.authority_id);
         }
     }
+}
+
+pub(super) fn refresh_live_session_route(
+    target_session_name: &str,
+    live_sessions: &mut HashMap<String, Arc<LiveSessionRoute>>,
+) -> bool {
+    let Some(route) = live_sessions.get(target_session_name) else {
+        return false;
+    };
+    let event_socket_path =
+        authority_event_socket_path(&route.transport_socket_path, &route.target_id);
+    if let Ok(mut stream) = UnixStream::connect(event_socket_path) {
+        let _ = stream.write_all(b"__refresh_binding\n");
+        let _ = stream.flush();
+        return true;
+    }
+    false
 }
 
 pub(super) fn dispatch_live_publication(
@@ -1130,72 +1155,87 @@ fn forward_host_output_to_session(
 ) -> Result<(), RemoteNodeSessionError> {
     let _ = running;
     loop {
-        let envelope = read_control_plane_envelope(&mut host_reader)?;
-        match envelope.payload {
-            ControlPlanePayload::OpenMirrorAccepted(payload) => {
-                let session_id = payload.session_id.clone();
-                let target_id = payload.target_id.clone();
-                session.send_payload(
-                    NodeSessionChannel::Authority,
-                    &session_id,
-                    &target_id,
-                    "authority-msg",
-                    ControlPlanePayload::OpenMirrorAccepted(payload),
-                )?;
-            }
-            ControlPlanePayload::OpenMirrorRejected(payload) => {
-                let session_id = payload.session_id.clone();
-                let target_id = payload.target_id.clone();
-                session.send_payload(
-                    NodeSessionChannel::Authority,
-                    &session_id,
-                    &target_id,
-                    "authority-msg",
-                    ControlPlanePayload::OpenMirrorRejected(payload),
-                )?;
-            }
-            ControlPlanePayload::MirrorBootstrapChunk(payload) => {
-                let session_id = payload.session_id.clone();
-                let target_id = payload.target_id.clone();
-                session.send_payload(
-                    NodeSessionChannel::Authority,
-                    &session_id,
-                    &target_id,
-                    "authority-msg",
-                    ControlPlanePayload::MirrorBootstrapChunk(payload),
-                )?;
-            }
-            ControlPlanePayload::MirrorBootstrapComplete(payload) => {
-                let session_id = payload.session_id.clone();
-                let target_id = payload.target_id.clone();
-                session.send_payload(
-                    NodeSessionChannel::Authority,
-                    &session_id,
-                    &target_id,
-                    "authority-msg",
-                    ControlPlanePayload::MirrorBootstrapComplete(payload),
-                )?;
-            }
-            ControlPlanePayload::TargetOutput(payload) => {
-                session.send_target_output(
+        let frame = read_authority_transport_frame(&mut host_reader)?;
+        match frame {
+            AuthorityTransportFrame::RawPtyOutput(payload) => {
+                session.send_raw_pty_output(
                     &payload.session_id,
                     &payload.target_id,
                     payload.output_seq,
-                    payload.stream,
                     payload.output_bytes,
                 )?;
             }
-            ControlPlanePayload::TargetExited(payload) => {
-                session.send_target_exited(
-                    &payload.transport_session_id,
-                    payload.source_session_name.as_deref(),
-                )?;
-                return Ok(());
-            }
+            AuthorityTransportFrame::ControlPlane(envelope) => match envelope.payload {
+                ControlPlanePayload::OpenMirrorAccepted(payload) => {
+                    let session_id = payload.session_id.clone();
+                    let target_id = payload.target_id.clone();
+                    session.send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::OpenMirrorAccepted(payload),
+                    )?;
+                }
+                ControlPlanePayload::OpenMirrorRejected(payload) => {
+                    let session_id = payload.session_id.clone();
+                    let target_id = payload.target_id.clone();
+                    session.send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::OpenMirrorRejected(payload),
+                    )?;
+                }
+                ControlPlanePayload::MirrorBootstrapChunk(payload) => {
+                    let session_id = payload.session_id.clone();
+                    let target_id = payload.target_id.clone();
+                    session.send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::MirrorBootstrapChunk(payload),
+                    )?;
+                }
+                ControlPlanePayload::MirrorBootstrapComplete(payload) => {
+                    let session_id = payload.session_id.clone();
+                    let target_id = payload.target_id.clone();
+                    session.send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::MirrorBootstrapComplete(payload),
+                    )?;
+                }
+                ControlPlanePayload::TargetOutput(payload) => {
+                    session.send_target_output(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.output_seq,
+                        payload.stream,
+                        payload.output_bytes,
+                    )?;
+                }
+                ControlPlanePayload::TargetExited(payload) => {
+                    session.send_target_exited(
+                        &payload.transport_session_id,
+                        payload.source_session_name.as_deref(),
+                    )?;
+                    return Ok(());
+                }
+                other => {
+                    return Err(RemoteNodeSessionError::new(format!(
+                        "unexpected live authority host payload `{}`",
+                        other.message_type()
+                    )));
+                }
+            },
             other => {
                 return Err(RemoteNodeSessionError::new(format!(
-                    "unexpected live authority host payload `{}`",
-                    other.message_type()
+                    "unexpected live authority host frame `{other:?}`"
                 )));
             }
         }

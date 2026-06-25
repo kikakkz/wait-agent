@@ -182,35 +182,12 @@ impl RemoteAuthorityTransportRuntime {
         output_seq: u64,
         output_bytes: Vec<u8>,
     ) -> Result<(), RemoteAuthorityTransportError> {
-        let payload = ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+        self.send_transport_frame(AuthorityTransportFrame::RawPtyOutput(RawPtyOutputPayload {
             session_id: session_id.to_string(),
             target_id: target_id.to_string(),
             output_seq,
             output_bytes,
-        });
-        let envelope = ProtocolEnvelope {
-            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!(
-                "{}-authority-msg-{}",
-                self.node_id,
-                self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1
-            ),
-            message_type: payload.message_type(),
-            timestamp: now_rfc3339_like(),
-            sender_id: self.node_id.clone(),
-            correlation_id: None,
-            session_id: Some(session_id.to_string()),
-            target_id: Some(target_id.to_string()),
-            attachment_id: None,
-            console_id: None,
-            payload,
-        };
-        let mut writer = self
-            .writer
-            .lock()
-            .expect("authority transport writer mutex should not be poisoned");
-        write_control_plane_envelope(&mut *writer, &envelope)?;
-        Ok(())
+        }))
     }
 
     pub fn send_sync_response(

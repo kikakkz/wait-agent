@@ -83,7 +83,7 @@ mod tests {
     impl RemoteTargetPtyGateway for FakeGateway {
         type Error = &'static str;
 
-        fn target_presentation_pane(
+        fn target_pty_pane(
             &self,
             _socket_name: &str,
             _target_session_name: &str,
@@ -343,13 +343,14 @@ mod tests {
         let command = remote_authority_output_pump_shell_command(
             "/tmp/wait agent",
             Path::new("/tmp/output path.sock"),
+            Path::new("/tmp/input path.sock"),
             "wa-test-socket",
             42,
         );
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--socket-name' 'wa-test-socket' '--stream-id' '42'"
+            "'/tmp/wait agent' '__remote-authority-output-pump' '--ingest-socket-path' '/tmp/output path.sock' '--input-socket-path' '/tmp/input path.sock' '--socket-name' 'wa-test-socket' '--stream-id' '42'"
         );
     }
 
@@ -880,6 +881,124 @@ mod tests {
     }
 
     #[test]
+    fn raw_pty_passthrough_output_uses_raw_channel_without_runtime_refresh() {
+        let socket_name = unique_test_socket_name("wa-raw-output");
+        let transport_socket_path = transport_socket_path("host-raw-output");
+        let transport_listener =
+            UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
+        let fake_gateway = FakeGateway {
+            terminal_flags: Arc::new(Mutex::new(RemoteTargetTerminalFlags {
+                alternate_screen_active: false,
+                application_cursor_keys: false,
+                cursor_visible: true,
+            })),
+            ..FakeGateway::default()
+        };
+        let fake_gateway_for_assert = fake_gateway.clone();
+        let runtime = RemoteAuthorityTargetHostRuntime::new(
+            fake_gateway,
+            FakePublicationGateway::default(),
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let command = RemoteAuthorityTargetHostCommand {
+            socket_name: socket_name.clone(),
+            target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-1".to_string(),
+            transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+        };
+        let ingest_socket_path = authority_output_ingest_socket_path(
+            command.transport_socket_path.as_str(),
+            &command.target_id,
+        );
+        let server_ingest_socket_path = ingest_socket_path.clone();
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = transport_listener
+                .accept()
+                .expect("transport should accept");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .expect("transport stream should accept read timeout");
+            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
+            match hello.payload {
+                ControlPlanePayload::ClientHello(ClientHelloPayload { .. }) => {}
+                other => panic!("unexpected hello payload: {other:?}"),
+            }
+            write_server_hello(&mut stream, "waitagent-remote-node-session")
+                .expect("server hello should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: open_mirror_envelope_with_raw_passthrough(true),
+                },
+            )
+            .expect("open mirror should encode");
+
+            let mut raw_output = None;
+            while raw_output.is_none() {
+                let envelope =
+                    read_node_session_envelope(&mut stream).expect("node session should decode");
+                match envelope.envelope.payload {
+                    ControlPlanePayload::OpenMirrorAccepted(_) => {
+                        wait_for_path(&server_ingest_socket_path);
+                        let mut output_stream = UnixStream::connect(&server_ingest_socket_path)
+                            .expect("ingest socket should accept");
+                        write_stream_id_frame(&mut output_stream, 1)
+                            .expect("stream id should encode");
+                        write_output_chunk_frame(&mut output_stream, b"echo")
+                            .expect("output chunk should encode");
+                        drop(output_stream);
+                    }
+                    ControlPlanePayload::RawPtyOutput(payload) => {
+                        raw_output = Some(payload);
+                        write_node_session_envelope(
+                            &mut stream,
+                            &NodeSessionEnvelope {
+                                channel: NodeSessionChannel::Authority,
+                                envelope: close_mirror_envelope(),
+                            },
+                        )
+                        .expect("close mirror should encode");
+                    }
+                    ControlPlanePayload::MirrorBootstrapChunk(_)
+                    | ControlPlanePayload::MirrorBootstrapComplete(_) => {}
+                    other => panic!("unexpected node-session payload: {other:?}"),
+                }
+            }
+            stream
+                .shutdown(Shutdown::Both)
+                .expect("server shutdown should succeed");
+            server_tx
+                .send(raw_output.expect("raw output should be collected"))
+                .expect("raw output should send");
+        });
+
+        runtime
+            .run_target_host(command)
+            .expect("runtime should finish cleanly");
+
+        let raw_output = server_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server harness should complete");
+        assert_eq!(raw_output.output_seq, 1);
+        assert_eq!(raw_output.output_bytes, b"echo");
+        assert!(fake_gateway_for_assert
+            .clear_runtime_override_calls
+            .lock()
+            .expect("clear runtime override calls mutex should not be poisoned")
+            .is_empty());
+        assert!(fake_gateway_for_assert
+            .chrome_refresh_calls
+            .lock()
+            .expect("chrome refresh calls mutex should not be poisoned")
+            .is_empty());
+        let _ = fs::remove_file(&transport_socket_path);
+    }
+
+    #[test]
     fn authority_host_runtime_replays_bootstrap_for_repeated_open_mirror() {
         let socket_name = unique_test_socket_name("wa-reopen");
         let transport_socket_path = transport_socket_path("host-reopen");
@@ -1146,6 +1265,108 @@ mod tests {
     }
 
     #[test]
+    fn authority_host_runtime_rebinds_active_mirror_on_binding_refresh() {
+        let socket_name = unique_test_socket_name("wa-refresh-active-mirror");
+        let transport_socket_path = transport_socket_path("host-refresh-active-mirror");
+        let transport_listener =
+            UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
+        let fake_gateway = FakeGateway {
+            capture_bootstrap_screen: Arc::new(Mutex::new("bash".to_string())),
+            cursor_position: Arc::new(Mutex::new((4, 0))),
+            ..FakeGateway::default()
+        };
+        let fake_gateway_for_server = fake_gateway.clone();
+        let target_id = "remote-peer:peer-a:target-1".to_string();
+        let event_socket_path = authority_event_socket_path(
+            transport_socket_path.to_string_lossy().as_ref(),
+            &target_id,
+        );
+        let runtime = RemoteAuthorityTargetHostRuntime::new(
+            fake_gateway.clone(),
+            FakePublicationGateway::default(),
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let command = RemoteAuthorityTargetHostCommand {
+            socket_name: socket_name.clone(),
+            target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id,
+            transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+        };
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = transport_listener
+                .accept()
+                .expect("transport should accept");
+            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
+            match hello.payload {
+                ControlPlanePayload::ClientHello(ClientHelloPayload { .. }) => {}
+                other => panic!("unexpected hello payload: {other:?}"),
+            }
+            write_server_hello(&mut stream, "waitagent-remote-node-session")
+                .expect("server hello should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: open_mirror_envelope(),
+                },
+            )
+            .expect("open mirror should encode");
+            wait_for_pipe_count(&fake_gateway_for_server, 1);
+            fake_gateway_for_server.set_current_pane("%8");
+            wait_for_path(&event_socket_path);
+            let mut event_stream =
+                UnixStream::connect(&event_socket_path).expect("event socket should accept");
+            event_stream
+                .write_all(b"__refresh_binding\n")
+                .expect("refresh event should write");
+            event_stream.flush().expect("refresh event should flush");
+            event_stream
+                .shutdown(Shutdown::Write)
+                .expect("refresh event should close write side");
+            wait_for_pipe_count(&fake_gateway_for_server, 2);
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: close_mirror_envelope(),
+                },
+            )
+            .expect("close mirror should encode");
+            stream
+                .shutdown(Shutdown::Both)
+                .expect("server shutdown should succeed");
+            server_tx.send(()).expect("server completion should send");
+        });
+
+        runtime
+            .run_target_host(command)
+            .expect("runtime should finish cleanly");
+        server_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server harness should complete");
+
+        assert_eq!(
+            fake_gateway
+                .pipe_calls
+                .lock()
+                .expect("pipe calls mutex should not be poisoned")
+                .iter()
+                .map(|(pane, _)| pane.clone())
+                .collect::<Vec<_>>(),
+            vec!["%7".to_string(), "%8".to_string()]
+        );
+        assert!(fake_gateway
+            .clear_hook_calls
+            .lock()
+            .expect("clear hook calls mutex should not be poisoned")
+            .contains(&"%7".to_string()));
+        let _ = fs::remove_file(&transport_socket_path);
+    }
+
+    #[test]
     fn authority_host_runtime_resolves_current_pane_before_each_input() {
         let socket_name = unique_test_socket_name("wa-pane-refresh");
         let transport_socket_path = transport_socket_path("host-pane-refresh");
@@ -1301,6 +1522,22 @@ mod tests {
         panic!("input count did not reach {expected}");
     }
 
+    fn wait_for_pipe_count(fake_gateway: &FakeGateway, expected: usize) {
+        for _ in 0..100 {
+            if fake_gateway
+                .pipe_calls
+                .lock()
+                .expect("pipe calls mutex should not be poisoned")
+                .len()
+                >= expected
+            {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("pipe count did not reach {expected}");
+    }
+
     fn transport_socket_path(name: &str) -> PathBuf {
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1360,6 +1597,12 @@ mod tests {
     }
 
     fn open_mirror_envelope() -> ProtocolEnvelope<ControlPlanePayload> {
+        open_mirror_envelope_with_raw_passthrough(false)
+    }
+
+    fn open_mirror_envelope_with_raw_passthrough(
+        raw_pty_passthrough: bool,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
             message_id: "msg-open-mirror".to_string(),
@@ -1377,7 +1620,7 @@ mod tests {
                 console_id: "console-a".to_string(),
                 cols: 80,
                 rows: 24,
-                raw_pty_passthrough: false,
+                raw_pty_passthrough,
                 bootstrap_mode: BootstrapMode::Full,
             }),
         }

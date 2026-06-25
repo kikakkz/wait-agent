@@ -31,12 +31,13 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MirrorState {
     Inactive,
     Active {
         stream_id: u64,
         raw_pty_passthrough: bool,
+        payload: crate::infra::remote_protocol::OpenMirrorRequestPayload,
     },
 }
 
@@ -133,7 +134,7 @@ impl Default for RemoteTargetTerminalFlags {
 pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
     type Error: ToString;
 
-    fn target_presentation_pane(
+    fn target_pty_pane(
         &self,
         socket_name: &str,
         target_session_name: &str,
@@ -217,7 +218,7 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
 impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
     type Error = TmuxError;
 
-    fn target_presentation_pane(
+    fn target_pty_pane(
         &self,
         socket_name: &str,
         target_session_name: &str,
@@ -430,6 +431,7 @@ enum AuthorityHostEvent {
     OutputChunk { stream_id: u64, bytes: Vec<u8> },
     OutputClosed { stream_id: u64 },
     PaneDied { pane_id: String },
+    BindingRefresh,
     RuntimeRefreshDue,
     TransportClosed,
 }
@@ -452,10 +454,20 @@ enum AuthorityOutputMessage {
         stream: &'static str,
         bytes: Vec<u8>,
     },
+    RawPtyOutput {
+        session_id: String,
+        target_id: String,
+        output_seq: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 struct AuthorityPaneBinding {
     pane: TmuxPaneId,
+}
+
+struct MirrorInputRoute {
+    writer: Arc<Mutex<Option<UnixStream>>>,
 }
 
 #[derive(Clone)]
@@ -605,10 +617,15 @@ where
         );
         let ingest_socket_path =
             authority_output_ingest_socket_path(&command.transport_socket_path, &command.target_id);
+        let input_socket_path =
+            authority_input_socket_path(&command.transport_socket_path, &command.target_id);
         let event_socket_path =
             authority_event_socket_path(&command.transport_socket_path, &command.target_id);
         let output_listener =
             bind_output_ingest_listener(&ingest_socket_path).map_err(remote_authority_error)?;
+        let input_route = MirrorInputRoute {
+            writer: Arc::new(Mutex::new(None)),
+        };
         let event_listener =
             bind_output_ingest_listener(&event_socket_path).map_err(remote_authority_error)?;
         let mut current_binding = None;
@@ -619,7 +636,9 @@ where
         let input_buffer = Arc::new(InputRingBuffer::new());
         let input_congested = Arc::new(AtomicBool::new(false));
         let current_input_pane = Arc::new(Mutex::new(
-            current_binding.as_ref().map(|binding| binding.pane.clone()),
+            self.gateway
+                .target_pty_pane(&command.socket_name, &command.target_session_name)
+                .ok(),
         ));
         let (output_tx, output_rx) =
             mpsc::sync_channel::<AuthorityOutputMessage>(OUTPUT_CHANNEL_BOUND);
@@ -640,12 +659,6 @@ where
         let sender_transport = transport.clone();
         let output_sender_thread = thread::spawn(move || {
             while let Ok(msg) = output_rx.recv() {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] target host: output sender sending (seq={})",
-                    match &msg {
-                        AuthorityOutputMessage::TargetOutput { output_seq, .. } => *output_seq,
-                    }
-                ));
                 let result = match msg {
                     AuthorityOutputMessage::TargetOutput {
                         session_id,
@@ -658,6 +671,17 @@ where
                         &target_id,
                         output_seq,
                         stream,
+                        bytes,
+                    ),
+                    AuthorityOutputMessage::RawPtyOutput {
+                        session_id,
+                        target_id,
+                        output_seq,
+                        bytes,
+                    } => sender_transport.send_raw_pty_output(
+                        &session_id,
+                        &target_id,
+                        output_seq,
                         bytes,
                     ),
                 };
@@ -675,6 +699,7 @@ where
             command.socket_name.clone(),
             input_buffer.clone(),
             current_input_pane.clone(),
+            input_route.writer.clone(),
             running.clone(),
         );
         let output_thread =
@@ -775,6 +800,8 @@ where
                         &command,
                         &pane,
                         &ingest_socket_path,
+                        &input_socket_path,
+                        &input_route,
                         stream_id,
                         &payload,
                     ) {
@@ -794,6 +821,7 @@ where
                     mirror_state = MirrorState::Active {
                         stream_id,
                         raw_pty_passthrough: payload.raw_pty_passthrough,
+                        payload: payload.clone(),
                     };
                     health.mirror_active.store(true, Ordering::Relaxed);
                     if let Err(error) = send_mirror_accepted_and_bootstrap(
@@ -816,8 +844,10 @@ where
                     }
                     *current_input_pane
                         .lock()
-                        .expect("current input pane mutex should not be poisoned") =
-                        current_binding.as_ref().map(|binding| binding.pane.clone());
+                        .expect("current input pane mutex should not be poisoned") = self
+                        .gateway
+                        .target_pty_pane(&command.socket_name, &command.target_session_name)
+                        .ok();
                     let bytes_len = payload.input_bytes.len();
                     let congested =
                         enqueue_input_bytes(&input_buffer, &payload.input_bytes, &input_congested);
@@ -829,10 +859,6 @@ where
                         }
                     }
                     health.record_input(bytes_len as u64);
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] target host: queued RawPtyInput ({} bytes)",
-                        bytes_len
-                    ));
                 }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::SyncRequest {
                     expected_seq,
@@ -850,8 +876,10 @@ where
                     };
                     *current_input_pane
                         .lock()
-                        .expect("current input pane mutex should not be poisoned") =
-                        current_binding.as_ref().map(|binding| binding.pane.clone());
+                        .expect("current input pane mutex should not be poisoned") = self
+                        .gateway
+                        .target_pty_pane(&command.socket_name, &command.target_session_name)
+                        .ok();
                     if let Err(error) = replay_output_frames_for_sync_request(
                         self,
                         &command,
@@ -909,25 +937,22 @@ where
                 AuthorityHostEvent::OutputChunk { stream_id, bytes } => {
                     health.record_event();
                     health.record_output();
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] target host: received OutputChunk stream={} ({} bytes)",
-                        stream_id,
-                        bytes.len()
-                    ));
-                    if !matches!(mirror_state, MirrorState::Active { stream_id: active_stream_id, .. } if active_stream_id == stream_id)
-                    {
-                        continue;
+                    let raw_pty_passthrough = match mirror_state {
+                        MirrorState::Active {
+                            stream_id: active_stream_id,
+                            raw_pty_passthrough,
+                            ..
+                        } if active_stream_id == stream_id => raw_pty_passthrough,
+                        _ => continue,
                     };
-                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
-                    {
-                        break Err(error);
+                    if !raw_pty_passthrough {
+                        if let Err(error) =
+                            emit_runtime_change_signal(self, &command, &runtime_signal)
+                        {
+                            break Err(error);
+                        }
                     }
                     output_seq += 1;
-                    // Always use TargetOutput: capture-pane produces plain text
-                    // that needs terminal-engine interpretation on the client.
-                    // RawPtyOutput carries raw PTY bytes streamed through
-                    // pipe-pane -O; TargetOutput carries full-screen captures
-                    // from the output pump.
                     output_cache
                         .lock()
                         .expect("output frame cache mutex should not be poisoned")
@@ -937,12 +962,21 @@ where
                             target_id: command.target_id.clone(),
                             bytes: bytes.clone(),
                         });
-                    let msg = AuthorityOutputMessage::TargetOutput {
-                        session_id: command.transport_session_id.clone(),
-                        target_id: command.target_id.clone(),
-                        output_seq,
-                        stream: "pty",
-                        bytes,
+                    let msg = if raw_pty_passthrough {
+                        AuthorityOutputMessage::RawPtyOutput {
+                            session_id: command.transport_session_id.clone(),
+                            target_id: command.target_id.clone(),
+                            output_seq,
+                            bytes,
+                        }
+                    } else {
+                        AuthorityOutputMessage::TargetOutput {
+                            session_id: command.transport_session_id.clone(),
+                            target_id: command.target_id.clone(),
+                            output_seq,
+                            stream: "pty",
+                            bytes,
+                        }
                     };
                     // Blocking send ensures output frames are never silently
                     // dropped. Backpressure propagates to the PTY capture
@@ -975,6 +1009,69 @@ where
                     ));
                     if current_pane.as_deref() == Some(pane_id.as_str()) {
                         break Ok(());
+                    }
+                }
+                AuthorityHostEvent::BindingRefresh => {
+                    health.record_event();
+                    let previous_pane = current_binding
+                        .as_ref()
+                        .map(|binding| binding.pane.as_str().to_string());
+                    let pane = match ensure_authority_pane_binding(
+                        self,
+                        &command,
+                        &mut current_binding,
+                        &event_socket_path,
+                    ) {
+                        Ok(pane) => pane,
+                        Err(error) => break Err(error),
+                    };
+                    *current_input_pane
+                        .lock()
+                        .expect("current input pane mutex should not be poisoned") =
+                        Some(pane.clone());
+                    if previous_pane.as_deref() == Some(pane.as_str()) {
+                        continue;
+                    }
+                    ERROR_LOG.log(format!(
+                        "[diag-authority-pane] refresh rebound target={} session={} socket={} previous={:?} pane={}",
+                        command.target_id,
+                        command.target_session_name,
+                        command.socket_name,
+                        previous_pane,
+                        pane.as_str()
+                    ));
+                    if let MirrorState::Active {
+                        raw_pty_passthrough,
+                        ref payload,
+                        ..
+                    } = mirror_state
+                    {
+                        next_stream_id = next_stream_id.saturating_add(1);
+                        let stream_id = next_stream_id;
+                        let payload = payload.clone();
+                        if let Err(error) = activate_mirror(
+                            self,
+                            &command,
+                            &pane,
+                            &ingest_socket_path,
+                            &input_socket_path,
+                            &input_route,
+                            stream_id,
+                            &payload,
+                        ) {
+                            break Err(error);
+                        }
+                        mirror_state = MirrorState::Active {
+                            stream_id,
+                            raw_pty_passthrough,
+                            payload: payload.clone(),
+                        };
+                        health.mirror_active.store(true, Ordering::Relaxed);
+                        if let Err(error) = send_mirror_accepted_and_bootstrap(
+                            self, &command, &pane, &transport, &payload,
+                        ) {
+                            break Err(error);
+                        }
                     }
                 }
                 AuthorityHostEvent::RuntimeRefreshDue => {
@@ -1029,6 +1126,7 @@ where
         let _ = UnixStream::connect(&ingest_socket_path);
         let _ = UnixStream::connect(&event_socket_path);
         let _ = fs::remove_file(&ingest_socket_path);
+        let _ = fs::remove_file(&input_socket_path);
         let _ = fs::remove_file(&event_socket_path);
         let _ = self
             .publication_gateway
@@ -1071,7 +1169,7 @@ where
 {
     let pane = runtime
         .gateway
-        .target_presentation_pane(&command.socket_name, &command.target_session_name)
+        .target_pty_pane(&command.socket_name, &command.target_session_name)
         .map_err(remote_authority_error)?;
     if current_binding
         .as_ref()
@@ -1167,9 +1265,74 @@ impl RemoteAuthorityOutputPumpRuntime {
             "[diag-timing] output pump: starting, ingest={}, socket={}, stream={}",
             command.ingest_socket_path, command.socket_name, command.stream_id
         ));
+        let input_running = Arc::new(AtomicBool::new(true));
+        let input_thread = command
+            .input_socket_path
+            .as_ref()
+            .map(|path| spawn_input_pipe_writer(PathBuf::from(path), input_running.clone()));
         let ingest = command.ingest_socket_path.clone();
-        pump_stdin_to_ingest_socket(&ingest, command.stream_id).map_err(remote_authority_error)
+        let result =
+            pump_stdin_to_ingest_socket(&ingest, command.stream_id).map_err(remote_authority_error);
+        if let Some(thread) = input_thread {
+            input_running.store(false, Ordering::Relaxed);
+            if let Some(path) = command.input_socket_path.as_ref() {
+                let _ = UnixStream::connect(path);
+            }
+            let _ = thread.join();
+        }
+        result
     }
+}
+
+fn spawn_input_pipe_writer(
+    socket_path: PathBuf,
+    running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] input pipe: bind {} failed: {error}",
+                    socket_path.display()
+                ));
+                return;
+            }
+        };
+        ERROR_LOG.log(format!(
+            "[diag-timing] input pipe: listening at {}",
+            socket_path.display()
+        ));
+        while running.load(Ordering::Relaxed) {
+            let accepted = listener.accept();
+            let Ok((mut stream, _)) = accepted else {
+                break;
+            };
+            let mut stdout = io::stdout().lock();
+            let mut buffer = [0_u8; 4096];
+            while running.load(Ordering::Relaxed) {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if stdout
+                            .write_all(&buffer[..read])
+                            .and_then(|_| stdout.flush())
+                            .is_err()
+                        {
+                            let _ = fs::remove_file(&socket_path);
+                            return;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        let _ = fs::remove_file(&socket_path);
+    })
 }
 
 fn bind_output_ingest_listener(
@@ -1219,6 +1382,7 @@ fn spawn_input_drain_thread<G>(
     socket_name: String,
     input_buffer: Arc<InputRingBuffer>,
     current_pane: Arc<Mutex<Option<TmuxPaneId>>>,
+    input_writer: Arc<Mutex<Option<UnixStream>>>,
     running: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()>
 where
@@ -1247,6 +1411,9 @@ where
             if bytes.is_empty() {
                 continue;
             }
+            if write_input_pipe(&input_writer, &bytes) {
+                continue;
+            }
             let pane = current_pane
                 .lock()
                 .expect("current input pane mutex should not be poisoned")
@@ -1263,6 +1430,42 @@ where
             }
         }
     })
+}
+
+fn connect_input_route(input_socket_path: &Path) -> Result<UnixStream, io::Error> {
+    for _ in 0..100 {
+        match UnixStream::connect(input_socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "authority input socket did not become ready at {}",
+            input_socket_path.display()
+        ),
+    ))
+}
+
+fn write_input_pipe(input_writer: &Arc<Mutex<Option<UnixStream>>>, bytes: &[u8]) -> bool {
+    let mut guard = input_writer
+        .lock()
+        .expect("input route writer mutex should not be poisoned");
+    let Some(writer) = guard.as_mut() else {
+        return false;
+    };
+    if writer.write_all(bytes).and_then(|_| writer.flush()).is_ok() {
+        return true;
+    }
+    *guard = None;
+    false
 }
 
 fn replay_output_frames_for_sync_request<G, P>(
@@ -1407,6 +1610,12 @@ fn spawn_pane_event_thread(
                         continue;
                     }
                     let pane_id = pane_id.trim().to_string();
+                    if pane_id == "__refresh_binding" {
+                        if tx.send(AuthorityHostEvent::BindingRefresh).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     if pane_id.is_empty() {
                         continue;
                     }
@@ -1516,6 +1725,11 @@ pub fn authority_output_ingest_socket_path(
     std::env::temp_dir().join(format!("waitagent-authority-output-{hash}.sock"))
 }
 
+pub fn authority_input_socket_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
+    let hash = stable_socket_hash(&[transport_socket_path, target_id]);
+    std::env::temp_dir().join(format!("waitagent-authority-input-{hash}.sock"))
+}
+
 pub fn authority_event_socket_path(transport_socket_path: &str, target_id: &str) -> PathBuf {
     let hash = stable_socket_hash(&[transport_socket_path, target_id]);
     std::env::temp_dir().join(format!("waitagent-authority-event-{hash}.sock"))
@@ -1530,6 +1744,7 @@ pub fn authority_diag_path(transport_socket_path: &str, target_id: &str) -> Path
 fn remote_authority_output_pump_shell_command(
     executable: &str,
     ingest_socket_path: &Path,
+    input_socket_path: &Path,
     socket_name: &str,
     stream_id: u64,
 ) -> String {
@@ -1538,6 +1753,8 @@ fn remote_authority_output_pump_shell_command(
         shell_escape("__remote-authority-output-pump"),
         shell_escape("--ingest-socket-path"),
         shell_escape(&ingest_socket_path.display().to_string()),
+        shell_escape("--input-socket-path"),
+        shell_escape(&input_socket_path.display().to_string()),
         shell_escape("--socket-name"),
         shell_escape(socket_name),
         shell_escape("--stream-id"),
@@ -1607,6 +1824,8 @@ fn activate_mirror<G, P>(
     command: &RemoteAuthorityTargetHostCommand,
     pane: &TmuxPaneId,
     ingest_socket_path: &Path,
+    input_socket_path: &Path,
+    input_route: &MirrorInputRoute,
     stream_id: u64,
     payload: &crate::infra::remote_protocol::OpenMirrorRequestPayload,
 ) -> Result<(), LifecycleError>
@@ -1617,6 +1836,7 @@ where
     let pipe_command = remote_authority_output_pump_shell_command(
         runtime.current_executable.to_string_lossy().as_ref(),
         ingest_socket_path,
+        input_socket_path,
         &command.socket_name,
         stream_id,
     );
@@ -1631,7 +1851,24 @@ where
         .gateway
         .set_output_pipe_owned(&command.socket_name, pane, &owner, &pipe_command)
         .map_err(remote_authority_error)?;
+    spawn_input_route_connector(input_socket_path.to_path_buf(), input_route.writer.clone());
     Ok(())
+}
+
+fn spawn_input_route_connector(
+    input_socket_path: PathBuf,
+    input_writer: Arc<Mutex<Option<UnixStream>>>,
+) {
+    thread::spawn(move || match connect_input_route(&input_socket_path) {
+        Ok(stream) => {
+            *input_writer
+                .lock()
+                .expect("input route writer mutex should not be poisoned") = Some(stream);
+        }
+        Err(error) => ERROR_LOG.log(format!(
+            "[diag-timing] authority input pipe connect failed, using send-keys fallback: {error}"
+        )),
+    });
 }
 
 fn emit_bootstrap<G, P>(

@@ -18,7 +18,7 @@ use crate::infra::remote_protocol::{
     TargetPublicationAckPayload, TargetPublicationAckStatus,
 };
 use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, write_control_plane_envelope,
+    read_authority_transport_frame, write_control_plane_envelope, AuthorityTransportFrame,
 };
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
@@ -1451,11 +1451,38 @@ fn forward_host_output_to_session(
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
     while running.load(Ordering::Relaxed) {
-        let envelope = match read_control_plane_envelope(&mut host_reader) {
-            Ok(env) => env,
+        let envelope = match read_authority_transport_frame(&mut host_reader) {
+            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => envelope,
+            Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => ProtocolEnvelope {
+                protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
+                    .to_string(),
+                message_id: format!(
+                    "{}-raw-pty-output-{}",
+                    session_handle.node_id(),
+                    payload.output_seq
+                ),
+                message_type: "raw_pty_output",
+                timestamp: String::new(),
+                sender_id: session_handle.node_id().to_string(),
+                correlation_id: None,
+                session_id: Some(payload.session_id.clone()),
+                target_id: Some(payload.target_id.clone()),
+                attachment_id: None,
+                console_id: None,
+                payload: ControlPlanePayload::RawPtyOutput(payload),
+            },
+            Ok(other) => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] forward_host_output_to_session: unexpected authority frame {other:?}, exiting"
+                ));
+                return Err(remote_session_sync_error(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected authority frame {other:?}"),
+                )));
+            }
             Err(e) => {
                 ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output_to_session: read_control_plane_envelope failed: {e}, exiting"
+                    "[diag-timing] forward_host_output_to_session: read_authority_transport_frame failed: {e}, exiting"
                 ));
                 return Err(remote_session_sync_error(e));
             }
