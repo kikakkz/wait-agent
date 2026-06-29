@@ -1,7 +1,7 @@
 use crate::domain::agent_signal::{
-    AgentSignalEnvelope, AgentSignalHandlerFactory, BuiltinAgentSignalHandlerFactory,
+    AgentSignalEnvelope, AgentSignalHandlerFactory, AgentStateEffect,
+    BuiltinAgentSignalHandlerFactory,
 };
-use crate::domain::session_catalog::ManagedSessionTaskState;
 #[cfg(test)]
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceSessionRole};
 use crate::infra::error_log::ERROR_LOG;
@@ -123,7 +123,7 @@ impl AgentSignalRuntime {
         let update = handler
             .handle(&signal)
             .ok_or_else(|| format!("unsupported event `{}`", signal.event))?;
-        self.apply_state_update(&workspace, &signal, update.state)
+        self.apply_state_update(&workspace, &signal, update.effect)
             .map_err(|error| error.to_string())?;
         self.refresh(&signal);
         Ok(())
@@ -141,28 +141,42 @@ impl AgentSignalRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
         signal: &AgentSignalEnvelope,
-        state: ManagedSessionTaskState,
+        effect: AgentStateEffect,
     ) -> Result<(), crate::infra::tmux::TmuxError> {
-        self.backend.set_session_option(
-            workspace,
-            WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
-            &signal.agent,
-        )?;
-        self.backend.set_session_option(
-            workspace,
-            WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
-            &signal.pane,
-        )?;
-        self.backend.set_session_option(
-            workspace,
-            WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
-            state.as_str(),
-        )?;
-        self.backend.set_session_option(
-            workspace,
-            WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
-            &now_millis().to_string(),
-        )?;
+        match effect {
+            AgentStateEffect::Set(state) => {
+                self.backend.set_session_option(
+                    workspace,
+                    WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+                    &signal.agent,
+                )?;
+                self.backend.set_session_option(
+                    workspace,
+                    WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
+                    &signal.pane,
+                )?;
+                self.backend.set_session_option(
+                    workspace,
+                    WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+                    state.as_str(),
+                )?;
+                self.backend.set_session_option(
+                    workspace,
+                    WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
+                    &now_millis().to_string(),
+                )?;
+            }
+            AgentStateEffect::Clear => {
+                self.backend
+                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)?;
+                self.backend
+                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)?;
+                self.backend
+                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)?;
+                self.backend
+                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION)?;
+            }
+        }
         Ok(())
     }
 
@@ -236,6 +250,7 @@ fn agent_signal_error(error: io::Error) -> LifecycleError {
 mod tests {
     use super::*;
     use crate::cli::RemoteNetworkConfig;
+    use crate::domain::session_catalog::ManagedSessionTaskState;
     use crate::infra::tmux::{TmuxGateway, TmuxSessionGateway};
     use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
     use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
@@ -304,6 +319,51 @@ mod tests {
 
         assert_eq!(error, "pane mismatch");
         assert_eq!(state, None);
+    }
+
+    #[test]
+    fn kimi_session_end_clears_agent_signal_metadata() {
+        let fixture = SignalRuntimeFixture::new("agent-signal-kimi-session-end");
+        let mut running = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
+        running.agent = "kimi".to_string();
+        fixture
+            .runtime
+            .apply_signal(running)
+            .expect("kimi running signal should apply");
+
+        let mut ended = fixture.signal("SessionEnd", fixture.content_pane.as_str());
+        ended.agent = "kimi".to_string();
+        fixture
+            .runtime
+            .apply_signal(ended)
+            .expect("kimi session end should clear metadata");
+
+        let agent = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
+            .expect("agent option should read");
+        let pane = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .expect("pane option should read");
+        let state = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .expect("state option should read");
+        let updated_at = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION)
+            .expect("updated_at option should read");
+        let token = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION)
+            .expect("token option should read");
+
+        assert_eq!(agent, None);
+        assert_eq!(pane, None);
+        assert_eq!(state, None);
+        assert_eq!(updated_at, None);
+        assert_eq!(token.as_deref(), Some(fixture.token.as_str()));
     }
 
     struct SignalRuntimeFixture {

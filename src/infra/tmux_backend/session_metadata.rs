@@ -236,6 +236,10 @@ fn apply_running_override(
     }
 }
 
+fn agent_signal_matches_command(agent: &str, command_name: &str) -> bool {
+    agent == command_name || (agent == "kimi" && command_name == "claude")
+}
+
 #[cfg(test)]
 fn clear_temporal_input_hysteresis_cache() {
     PREVIOUS_PANE_SIGNATURE.with(|cache| cache.borrow_mut().clear());
@@ -381,7 +385,7 @@ impl EmbeddedTmuxBackend {
             .show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
             .ok()
             .flatten()?;
-        if agent != command_name {
+        if !agent_signal_matches_command(&agent, command_name) {
             return None;
         }
         let signal_pane = self
@@ -623,6 +627,15 @@ mod tests {
     }
 
     #[test]
+    fn agent_signal_matches_exact_agent_or_kimi_wrapped_claude() {
+        assert!(agent_signal_matches_command("codex", "codex"));
+        assert!(agent_signal_matches_command("kimi", "kimi"));
+        assert!(agent_signal_matches_command("kimi", "claude"));
+        assert!(!agent_signal_matches_command("claude", "kimi"));
+        assert!(!agent_signal_matches_command("codex", "claude"));
+    }
+
+    #[test]
     fn codex_input_skips_temporal_running_override() {
         clear_temporal_input_hysteresis_cache();
         let session_key = "test:codex-input";
@@ -818,7 +831,7 @@ mod tests {
         assert!(stripped.contains("› Write tests for @filename"));
         assert_eq!(
             registry.detect_command_name("node", None, &stripped),
-            "codex"
+            "node"
         );
         assert_eq!(
             registry.infer_task_state(Some("codex"), &stripped),

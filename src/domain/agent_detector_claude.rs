@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::{AgentDetector, SHELL_NAMES};
+use crate::domain::agent_detector::AgentDetector;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 pub struct ClaudeDetector;
@@ -36,31 +36,6 @@ impl AgentDetector for ClaudeDetector {
             if is_claude {
                 return Some("claude");
             }
-        }
-        None
-    }
-
-    fn detect_from_pane_text(
-        &self,
-        current_command: &str,
-        pane_text: &str,
-    ) -> Option<&'static str> {
-        // Even without "claude" text in the pane (scrolled away in long
-        // sessions), the ❯ prompt character identifies a Claude Code TUI
-        // specifically (Codex uses ›, shells use $/%/#/❯). Guard against
-        // shell false positives — ShellDetector handles those.
-        if pane_text.contains('❯') && !SHELL_NAMES.contains(&current_command) {
-            return Some("claude");
-        }
-        let lowered = pane_text.to_ascii_lowercase();
-        if !lowered.contains("claude") {
-            return None;
-        }
-        if lowered.contains("type your message")
-            || pane_text.contains('❯')
-            || pane_text.contains('›')
-        {
-            return Some("claude");
         }
         None
     }

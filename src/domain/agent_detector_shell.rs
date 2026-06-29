@@ -17,14 +17,6 @@ impl AgentDetector for ShellDetector {
         None
     }
 
-    fn detect_from_pane_text(
-        &self,
-        _current_command: &str,
-        _pane_text: &str,
-    ) -> Option<&'static str> {
-        None
-    }
-
     fn infer_task_state(
         &self,
         command_name: Option<&str>,

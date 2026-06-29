@@ -143,8 +143,12 @@ int main(int argc, char **argv) {
   const char *session = getenv("WAITAGENT_TARGET_SESSION_NAME");
   const char *pane = getenv("WAITAGENT_PANE_ID");
   const char *token = getenv("WAITAGENT_AGENT_SIGNAL_TOKEN");
+  const char *agent = getenv("WAITAGENT_AGENT_NAME");
+  if (!agent || !*agent) {
+    agent = "codex";
+  }
 
-  if (!event || !*event || !signal_socket || !*signal_socket || !socket_name ||
+  if (!event || !*event || !agent || !*agent || !signal_socket || !*signal_socket || !socket_name ||
       !*socket_name || !session || !*session || !pane || !*pane || !token ||
       !*token) {
     return 0;
@@ -156,7 +160,9 @@ int main(int argc, char **argv) {
   }
 
   struct buffer message = {0};
-  if (buf_append(&message, "{\"version\":1,\"agent\":\"codex\",\"event\":") !=
+  if (buf_append(&message, "{\"version\":1,\"agent\":") != 0 ||
+      json_append_string(&message, agent) != 0 ||
+      buf_append(&message, ",\"event\":") !=
       0 ||
       json_append_string(&message, event) != 0 ||
       buf_append(&message, ",\"socket\":") != 0 ||

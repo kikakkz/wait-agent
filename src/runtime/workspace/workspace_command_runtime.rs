@@ -1,4 +1,6 @@
+use crate::application::claude_hooks_config_service::ClaudeHooksConfigService;
 use crate::application::codex_hooks_config_service::CodexHooksConfigService;
+use crate::application::kimi_hooks_config_service::KimiHooksConfigService;
 use crate::application::remote_session_creation_service::{
     GrpcRemoteSessionCreationTransport, RemoteSessionCreationRequest, RemoteSessionCreationService,
 };
@@ -696,9 +698,19 @@ impl WorkspaceCommandRuntime {
 
     fn ensure_agent_signal_runtime(&self, socket_name: &str) -> Result<(), LifecycleError> {
         let sender_path = extract_agent_signal_sender()?;
-        if let Err(error) = CodexHooksConfigService::from_env(sender_path).reconcile() {
+        if let Err(error) = CodexHooksConfigService::from_env(sender_path.clone()).reconcile() {
             ERROR_LOG.log(format!(
                 "[agent-signal] Codex hook reconcile failed: {error}"
+            ));
+        }
+        if let Err(error) = ClaudeHooksConfigService::from_env(sender_path.clone()).reconcile() {
+            ERROR_LOG.log(format!(
+                "[agent-signal] Claude hook reconcile failed: {error}"
+            ));
+        }
+        if let Err(error) = KimiHooksConfigService::from_env(sender_path).reconcile() {
+            ERROR_LOG.log(format!(
+                "[agent-signal] Kimi hook reconcile failed: {error}"
             ));
         }
         let runtime = AgentSignalRuntime::new(

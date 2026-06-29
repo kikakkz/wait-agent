@@ -281,6 +281,24 @@ impl EmbeddedTmuxBackend {
         }
     }
 
+    pub(crate) fn clear_session_option(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        option_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(
+            workspace,
+            &[
+                "set-option".to_string(),
+                "-qu".to_string(),
+                "-t".to_string(),
+                exact_session_target(workspace.session_name.as_str()),
+                option_name.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn show_pane_option_on_socket(
         &self,
         socket_name: &TmuxSocketName,

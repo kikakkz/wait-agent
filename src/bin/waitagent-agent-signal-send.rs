@@ -17,6 +17,10 @@ fn run() -> io::Result<()> {
     let session_name = env::var("WAITAGENT_TARGET_SESSION_NAME").unwrap_or_default();
     let pane_id = env::var("WAITAGENT_PANE_ID").unwrap_or_default();
     let token = env::var("WAITAGENT_AGENT_SIGNAL_TOKEN").unwrap_or_default();
+    let mut agent = env::var("WAITAGENT_AGENT_NAME").unwrap_or_else(|_| "codex".to_string());
+    if agent.is_empty() {
+        agent = "codex".to_string();
+    }
 
     if event.is_empty()
         || signal_socket.is_empty()
@@ -36,7 +40,8 @@ fn run() -> io::Result<()> {
         payload
     };
     let message = format!(
-        "{{\"version\":1,\"agent\":\"codex\",\"event\":{},\"socket\":{},\"session\":{},\"pane\":{},\"token\":{},\"payload\":{}}}",
+        "{{\"version\":1,\"agent\":{},\"event\":{},\"socket\":{},\"session\":{},\"pane\":{},\"token\":{},\"payload\":{}}}",
+        json_string(&agent),
         json_string(&event),
         json_string(&socket_name),
         json_string(&session_name),

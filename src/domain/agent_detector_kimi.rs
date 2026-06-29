@@ -30,22 +30,6 @@ impl AgentDetector for KimiDetector {
         None
     }
 
-    fn detect_from_pane_text(
-        &self,
-        _current_command: &str,
-        pane_text: &str,
-    ) -> Option<&'static str> {
-        let lowered = pane_text.to_ascii_lowercase();
-        if lowered.contains("welcome to kimi code")
-            || lowered.contains("kimi code")
-            || lowered.contains("k2.7 code")
-            || lowered.contains("send /help for help information")
-        {
-            return Some("kimi");
-        }
-        None
-    }
-
     fn infer_task_state(
         &self,
         command_name: Option<&str>,

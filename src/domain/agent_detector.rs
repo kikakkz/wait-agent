@@ -19,11 +19,6 @@ pub trait AgentDetector: Send + Sync {
         argv: Option<&[String]>,
     ) -> Option<&'static str>;
 
-    /// Agent-specific pane-text detection (used when the shell is a known shell).
-    /// Returns Some(agent_name) if the pane text reveals this agent.
-    fn detect_from_pane_text(&self, current_command: &str, pane_text: &str)
-        -> Option<&'static str>;
-
     /// Infer the agent-specific task state from command name and pane text.
     /// Returns None if this detector does not handle the given context.
     fn infer_task_state(
@@ -82,41 +77,20 @@ impl DetectorRegistry {
         None
     }
 
-    /// Runs pane-text detection across all registered detectors.
-    /// Highest-priority (first) match wins.
-    pub fn detect_from_pane_text(
-        &self,
-        current_command: &str,
-        pane_text: &str,
-    ) -> Option<&'static str> {
-        for detector in &self.detectors {
-            if let Some(name) = detector.detect_from_pane_text(current_command, pane_text) {
-                return Some(name);
-            }
-        }
-        None
-    }
-
-    /// Full detection: process first, then pane text, then normalize.
+    /// Full detection: process identity only, then normalize.
     /// Returns the normalized command name.
     pub fn detect_command_name(
         &self,
         current_command: &str,
         argv: Option<&[String]>,
-        pane_text: &str,
+        _pane_text: &str,
     ) -> String {
         // 1. Process-level detection
         if let Some(name) = self.detect_from_process(current_command, argv) {
             return name.to_string();
         }
-        // 2. Pane-text detection — try for all commands, not just shells.
-        //    This handles cases where an agent (codex, claude) runs under a
-        //    non-shell process like "node" and argv-based detection failed
-        //    (e.g. /proc raced), so we fall back to reading the pane text.
-        if let Some(name) = self.detect_from_pane_text(current_command, pane_text) {
-            return name.to_string();
-        }
-        // 3. Fall back to the original command name
+        // 2. Fall back to the foreground command name. Pane scrollback is
+        // historical output and must not define the current session identity.
         current_command.to_string()
     }
 

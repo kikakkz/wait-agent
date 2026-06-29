@@ -11,6 +11,7 @@ fn main() {
 }
 
 fn compile_agent_signal_sender() {
+    println!("cargo:rerun-if-changed=src/runtime/agent_signal_sender_bundle.c");
     let out_dir =
         std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR should be set by cargo"));
     let object = out_dir.join("waitagent-agent-signal-send");

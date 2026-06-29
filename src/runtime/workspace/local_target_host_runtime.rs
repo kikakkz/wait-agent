@@ -438,6 +438,18 @@ impl ShellRuntimeHooks {
         .map_err(|error| {
             LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
         })?;
+        file.write_all(
+            b"__waitagent_agent_exec() { local __waitagent_agent_name=\"$1\"; shift; WAITAGENT_AGENT_NAME=\"$__waitagent_agent_name\" command \"$__waitagent_agent_name\" \"$@\"; }\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
+        file.write_all(
+            b"codex() { __waitagent_agent_exec codex \"$@\"; }\nclaude() { __waitagent_agent_exec claude \"$@\"; }\nkimi() { __waitagent_agent_exec kimi \"$@\"; }\n",
+        )
+        .map_err(|error| {
+            LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
+        })?;
         writeln!(
             file,
             "__waitagent_signal_runtime() {{ if [ -n \"${{__WAITAGENT_RUNTIME_SIGNALING:-}}\" ]; then return 0; fi; local __waitagent_mode=\"${{1:-prompt}}\"; __WAITAGENT_RUNTIME_EVENT_SEQ=$(( ${{__WAITAGENT_RUNTIME_EVENT_SEQ:-0}} + 1 )); local __waitagent_seq=$__WAITAGENT_RUNTIME_EVENT_SEQ; __WAITAGENT_RUNTIME_SIGNALING=1; if [ \"$__waitagent_mode\" = running ]; then ({} --running --event-seq \"$__waitagent_seq\") >/dev/null 2>&1 & disown; else ({} --event-seq \"$__waitagent_seq\") >/dev/null 2>&1 & disown; fi; __WAITAGENT_RUNTIME_SIGNALING=; }}",
@@ -574,6 +586,7 @@ pub(crate) fn runtime_event_shell_program(
                 "WAITAGENT_AGENT_SIGNAL_TOKEN".to_string(),
                 agent_signal_env.token.clone(),
             ),
+            ("WAITAGENT_AGENT_NAME".to_string(), String::new()),
         ]);
     if let Some(workspace_dir) = workspace_dir {
         program = program.with_start_directory(workspace_dir);
@@ -642,6 +655,7 @@ mod tests {
         assert!(content.contains("__waitagent_prompt_command"));
         assert!(content.contains("WAITAGENT_SIGNAL_SOCKET"));
         assert!(content.contains("WAITAGENT_PANE_ID=\"${TMUX_PANE:-}\""));
+        assert!(content.contains("kimi() { __waitagent_agent_exec kimi"));
         assert!(content.contains("trap '__waitagent_preexec \"$BASH_COMMAND\"' DEBUG"));
         assert!(content.contains("PROMPT_COMMAND"));
     }

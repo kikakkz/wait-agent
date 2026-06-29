@@ -1,6 +1,8 @@
 pub mod chrome_projection_service;
+pub mod claude_hooks_config_service;
 pub mod codex_hooks_config_service;
 pub mod control_service;
+pub mod kimi_hooks_config_service;
 pub mod layout_service;
 pub mod local_runtime_event_service;
 pub mod remote_control_plane_service;

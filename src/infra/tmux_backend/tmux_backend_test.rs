@@ -47,17 +47,17 @@ mod tests {
     }
 
     #[test]
-    fn detector_registry_detects_codex_from_pane_text() {
+    fn detector_registry_does_not_detect_identity_from_pane_text() {
         let registry = DetectorRegistry::default();
 
         assert_eq!(
             registry.detect_command_name("bash", None, "skip codex"),
-            "codex"
+            "bash"
         );
 
         assert_eq!(
             registry.detect_command_name("bash", None, "Type your message here"),
-            "codex"
+            "bash"
         );
 
         let stale_codex_then_shell = "│ >_ OpenAI Codex (v0.142.0) │\n\
@@ -70,13 +70,13 @@ mod tests {
     }
 
     #[test]
-    fn detector_registry_detects_kimi_from_process_and_pane_text() {
+    fn detector_registry_detects_kimi_from_process_only() {
         let registry = DetectorRegistry::default();
 
         assert_eq!(registry.detect_command_name("kimi", None, ""), "kimi");
         assert_eq!(
             registry.detect_command_name("bash", None, "Welcome to Kimi Code!"),
-            "kimi"
+            "bash"
         );
     }
 
