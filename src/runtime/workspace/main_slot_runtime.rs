@@ -686,8 +686,25 @@ impl MainSlotRuntime {
             return Ok(());
         }
 
+        let t_active = Instant::now();
+        let active_target = self.active_target(&workspace)?;
+        let switching_from_remote =
+            self.active_target_is_remote(workspace.socket_name.as_str(), active_target.as_deref())?;
+        let previous_remote_main_pane =
+            self.active_remote_session_pane(&workspace, active_target.as_deref())?;
         let t_workspace_main = Instant::now();
-        let mut workspace_main_pane = self.workspace_main_pane(&workspace)?;
+        let mut workspace_main_pane = if switching_from_remote {
+            self.configured_recoverable_main_pane(&workspace)?
+                .or_else(|| previous_remote_main_pane.clone())
+                .filter(|pane| {
+                    self.pane_is_recoverable_content_pane(&workspace, pane.as_str())
+                        .unwrap_or(false)
+                })
+                .map(Ok)
+                .unwrap_or_else(|| self.workspace_main_pane(&workspace))?
+        } else {
+            self.workspace_main_pane(&workspace)?
+        };
         ERROR_LOG.log(format!(
             "[diag-newhost] activate_local workspace_main_pane socket={} session={} pane={} elapsed={:?} total={:?}",
             current_workspace.socket_name,
@@ -696,12 +713,6 @@ impl MainSlotRuntime {
             t_workspace_main.elapsed(),
             t_total.elapsed()
         ));
-        let t_active = Instant::now();
-        let active_target = self.active_target(&workspace)?;
-        let switching_from_remote =
-            self.active_target_is_remote(workspace.socket_name.as_str(), active_target.as_deref())?;
-        let previous_remote_main_pane =
-            self.active_remote_session_pane(&workspace, active_target.as_deref())?;
         ERROR_LOG.log(format!(
             "[diag-newhost] activate_local previous_state socket={} session={} active={:?} switching_from_remote={} previous_remote={:?} elapsed={:?} total={:?}",
             current_workspace.socket_name,
@@ -712,19 +723,6 @@ impl MainSlotRuntime {
             t_active.elapsed(),
             t_total.elapsed()
         ));
-        if switching_from_remote && !self.pane_is_live(&workspace, workspace_main_pane.as_str()) {
-            workspace_main_pane = previous_remote_main_pane
-                .as_ref()
-                .filter(|pane| self.pane_is_live(&workspace, pane.as_str()))
-                .cloned()
-                .or_else(|| self.infer_target_main_pane(&workspace).map(TmuxPaneId::new))
-                .ok_or_else(|| {
-                    LifecycleError::Protocol(format!(
-                        "workspace `{}` has no live recovery pane after remote exit",
-                        workspace.session_name.as_str()
-                    ))
-                })?;
-        }
         let t_transition = Instant::now();
         self.begin_main_pane_transition(&workspace, &workspace_main_pane)?;
         ERROR_LOG.log(format!(
@@ -1063,37 +1061,53 @@ impl MainSlotRuntime {
                     target.address.authority_id(),
                 ));
                 if is_remote {
-                    self.activate_remote_target_in_workspace(current_workspace, &target)?;
+                    let reused_recovery_pane = self.recover_remote_target_after_remote_exit(
+                        current_workspace,
+                        workspace,
+                        recovery_pane,
+                        &target,
+                    )?;
+                    if !reused_recovery_pane {
+                        self.cleanup_exited_remote_session_pane(
+                            workspace,
+                            active_target.as_deref().unwrap_or_default(),
+                            Some(recovery_pane),
+                        )?;
+                    }
                 } else {
-                    let recovery_pane = self.resolve_recovery_pane(workspace, recovery_pane)?;
                     self.backend
                         .respawn_pane(
                             workspace,
-                            &recovery_pane,
+                            recovery_pane,
                             &workspace_shell_program(&current_workspace.workspace_dir),
                         )
                         .map_err(main_slot_error)?;
-                    self.clear_remote_recovery_pane_state(workspace, &recovery_pane);
-                    self.activate_target_in_workspace(current_workspace, &target)?;
+                    self.clear_remote_recovery_pane_state(workspace, recovery_pane);
+                    self.set_active_target(workspace, None)?;
+                    self.recover_local_target_after_remote_exit(
+                        current_workspace,
+                        workspace,
+                        recovery_pane,
+                        &target,
+                    )?;
                 }
             }
             None => {
                 ERROR_LOG.log(
                     "[diag-bug] fallback: no next target, respawning with host only".to_string(),
                 );
-                let recovery_pane = self.resolve_recovery_pane(workspace, recovery_pane)?;
                 self.backend
                     .respawn_pane(
                         workspace,
-                        &recovery_pane,
+                        recovery_pane,
                         &workspace_shell_program(&current_workspace.workspace_dir),
                     )
                     .map_err(main_slot_error)?;
-                self.clear_remote_recovery_pane_state(workspace, &recovery_pane);
+                self.clear_remote_recovery_pane_state(workspace, recovery_pane);
                 self.restore_workspace_main_pane(
                     current_workspace,
                     workspace,
-                    &recovery_pane,
+                    recovery_pane,
                     None,
                 )?;
             }
@@ -1124,6 +1138,7 @@ impl MainSlotRuntime {
             t_lock.elapsed(),
             t_total.elapsed()
         ));
+        let command_pane = self.remote_exit_pane_from_command(&workspace, &command)?;
         let t_remove = Instant::now();
         self.remove_remote_target_runtime_record(&command.socket_name, &command.target)?;
         ERROR_LOG.log_exit_latency(format!(
@@ -1143,10 +1158,11 @@ impl MainSlotRuntime {
         ));
         if active_target.as_deref() != Some(command.target.as_str()) {
             let inactive_pane = self.read_session_pane(&workspace, &command.target)?;
+            let cleanup_pane = command_pane.clone().or(inactive_pane);
             self.cleanup_exited_remote_session_pane(
                 &workspace,
                 &command.target,
-                inactive_pane.as_ref(),
+                cleanup_pane.as_ref(),
             )?;
             ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] workspace_remote_exit_skip_inactive target={} total={:?} stage=workspace_exit",
@@ -1155,8 +1171,16 @@ impl MainSlotRuntime {
             ));
             return Ok(());
         }
+        let Some(exiting_pane) = command_pane else {
+            ERROR_LOG.log_exit_latency(format!(
+                "[diag-exit] workspace_remote_exit_skip_active_without_pane target={} total={:?} stage=workspace_exit",
+                command.target,
+                t_total.elapsed()
+            ));
+            return Ok(());
+        };
         let t_session_pane = Instant::now();
-        let session_pane = self.read_session_pane(&workspace, &command.target)?;
+        let session_pane = Some(exiting_pane.clone());
         ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] workspace_remote_exit_session_pane target={} pane={:?} elapsed={:?} total={:?} stage=workspace_exit",
             command.target,
@@ -1179,12 +1203,19 @@ impl MainSlotRuntime {
             t_transition.elapsed(),
             t_total.elapsed()
         ));
-        let cleanup_pane = session_pane.clone();
+        self.set_active_target(&workspace, None)?;
+        self.clear_session_pane(&workspace, &command.target)?;
+        self.begin_main_pane_transition(&workspace, &exiting_pane)?;
 
-        match transition {
+        let cleanup_exiting_pane = match transition {
             RemoteTargetExitTransition::ActivateRemote(target) => {
                 let t_activate = Instant::now();
-                self.activate_remote_target_in_workspace(&current_workspace, &target)?;
+                let reused_exiting_pane = self.recover_remote_target_after_remote_exit(
+                    &current_workspace,
+                    &workspace,
+                    &exiting_pane,
+                    &target,
+                )?;
                 ERROR_LOG.log_exit_latency(format!(
                     "[diag-exit] workspace_remote_exit_activate_remote target={} next={} elapsed={:?} total={:?} stage=workspace_exit",
                     command.target,
@@ -1192,10 +1223,16 @@ impl MainSlotRuntime {
                     t_activate.elapsed(),
                     t_total.elapsed()
                 ));
+                !reused_exiting_pane
             }
             RemoteTargetExitTransition::ActivateLocal(target) => {
                 let t_activate = Instant::now();
-                self.activate_target_in_workspace(&current_workspace, &target)?;
+                self.recover_local_target_after_remote_exit(
+                    &current_workspace,
+                    &workspace,
+                    &exiting_pane,
+                    &target,
+                )?;
                 ERROR_LOG.log_exit_latency(format!(
                     "[diag-exit] workspace_remote_exit_activate_local target={} next={} elapsed={:?} total={:?} stage=workspace_exit",
                     command.target,
@@ -1203,13 +1240,14 @@ impl MainSlotRuntime {
                     t_activate.elapsed(),
                     t_total.elapsed()
                 ));
+                true
             }
             RemoteTargetExitTransition::CloseWorkspace => {
                 let t_close = Instant::now();
                 self.cleanup_exited_remote_session_pane(
                     &workspace,
                     &command.target,
-                    cleanup_pane.as_ref(),
+                    Some(&exiting_pane),
                 )?;
                 self.backend
                     .kill_server(&TmuxSocketName::new(workspace.socket_name.as_str()))
@@ -1223,14 +1261,18 @@ impl MainSlotRuntime {
                 ));
                 return Ok(());
             }
-        }
+        };
 
         let t_cleanup = Instant::now();
-        self.cleanup_exited_remote_session_pane(
-            &workspace,
-            &command.target,
-            cleanup_pane.as_ref(),
-        )?;
+        if cleanup_exiting_pane {
+            self.cleanup_exited_remote_session_pane(
+                &workspace,
+                &command.target,
+                Some(&exiting_pane),
+            )?;
+        } else {
+            self.clear_session_pane(&workspace, &command.target)?;
+        }
         ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] workspace_remote_exit_cleanup target={} elapsed={:?} total={:?} stage=workspace_exit",
             command.target,
@@ -1442,7 +1484,25 @@ impl MainSlotRuntime {
             self.backend
                 .set_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION, "")
                 .map_err(main_slot_error)?;
-            return self.activate_remote_target_in_workspace(current_workspace, target);
+            let pane = self.create_remote_session_pane_from_available_anchor(
+                current_workspace,
+                workspace,
+                recovery_pane,
+                target,
+            )?;
+            self.set_content_pane_owner(
+                workspace,
+                &pane,
+                target.session_instance_id(),
+                target.address.qualified_target().as_str(),
+            )?;
+            self.set_session_pane(workspace, target.address.qualified_target().as_str(), &pane)?;
+            return self.restore_workspace_main_pane(
+                current_workspace,
+                workspace,
+                &pane,
+                Some(target.address.qualified_target().as_str()),
+            );
         }
         self.ensure_pane_in_workspace_window(workspace, recovery_pane)?;
         self.assign_remote_target_to_content_pane(
@@ -1450,6 +1510,74 @@ impl MainSlotRuntime {
             workspace,
             recovery_pane,
             target,
+        )
+    }
+
+    fn recover_remote_target_after_remote_exit(
+        &self,
+        current_workspace: &CurrentWorkspace,
+        workspace: &TmuxWorkspaceHandle,
+        exiting_pane: &TmuxPaneId,
+        target: &ManagedSessionRecord,
+    ) -> Result<bool, LifecycleError> {
+        let qualified_target = target.address.qualified_target();
+        if let Some(existing_pane) = self.find_session_pane(workspace, &qualified_target)? {
+            if self.prepare_existing_remote_session_pane(workspace, &existing_pane)? {
+                self.ensure_pane_in_workspace_window(workspace, &existing_pane)?;
+                if existing_pane != *exiting_pane {
+                    self.backend
+                        .swap_panes(workspace, &existing_pane, exiting_pane)
+                        .map_err(main_slot_error)?;
+                }
+                return self
+                    .restore_workspace_main_pane(
+                        current_workspace,
+                        workspace,
+                        &existing_pane,
+                        Some(qualified_target.as_str()),
+                    )
+                    .map(|_| existing_pane == *exiting_pane);
+            }
+            self.clear_session_pane(workspace, &qualified_target)?;
+        }
+
+        self.recover_remote_target_in_workspace(current_workspace, workspace, exiting_pane, target)
+            .map(|_| true)
+    }
+
+    fn recover_local_target_after_remote_exit(
+        &self,
+        current_workspace: &CurrentWorkspace,
+        workspace: &TmuxWorkspaceHandle,
+        exiting_pane: &TmuxPaneId,
+        target: &ManagedSessionRecord,
+    ) -> Result<(), LifecycleError> {
+        if target.session_role != Some(WorkspaceSessionRole::TargetHost) {
+            return Err(LifecycleError::Protocol(format!(
+                "target `{}` is not a target host session",
+                target.address.qualified_target()
+            )));
+        }
+
+        let target_main_pane = self.target_main_pane(target)?;
+        if target_main_pane != *exiting_pane {
+            self.backend
+                .swap_panes(workspace, &target_main_pane, exiting_pane)
+                .map_err(main_slot_error)?;
+        }
+        self.set_local_target_pane_identity(
+            workspace,
+            &target_main_pane,
+            target.address.session_id(),
+        )?;
+        let target_workspace =
+            self.target_workspace_on_socket(workspace, target.address.session_id());
+        self.set_workspace_main_pane_if_session_exists(&target_workspace, &target_main_pane)?;
+        self.restore_workspace_main_pane(
+            current_workspace,
+            workspace,
+            &target_main_pane,
+            Some(target.address.qualified_target().as_str()),
         )
     }
 
@@ -1561,17 +1689,6 @@ impl MainSlotRuntime {
             pane,
             Some(target.address.qualified_target().as_str()),
         )
-    }
-
-    fn resolve_recovery_pane(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        recovery_pane: &TmuxPaneId,
-    ) -> Result<TmuxPaneId, LifecycleError> {
-        if self.pane_is_recoverable_content_pane(workspace, recovery_pane.as_str())? {
-            return Ok(recovery_pane.clone());
-        }
-        self.workspace_main_pane(workspace)
     }
 
     fn target_main_pane(
@@ -1813,13 +1930,10 @@ impl MainSlotRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<TmuxPaneId, LifecycleError> {
-        if let Some(configured_pane) = self
-            .backend
-            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
-            .map_err(main_slot_error)?
-            .filter(|pane| self.pane_is_live_fast(workspace, pane))
-        {
-            return Ok(TmuxPaneId::new(configured_pane));
+        if let Some(configured_pane) = self.configured_recoverable_main_pane(workspace)? {
+            if self.pane_is_live_on_socket(workspace, configured_pane.as_str())? {
+                return Ok(configured_pane);
+            }
         }
 
         let pane = self.infer_target_main_pane(workspace).ok_or_else(|| {
@@ -1831,6 +1945,23 @@ impl MainSlotRuntime {
         let pane = TmuxPaneId::new(pane);
         self.set_workspace_main_pane(workspace, &pane)?;
         Ok(pane)
+    }
+
+    fn configured_recoverable_main_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let Some(configured_pane) = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(main_slot_error)?
+        else {
+            return Ok(None);
+        };
+        if self.pane_is_recoverable_content_pane(workspace, &configured_pane)? {
+            return Ok(Some(TmuxPaneId::new(configured_pane)));
+        }
+        Ok(None)
     }
 
     fn active_target(
@@ -2214,6 +2345,26 @@ impl MainSlotRuntime {
         self.find_content_pane_by_session_instance(workspace, session_instance_id)
     }
 
+    fn remote_exit_pane_from_command(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        command: &RemoteTargetExitedCommand,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let Some(pane_id) = command.pane_id.as_deref().filter(|pane| !pane.is_empty()) else {
+            return Ok(None);
+        };
+        if !self.pane_exists_on_socket(workspace, pane_id)? {
+            return Ok(None);
+        }
+        if self.pane_is_chrome(workspace, pane_id)? {
+            return Err(LifecycleError::Protocol(format!(
+                "refusing to handle remote target `{}` exit from chrome pane `{}`",
+                command.target, pane_id
+            )));
+        }
+        Ok(Some(TmuxPaneId::new(pane_id)))
+    }
+
     fn find_session_pane(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -2316,6 +2467,17 @@ impl MainSlotRuntime {
         Ok(pane)
     }
 
+    fn create_remote_session_pane_from_available_anchor(
+        &self,
+        current_workspace: &CurrentWorkspace,
+        workspace: &TmuxWorkspaceHandle,
+        excluded_pane: &TmuxPaneId,
+        target: &ManagedSessionRecord,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        let anchor = self.workspace_window_join_destination(workspace, excluded_pane)?;
+        self.create_remote_session_pane(workspace, &anchor, current_workspace, target)
+    }
+
     fn configure_main_pane_output_bridge_for_active_target(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -2388,7 +2550,6 @@ impl MainSlotRuntime {
             .find(|pane| {
                 !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
             })
-            .or_else(|| panes.iter().find(|pane| !pane.is_dead))
             .map(|pane| pane.pane_id.as_str().to_string())
     }
 
@@ -2454,12 +2615,6 @@ impl MainSlotRuntime {
         self.backend
             .pane_liveness_on_socket(&workspace.socket_name, pane_id)
             .map_err(main_slot_error)
-    }
-
-    fn pane_is_live_fast(&self, workspace: &TmuxWorkspaceHandle, pane_id: &str) -> bool {
-        self.pane_liveness_on_socket(workspace, pane_id)
-            .map(|live| live == Some(true))
-            .unwrap_or(false)
     }
 
     fn pane_exists_on_socket(

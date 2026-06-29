@@ -1836,12 +1836,43 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read")
             .expect("main pane option should be populated");
+        let exited_pane = crate::infra::tmux::TmuxPaneId::new(exited_pane_id.clone());
+        backend
+            .set_pane_option(
+                &workspace.workspace_handle,
+                &exited_pane,
+                "remain-on-exit",
+                "on",
+            )
+            .expect("remote pane should remain after simulated exit");
+        backend
+            .unset_pane_hook(
+                &workspace.workspace_handle,
+                &exited_pane,
+                MAIN_PANE_DIED_HOOK,
+            )
+            .expect("manual remote exit simulation should disable automatic pane-died recovery");
+        backend
+            .run_on_socket(
+                &workspace.workspace_handle.socket_name,
+                &[
+                    "respawn-pane".to_string(),
+                    "-k".to_string(),
+                    "-t".to_string(),
+                    exited_pane_id.clone(),
+                    "exit 0".to_string(),
+                ],
+            )
+            .expect("remote pane should become a retained dead pane");
+        wait_for_condition(|| {
+            !pane_is_live(&backend, &workspace.workspace_handle, &exited_pane_id)
+        });
         runtime
             .run_remote_target_exited(RemoteTargetExitedCommand {
                 socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
                 session_name: workspace.workspace_handle.session_name.as_str().to_string(),
                 target: remote_target.address.qualified_target(),
-                pane_id: Some(exited_pane_id),
+                pane_id: Some(exited_pane_id.clone()),
             })
             .expect("last remote target exit should restore the selected local target");
 
@@ -1860,6 +1891,15 @@ mod tests {
             workspace_main_pane_command(&backend, &workspace.workspace_handle).as_deref()
                 == Some("bash")
         });
+        wait_for_condition(|| !pane_exists(&backend, &workspace.workspace_handle, &exited_pane_id));
+        let main_pane_after = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read after remote exit")
+            .expect("main pane option should be populated after remote exit");
+        assert!(
+            !pane_is_chrome(&backend, &workspace.workspace_handle, &main_pane_after),
+            "workspace main pane must not be chrome after remote exit"
+        );
 
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);
@@ -3383,6 +3423,30 @@ mod tests {
         output.stdout.lines().any(|line| {
             let mut parts = line.split('\t');
             parts.next() == Some(pane_id) && parts.next() == Some("0")
+        })
+    }
+
+    fn pane_is_chrome(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+        pane_id: &str,
+    ) -> bool {
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}\t#{pane_title}".to_string(),
+                ],
+            )
+            .expect("pane title list should read");
+        output.stdout.lines().any(|line| {
+            let mut parts = line.split('\t');
+            let listed_pane = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            listed_pane == pane_id && (title == SIDEBAR_PANE_TITLE || title == FOOTER_PANE_TITLE)
         })
     }
 

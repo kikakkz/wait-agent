@@ -945,12 +945,9 @@ where
                         } if active_stream_id == stream_id => raw_pty_passthrough,
                         _ => continue,
                     };
-                    if !raw_pty_passthrough {
-                        if let Err(error) =
-                            emit_runtime_change_signal(self, &command, &runtime_signal)
-                        {
-                            break Err(error);
-                        }
+                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    {
+                        break Err(error);
                     }
                     output_seq += 1;
                     output_cache

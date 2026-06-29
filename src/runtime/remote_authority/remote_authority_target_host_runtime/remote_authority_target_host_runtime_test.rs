@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_pty_passthrough_output_uses_raw_channel_without_runtime_refresh() {
+    fn raw_pty_passthrough_output_uses_raw_channel_and_signals_runtime_refresh() {
         let socket_name = unique_test_socket_name("wa-raw-output");
         let transport_socket_path = transport_socket_path("host-raw-output");
         let transport_listener =
@@ -895,9 +895,11 @@ mod tests {
             ..FakeGateway::default()
         };
         let fake_gateway_for_assert = fake_gateway.clone();
+        let fake_publication = FakePublicationGateway::default();
+        let fake_publication_for_assert = fake_publication.clone();
         let runtime = RemoteAuthorityTargetHostRuntime::new(
             fake_gateway,
-            FakePublicationGateway::default(),
+            fake_publication,
             PathBuf::from("/tmp/waitagent"),
         );
         let command = RemoteAuthorityTargetHostCommand {
@@ -985,16 +987,30 @@ mod tests {
             .expect("server harness should complete");
         assert_eq!(raw_output.output_seq, 1);
         assert_eq!(raw_output.output_bytes, b"echo");
-        assert!(fake_gateway_for_assert
-            .clear_runtime_override_calls
-            .lock()
-            .expect("clear runtime override calls mutex should not be poisoned")
-            .is_empty());
-        assert!(fake_gateway_for_assert
-            .chrome_refresh_calls
-            .lock()
-            .expect("chrome refresh calls mutex should not be poisoned")
-            .is_empty());
+        assert_eq!(
+            fake_gateway_for_assert
+                .clear_runtime_override_calls
+                .lock()
+                .expect("clear runtime override calls mutex should not be poisoned")
+                .as_slice(),
+            &["target-1".to_string()]
+        );
+        assert_eq!(
+            fake_gateway_for_assert
+                .chrome_refresh_calls
+                .lock()
+                .expect("chrome refresh calls mutex should not be poisoned")
+                .as_slice(),
+            &[socket_name.clone()]
+        );
+        assert_eq!(
+            fake_publication_for_assert
+                .runtime_changed_sockets
+                .lock()
+                .expect("runtime changed sockets mutex should not be poisoned")
+                .as_slice(),
+            &[socket_name]
+        );
         let _ = fs::remove_file(&transport_socket_path);
     }
 
