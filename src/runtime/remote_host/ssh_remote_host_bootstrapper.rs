@@ -336,7 +336,7 @@ pub fn install_or_update_command() -> String {
         shell_single_quote(WAITAGENT_INSTALL_SCRIPT_URL)
     );
     format!(
-        "if ! {}; then {}; fi",
+        "if ! {{ {}; }}; then {}; fi",
         current_version_check_command(),
         install
     )
@@ -461,6 +461,8 @@ mod tests {
         assert!(plan
             .install_or_update_command
             .contains("command -v waitagent"));
+        assert!(plan.install_or_update_command.contains("if ! { command -v"));
+        assert!(plan.install_or_update_command.contains("; }; then"));
         assert!(plan
             .install_or_update_command
             .contains("waitagent --version"));
