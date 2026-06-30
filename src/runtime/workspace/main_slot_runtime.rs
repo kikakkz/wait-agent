@@ -1139,7 +1139,7 @@ impl MainSlotRuntime {
         let current_main_pane = self.workspace_main_pane(&workspace)?;
         let exiting_main_pane = command_pane
             .as_ref()
-            .is_some_and(|pane| current_main_pane.as_ref() == Some(pane));
+            .is_some_and(|pane| current_main_pane == *pane);
         ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] workspace_remote_exit_main_pane target={} command_pane={:?} current_main={:?} exiting_main={} elapsed={:?} total={:?} stage=workspace_exit",
             command.target,
@@ -1985,16 +1985,6 @@ impl MainSlotRuntime {
         self.backend
             .show_session_option(workspace, WAITAGENT_ACTIVE_TARGET_OPTION)
             .map(|target| target.filter(|target| !target.is_empty()))
-            .map_err(main_slot_error)
-    }
-
-    fn workspace_main_pane(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
-        self.backend
-            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
-            .map(|pane| pane.filter(|pane| !pane.is_empty()).map(TmuxPaneId::new))
             .map_err(main_slot_error)
     }
 
