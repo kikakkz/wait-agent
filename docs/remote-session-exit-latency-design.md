@@ -245,7 +245,100 @@ Not guaranteed by this slice:
 Those guarantees would require a different slice, such as a tmux hook/control
 watcher or a durable outbox. They are intentionally excluded here.
 
-## 8. Observability
+## 8. Reliable Exit State Machine
+
+Remote session exit is a workspace lifecycle transition. It must not be
+implemented as independent handlers that each mutate tmux layout, active target,
+catalog state, or pane metadata.
+
+All exit-related inputs are normalized into workspace lifecycle events:
+
+```text
+RemoteSessionExited { target_id, pane_id }
+PaneDied { pane_id, generation }
+TargetRemoved { target_id }
+ActivateTarget { target_id }
+```
+
+The workspace lifecycle reducer owns the only state transition that can move the
+main pane after an exit. The reducer state is:
+
+```text
+WorkspaceState {
+  main_pane: PaneId
+  active_target: Option<TargetId>
+  sessions: Map<TargetId, SessionState>
+  panes: Map<PaneId, PaneState>
+}
+
+SessionState {
+  target_id: TargetId
+  pane_id: PaneId
+  lifecycle: Live | Exiting | Exited
+}
+
+PaneState {
+  pane_id: PaneId
+  owner: Option<TargetId>
+  role: Content | Sidebar | Footer | Parking
+  lifecycle: Live | Dead | Detached
+}
+```
+
+The remote exit transition is:
+
+```text
+RemoteSessionExited(target, pane):
+  if target is already Exited:
+      ignore as duplicate
+
+  mark target Exiting
+  mark pane Dead
+
+  was_main = state.main_pane == pane
+
+  remove target from the runtime owner/catalog view
+  clear target -> pane mapping
+
+  if was_main:
+      next = choose_next_target(excluding target)
+
+      if next exists:
+          keep pane as the temporary main-slot anchor
+          move next.pane into the main slot
+          state.main_pane = next.pane
+          state.active_target = next.target
+      else:
+          close the remote workspace, or restore the local workspace target
+          according to workspace kind
+
+      destroy or detach the old dead pane
+  else:
+      destroy or detach the old dead pane
+
+  mark target Exited
+```
+
+The important invariant is that `active_target` is a result of the transition.
+It is not used to decide whether the exiting pane is the workspace main pane.
+That decision is made only by comparing the exit event's `pane_id` with the
+workspace `main_pane` binding.
+
+If `pane_id == main_pane`, the replacement main pane must be installed before
+the exiting pane is destroyed or detached. The exiting pane may already contain
+a dead process, but the tmux pane object is intentionally retained with
+`remain-on-exit` until the transition finishes. Killing it first lets tmux
+reflow the workspace outside the lifecycle reducer and can expose dead-pane
+content or resize chrome panes incorrectly.
+
+The implementation may still receive multiple physical inputs, such as the
+remote session exit envelope, tmux pane-died hook, and catalog target removal.
+Those inputs do not own separate lifecycle behavior. They must be reduced into
+the same workspace lifecycle transition under the workspace main-pane lock. The
+transition must be idempotent so repeated events for the same target/pane cannot
+leave a dead pane in the main slot or publish an inconsistent sidebar snapshot.
+
+## 9. Observability
 
 Exit-latency timing logs are kept behind an explicit environment gate so normal runs do not continuously write temporary investigation data:
 

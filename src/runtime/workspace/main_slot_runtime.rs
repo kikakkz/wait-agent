@@ -1135,6 +1135,20 @@ impl MainSlotRuntime {
             t_remove.elapsed(),
             t_total.elapsed()
         ));
+        let t_main = Instant::now();
+        let current_main_pane = self.workspace_main_pane(&workspace)?;
+        let exiting_main_pane = command_pane
+            .as_ref()
+            .is_some_and(|pane| current_main_pane.as_ref() == Some(pane));
+        ERROR_LOG.log_exit_latency(format!(
+            "[diag-exit] workspace_remote_exit_main_pane target={} command_pane={:?} current_main={:?} exiting_main={} elapsed={:?} total={:?} stage=workspace_exit",
+            command.target,
+            command_pane,
+            current_main_pane,
+            exiting_main_pane,
+            t_main.elapsed(),
+            t_total.elapsed()
+        ));
         let t_active = Instant::now();
         let active_target = self.active_target(&workspace)?;
         ERROR_LOG.log_exit_latency(format!(
@@ -1144,7 +1158,7 @@ impl MainSlotRuntime {
             t_active.elapsed(),
             t_total.elapsed()
         ));
-        if active_target.as_deref() != Some(command.target.as_str()) {
+        if !exiting_main_pane {
             let inactive_pane = self.read_session_pane(&workspace, &command.target)?;
             let cleanup_pane = command_pane.clone().or(inactive_pane);
             self.cleanup_exited_remote_session_pane(
@@ -1153,7 +1167,7 @@ impl MainSlotRuntime {
                 cleanup_pane.as_ref(),
             )?;
             ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] workspace_remote_exit_skip_inactive target={} total={:?} stage=workspace_exit",
+                "[diag-exit] workspace_remote_exit_skip_non_main target={} total={:?} stage=workspace_exit",
                 command.target,
                 t_total.elapsed()
             ));
@@ -1971,6 +1985,16 @@ impl MainSlotRuntime {
         self.backend
             .show_session_option(workspace, WAITAGENT_ACTIVE_TARGET_OPTION)
             .map(|target| target.filter(|target| !target.is_empty()))
+            .map_err(main_slot_error)
+    }
+
+    fn workspace_main_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        self.backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map(|pane| pane.filter(|pane| !pane.is_empty()).map(TmuxPaneId::new))
             .map_err(main_slot_error)
     }
 
