@@ -2596,6 +2596,208 @@ mod tests {
     }
 
     #[test]
+    fn remote_target_exit_is_idempotent_for_duplicate_and_late_events() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("remote-exit-idempotent");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+
+        let waitagent_executable = waitagent_test_executable();
+        let network = unique_remote_network_config(&workspace_config.workspace_key);
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                network.clone(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        persist_workspace_network_config(&backend, &workspace.workspace_handle, &network)
+            .expect("workspace network config should persist");
+        let target_host = backend
+            .ensure_workspace(
+                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                    &workspace_dir,
+                    workspace.workspace_handle.socket_name.as_str(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("target host bootstrap should succeed");
+
+        let runtime = MainSlotRuntime::new(
+            backend.clone(),
+            TargetHostRuntime::from_build_env(backend.clone())
+                .expect("target host runtime should build"),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                network.clone(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            network.clone(),
+        );
+
+        let local_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            target_host.session_name.as_str()
+        );
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: local_target.clone(),
+            })
+            .expect("local target activation should succeed");
+
+        let remote_runtime_owner =
+            RemoteRuntimeOwnerRuntime::new_for_tests(waitagent_executable.clone(), network.clone());
+        let exiting_target = remote_session_with_selector(
+            "10.1.29.130#7474",
+            "remote-exit-idempotent-a",
+            &local_target,
+            ManagedSessionTaskState::Input,
+        );
+        let next_target = remote_session_with_selector(
+            "10.1.29.130#7474",
+            "remote-exit-idempotent-b",
+            &local_target,
+            ManagedSessionTaskState::Running,
+        );
+        remote_runtime_owner
+            .upsert_session("10.1.29.130#7474", &exiting_target)
+            .expect("first remote target should be discoverable");
+        remote_runtime_owner
+            .upsert_session("10.1.29.130#7474", &next_target)
+            .expect("second remote target should be discoverable");
+
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: next_target.address.qualified_target(),
+            })
+            .expect("next remote target activation should succeed");
+        let next_pane = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("next main pane option should read")
+            .expect("next main pane option should be populated");
+
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: exiting_target.address.qualified_target(),
+            })
+            .expect("exiting remote target activation should succeed");
+        let exiting_pane = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("exiting main pane option should read")
+            .expect("exiting main pane option should be populated");
+        assert_ne!(exiting_pane, next_pane);
+
+        let exiting_tmux_pane = crate::infra::tmux::TmuxPaneId::new(exiting_pane.clone());
+        backend
+            .set_pane_option(
+                &workspace.workspace_handle,
+                &exiting_tmux_pane,
+                "remain-on-exit",
+                "on",
+            )
+            .expect("remote pane should remain after clean exit");
+        backend
+            .unset_pane_hook(
+                &workspace.workspace_handle,
+                &exiting_tmux_pane,
+                MAIN_PANE_DIED_HOOK,
+            )
+            .expect("manual remote exit simulation should disable automatic pane-died recovery");
+        backend
+            .run_on_socket(
+                &workspace.workspace_handle.socket_name,
+                &[
+                    "respawn-pane".to_string(),
+                    "-k".to_string(),
+                    "-t".to_string(),
+                    exiting_pane.clone(),
+                    "exit 0".to_string(),
+                ],
+            )
+            .expect("remote pane should become a retained dead pane");
+        wait_for_condition(|| !pane_is_live(&backend, &workspace.workspace_handle, &exiting_pane));
+
+        runtime
+            .run_remote_target_exited(RemoteTargetExitedCommand {
+                socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: exiting_target.address.qualified_target(),
+                pane_id: Some(exiting_pane.clone()),
+            })
+            .expect("first remote target exit should recover to the next remote pane");
+
+        wait_for_condition(|| {
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read")
+                .as_deref()
+                == Some(next_target.address.qualified_target().as_str())
+        });
+        let recovered_main = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("recovered main pane option should read")
+            .expect("recovered main pane option should be populated");
+        assert_eq!(recovered_main, next_pane);
+
+        runtime
+            .run_remote_target_exited(RemoteTargetExitedCommand {
+                socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: exiting_target.address.qualified_target(),
+                pane_id: Some(exiting_pane.clone()),
+            })
+            .expect("duplicate remote target exit should be a completed transition");
+        runtime
+            .run_remote_target_exited(RemoteTargetExitedCommand {
+                socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: exiting_target.address.qualified_target(),
+                pane_id: None,
+            })
+            .expect("late remote target exit without pane id should be a completed transition");
+
+        assert_eq!(
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read after duplicate exits")
+                .as_deref(),
+            Some(next_target.address.qualified_target().as_str())
+        );
+        assert_eq!(
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+                .expect("main pane should read after duplicate exits")
+                .as_deref(),
+            Some(next_pane.as_str())
+        );
+
+        kill_server(&backend, &workspace.workspace_handle);
+        let _ = fs::remove_dir_all(workspace_dir);
+    }
+
+    #[test]
     fn remote_target_exit_activates_existing_next_remote_pane() {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()
