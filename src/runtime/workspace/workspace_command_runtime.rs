@@ -386,14 +386,6 @@ impl WorkspaceCommandRuntime {
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         self.remote_runtime_owner_runtime
             .upsert_session(created.address.authority_id(), &created)?;
-        let qualified_target = created.address.qualified_target();
-        self.backend
-            .set_session_option(
-                &workspace,
-                WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION,
-                &qualified_target,
-            )
-            .map_err(tmux_runtime_error)?;
         self.refresh_registered_remote_session(&command.current_socket_name)?;
         self.main_slot_runtime.run_activate_session_record(
             &command.current_socket_name,
@@ -521,15 +513,6 @@ impl WorkspaceCommandRuntime {
             outcome.created_target.address.authority_id(),
             &outcome.created_target,
         )?;
-        let workspace =
-            workspace_handle(&command.current_socket_name, &command.current_session_name);
-        self.backend
-            .set_session_option(
-                &workspace,
-                WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION,
-                &outcome.created_target.address.qualified_target(),
-            )
-            .map_err(tmux_runtime_error)?;
         self.refresh_registered_remote_session(&command.current_socket_name)?;
         self.main_slot_runtime.run_activate_session_record(
             &command.current_socket_name,

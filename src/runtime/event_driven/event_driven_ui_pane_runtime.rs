@@ -170,8 +170,7 @@ impl EventDrivenUiPaneState {
                 self.sessions = sessions.clone();
                 self.listener_display = listener_display.clone();
                 self.ensure_active_target();
-                let selection_was_visible = self.selection_is_visible();
-                if !selection_was_visible && self.active_target != previous_active_target {
+                if self.active_target != previous_active_target && self.active_target_is_visible() {
                     self.selected_target = self.active_target.clone();
                 }
                 self.ensure_selected_session();
@@ -193,6 +192,14 @@ impl EventDrivenUiPaneState {
 
     fn selection_is_visible(&self) -> bool {
         self.selected_target.as_ref().map(|target| {
+            self.sessions
+                .iter()
+                .any(|session| session.address.qualified_target() == *target)
+        }) == Some(true)
+    }
+
+    fn active_target_is_visible(&self) -> bool {
+        self.active_target.as_ref().map(|target| {
             self.sessions
                 .iter()
                 .any(|session| session.address.qualified_target() == *target)
@@ -540,6 +547,45 @@ mod tests {
             .sidebar
             .as_ref()
             .map(|buffer| buffer.contains("codex@local"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn active_target_change_moves_selection_even_when_previous_selection_is_visible() {
+        let mut runtime = EventDrivenUiPaneRuntime::new();
+        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
+        runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("wa-1:sess-1"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                remote_session("10.1.26.84#7474", "remote-1", "bash"),
+            ],
+            None,
+            None,
+        );
+
+        let update = runtime.publish_session_snapshot(
+            "wa-1",
+            "sess-1",
+            Some("10.1.26.84#7474:remote-1"),
+            vec![
+                session("wa-1", "sess-1", "bash"),
+                remote_session("10.1.26.84#7474", "remote-1", "bash"),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(
+            runtime.selected_target().as_deref(),
+            Some("10.1.26.84#7474:remote-1")
+        );
+        assert!(update
+            .sidebar
+            .as_ref()
+            .map(|buffer| buffer.contains("> bash@10.1.26.84#7474"))
             .unwrap_or(false));
     }
 
