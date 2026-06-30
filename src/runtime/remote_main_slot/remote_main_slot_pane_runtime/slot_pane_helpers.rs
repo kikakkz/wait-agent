@@ -504,11 +504,9 @@ impl RawPtyInputRoute {
         if input_bytes.is_empty() {
             return Ok(true);
         }
-        // Never forward local navigation escape sequences to the remote PTY.
-        // When the terminal sends C-Right / Left and tmux does not intercept
-        // the binding (e.g. under certain terminal emulators or SSH configs),
-        // the bytes would otherwise reach the remote shell instead of switching
-        // the local chrome pane.
+        // Never forward local chrome navigation escape sequences to the
+        // remote PTY. Plain cursor keys are application input and must pass
+        // through to the remote shell.
         if is_local_navigation_sequence(&input_bytes) {
             return Ok(false);
         }
@@ -1234,8 +1232,7 @@ fn write_escape(sequence: &str) -> io::Result<()> {
 /// forwarded to the remote PTY.
 pub(super) fn is_local_navigation_sequence(bytes: &[u8]) -> bool {
     // C-Right (focus sidebar): CSI 1;5 C
-    // Left (focus main):      CSI D
-    bytes == b"\x1b[1;5C" || bytes == b"\x1b[D"
+    bytes == b"\x1b[1;5C"
 }
 
 /// Execute a tmux `select-pane` command for local chrome navigation.
@@ -1244,8 +1241,6 @@ pub(super) fn is_local_navigation_sequence(bytes: &[u8]) -> bool {
 pub(super) fn try_local_navigation(socket_name: &str, bytes: &[u8]) {
     let direction = if bytes == b"\x1b[1;5C" {
         "-R"
-    } else if bytes == b"\x1b[D" {
-        "-L"
     } else {
         return;
     };

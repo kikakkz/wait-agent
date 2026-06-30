@@ -450,7 +450,8 @@ impl RemoteMainSlotPaneRuntime {
                     }
                     RemotePaneEvent::Resize => {
                         let size = current_remote_surface_size(&spec, &terminal);
-                        if size != last_synced_size {
+                        let resize_is_user_visible = should_sync_remote_pty_resize(&spec)?;
+                        if size != last_synced_size && resize_is_user_visible {
                             if let Some(binding) = binding.as_ref() {
                                 sync_or_defer_remote_pty_size(
                                     &remote_runtime,
@@ -875,6 +876,75 @@ fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize>
         pixel_width: 0,
         pixel_height: 0,
     })
+}
+
+fn should_sync_remote_pty_resize(spec: &RemoteInteractSurfaceSpec) -> Result<bool, LifecycleError> {
+    if spec.console_location != ConsoleLocation::LocalWorkspace {
+        return Ok(true);
+    }
+    let pane_id = std::env::var("TMUX_PANE").map_err(|error| {
+        LifecycleError::Protocol(format!(
+            "workspace remote pane resize missing TMUX_PANE for target {}: {error}",
+            spec.target
+        ))
+    })?;
+    let pane_id = pane_id.trim();
+    if pane_id.is_empty() {
+        return Err(LifecycleError::Protocol(format!(
+            "workspace remote pane resize has empty TMUX_PANE for target {}",
+            spec.target
+        )));
+    }
+    let backend =
+        crate::infra::tmux::EmbeddedTmuxBackend::from_build_env().map_err(remote_pane_error)?;
+    let workspace = crate::infra::tmux::TmuxWorkspaceHandle {
+        workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
+            spec.surface_scope.clone(),
+        ),
+        socket_name: crate::infra::tmux::TmuxSocketName::new(spec.socket_name.clone()),
+        session_name: crate::infra::tmux::TmuxSessionName::new(spec.surface_scope.clone()),
+    };
+    let main_pane = backend
+        .show_session_option(&workspace, "@waitagent_main_pane_id")
+        .map_err(remote_pane_error)?;
+    let active_target = backend
+        .show_session_option(&workspace, "@waitagent_active_target")
+        .map_err(remote_pane_error)?;
+    let window_active = backend
+        .run_on_socket(
+            &workspace.socket_name,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane_id.to_string(),
+                "#{window_active}".to_string(),
+            ],
+        )
+        .map_err(remote_pane_error)?
+        .stdout
+        .trim()
+        == "1";
+    Ok(should_sync_remote_pty_resize_for_state(
+        spec,
+        pane_id,
+        main_pane.as_deref(),
+        active_target.as_deref(),
+        window_active,
+    ))
+}
+
+fn should_sync_remote_pty_resize_for_state(
+    spec: &RemoteInteractSurfaceSpec,
+    pane_id: &str,
+    main_pane: Option<&str>,
+    active_target: Option<&str>,
+    window_active: bool,
+) -> bool {
+    if spec.console_location != ConsoleLocation::LocalWorkspace {
+        return true;
+    }
+    window_active && main_pane == Some(pane_id) && active_target == Some(spec.target.as_str())
 }
 
 fn activate_remote_surface_binding(

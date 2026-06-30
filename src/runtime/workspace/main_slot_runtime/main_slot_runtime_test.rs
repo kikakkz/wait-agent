@@ -684,8 +684,8 @@ mod tests {
                     "remain-on-exit",
                 )
                 .as_deref(),
-                Some("off"),
-                "inactive remote session pane should force remain-on-exit off"
+                Some("on"),
+                "inactive remote session pane should remain a persistent owned content pane"
             );
             assert!(
                 pane_hook_command(
@@ -698,6 +698,24 @@ mod tests {
                 "inactive remote session pane should not keep the workspace pane-died hook"
             );
         }
+        let hidden_windows = backend
+            .run_on_socket(
+                &workspace.workspace_handle.socket_name,
+                &[
+                    "list-windows".to_string(),
+                    "-F".to_string(),
+                    "#{window_name}".to_string(),
+                ],
+            )
+            .expect("windows should list");
+        assert!(
+            !hidden_windows.stdout.contains("wa-orphan-"),
+            "normal session switching should not create orphan windows"
+        );
+        assert!(
+            hidden_windows.stdout.contains("wa-hidden-"),
+            "normal session switching should park inactive content panes in owned hidden windows"
+        );
 
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);

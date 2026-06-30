@@ -13,7 +13,7 @@ impl AgentDetector for KimiDetector {
         current_command: &str,
         argv: Option<&[String]>,
     ) -> Option<&'static str> {
-        if current_command == "kimi" || current_command == "kimi.js" {
+        if is_kimi_process_name(current_command) {
             return Some("kimi");
         }
         if let Some(argv) = argv {
@@ -21,7 +21,7 @@ impl AgentDetector for KimiDetector {
                 std::path::Path::new(arg)
                     .file_name()
                     .and_then(std::ffi::OsStr::to_str)
-                    .is_some_and(|name| name == "kimi" || name == "kimi.js")
+                    .is_some_and(is_kimi_process_name)
             });
             if is_kimi {
                 return Some("kimi");
@@ -75,6 +75,10 @@ impl AgentDetector for KimiDetector {
 
         Some(ManagedSessionTaskState::Running)
     }
+}
+
+fn is_kimi_process_name(name: &str) -> bool {
+    matches!(name, "kimi" | "kimi.js" | "kimi-code")
 }
 
 fn kimi_prompt_line(line: &str) -> bool {

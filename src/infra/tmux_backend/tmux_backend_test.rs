@@ -74,6 +74,15 @@ mod tests {
         let registry = DetectorRegistry::default();
 
         assert_eq!(registry.detect_command_name("kimi", None, ""), "kimi");
+        assert_eq!(registry.detect_command_name("kimi-code", None, ""), "kimi");
+        assert_eq!(
+            registry.detect_command_name(
+                "node",
+                Some(&["/usr/local/bin/kimi-code".to_string()]),
+                ""
+            ),
+            "kimi"
+        );
         assert_eq!(
             registry.detect_command_name("bash", None, "Welcome to Kimi Code!"),
             "bash"

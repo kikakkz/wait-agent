@@ -41,6 +41,7 @@ const WAITAGENT_MAIN_PANE_STATE_LOCK_PREFIX: &str = "waitagent-main-pane-state-"
 const WAITAGENT_MAIN_PANE_GENERATION_OPTION: &str = "@waitagent_main_pane_generation";
 const WAITAGENT_MAIN_PANE_TRANSITION_OPTION: &str = "@waitagent_main_pane_transition";
 const MAIN_PANE_DIED_HOOK: &str = "pane-died[10]";
+const HIDDEN_CONTENT_WINDOW_PREFIX: &str = "wa-hidden";
 
 pub struct MainSlotRuntime {
     backend: EmbeddedTmuxBackend,
@@ -769,7 +770,7 @@ impl MainSlotRuntime {
                 t_swap.elapsed(),
                 t_total.elapsed()
             ));
-            self.break_pane_to_orphan_window(&workspace, &workspace_main_pane);
+            self.park_content_pane_in_hidden_window(&workspace, &workspace_main_pane);
         }
         let t_identity = Instant::now();
         self.set_local_target_pane_identity(
@@ -892,20 +893,7 @@ impl MainSlotRuntime {
                 .swap_panes(&workspace, &session_pane, &workspace_main_pane)
                 .map_err(main_slot_error)?;
 
-            let _ = self.backend.run_on_socket(
-                &workspace.socket_name,
-                &[
-                    "break-pane".to_string(),
-                    "-d".to_string(),
-                    "-s".to_string(),
-                    workspace_main_pane.as_str().to_string(),
-                    "-n".to_string(),
-                    format!(
-                        "wa-orphan-{}",
-                        workspace_main_pane.as_str().trim_start_matches("%")
-                    ),
-                ],
-            );
+            self.park_content_pane_in_hidden_window(&workspace, &workspace_main_pane);
             if let Ok(window) = self.backend.current_window(&workspace) {
                 if let Ok(panes) = self.backend.list_panes(&workspace, &window) {
                     if let Some(footer) = panes
@@ -1340,7 +1328,7 @@ impl MainSlotRuntime {
         self.backend
             .swap_panes(workspace, &parking_pane, workspace_main_pane)
             .map_err(main_slot_error)?;
-        self.break_pane_to_orphan_window(workspace, workspace_main_pane);
+        self.park_content_pane_in_hidden_window(workspace, workspace_main_pane);
         Ok(parking_pane)
     }
 
@@ -1361,7 +1349,11 @@ impl MainSlotRuntime {
             .map_err(main_slot_error)
     }
 
-    fn break_pane_to_orphan_window(&self, workspace: &TmuxWorkspaceHandle, pane: &TmuxPaneId) {
+    fn park_content_pane_in_hidden_window(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) {
         let _ = self.backend.run_on_socket(
             &workspace.socket_name,
             &[
@@ -1370,9 +1362,17 @@ impl MainSlotRuntime {
                 "-s".to_string(),
                 pane.as_str().to_string(),
                 "-n".to_string(),
-                format!("wa-orphan-{}", pane.as_str().trim_start_matches('%')),
+                self.hidden_content_window_name(pane),
             ],
         );
+    }
+
+    fn hidden_content_window_name(&self, pane: &TmuxPaneId) -> String {
+        format!(
+            "{}-{}",
+            HIDDEN_CONTENT_WINDOW_PREFIX,
+            pane.as_str().trim_start_matches('%')
+        )
     }
 
     fn deactivate_inactive_remote_session_pane(
@@ -1385,7 +1385,7 @@ impl MainSlotRuntime {
             .unset_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK);
         let _ = self
             .backend
-            .set_pane_option(workspace, pane, "remain-on-exit", "off");
+            .set_pane_option(workspace, pane, "remain-on-exit", "on");
     }
 
     fn clear_stale_remote_session_pane(

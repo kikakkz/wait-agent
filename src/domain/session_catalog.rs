@@ -550,6 +550,24 @@ mod tests {
     }
 
     #[test]
+    fn task_state_infers_input_from_resumed_kimi_prompt() {
+        let command_name = DetectorRegistry::default().detect_command_name("kimi-code", None, "");
+        let state = DetectorRegistry::default().infer_task_state(
+            Some(&command_name),
+            "✨ 列出当前目录文件\n\
+             ● Used Bash (ls -la)\n\
+             ● 当前目录 /home/kk/ozon 的文件和目录如下：\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  ~/ozon  /sessions to browse and resume earlier sessions\n\
+             context: 6.7% (17.6k/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Input);
+    }
+
+    #[test]
     fn task_state_keeps_kimi_running_without_prompt() {
         let state = DetectorRegistry::default().infer_task_state(
             Some("kimi"),

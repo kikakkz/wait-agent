@@ -6,11 +6,11 @@ mod tests {
         flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
         placeholder_lines, should_draw_remote_snapshot, should_exit_surface_for_target_presence,
         should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
-        spawn_mailbox_watcher, sync_or_defer_remote_pty_size,
-        write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, RawPtyInputRoute,
-        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
-        RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
-        CLEAR_SCREEN_HOME_ESCAPE,
+        should_sync_remote_pty_resize_for_state, spawn_mailbox_watcher,
+        sync_or_defer_remote_pty_size, write_remote_raw_output_with_initial_clear,
+        AuthorityTransportStatus, RawPtyInputRoute, RemoteInteractInputSignalDecoder,
+        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
+        RemotePaneEvent, RemoteRawPtyMailboxReader, CLEAR_SCREEN_HOME_ESCAPE,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -97,6 +97,60 @@ mod tests {
         assert!(!should_exit_surface_locally(&main_slot, &[0x1d]));
         assert!(should_exit_surface_locally(&server_console, &[0x1d]));
         assert!(!should_exit_surface_locally(&server_console, b"hello"));
+    }
+
+    #[test]
+    fn workspace_remote_resize_syncs_only_for_visible_active_content_pane() {
+        let spec = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: "peer-a:shell-1".to_string(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "wa-1".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+
+        assert!(should_sync_remote_pty_resize_for_state(
+            &spec,
+            "%4",
+            Some("%4"),
+            Some("peer-a:shell-1"),
+            true
+        ));
+        assert!(!should_sync_remote_pty_resize_for_state(
+            &spec,
+            "%4",
+            Some("%4"),
+            Some("peer-a:shell-1"),
+            false
+        ));
+        assert!(!should_sync_remote_pty_resize_for_state(
+            &spec,
+            "%4",
+            Some("%3"),
+            Some("peer-a:shell-1"),
+            true
+        ));
+        assert!(!should_sync_remote_pty_resize_for_state(
+            &spec,
+            "%4",
+            Some("%4"),
+            Some("wa-1:local"),
+            true
+        ));
+    }
+
+    #[test]
+    fn server_console_resize_sync_is_independent_from_workspace_visibility() {
+        let spec = server_console_surface_spec();
+
+        assert!(should_sync_remote_pty_resize_for_state(
+            &spec,
+            "%4",
+            Some("%3"),
+            Some("other"),
+            false
+        ));
     }
 
     #[test]
@@ -1228,6 +1282,56 @@ mod tests {
         assert_eq!(payloads[0].input_bytes, b"ls\r");
         assert_eq!(payloads[0].console_host_id, "observer-a");
         assert_eq!(payloads[0].input_seq, 1);
+    }
+
+    #[test]
+    fn raw_pty_input_route_forwards_plain_left_arrow_to_remote_pty() {
+        let registry = RemoteConnectionRegistry::new();
+        let capture = Arc::new(CapturingRawRemoteConnection::default());
+        registry.register_connection("peer-a", capture.clone());
+        let route = RawPtyInputRoute::default();
+        route.activate(
+            &remote_target(),
+            &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                attachment_id: "attach-1".to_string(),
+                console_id: "console-a".to_string(),
+            },
+            "observer-a",
+        );
+
+        assert!(route
+            .send(&registry, b"\x1b[D".to_vec())
+            .expect("plain left arrow should be forwarded"));
+
+        let payloads = capture.raw_inputs();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].input_bytes, b"\x1b[D");
+    }
+
+    #[test]
+    fn raw_pty_input_route_keeps_ctrl_right_for_local_chrome_navigation() {
+        let registry = RemoteConnectionRegistry::new();
+        let capture = Arc::new(CapturingRawRemoteConnection::default());
+        registry.register_connection("peer-a", capture.clone());
+        let route = RawPtyInputRoute::default();
+        route.activate(
+            &remote_target(),
+            &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                attachment_id: "attach-1".to_string(),
+                console_id: "console-a".to_string(),
+            },
+            "observer-a",
+        );
+
+        assert!(!route
+            .send(&registry, b"\x1b[1;5C".to_vec())
+            .expect("ctrl-right should stay local"));
+
+        assert!(capture.raw_inputs().is_empty());
     }
 
     #[test]
