@@ -42,6 +42,7 @@ jobs:
         run: |
           docker run --rm \
             -e CARGO_TERM_COLOR=always \
+            -e WAITAGENT_GIT_SHA="${GITHUB_SHA}" \
             -v "$PWD:/workspace" \
             -w /workspace \
             ubuntu:20.04 \
@@ -50,7 +51,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install -y \
-                ca-certificates curl bison pkg-config libevent-dev libncurses-dev \
+                ca-certificates curl git bison pkg-config libevent-dev libncurses-dev \
                 build-essential automake autoconf cmake ninja-build nasm clang
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain 1.86.0

@@ -35,22 +35,15 @@ fn compile_agent_signal_sender() {
 }
 
 fn emit_version_info() {
+    println!("cargo:rerun-if-env-changed=WAITAGENT_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into());
 
-    let git_hash = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
+    let git_hash =
+        env_git_hash().unwrap_or_else(|| git_command_hash().unwrap_or_else(|| "unknown".into()));
 
-    let git_dirty = std::process::Command::new("git")
-        .args(["diff-index", "--quiet", "HEAD", "--"])
-        .status()
-        .ok()
-        .map(|s| !s.success())
-        .unwrap_or(false);
+    let git_dirty = git_worktree_dirty();
 
     let build_time = std::process::Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -62,6 +55,42 @@ fn emit_version_info() {
 
     let dirty_flag = if git_dirty { "-dirty" } else { "" };
     println!("cargo:rustc-env=WAITAGENT_VERSION_FULL={pkg_version} ({git_hash}{dirty_flag}) {build_time}");
+}
+
+fn env_git_hash() -> Option<String> {
+    ["WAITAGENT_GIT_SHA", "GITHUB_SHA"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .find_map(short_hash)
+}
+
+fn git_command_hash() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn git_worktree_dirty() -> bool {
+    std::process::Command::new("git")
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .ok()
+        .and_then(|status| status.code())
+        .is_some_and(|code| code == 1)
+}
+
+fn short_hash(value: String) -> Option<String> {
+    let hash = value.trim();
+    if hash.len() < 7 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hash.chars().take(7).collect())
 }
 
 fn compile_remote_grpc_proto() {
