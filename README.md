@@ -169,19 +169,29 @@ WSL configuration is documented in [WSL2 Setup](#wsl2-setup).
 |---|---|
 | Local tmux-backed workspace with fixed main slot, sidebar, and footer | Stable |
 | Local session create/switch/attach/detach | Stable |
+| Dedicated content pane per session | Stable |
 | Main-slot fullscreen/history view | Stable |
-| Sidebar task-state badges and manual attention cues | Implemented; no auto-focus switching |
+| Sidebar task-state badges and manual attention cues | Stable; no auto-focus switching |
+| Codex, Claude, and Kimi task-state integration | Implemented through explicit agent signals where available |
 | Footer menu and keyboard actions (`Ctrl-N`, `Ctrl-W`, `Ctrl-S`, `Ctrl-O`, `Ctrl-E`, `Ctrl-M`) | Implemented |
 | `waitagent --port` server listener | Implemented |
 | `waitagent --connect` remote node connection | Implemented |
 | Remote session catalog over node-scoped gRPC | Implemented |
-| Remote main-slot open/input/output/resize path | Implemented; still being hardened for full TUI parity |
+| Remote main-slot open/input/output/resize path | Implemented |
 | `Ctrl-W` SSH remote-host bootstrap | Implemented and user-validated for default-session activation |
 | Remote install proxy configuration | Implemented |
 | `Ctrl-S` new session on selected remote endpoint | Implemented |
 | Reconnect and bounded replay | Implemented baseline; edge-case hardening continues |
-| Remote session exit visibility latency | In progress |
-| Remote Codex/complex TUI parity | In progress; known issues include application-cursor mode and some replay/metadata freshness gaps |
+| Remote session exit synchronization | Implemented |
+| Remote Codex/Kimi/complex TUI parity | Implemented for current local and remote validation paths; hardening continues for agent-specific edge cases |
+
+### Planned Features
+
+| Feature | Status |
+|---|---|
+| Per-item automatic handling rules | Planned |
+| Session switch lists for Codex, Claude, Kimi, and similar CLI agents | Planned |
+| WeChat and Telegram connection support | Planned |
 
 ## Remote Protocol Status
 
@@ -197,8 +207,8 @@ WSL configuration is documented in [WSL2 Setup](#wsl2-setup).
 | Session-scoped live mirror lifecycle | Implemented enough for current remote main-slot use; hardening continues |
 | Reconnect with bounded replay | Implemented baseline |
 | Create-session request routing for `Ctrl-S` | Implemented through the local owner/control path |
-| Remote exit synchronization | In progress: moving from periodic sync latency to acknowledged local catalog wakeups |
-| Cross-host visible parity validation | In progress |
+| Remote exit synchronization | Implemented |
+| Cross-host visible parity validation | Implemented for current release paths; ongoing for new agent integrations |
 
 ---
 
