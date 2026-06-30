@@ -179,6 +179,7 @@ struct ConnectRemoteHostState {
     proxy_all_proxy_autofilled: bool,
     proxy_https_proxy_autofilled: bool,
     editing: Option<EditField>,
+    edit_cursor: usize,
     status: Status,
     delete_confirm: DeleteConfirmState,
     secret_load: SecretLoadState,
@@ -214,6 +215,7 @@ impl ConnectRemoteHostState {
             proxy_all_proxy_autofilled: false,
             proxy_https_proxy_autofilled: false,
             editing: None,
+            edit_cursor: 0,
             status: Status::Hint("Select a saved host or fill a new host.".to_string()),
             delete_confirm: DeleteConfirmState::Idle,
             secret_load: SecretLoadState::Idle,
@@ -523,9 +525,15 @@ impl ConnectRemoteHostState {
             self.password_mode = PasswordMode::Enter;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Left => self.set_focus(Focus::Hosts),
+            KeyCode::Esc => self.set_focus(Focus::Hosts),
+            KeyCode::Left => self.move_edit_cursor_left_or_leave(),
             KeyCode::Right if field == EditField::SshPassword => {
-                self.set_focus(Focus::PasswordToggle)
+                if !self.move_edit_cursor_right(field) {
+                    self.set_focus(Focus::PasswordToggle);
+                }
+            }
+            KeyCode::Right => {
+                self.move_edit_cursor_right(field);
             }
             KeyCode::Tab => self.set_focus(self.next_focus()),
             KeyCode::BackTab => self.set_focus(self.prev_focus()),
@@ -548,20 +556,24 @@ impl ConnectRemoteHostState {
             KeyCode::BackTab => self.set_focus(self.prev_focus()),
             KeyCode::Up => return self.move_up(),
             KeyCode::Down => return self.move_down(),
-            KeyCode::Left => self.set_focus(Focus::Hosts),
-            KeyCode::Right => self.set_focus(Focus::SudoToggle),
+            KeyCode::Left => self.move_edit_cursor_left_or_leave(),
+            KeyCode::Right => {
+                if !self.move_edit_cursor_right(EditField::SudoPassword) {
+                    self.set_focus(Focus::SudoToggle);
+                }
+            }
             KeyCode::Enter => self.set_focus(self.next_focus()),
             code if is_backspace_key(code, key.modifiers) => {
                 if self.sudo_mode == SudoMode::Saved {
                     self.sudo_mode = SudoMode::Replace;
                 }
-                self.sudo_password.pop();
+                self.edit_field_backspace(EditField::SudoPassword);
             }
             KeyCode::Char(ch) if !ch.is_control() => {
                 if self.sudo_mode == SudoMode::Saved {
                     self.sudo_mode = SudoMode::Replace;
                 }
-                self.sudo_password.push(ch);
+                self.edit_field_push(EditField::SudoPassword, ch);
             }
             _ => {}
         }
@@ -723,6 +735,7 @@ impl ConnectRemoteHostState {
         }
         self.focus = focus;
         self.editing = focus.edit_field(self.auth);
+        self.sync_edit_cursor_to_end();
         if focus == Focus::Password
             && self.auth == AuthChoice::Password
             && self.ssh_password.is_empty()
@@ -737,6 +750,7 @@ impl ConnectRemoteHostState {
     fn start_edit(&mut self, field: EditField) {
         self.focus = edit_focus(field);
         self.editing = Some(field);
+        self.sync_edit_cursor_to_end();
     }
 
     fn start_sudo_password_edit(&mut self) {
@@ -860,13 +874,54 @@ impl ConnectRemoteHostState {
         }
     }
 
+    fn move_edit_cursor_left_or_leave(&mut self) {
+        if self.edit_cursor > 0 {
+            self.edit_cursor -= 1;
+        } else {
+            self.set_focus(Focus::Hosts);
+        }
+    }
+
+    fn move_edit_cursor_right(&mut self, field: EditField) -> bool {
+        let len = self.edit_field_len(field);
+        if self.edit_cursor < len {
+            self.edit_cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn sync_edit_cursor_to_end(&mut self) {
+        self.edit_cursor = self
+            .editing
+            .map(|field| self.edit_field_len(field))
+            .unwrap_or(0);
+    }
+
+    fn edit_field_len(&self, field: EditField) -> usize {
+        edit_buffer_ref(self, field).chars().count()
+    }
+
     fn edit_field_backspace(&mut self, field: EditField) {
-        edit_buffer(self, field).pop();
+        if self.edit_cursor == 0 {
+            return;
+        }
+        let cursor = self.edit_cursor;
+        let buffer = edit_buffer(self, field);
+        let start = char_to_byte_index(buffer, cursor - 1);
+        let end = char_to_byte_index(buffer, cursor);
+        buffer.replace_range(start..end, "");
+        self.edit_cursor -= 1;
         self.after_field_edit(field);
     }
 
     fn edit_field_push(&mut self, field: EditField, ch: char) {
-        edit_buffer(self, field).push(ch);
+        let cursor = self.edit_cursor;
+        let buffer = edit_buffer(self, field);
+        let index = char_to_byte_index(buffer, cursor);
+        buffer.insert(index, ch);
+        self.edit_cursor += 1;
         self.after_field_edit(field);
     }
 
@@ -2176,45 +2231,26 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
     let field = state.editing?;
     if state.selected_proxy_config() {
         let rows = ProxyDetailsGeometry::from_area(details).rows;
-        let (row, value) = match field {
-            EditField::AllProxy => (rows.all_proxy, state.proxy_config.all_proxy.as_str()),
-            EditField::HttpsProxy => (rows.https_proxy, state.proxy_config.https_proxy.as_str()),
+        let row = match field {
+            EditField::AllProxy => rows.all_proxy,
+            EditField::HttpsProxy => rows.https_proxy,
             _ => return None,
         };
-        let value_width = value.chars().count() as u16;
+        let value_width = state.edit_cursor as u16;
         let desired_x = details.x.saturating_add(14).saturating_add(value_width);
         let max_x = details.x.saturating_add(details.width.saturating_sub(1));
         return Some((desired_x.min(max_x), details.y.saturating_add(row)));
     }
     let rows = DetailsGeometry::from_area(details, state).rows;
-    let (row, value) = match field {
-        EditField::Host => (rows.host, state.host.as_str().to_string()),
-        EditField::RemotePort => (rows.port, state.remote_port.as_str().to_string()),
-        EditField::SshUser => (rows.user, state.ssh_user.as_str().to_string()),
-        EditField::KeyPath => (rows.password, state.key_path.as_str().to_string()),
-        EditField::SshPassword => (
-            rows.password,
-            password_field_display(
-                &state.ssh_password,
-                state.password_mode == PasswordMode::Loading,
-                state.show_ssh_password,
-                "",
-                true,
-            ),
-        ),
-        EditField::SudoPassword => (
-            rows.sudo,
-            password_field_display(
-                sudo_password_value(state),
-                state.sudo_mode == SudoMode::Loading,
-                state.show_sudo_password,
-                "",
-                true,
-            ),
-        ),
+    let row = match field {
+        EditField::Host => rows.host,
+        EditField::RemotePort => rows.port,
+        EditField::SshUser => rows.user,
+        EditField::KeyPath | EditField::SshPassword => rows.password,
+        EditField::SudoPassword => rows.sudo,
         EditField::AllProxy | EditField::HttpsProxy => return None,
     };
-    let value_width = value.chars().count() as u16;
+    let value_width = state.edit_cursor as u16;
     let desired_x = details.x.saturating_add(14).saturating_add(value_width);
     let max_x = details.x.saturating_add(details.width.saturating_sub(1));
     Some((desired_x.min(max_x), details.y.saturating_add(row)))
@@ -2274,6 +2310,27 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
         EditField::AllProxy => &mut state.proxy_config.all_proxy,
         EditField::HttpsProxy => &mut state.proxy_config.https_proxy,
     }
+}
+
+fn edit_buffer_ref(state: &ConnectRemoteHostState, field: EditField) -> &str {
+    match field {
+        EditField::Host => &state.host,
+        EditField::RemotePort => &state.remote_port,
+        EditField::SshUser => &state.ssh_user,
+        EditField::KeyPath => &state.key_path,
+        EditField::SshPassword => &state.ssh_password,
+        EditField::SudoPassword => &state.sudo_password,
+        EditField::AllProxy => &state.proxy_config.all_proxy,
+        EditField::HttpsProxy => &state.proxy_config.https_proxy,
+    }
+}
+
+fn char_to_byte_index(value: &str, char_index: usize) -> usize {
+    value
+        .char_indices()
+        .map(|(index, _)| index)
+        .nth(char_index)
+        .unwrap_or(value.len())
 }
 
 fn edit_focus(field: EditField) -> Focus {
@@ -3389,6 +3446,7 @@ mod tests {
         state.profiles.clear();
         state.selected = 0;
         let _ = state.sync_selected_profile();
+        state.host.clear();
         assert_eq!(state.focus, Focus::Hosts);
 
         state.apply_key(KeyEvent::from(KeyCode::Right));
@@ -3656,6 +3714,78 @@ mod tests {
         );
 
         assert_eq!(state.host, "ab");
+    }
+
+    #[test]
+    fn proxy_input_left_right_moves_cursor_before_focus_navigation() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = state.proxy_selection_index();
+        state.proxy_config.all_proxy = "socks5://10.1.29.96:7897".to_string();
+        state.set_focus(Focus::AllProxy);
+
+        assert_eq!(state.editing, Some(EditField::AllProxy));
+        assert_eq!(
+            state.edit_cursor,
+            state.proxy_config.all_proxy.chars().count()
+        );
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Left)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::AllProxy);
+        assert_eq!(
+            state.edit_cursor,
+            state.proxy_config.all_proxy.chars().count() - 1
+        );
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Right)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::AllProxy);
+        assert_eq!(
+            state.edit_cursor,
+            state.proxy_config.all_proxy.chars().count()
+        );
+
+        for _ in 0..state.proxy_config.all_proxy.chars().count() {
+            state.apply_key(KeyEvent::from(KeyCode::Left));
+        }
+        assert_eq!(state.focus, Focus::AllProxy);
+        assert_eq!(state.edit_cursor, 0);
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Left)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Hosts);
+    }
+
+    #[test]
+    fn text_input_inserts_and_deletes_at_cursor() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = state.proxy_selection_index();
+        state.proxy_config.https_proxy = "ab好d".to_string();
+        state.set_focus(Focus::HttpsProxy);
+
+        state.apply_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(state.edit_cursor, 3);
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Char('c'))),
+            PaneAction::None
+        );
+        assert_eq!(state.proxy_config.https_proxy, "ab好cd");
+        assert_eq!(state.edit_cursor, 4);
+
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Backspace)),
+            PaneAction::None
+        );
+        assert_eq!(state.proxy_config.https_proxy, "ab好d");
+        assert_eq!(state.edit_cursor, 3);
     }
 
     #[test]
