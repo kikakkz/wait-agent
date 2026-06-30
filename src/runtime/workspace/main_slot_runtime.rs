@@ -1136,7 +1136,7 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         let t_main = Instant::now();
-        let current_main_pane = self.workspace_main_pane(&workspace)?;
+        let current_main_pane = self.configured_main_pane_binding(&workspace)?;
         let exiting_main_pane = command_pane
             .as_ref()
             .is_some_and(|pane| current_main_pane == *pane);
@@ -1976,6 +1976,23 @@ impl MainSlotRuntime {
             return Ok(Some(TmuxPaneId::new(configured_pane)));
         }
         Ok(None)
+    }
+
+    fn configured_main_pane_binding(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        self.backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(main_slot_error)?
+            .filter(|pane| !pane.is_empty())
+            .map(TmuxPaneId::new)
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no configured main pane binding",
+                    workspace.session_name.as_str()
+                ))
+            })
     }
 
     fn active_target(
