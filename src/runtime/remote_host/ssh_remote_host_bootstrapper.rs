@@ -332,7 +332,7 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 pub fn install_or_update_command() -> String {
     let install = format!(
-        "curl -fsSL {} | bash",
+        "tmp=\"$(mktemp)\" && trap 'rm -f \"$tmp\"' EXIT && curl -fsSL {} -o \"$tmp\" && bash \"$tmp\"",
         shell_single_quote(WAITAGENT_INSTALL_SCRIPT_URL)
     );
     format!(
@@ -352,11 +352,12 @@ fn current_version_check_command() -> String {
 
 fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
     format!(
-        "ps -eo args= | grep -F {} | grep -F {} | grep -F {} | grep -F {} | grep -v 'grep -F' >/dev/null 2>&1",
+        "ps -eo args= | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -v 'grep -F' >/dev/null 2>&1",
         shell_single_quote("waitagent"),
         shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
         shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
         shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
+        shell_single_quote("__remote-daemon"),
     )
 }
 

@@ -16,6 +16,11 @@ impl RemoteInstallProxyConfig {
     pub fn has_proxy(&self) -> bool {
         !self.all_proxy.trim().is_empty() || !self.https_proxy.trim().is_empty()
     }
+
+    pub fn validate(&self) -> Result<(), RemoteInstallProxyStoreError> {
+        validate_proxy_url("all_proxy", &self.all_proxy)?;
+        validate_proxy_url("https_proxy", &self.https_proxy)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +48,7 @@ impl RemoteInstallProxyStore {
         &self,
         config: &RemoteInstallProxyConfig,
     ) -> Result<(), RemoteInstallProxyStoreError> {
+        config.validate()?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(RemoteInstallProxyStoreError::io)?;
         }
@@ -147,15 +153,52 @@ pub fn wrap_install_command_with_proxy(
     config: &RemoteInstallProxyConfig,
     remote_host: &str,
     local_connect_endpoint: &str,
-) -> String {
+) -> Result<String, RemoteInstallProxyStoreError> {
     if !config.has_proxy() {
-        return command.to_string();
+        return Ok(command.to_string());
     }
-    format!(
+    config.validate()?;
+    Ok(format!(
         "{} sh -lc {}",
         proxy_export_prefix(config, remote_host, local_connect_endpoint),
         shell_single_quote(command)
-    )
+    ))
+}
+
+fn validate_proxy_url(field: &str, value: &str) -> Result<(), RemoteInstallProxyStoreError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.contains('：') {
+        return Err(RemoteInstallProxyStoreError::new(format!(
+            "{field} contains a full-width colon; use `:`"
+        )));
+    }
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return Err(RemoteInstallProxyStoreError::new(format!(
+            "{field} must include a URL scheme"
+        )));
+    };
+    if scheme.is_empty() || !scheme.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err(RemoteInstallProxyStoreError::new(format!(
+            "{field} has an invalid URL scheme"
+        )));
+    }
+    if rest.is_empty() || rest.starts_with(':') {
+        return Err(RemoteInstallProxyStoreError::new(format!(
+            "{field} must include a host"
+        )));
+    }
+    if let Some(port) = rest.rsplit_once(':').map(|(_, port)| port) {
+        let port = port.split('/').next().unwrap_or(port);
+        if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(RemoteInstallProxyStoreError::new(format!(
+                "{field} has an invalid port"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parse_config(text: &str) -> Result<RemoteInstallProxyConfig, RemoteInstallProxyStoreError> {
@@ -326,7 +369,8 @@ mod tests {
             &config,
             "10.0.0.2",
             "192.168.1.5:7474",
-        );
+        )
+        .unwrap();
         assert!(command.contains("export all_proxy="));
         assert!(command.contains("export HTTPS_PROXY="));
         assert!(command.contains("export no_proxy="));
@@ -337,6 +381,18 @@ mod tests {
         assert!(command.contains("no_proxy="));
         assert!(command.contains("NO_PROXY="));
         assert!(command.contains("sh -lc"));
+    }
+
+    #[test]
+    fn proxy_config_rejects_full_width_colon() {
+        let config = RemoteInstallProxyConfig {
+            all_proxy: "socks5://127.0.0.1:7897".to_string(),
+            https_proxy: "http://127.0.0.1：7897".to_string(),
+        };
+
+        let error = config.validate().unwrap_err();
+
+        assert!(error.to_string().contains("full-width colon"));
     }
 
     fn unique_path(name: &str) -> PathBuf {

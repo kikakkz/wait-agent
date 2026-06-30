@@ -135,7 +135,8 @@ where
                 &proxy_config,
                 &profile.host,
                 &request.local_connect_endpoint,
-            );
+            )
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         }
         self.bootstrapper
             .ensure_waitagent_and_start(&plan)
