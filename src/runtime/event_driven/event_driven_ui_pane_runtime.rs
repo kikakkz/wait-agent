@@ -2,6 +2,7 @@ use crate::application::local_runtime_event_service::{
     LocalRuntimeEventBus, LocalRuntimeEventPublisher, LocalRuntimeEventSubscriber,
 };
 use crate::application::session_catalog_projection_service::SessionCatalogProjectionService;
+use crate::domain::chrome::{ChromeSurfaceSize, FooterViewModel, SidebarViewModel};
 use crate::domain::local_runtime::{
     ChromeEvent, ChromeSurface, LocalRuntimeEvent, SessionCatalogEvent,
 };
@@ -132,10 +133,14 @@ impl EventDrivenUiPaneRuntime {
     fn drain_pending_events(&mut self) -> EventDrivenChromeRenderUpdate {
         let mut update = EventDrivenChromeRenderUpdate::default();
         while let Ok(envelope) = self.event_rx.try_recv() {
-            self.state.observe(&envelope.payload);
+            let invalidate_chrome = self.state.observe(&envelope.payload);
             merge_render_update(
                 &mut update,
-                self.chrome_runtime.apply_event(&envelope.payload),
+                self.chrome_runtime.render(
+                    self.state.sidebar_view_model(),
+                    self.state.footer_view_model(),
+                    invalidate_chrome,
+                ),
             );
         }
         update
@@ -149,11 +154,16 @@ struct EventDrivenUiPaneState {
     active_target: Option<String>,
     sessions: Vec<ManagedSessionRecord>,
     listener_display: Option<String>,
+    connect_endpoint: Option<String>,
     selected_target: Option<String>,
+    sidebar_surface: ChromeSurfaceSize,
+    footer_width: usize,
+    fullscreen_footer_width: usize,
+    fullscreen: bool,
 }
 
 impl EventDrivenUiPaneState {
-    fn observe(&mut self, event: &LocalRuntimeEvent) {
+    fn observe(&mut self, event: &LocalRuntimeEvent) -> bool {
         match event {
             LocalRuntimeEvent::SessionCatalog(SessionCatalogEvent::SnapshotUpdated {
                 active_socket,
@@ -161,7 +171,7 @@ impl EventDrivenUiPaneState {
                 active_target,
                 sessions,
                 listener_display,
-                connect_endpoint: _,
+                connect_endpoint,
             }) => {
                 let previous_active_target = self.active_target.clone();
                 self.active_socket = active_socket.clone();
@@ -169,11 +179,13 @@ impl EventDrivenUiPaneState {
                 self.active_target = active_target.clone();
                 self.sessions = sessions.clone();
                 self.listener_display = listener_display.clone();
+                self.connect_endpoint = connect_endpoint.clone();
                 self.ensure_active_target();
                 if self.active_target != previous_active_target && self.active_target_is_visible() {
                     self.selected_target = self.active_target.clone();
                 }
                 self.ensure_selected_session();
+                false
             }
             LocalRuntimeEvent::Chrome(ChromeEvent::SidebarSelectionChanged { target }) => {
                 if self.sessions.is_empty() {
@@ -185,17 +197,32 @@ impl EventDrivenUiPaneState {
                 {
                     self.selected_target = Some(target.clone());
                 }
+                false
             }
-            _ => {}
+            LocalRuntimeEvent::Chrome(ChromeEvent::SurfaceResized {
+                surface,
+                width,
+                height,
+            }) => {
+                match surface {
+                    ChromeSurface::SidebarPane => {
+                        self.sidebar_surface = ChromeSurfaceSize::new(*width, *height);
+                    }
+                    ChromeSurface::FooterPane => {
+                        self.footer_width = *width;
+                    }
+                    ChromeSurface::FullscreenStatusLine => {
+                        self.fullscreen_footer_width = *width;
+                    }
+                }
+                false
+            }
+            LocalRuntimeEvent::Chrome(ChromeEvent::FullscreenChanged { is_fullscreen }) => {
+                let changed = self.fullscreen != *is_fullscreen;
+                self.fullscreen = *is_fullscreen;
+                changed
+            }
         }
-    }
-
-    fn selection_is_visible(&self) -> bool {
-        self.selected_target.as_ref().map(|target| {
-            self.sessions
-                .iter()
-                .any(|session| session.address.qualified_target() == *target)
-        }) == Some(true)
     }
 
     fn active_target_is_visible(&self) -> bool {
@@ -299,6 +326,43 @@ impl EventDrivenUiPaneState {
             self.sessions
                 .iter()
                 .find(|session| session.address.qualified_target() == *target)
+        })
+    }
+
+    fn sidebar_view_model(&self) -> Option<SidebarViewModel> {
+        if self.sidebar_surface.width == 0 || self.sidebar_surface.height == 0 {
+            return None;
+        }
+
+        Some(SidebarViewModel {
+            active_socket: self.active_socket.clone(),
+            active_session: self.active_session.clone(),
+            active_target: self.active_target.clone(),
+            selected_target: self.selected_target(),
+            sessions: self.sessions.clone(),
+            surface: self.sidebar_surface,
+        })
+    }
+
+    fn footer_view_model(&self) -> Option<FooterViewModel> {
+        let width = if self.fullscreen {
+            self.fullscreen_footer_width.max(self.footer_width)
+        } else {
+            self.footer_width
+        };
+        if width == 0 {
+            return None;
+        }
+
+        Some(FooterViewModel {
+            active_socket: self.active_socket.clone(),
+            active_session: self.active_session.clone(),
+            active_target: self.active_target.clone(),
+            sessions: self.sessions.clone(),
+            listener_display: self.listener_display.clone(),
+            connect_endpoint: self.connect_endpoint.clone(),
+            width,
+            fullscreen: self.fullscreen,
         })
     }
 }
@@ -428,7 +492,7 @@ mod tests {
     #[test]
     fn sidebar_navigation_emits_selection_event_and_rerenders_sidebar() {
         let mut runtime = EventDrivenUiPaneRuntime::new();
-        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
+        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 40, 9);
         runtime.publish_session_snapshot(
             "wa-1",
             "sess-1",
@@ -553,7 +617,7 @@ mod tests {
     #[test]
     fn active_target_change_moves_selection_even_when_previous_selection_is_visible() {
         let mut runtime = EventDrivenUiPaneRuntime::new();
-        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 28, 9);
+        runtime.publish_surface_resize(ChromeSurface::SidebarPane, 40, 9);
         runtime.publish_session_snapshot(
             "wa-1",
             "sess-1",
@@ -585,7 +649,7 @@ mod tests {
         assert!(update
             .sidebar
             .as_ref()
-            .map(|buffer| buffer.contains("> bash@10.1.26.84#7474"))
+            .map(|buffer| buffer.contains("> bash@10.1.26.84:7474"))
             .unwrap_or(false));
     }
 
