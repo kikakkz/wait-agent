@@ -3228,6 +3228,16 @@ mod tests {
 
         state.set_focus(Focus::Host);
         assert_eq!(state.editing, Some(EditField::Host));
+        assert_eq!(state.edit_cursor, state.host.chars().count());
+        assert_eq!(
+            state.apply_key(KeyEvent::from(KeyCode::Left)),
+            PaneAction::None
+        );
+        assert_eq!(state.focus, Focus::Host);
+        assert_eq!(state.edit_cursor, state.host.chars().count() - 1);
+        while state.edit_cursor > 0 {
+            state.apply_key(KeyEvent::from(KeyCode::Left));
+        }
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Left)),
             PaneAction::None
