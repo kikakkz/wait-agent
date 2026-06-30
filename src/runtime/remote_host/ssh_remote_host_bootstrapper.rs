@@ -167,6 +167,9 @@ where
         if !self.remote_waitagent_is_current(plan)? {
             self.run_ssh_command(plan, &plan.install_or_update_command, true)?;
         }
+        if self.remote_waitagent_daemon_is_running(plan)? {
+            return Ok(());
+        }
         self.run_ssh_command(plan, &plan.start_plan.command, false)
     }
 }
@@ -183,6 +186,14 @@ where
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<bool, RemoteHostBootstrapError> {
         let output = self.run_ssh_output(plan, &current_version_check_command(), false)?;
+        Ok(output.status == 0)
+    }
+
+    fn remote_waitagent_daemon_is_running(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<bool, RemoteHostBootstrapError> {
+        let output = self.run_ssh_output(plan, &daemon_running_check_command(plan), false)?;
         Ok(output.status == 0)
     }
 
@@ -336,6 +347,16 @@ fn current_version_check_command() -> String {
     format!(
         "command -v waitagent >/dev/null 2>&1 && waitagent --version 2>/dev/null | grep -q {}",
         shell_single_quote(expected_version)
+    )
+}
+
+fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
+    format!(
+        "ps -eo args= | grep -F {} | grep -F {} | grep -F {} | grep -F {} | grep -v 'grep -F' >/dev/null 2>&1",
+        shell_single_quote("waitagent"),
+        shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
+        shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
+        shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
     )
 }
 
@@ -540,7 +561,63 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 0, 1])),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0, 1])),
+            },
+        );
+
+        bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].0.host, "10.1.29.130");
+        assert_eq!(calls[0].0.user, "kk");
+        assert!(calls[0].1.contains("waitagent --version"));
+        assert_eq!(calls[0].2, None);
+        assert!(calls[1].1.starts_with("sudo -S -p '' sh -lc "));
+        assert_eq!(calls[1].2.as_deref(), Some("sudo-secret\n"));
+        assert!(calls[2].1.contains("ps -eo args="));
+        assert_eq!(calls[2].2, None);
+        assert!(calls[3].1.contains("__remote-daemon"));
+        assert_eq!(calls[3].2, None);
+    }
+
+    #[test]
+    fn remote_host_bootstrapper_skips_sudo_install_when_waitagent_is_current() {
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let sudo_id = RemoteHostSecretId::new("waitagent.remote-host.130.sudo-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        store
+            .put_secret(&sudo_id, RemoteHostSecretValue::new("sudo-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: Some(sudo_id),
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        };
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        );
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            store,
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0])),
             },
         );
 
@@ -548,18 +625,17 @@ mod tests {
 
         let calls = calls.borrow();
         assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0.host, "10.1.29.130");
-        assert_eq!(calls[0].0.user, "kk");
         assert!(calls[0].1.contains("waitagent --version"));
         assert_eq!(calls[0].2, None);
-        assert!(calls[1].1.starts_with("sudo -S -p '' sh -lc "));
-        assert_eq!(calls[1].2.as_deref(), Some("sudo-secret\n"));
+        assert!(calls[1].1.contains("ps -eo args="));
+        assert_eq!(calls[1].2, None);
         assert!(calls[2].1.contains("__remote-daemon"));
         assert_eq!(calls[2].2, None);
+        assert!(!calls.iter().any(|(_, command, _)| command.contains("sudo")));
     }
 
     #[test]
-    fn remote_host_bootstrapper_skips_sudo_install_when_waitagent_is_current() {
+    fn remote_host_bootstrapper_does_not_start_when_daemon_is_running() {
         let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
         let sudo_id = RemoteHostSecretId::new("waitagent.remote-host.130.sudo-password").unwrap();
         let store = MemoryRemoteHostSecretStore::default();
@@ -603,9 +679,9 @@ mod tests {
         let calls = calls.borrow();
         assert_eq!(calls.len(), 2);
         assert!(calls[0].1.contains("waitagent --version"));
-        assert_eq!(calls[0].2, None);
-        assert!(calls[1].1.contains("__remote-daemon"));
-        assert_eq!(calls[1].2, None);
-        assert!(!calls.iter().any(|(_, command, _)| command.contains("sudo")));
+        assert!(calls[1].1.contains("ps -eo args="));
+        assert!(!calls
+            .iter()
+            .any(|(_, command, _)| command.contains("nohup")));
     }
 }

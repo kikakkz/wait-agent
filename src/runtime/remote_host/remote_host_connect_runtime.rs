@@ -114,18 +114,6 @@ where
             profile.name = name.clone();
         }
 
-        if let Some(endpoint) = self.find_connected_endpoint(&profile)? {
-            let created = self.create_remote_session(&endpoint, request.cwd_hint.clone())?;
-            if should_save_profile {
-                self.save_connected_profile(&request, profile)?;
-            }
-            return Ok(RemoteHostConnectOutcome {
-                authority_node_id: endpoint,
-                created_target: created,
-                reused_existing_endpoint: true,
-            });
-        }
-
         let preference = port_preference(&profile.preferred_remote_port);
         let port_probe = self.port_probe_factory.create(&profile);
         let port = port_probe
@@ -152,6 +140,21 @@ where
         self.bootstrapper
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+
+        if let Some(endpoint) = self.find_connected_endpoint(&profile)? {
+            let created = self.create_remote_session(&endpoint, request.cwd_hint.clone())?;
+            if should_save_profile {
+                profile.last_remote_port = Some(port.port);
+                profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
+                profile.use_install_proxy = request.use_install_proxy;
+                self.save_connected_profile(&request, profile)?;
+            }
+            return Ok(RemoteHostConnectOutcome {
+                authority_node_id: endpoint,
+                created_target: created,
+                reused_existing_endpoint: true,
+            });
+        }
 
         let default_target =
             self.wait_for_first_online_target(&authority_node_id, DEFAULT_ENDPOINT_POLL_INTERVAL)?;
@@ -618,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_host_connect_reuses_existing_online_endpoint_before_bootstrap() {
+    fn remote_host_connect_prefights_before_reusing_existing_online_endpoint() {
         let path = unique_path("remote-host-connect-reuse.toml");
         let history = RemoteHostHistoryStore::new(&path);
         history.upsert_profile(profile()).unwrap();
@@ -667,8 +670,8 @@ mod tests {
 
         assert!(outcome.reused_existing_endpoint);
         assert_eq!(outcome.authority_node_id, "10.1.29.130#7474");
-        assert_eq!(*probe_calls.borrow(), 0);
-        assert!(bootstrap_plans.borrow().is_empty());
+        assert_eq!(*probe_calls.borrow(), 1);
+        assert_eq!(bootstrap_plans.borrow().len(), 1);
         assert_eq!(
             create_requests.borrow()[0].authority_node_id,
             "10.1.29.130#7474"
