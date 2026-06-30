@@ -562,7 +562,7 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 0, 0, 1])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 1])),
             },
         );
 

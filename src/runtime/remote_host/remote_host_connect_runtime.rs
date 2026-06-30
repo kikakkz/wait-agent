@@ -120,6 +120,7 @@ where
             .choose_remote_port(&preference, &request.local_connect_endpoint)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         let authority_node_id = authority_id_for_profile_port(&profile, port.port);
+        let existing_endpoint = self.find_connected_endpoint(&profile)?;
         let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             port.port,
@@ -142,7 +143,7 @@ where
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
-        if let Some(endpoint) = self.find_connected_endpoint(&profile)? {
+        if let Some(endpoint) = existing_endpoint {
             let created = self.create_remote_session(&endpoint, request.cwd_hint.clone())?;
             if should_save_profile {
                 profile.last_remote_port = Some(port.port);
