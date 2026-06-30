@@ -293,13 +293,13 @@ WSL NAT IPs can change after WSL restarts. Re-run the portproxy commands when th
 curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
 ```
 
-4. Start a listener workspace inside WSL:
+4. Start a public listener workspace inside WSL:
 
 ```bash
-waitagent --port 7474
+waitagent --public <reachable-wsl-or-windows-ip>:7474
 ```
 
-Use the listener/connect endpoint shown in the WaitAgent footer when connecting remote hosts. If the remote machine cannot connect back, check Windows Defender Firewall and allow inbound TCP for the selected port, for example `7474`.
+Use the listener/connect endpoint shown in the WaitAgent footer when connecting remote hosts. In WSL, the listener must be started with `--public` so remote machines receive an address they can dial back. If the remote machine cannot connect back, check Windows Defender Firewall and allow inbound TCP for the selected port, for example `7474`; in NAT mode, also confirm the Windows portproxy still points at the current WSL IP.
 
 If your WSL or Windows environment uses a corporate proxy, keep `autoProxy=true` and configure the WaitAgent remote install proxy from **Ctrl-W -> Proxy Configuration** when the remote host also needs that proxy to reach GitHub releases.
 
