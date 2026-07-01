@@ -1572,7 +1572,6 @@ impl MainSlotRuntime {
         let qualified_target = target.address.qualified_target();
         if let Some(existing_pane) = self.find_session_pane(workspace, &qualified_target)? {
             if self.prepare_existing_remote_session_pane(workspace, &existing_pane)? {
-                self.ensure_pane_in_workspace_window(workspace, &existing_pane)?;
                 if existing_pane != *exiting_pane {
                     self.backend
                         .swap_panes(workspace, &existing_pane, exiting_pane)
