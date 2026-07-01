@@ -213,7 +213,8 @@ pub(super) fn dispatch_publication_sender_command(
     command: PublicationSenderCommand,
 ) -> Result<(), LifecycleError> {
     match command {
-        PublicationSenderCommand::RegisterLiveSession { .. }
+        PublicationSenderCommand::Stop
+        | PublicationSenderCommand::RegisterLiveSession { .. }
         | PublicationSenderCommand::RefreshLiveSession { .. }
         | PublicationSenderCommand::UnregisterLiveSession { .. } => Ok(()),
         PublicationSenderCommand::PublishTarget {

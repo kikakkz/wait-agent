@@ -330,7 +330,8 @@ impl WorkspaceLayoutRuntime {
         ));
         let target_registry = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())
-                .map_err(tmux_layout_error)?,
+                .map_err(tmux_layout_error)?
+                .with_fresh_local_tmux(),
         );
         ERROR_LOG.log(format!(
             "[diag-newhost] chrome_refresh_socket registry_ready socket={} elapsed={:?}",
@@ -362,7 +363,8 @@ impl WorkspaceLayoutRuntime {
     ) -> Result<(), LifecycleError> {
         let target_registry = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())
-                .map_err(tmux_layout_error)?,
+                .map_err(tmux_layout_error)?
+                .with_fresh_local_tmux(),
         );
         let sessions = target_registry
             .list_local_workspace_chrome_targets_on_authority(socket_name)

@@ -40,6 +40,7 @@ pub(super) enum SocketLifecyclePublicationAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PublicationAgentCommand {
+    Stop,
     FullReconcile,
     PublishSession {
         session_name: String,
@@ -53,6 +54,7 @@ pub(super) enum PublicationAgentCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublicationSenderCommand {
+    Stop,
     RegisterLiveSession {
         target_session_name: String,
         authority_id: String,
@@ -89,6 +91,11 @@ pub(crate) enum PublicationSenderCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PublicationOwnerCommand {
     Refresh,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PublicationServerCommand {
     Stop,
 }
 
@@ -257,6 +264,13 @@ pub(super) fn remote_target_publication_agent_socket_path(socket_name: &str) -> 
     ))
 }
 
+pub(super) fn remote_target_publication_server_command_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-server-command-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
+}
+
 pub(super) fn remote_target_publication_owner_socket_path(
     socket_name: &str,
     target_session_name: &str,
@@ -277,6 +291,7 @@ pub(crate) fn remote_target_publication_sender_socket_path(socket_name: &str) ->
 
 pub(super) fn render_publication_agent_command(command: &PublicationAgentCommand) -> String {
     match command {
+        PublicationAgentCommand::Stop => "stop\n".to_string(),
         PublicationAgentCommand::FullReconcile => "full_reconcile\n".to_string(),
         PublicationAgentCommand::PublishSession { session_name } => format!(
             "publish_session\t{}\n",
@@ -297,6 +312,7 @@ pub(super) fn render_publication_agent_command(command: &PublicationAgentCommand
 
 pub(crate) fn render_publication_sender_command(command: &PublicationSenderCommand) -> String {
     match command {
+        PublicationSenderCommand::Stop => "stop\n".to_string(),
         PublicationSenderCommand::RegisterLiveSession {
             target_session_name,
             authority_id,
@@ -369,6 +385,26 @@ pub(super) fn render_publication_owner_command(command: PublicationOwnerCommand)
     }
 }
 
+pub(super) fn render_publication_server_command(command: PublicationServerCommand) -> &'static str {
+    match command {
+        PublicationServerCommand::Stop => "stop\n",
+    }
+}
+
+pub(super) fn signal_publication_server_command(
+    socket_name: &str,
+    command: PublicationServerCommand,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_target_publication_server_command_socket_path(
+        socket_name,
+    ))
+    .map_err(remote_target_publication_error)?;
+    stream
+        .write_all(render_publication_server_command(command).as_bytes())
+        .map_err(remote_target_publication_error)?;
+    stream.flush().map_err(remote_target_publication_error)
+}
+
 pub(super) fn signal_publication_owner_command(
     socket_name: &str,
     target_session_name: &str,
@@ -416,6 +452,7 @@ pub(super) fn parse_publication_agent_command(
 ) -> Result<PublicationAgentCommand, LifecycleError> {
     let mut parts = line.split('\t');
     match parts.next().unwrap_or_default() {
+        "stop" => Ok(PublicationAgentCommand::Stop),
         "full_reconcile" => Ok(PublicationAgentCommand::FullReconcile),
         "publish_session" => {
             let session_name =
@@ -466,6 +503,7 @@ pub(super) fn parse_publication_sender_command(
 ) -> Result<PublicationSenderCommand, LifecycleError> {
     let mut parts = line.split('\t');
     match parts.next().unwrap_or_default() {
+        "stop" => Ok(PublicationSenderCommand::Stop),
         "register_live_session" => {
             let target_session_name =
                 decode_publication_agent_string_field(parts.next().ok_or_else(|| {
@@ -843,6 +881,42 @@ pub(super) fn parse_publication_owner_command(
         other => Err(LifecycleError::Protocol(format!(
             "unsupported remote publication owner command `{other}`"
         ))),
+    }
+}
+
+pub(super) fn parse_publication_server_command(
+    line: &str,
+) -> Result<Option<PublicationServerCommand>, LifecycleError> {
+    match line.trim() {
+        "" => Ok(None),
+        "stop" => Ok(Some(PublicationServerCommand::Stop)),
+        other => Err(LifecycleError::Protocol(format!(
+            "unsupported remote publication server command `{other}`"
+        ))),
+    }
+}
+
+pub(super) fn drain_publication_server_commands(
+    listener: &UnixListener,
+) -> Result<bool, LifecycleError> {
+    let mut stop_requested = false;
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let mut buffer = String::new();
+                stream
+                    .read_to_string(&mut buffer)
+                    .map_err(remote_target_publication_error)?;
+                if matches!(
+                    parse_publication_server_command(&buffer)?,
+                    Some(PublicationServerCommand::Stop)
+                ) {
+                    stop_requested = true;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(stop_requested),
+            Err(error) => return Err(remote_target_publication_error(error)),
+        }
     }
 }
 

@@ -59,6 +59,7 @@ impl RemoteNodeSessionOwnerRuntime {
         let mut transports = HashMap::<String, RemoteTargetPublicationTransportRuntime>::new();
         let mut live_sessions = HashMap::<String, Arc<LiveSessionRoute>>::new();
         let mut authority_sessions = HashMap::<String, SharedAuthoritySession>::new();
+        let mut stop_requested = false;
         for accepted in listener.incoming() {
             let Ok(mut stream) = accepted else {
                 break;
@@ -71,6 +72,9 @@ impl RemoteNodeSessionOwnerRuntime {
             reap_inactive_authority_sessions(&mut authority_sessions);
             for sender_command in commands {
                 match sender_command {
+                    PublicationSenderCommand::Stop => {
+                        stop_requested = true;
+                    }
                     PublicationSenderCommand::RegisterLiveSession {
                         target_session_name,
                         authority_id,
@@ -211,6 +215,9 @@ impl RemoteNodeSessionOwnerRuntime {
                     }
                 }
             }
+            if stop_requested {
+                break;
+            }
         }
         for target_session_name in live_sessions.keys().cloned().collect::<Vec<_>>() {
             stop_live_session_route(
@@ -219,6 +226,7 @@ impl RemoteNodeSessionOwnerRuntime {
                 &mut authority_sessions,
             );
         }
+        let _ = fs::remove_file(socket_path);
         Ok(())
     }
 }

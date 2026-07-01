@@ -2,6 +2,7 @@ pub mod error_log;
 pub mod published_target_store;
 pub mod remote_grpc_proto;
 pub mod remote_grpc_transport;
+pub mod session_catalog_snapshot_store;
 mod tmux_backend;
 mod tmux_error;
 mod tmux_types;

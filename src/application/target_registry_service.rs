@@ -3,6 +3,7 @@ use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionAvailability;
 use crate::domain::session_catalog::SessionTransport;
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::session_catalog_snapshot_store::SessionCatalogSnapshotStore;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
@@ -15,6 +16,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const REMOTE_OWNER_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCatalogReadMode {
+    ProjectionFirst,
+    FreshTmux,
+}
 
 pub trait TargetCatalogGateway {
     type Error;
@@ -39,6 +46,7 @@ pub struct DefaultTargetCatalogGateway {
     remote_runtime_owner: RemoteRuntimeOwnerRuntime,
     current_socket_name: Option<String>,
     remote_snapshot_cache: Arc<Mutex<Option<CachedRemoteRuntimeOwnerSnapshot>>>,
+    local_catalog_read_mode: LocalCatalogReadMode,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +100,13 @@ impl DefaultTargetCatalogGateway {
             })?,
             current_socket_name,
             remote_snapshot_cache: Arc::new(Mutex::new(None)),
+            local_catalog_read_mode: LocalCatalogReadMode::ProjectionFirst,
         })
+    }
+
+    pub fn with_fresh_local_tmux(mut self) -> Self {
+        self.local_catalog_read_mode = LocalCatalogReadMode::FreshTmux;
+        self
     }
 
     pub fn list_local_targets_on_authority(
@@ -130,11 +144,58 @@ impl DefaultTargetCatalogGateway {
 
     fn local_targets_on_current_socket(&self) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         if let Some(socket_name) = self.current_socket_name.as_deref() {
-            self.local_tmux
-                .list_sessions_on_socket(&TmuxSocketName::new(socket_name))
+            match self.local_catalog_read_mode {
+                LocalCatalogReadMode::ProjectionFirst => {
+                    self.local_targets_from_projection_or_refresh(socket_name)
+                }
+                LocalCatalogReadMode::FreshTmux => {
+                    self.refresh_local_targets_on_socket(socket_name)
+                }
+            }
         } else {
             self.local_tmux.list_sessions()
         }
+    }
+
+    fn local_targets_from_projection_or_refresh(
+        &self,
+        socket_name: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
+        let store = SessionCatalogSnapshotStore::for_socket(socket_name);
+        match store.load() {
+            Ok(Some(sessions)) => {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] list_targets local_projection current_socket={:?} sessions={}",
+                    self.current_socket_name,
+                    sessions.len()
+                ));
+                Ok(sessions)
+            }
+            Ok(None) => self.refresh_local_targets_on_socket(socket_name),
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] list_targets local_projection_failed current_socket={:?} error={}",
+                    self.current_socket_name, error
+                ));
+                self.refresh_local_targets_on_socket(socket_name)
+            }
+        }
+    }
+
+    fn refresh_local_targets_on_socket(
+        &self,
+        socket_name: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
+        let sessions = self
+            .local_tmux
+            .list_sessions_on_socket(&TmuxSocketName::new(socket_name))?;
+        if let Err(error) = SessionCatalogSnapshotStore::for_socket(socket_name).store(&sessions) {
+            ERROR_LOG.log(format!(
+                "[diag-newhost] list_targets local_projection_store_failed current_socket={:?} error={}",
+                self.current_socket_name, error
+            ));
+        }
+        Ok(sessions)
     }
 
     fn remote_snapshot(

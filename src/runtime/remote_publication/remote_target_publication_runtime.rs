@@ -27,10 +27,11 @@ use crate::runtime::remote_workspace_socket_registry_runtime::{
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 
 mod publication_helpers;
 pub(crate) use publication_helpers::*;
@@ -128,34 +129,106 @@ impl RemoteTargetPublicationRuntime {
             let _ = fs::remove_file(&socket_path);
         }
         let listener = UnixListener::bind(&socket_path).map_err(remote_target_publication_error)?;
-        for accepted in listener.incoming() {
-            let Ok(mut stream) = accepted else {
+        listener
+            .set_nonblocking(true)
+            .map_err(remote_target_publication_error)?;
+        let command_socket_path =
+            remote_target_publication_server_command_socket_path(&command.socket_name);
+        if command_socket_path.exists() {
+            let _ = fs::remove_file(&command_socket_path);
+        }
+        let command_listener =
+            UnixListener::bind(&command_socket_path).map_err(remote_target_publication_error)?;
+        command_listener
+            .set_nonblocking(true)
+            .map_err(remote_target_publication_error)?;
+        loop {
+            if drain_publication_server_commands(&command_listener)? {
                 break;
-            };
-            let source_socket_name = command.socket_name.clone();
-            let _current_executable = self.current_executable.clone();
-            thread::spawn(move || {
-                if read_client_hello(&mut stream).is_err() {
-                    return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let source_socket_name = command.socket_name.clone();
+                    let _current_executable = self.current_executable.clone();
+                    thread::spawn(move || {
+                        if read_client_hello(&mut stream).is_err() {
+                            return;
+                        }
+                        if write_server_hello(&mut stream, "waitagent-publication").is_err() {
+                            return;
+                        }
+                        while let Ok(session_envelope) = read_node_session_envelope(&mut stream) {
+                            if session_envelope.channel != NodeSessionChannel::Publication {
+                                break;
+                            }
+                            let _changed = match apply_publication_envelope(
+                                &source_socket_name,
+                                &session_envelope.envelope,
+                            ) {
+                                Ok(changed) => changed,
+                                Err(_) => break,
+                            };
+                        }
+                    });
                 }
-                if write_server_hello(&mut stream, "waitagent-publication").is_err() {
-                    return;
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(25));
                 }
-                while let Ok(session_envelope) = read_node_session_envelope(&mut stream) {
-                    if session_envelope.channel != NodeSessionChannel::Publication {
-                        break;
-                    }
-                    let _changed = match apply_publication_envelope(
-                        &source_socket_name,
-                        &session_envelope.envelope,
-                    ) {
-                        Ok(changed) => changed,
-                        Err(_) => break,
-                    };
-                }
-            });
+                Err(_) => break,
+            }
+        }
+        let _ = fs::remove_file(socket_path);
+        let _ = fs::remove_file(command_socket_path);
+        Ok(())
+    }
+
+    pub fn shutdown_socket_sidecars(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        let mut first_error = None;
+        if let Err(error) = self
+            .signal_publication_agent_command_without_start(
+                socket_name,
+                PublicationAgentCommand::Stop,
+            )
+            .or_else(ignore_missing_publication_sidecar)
+        {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) =
+            signal_publication_sender_command(socket_name, PublicationSenderCommand::Stop)
+                .or_else(ignore_missing_publication_sidecar)
+        {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) =
+            signal_publication_server_command(socket_name, PublicationServerCommand::Stop)
+                .or_else(ignore_missing_publication_sidecar)
+        {
+            first_error.get_or_insert(error);
+        }
+        let _ = fs::remove_file(remote_target_publication_agent_socket_path(socket_name));
+        let _ = fs::remove_file(remote_target_publication_sender_socket_path(socket_name));
+        let _ = fs::remove_file(remote_target_publication_server_command_socket_path(
+            socket_name,
+        ));
+        let _ = fs::remove_file(remote_target_publication_socket_path(socket_name));
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
+    }
+
+    fn signal_publication_agent_command_without_start(
+        &self,
+        socket_name: &str,
+        command: PublicationAgentCommand,
+    ) -> Result<(), LifecycleError> {
+        let mut stream =
+            UnixStream::connect(remote_target_publication_agent_socket_path(socket_name))
+                .map_err(remote_target_publication_error)?;
+        stream
+            .write_all(render_publication_agent_command(&command).as_bytes())
+            .map_err(remote_target_publication_error)?;
+        stream.flush().map_err(remote_target_publication_error)
     }
 
     pub fn apply_live_publication_envelope(
@@ -293,6 +366,7 @@ impl RemoteTargetPublicationRuntime {
             let _ = fs::remove_file(&socket_path);
         }
         let listener = UnixListener::bind(&socket_path).map_err(remote_target_publication_error)?;
+        let mut stop_requested = false;
         for accepted in listener.incoming() {
             let Ok(mut stream) = accepted else {
                 break;
@@ -303,9 +377,17 @@ impl RemoteTargetPublicationRuntime {
             let mut commands = vec![first_command];
             drain_pending_publication_agent_commands(&listener, &mut commands)?;
             for agent_command in commands {
+                if agent_command == PublicationAgentCommand::Stop {
+                    stop_requested = true;
+                    continue;
+                }
                 self.process_publication_agent_command(&command.socket_name, agent_command)?;
             }
+            if stop_requested {
+                break;
+            }
         }
+        let _ = fs::remove_file(socket_path);
         Ok(())
     }
 
@@ -1005,6 +1087,7 @@ impl RemoteTargetPublicationRuntime {
         command: PublicationAgentCommand,
     ) -> Result<(), LifecycleError> {
         match command {
+            PublicationAgentCommand::Stop => Ok(()),
             PublicationAgentCommand::FullReconcile => {
                 self.reconcile_socket_publications_with_cache(socket_name)
             }
@@ -1025,6 +1108,20 @@ impl RemoteTargetPublicationRuntime {
                 )
             }
         }
+    }
+}
+
+fn ignore_missing_publication_sidecar(error: LifecycleError) -> Result<(), LifecycleError> {
+    match &error {
+        LifecycleError::Io(_, io_error)
+            if matches!(
+                io_error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(error),
     }
 }
 

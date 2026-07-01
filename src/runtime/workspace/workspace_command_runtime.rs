@@ -20,6 +20,7 @@ use crate::cli::{
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::session_catalog_snapshot_store::SessionCatalogSnapshotStore;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
@@ -624,6 +625,7 @@ impl WorkspaceCommandRuntime {
             .kill_server(&socket_name)
             .map_err(tmux_runtime_error)?;
         self.unregister_live_workspace_socket(socket_name.as_str());
+        SessionCatalogSnapshotStore::for_socket(socket_name.as_str()).remove();
         println!(
             "stopped waitagent server on socket `{}`",
             socket_name.as_str()
@@ -661,7 +663,9 @@ impl WorkspaceCommandRuntime {
 
     fn register_live_workspace_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
         self.remote_workspace_socket_registry_runtime
-            .register_workspace_socket(socket_name)
+            .register_workspace_socket(socket_name)?;
+        self.warm_session_catalog_projection(socket_name);
+        Ok(())
     }
 
     fn register_live_workspace(
@@ -722,6 +726,15 @@ impl WorkspaceCommandRuntime {
         let _ =
             shutdown_remote_session_sync_owner(&remote_session_sync_owner_socket_path(socket_name));
         if let Err(error) = self
+            .remote_target_publication_runtime
+            .shutdown_socket_sidecars(socket_name)
+        {
+            ERROR_LOG.log(format!(
+                "[diag-exit] remote_publication_shutdown_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
+        if let Err(error) = self
             .remote_workspace_socket_registry_runtime
             .unregister_workspace_socket(socket_name)
         {
@@ -743,6 +756,19 @@ impl WorkspaceCommandRuntime {
         if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
             ERROR_LOG.log(format!(
                 "[diag-exit] remote_runtime_owner_shutdown_failed socket={} error={}",
+                socket_name, error
+            ));
+        }
+    }
+
+    fn warm_session_catalog_projection(&self, socket_name: &str) {
+        let result =
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())
+                .map(|gateway| gateway.with_fresh_local_tmux())
+                .and_then(|gateway| gateway.list_local_targets_on_authority(socket_name));
+        if let Err(error) = result {
+            ERROR_LOG.log(format!(
+                "[diag-newhost] session_catalog_projection_warm_failed socket={} error={}",
                 socket_name, error
             ));
         }

@@ -401,7 +401,8 @@ impl RemoteNodeSessionRuntime {
                     source_session_name: source_session_name.clone(),
                 }),
             ),
-            PublicationSenderCommand::RegisterLiveSession { .. }
+            PublicationSenderCommand::Stop
+            | PublicationSenderCommand::RegisterLiveSession { .. }
             | PublicationSenderCommand::RefreshLiveSession { .. }
             | PublicationSenderCommand::UnregisterLiveSession { .. } => {
                 Err(RemoteNodeSessionError::new(
