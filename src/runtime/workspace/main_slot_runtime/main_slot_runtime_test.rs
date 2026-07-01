@@ -90,6 +90,20 @@ mod tests {
     }
 
     #[test]
+    fn next_target_host_session_ignores_exited_target_hosts() {
+        let _guard = crate::test_support::integration_test_lock();
+        let mut exited = session("wa-1", "target-b", WorkspaceSessionRole::TargetHost);
+        exited.availability = SessionAvailability::Exited;
+        let sessions = vec![
+            session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
+            session("wa-1", "target-a", WorkspaceSessionRole::TargetHost),
+            exited,
+        ];
+
+        assert!(next_target_host_session(&sessions, "wa-1", Some("wa-1:target-a")).is_none());
+    }
+
+    #[test]
     fn next_remote_target_prefers_another_remote_target() {
         let _guard = crate::test_support::integration_test_lock();
         let sessions = vec![

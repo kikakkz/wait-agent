@@ -6,7 +6,7 @@ use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::cli::{
     ActivateTargetCommand, MainPaneDiedCommand, NewTargetCommand, RemoteTargetExitedCommand,
 };
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
+use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceInstanceId};
 use crate::infra::error_log::ERROR_LOG;
@@ -1336,9 +1336,15 @@ impl MainSlotRuntime {
         if self.network.connect.is_some() {
             return Ok(RemoteTargetExitTransition::CloseWorkspace);
         }
-        if let Some(target) =
-            next_target_host_session(&sessions, workspace.socket_name.as_str(), active_target)
-        {
+        let local_sessions = self
+            .target_registry_for_socket_fresh(workspace.socket_name.as_str())?
+            .list_targets_on_authority(workspace.socket_name.as_str())
+            .map_err(main_slot_error)?;
+        if let Some(target) = next_target_host_session(
+            &local_sessions,
+            workspace.socket_name.as_str(),
+            active_target,
+        ) {
             return Ok(RemoteTargetExitTransition::ActivateLocal(target));
         }
         Ok(RemoteTargetExitTransition::CloseWorkspace)
@@ -2867,6 +2873,7 @@ fn next_target_host_session(
     let same_socket_targets = sessions
         .iter()
         .filter(|session| session.address.server_id() == socket_name && session.is_target_host())
+        .filter(|session| session.availability != SessionAvailability::Exited)
         .cloned()
         .collect::<Vec<_>>();
 
