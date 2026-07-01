@@ -110,7 +110,7 @@ fn render_session_snapshot_record(session: &ManagedSessionRecord) -> String {
         session.availability.as_str().to_string(),
         encode_optional_string_field(workspace_dir.as_deref()),
         encode_optional_string_field(session.workspace_key.as_deref()),
-        encode_optional_string_field(session.session_role.map(WorkspaceSessionRole::as_str)),
+        encode_optional_string_field(session.session_role.map(|role| role.as_str())),
         session.attached_clients.to_string(),
         session.window_count.to_string(),
         encode_optional_string_field(session.command_name.as_deref()),
