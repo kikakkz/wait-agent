@@ -87,7 +87,7 @@ impl MainSlotRuntime {
         let current_workspace = self.current_workspace(&command)?;
         let current_socket = TmuxSocketName::new(&command.current_socket_name);
         let socket_scoped_registry =
-            self.target_registry_for_socket(command.current_socket_name.as_str())?;
+            self.target_registry_for_socket_fresh(command.current_socket_name.as_str())?;
         let session = if target_socket_name(&command.target)
             == Some(command.current_socket_name.as_str())
         {
@@ -226,7 +226,7 @@ impl MainSlotRuntime {
         };
         let t_list = Instant::now();
         let socket_scoped_registry =
-            self.target_registry_for_socket(workspace.socket_name.as_str())?;
+            self.target_registry_for_socket_fresh(workspace.socket_name.as_str())?;
         let sessions = socket_scoped_registry
             .list_targets_on_authority(workspace.socket_name.as_str())
             .map_err(main_slot_error)?;
@@ -2117,7 +2117,7 @@ impl MainSlotRuntime {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
-        self.target_registry_for_socket(socket_name.as_str())?
+        self.target_registry_for_socket_fresh(socket_name.as_str())?
             .resolve_target_on_authority_session(socket_name.as_str(), session_name)
             .map_err(main_slot_error)?
             .ok_or_else(|| {
@@ -2134,7 +2134,7 @@ impl MainSlotRuntime {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
-        self.target_registry_for_socket(socket_name.as_str())?
+        self.target_registry_for_socket_fresh(socket_name.as_str())?
             .resolve_local_target_on_authority_session(socket_name.as_str(), session_name)
             .map_err(main_slot_error)?
             .ok_or_else(|| {
@@ -2771,6 +2771,17 @@ impl MainSlotRuntime {
         Ok(TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name)
                 .map_err(main_slot_error)?,
+        ))
+    }
+
+    fn target_registry_for_socket_fresh(
+        &self,
+        socket_name: &str,
+    ) -> Result<TargetRegistryService<DefaultTargetCatalogGateway>, LifecycleError> {
+        Ok(TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name)
+                .map_err(main_slot_error)?
+                .with_fresh_local_tmux(),
         ))
     }
 
