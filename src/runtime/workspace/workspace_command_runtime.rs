@@ -546,11 +546,7 @@ impl WorkspaceCommandRuntime {
         &self,
         command: RemoteTargetExitedCommand,
     ) -> Result<(), LifecycleError> {
-        let socket_name = command.socket_name.clone();
-        let session_name = command.session_name.clone();
-        let result = self.main_slot_runtime.run_remote_target_exited(command);
-        let _ = self.signal_workspace_chrome_refresh(&socket_name, &session_name);
-        result
+        self.main_slot_runtime.run_remote_target_exited(command)
     }
 
     pub fn run_toggle_fullscreen(
