@@ -1275,6 +1275,7 @@ impl MainSlotRuntime {
         } else {
             self.clear_session_pane(&workspace, &command.target)?;
         }
+        self.restore_remote_exit_workspace_layout(&current_workspace, &workspace)?;
         ERROR_LOG.log_exit_latency(format!(
             "[diag-exit] workspace_remote_exit_cleanup target={} elapsed={:?} total={:?} stage=workspace_exit",
             command.target,
@@ -1282,6 +1283,15 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         Ok(())
+    }
+
+    fn restore_remote_exit_workspace_layout(
+        &self,
+        current_workspace: &CurrentWorkspace,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        self.layout_runtime
+            .sync_main_slot_bindings(workspace, &current_workspace.workspace_dir)
     }
 
     fn remote_target_exit_transition(

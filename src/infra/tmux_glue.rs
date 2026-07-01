@@ -1,11 +1,13 @@
 use crate::infra::tmux::TmuxError;
 use crate::infra::tmux_glue_contract::TmuxGlueContractError;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The vendored tmux binary, embedded at compile time.
 /// Extracted to a runtime directory on first use.
 pub const VENDORED_TMUX_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vendored_tmux.bin"));
+static TMUX_EXTRACT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[allow(unused_imports)]
 pub use crate::infra::tmux_glue_contract::{
@@ -45,20 +47,32 @@ pub fn extract_embedded_tmux() -> Result<PathBuf, TmuxError> {
                 data_dir.display()
             ))
         })?;
-        std::fs::write(&tmux_path, VENDORED_TMUX_BYTES).map_err(|e| {
+        let temp_path = data_dir.join(format!(
+            ".tmux.{}.{}.tmp",
+            std::process::id(),
+            TMUX_EXTRACT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&temp_path, VENDORED_TMUX_BYTES).map_err(|e| {
             TmuxError::new(format!(
                 "failed to write vendored tmux binary to {}: {e}",
-                tmux_path.display()
+                temp_path.display()
             ))
         })?;
         #[cfg(unix)]
         std::fs::set_permissions(
-            &tmux_path,
+            &temp_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
         .map_err(|e| {
             TmuxError::new(format!(
                 "failed to set permissions on vendored tmux binary at {}: {e}",
+                temp_path.display()
+            ))
+        })?;
+        std::fs::rename(&temp_path, &tmux_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            TmuxError::new(format!(
+                "failed to install vendored tmux binary at {}: {e}",
                 tmux_path.display()
             ))
         })?;

@@ -2590,6 +2590,11 @@ mod tests {
             .as_deref(),
             Some("on")
         );
+        assert_eq!(
+            workspace_footer_height(&backend, &workspace.workspace_handle),
+            Some(1),
+            "remote exit recovery must restore the chrome footer to one row"
+        );
 
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);
@@ -3790,6 +3795,30 @@ mod tests {
             .into_iter()
             .find(|pane| pane.pane_id == current_pane)
             .and_then(|pane| pane.current_command)
+    }
+
+    fn workspace_footer_height(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Option<u16> {
+        let window = backend.current_window(workspace).ok()?;
+        let panes = backend.list_panes(workspace, &window).ok()?;
+        let footer = panes
+            .into_iter()
+            .find(|pane| pane.title == FOOTER_PANE_TITLE && !pane.is_dead)?;
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    footer.pane_id.as_str().to_string(),
+                    "#{pane_height}".to_string(),
+                ],
+            )
+            .ok()?;
+        output.stdout.trim().parse().ok()
     }
 
     fn workspace_main_pane_pipe(
