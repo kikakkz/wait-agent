@@ -15,20 +15,21 @@ use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use crate::runtime::remote_host::remote_install_proxy_store::{
-    wrap_install_command_with_proxy, RemoteInstallProxyStore,
+    proxy_env_prefix, wrap_install_command_with_proxy, RemoteInstallProxyStore,
 };
 use crate::runtime::remote_host::remote_port_probe::{
     RemotePortProbe, RemotePortProbePreference, SshRemotePortProbe,
 };
 use crate::runtime::remote_host::ssh_remote_host_bootstrapper::{
-    RemoteHostBootstrapPlan, RemoteHostBootstrapper,
+    install_reachability_preflight_command, RemoteHostBootstrapPlan, RemoteHostBootstrapper,
 };
 use std::io::{self, Read};
 
 const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub trait RemotePortProbeFactory {
     type Probe;
@@ -127,10 +128,24 @@ where
             request.local_connect_endpoint.clone(),
             authority_node_id.clone(),
         );
+        plan.install_reachability_preflight_command =
+            Some(install_reachability_preflight_command(None));
         if request.use_install_proxy {
             let proxy_config = RemoteInstallProxyStore::default()
                 .load()
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+            if proxy_config.has_proxy() {
+                plan.install_reachability_preflight_command = Some(
+                    install_reachability_preflight_command(Some(&proxy_env_prefix(
+                        &proxy_config,
+                        &profile.host,
+                        &request.local_connect_endpoint,
+                    ))),
+                );
+            } else {
+                plan.install_reachability_preflight_command =
+                    Some(install_reachability_preflight_command(None));
+            }
             plan.install_or_update_command = wrap_install_command_with_proxy(
                 &plan.install_or_update_command,
                 &proxy_config,
@@ -158,8 +173,11 @@ where
             });
         }
 
-        let default_target =
-            self.wait_for_first_online_target(&authority_node_id, DEFAULT_ENDPOINT_POLL_INTERVAL)?;
+        let default_target = self.wait_for_first_online_target(
+            &authority_node_id,
+            DEFAULT_ENDPOINT_POLL_INTERVAL,
+            DEFAULT_ENDPOINT_WAIT_TIMEOUT,
+        )?;
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
         profile.use_install_proxy = request.use_install_proxy;
@@ -217,8 +235,10 @@ where
         &self,
         expected: &str,
         poll_interval: Duration,
+        timeout: Duration,
     ) -> Result<ManagedSessionRecord, LifecycleError> {
         let expected = expected.to_string();
+        let deadline = Instant::now() + timeout;
         loop {
             let targets = self
                 .target_registry
@@ -229,6 +249,12 @@ where
                 .find(|target| target.availability == SessionAvailability::Online)
             {
                 return Ok(target);
+            }
+            if Instant::now() >= deadline {
+                return Err(LifecycleError::Protocol(format!(
+                    "timed out after {}s waiting for remote WaitAgent `{expected}` to publish a target; check `/tmp/waitagent-*.log` on the remote host",
+                    timeout.as_secs()
+                )));
             }
             thread::sleep(poll_interval);
         }
@@ -925,12 +951,53 @@ mod tests {
         );
 
         let target = runtime
-            .wait_for_first_online_target("10.1.29.130#7476", Duration::from_millis(0))
+            .wait_for_first_online_target(
+                "10.1.29.130#7476",
+                Duration::from_millis(0),
+                Duration::from_secs(1),
+            )
             .unwrap();
 
         assert_eq!(target.address.authority_id(), "10.1.29.130#7476");
         assert_eq!(target.address.session_id(), "seed");
         assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn wait_for_first_online_target_times_out_when_remote_never_publishes() {
+        let registry = TargetRegistryService::new(FakeGateway {
+            targets: Rc::new(RefCell::new(Vec::new())),
+        });
+        let runtime = RemoteHostConnectRuntime::new(
+            RemoteHostHistoryStore::new(unique_path("remote-host-connect-timeout.toml")),
+            FakeProbe {
+                calls: Rc::new(RefCell::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: Rc::new(RefCell::new(Vec::new())),
+                catalog_targets: None,
+            },
+            registry.clone(),
+            RemoteSessionCreationService::new(
+                FakeCreateTransport {
+                    requests: Rc::new(RefCell::new(Vec::new())),
+                    catalog_targets: Rc::new(RefCell::new(Vec::new())),
+                },
+                registry,
+            ),
+        );
+
+        let error = runtime
+            .wait_for_first_online_target(
+                "10.1.29.130#7476",
+                Duration::from_millis(0),
+                Duration::from_millis(1),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(error.to_string().contains("10.1.29.130#7476"));
     }
 
     #[test]

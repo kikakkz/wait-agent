@@ -13,12 +13,15 @@ use std::fmt;
 
 pub const WAITAGENT_INSTALL_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh";
+const REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS: u16 = 5;
+const REMOTE_INSTALL_PREFLIGHT_TIMEOUT_SECS: u16 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteWaitAgentStartPlan {
     pub remote_port: u16,
     pub local_connect_endpoint: String,
     pub authority_id: String,
+    pub endpoint_preflight_command: String,
     pub command: String,
 }
 
@@ -32,6 +35,7 @@ impl RemoteWaitAgentStartPlan {
         let authority_id = authority_id.into();
         Self {
             remote_port,
+            endpoint_preflight_command: endpoint_preflight_command(&local_connect_endpoint),
             command: format!(
                 "nohup waitagent --port {remote_port} --connect {} --node-id {} __remote-daemon >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
                 shell_single_quote(&local_connect_endpoint),
@@ -52,6 +56,7 @@ pub struct RemoteHostBootstrapPlan {
     pub ssh_password_secret_id: Option<RemoteHostSecretId>,
     pub sudo_password_secret_id: Option<RemoteHostSecretId>,
     pub install_or_update_command: String,
+    pub install_reachability_preflight_command: Option<String>,
     pub start_plan: RemoteWaitAgentStartPlan,
 }
 
@@ -81,6 +86,7 @@ impl RemoteHostBootstrapPlan {
             ssh_password_secret_id,
             sudo_password_secret_id: profile.sudo_password_secret_id.clone(),
             install_or_update_command: install_or_update_command(),
+            install_reachability_preflight_command: None,
             start_plan: RemoteWaitAgentStartPlan::new(
                 remote_port,
                 local_connect_endpoint,
@@ -164,7 +170,28 @@ where
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<(), Self::Error> {
+        self.run_ssh_command(
+            plan,
+            &plan.start_plan.endpoint_preflight_command,
+            false,
+        )
+        .map_err(|error| {
+            RemoteHostBootstrapError::new(format!(
+                "remote host cannot reach local WaitAgent endpoint `{}`: {}. Pass `--public <host:port>` with an endpoint reachable from `{}`.",
+                plan.start_plan.local_connect_endpoint, error, plan.host
+            ))
+        })?;
         if !self.remote_waitagent_is_current(plan)? {
+            if let Some(command) = &plan.install_reachability_preflight_command {
+                self.run_ssh_command(plan, command, false)
+                    .map_err(|error| {
+                        RemoteHostBootstrapError::new(format!(
+                            "remote host cannot reach the WaitAgent install URL{}: {}",
+                            install_proxy_hint(command),
+                            error
+                        ))
+                    })?;
+            }
             self.run_ssh_command(plan, &plan.install_or_update_command, true)?;
         }
         if self.remote_waitagent_daemon_is_running(plan)? {
@@ -361,6 +388,94 @@ fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
     )
 }
 
+pub fn install_reachability_preflight_command(env_prefix: Option<&str>) -> String {
+    let prefix = env_prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{value} "))
+        .unwrap_or_default();
+    format!(
+        "{prefix}curl -fsSL --connect-timeout {} --max-time {} -o /dev/null {}",
+        REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS,
+        REMOTE_INSTALL_PREFLIGHT_TIMEOUT_SECS,
+        shell_single_quote(WAITAGENT_INSTALL_SCRIPT_URL)
+    )
+}
+
+fn install_proxy_hint(command: &str) -> &'static str {
+    if command.contains("_proxy=") || command.contains("_PROXY=") {
+        " through the configured install proxy"
+    } else {
+        ""
+    }
+}
+
+fn endpoint_preflight_command(endpoint: &str) -> String {
+    match parse_endpoint_host_port(endpoint) {
+        Ok((host, port)) => tcp_connect_preflight_command(&host, port),
+        Err(message) => format!("echo {} >&2; exit 2", shell_single_quote(&message)),
+    }
+}
+
+fn tcp_connect_preflight_command(host: &str, port: u16) -> String {
+    let host = shell_single_quote(host);
+    let port = shell_single_quote(&port.to_string());
+    let python = shell_single_quote(
+        "import socket,sys; s=socket.create_connection((sys.argv[1], int(sys.argv[2])), 5); s.close()",
+    );
+    let bash = shell_single_quote("cat < /dev/null > /dev/tcp/$1/$2");
+    format!(
+        "if command -v nc >/dev/null 2>&1; then nc -z -w {timeout} {host} {port}; \
+elif command -v python3 >/dev/null 2>&1; then python3 -c {python} {host} {port}; \
+elif command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout {timeout} bash -c {bash} sh {host} {port}; \
+else echo 'no TCP probe tool available on remote host (need nc, python3, or bash+timeout)' >&2; exit 127; fi",
+        timeout = REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS
+    )
+}
+
+fn parse_endpoint_host_port(endpoint: &str) -> Result<(String, u16), String> {
+    let value = endpoint.trim();
+    if value.is_empty() {
+        return Err("local WaitAgent endpoint is empty".to_string());
+    }
+    let value = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or(value);
+    let value = value.split('/').next().unwrap_or(value);
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some((host, tail)) = rest.split_once(']') else {
+            return Err(format!(
+                "local WaitAgent endpoint `{endpoint}` has an invalid IPv6 host"
+            ));
+        };
+        let Some(port) = tail.strip_prefix(':') else {
+            return Err(format!(
+                "local WaitAgent endpoint `{endpoint}` is missing a port"
+            ));
+        };
+        return parse_endpoint_port(endpoint, host, port);
+    }
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return Err(format!(
+            "local WaitAgent endpoint `{endpoint}` is missing a port"
+        ));
+    };
+    parse_endpoint_port(endpoint, host, port)
+}
+
+fn parse_endpoint_port(endpoint: &str, host: &str, port: &str) -> Result<(String, u16), String> {
+    if host.trim().is_empty() {
+        return Err(format!(
+            "local WaitAgent endpoint `{endpoint}` is missing a host"
+        ));
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("local WaitAgent endpoint `{endpoint}` has an invalid port"))?;
+    Ok((host.to_string(), port))
+}
+
 fn sudo_shell_command(remote_command: &str) -> String {
     format!(
         "sudo -S -p '' sh -lc {}",
@@ -467,6 +582,14 @@ mod tests {
             .install_or_update_command
             .contains("waitagent --version"));
         assert!(plan.install_or_update_command.contains("curl -fsSL"));
+        assert!(plan
+            .start_plan
+            .endpoint_preflight_command
+            .contains("10.1.26.84"));
+        assert!(plan
+            .start_plan
+            .endpoint_preflight_command
+            .contains("'7474'"));
         assert!(plan.start_plan.command.contains(
             "waitagent --port 7476 --connect '10.1.26.84:7474' --node-id '10.1.29.130#7476' __remote-daemon"
         ));
@@ -564,24 +687,135 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 1])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 1, 0])),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 5);
         assert_eq!(calls[0].0.host, "10.1.29.130");
         assert_eq!(calls[0].0.user, "kk");
-        assert!(calls[0].1.contains("waitagent --version"));
+        assert!(calls[0].1.contains("nc -z -w"));
         assert_eq!(calls[0].2, None);
-        assert!(calls[1].1.starts_with("sudo -S -p '' sh -lc "));
-        assert_eq!(calls[1].2.as_deref(), Some("sudo-secret\n"));
-        assert!(calls[2].1.contains("ps -eo args="));
-        assert_eq!(calls[2].2, None);
-        assert!(calls[3].1.contains("__remote-daemon"));
+        assert!(calls[1].1.contains("waitagent --version"));
+        assert_eq!(calls[1].2, None);
+        assert!(calls[2].1.starts_with("sudo -S -p '' sh -lc "));
+        assert_eq!(calls[2].2.as_deref(), Some("sudo-secret\n"));
+        assert!(calls[3].1.contains("ps -eo args="));
         assert_eq!(calls[3].2, None);
+        assert!(calls[4].1.contains("__remote-daemon"));
+        assert_eq!(calls[4].2, None);
+    }
+
+    #[test]
+    fn remote_host_bootstrapper_checks_install_url_before_install_when_configured() {
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let sudo_id = RemoteHostSecretId::new("waitagent.remote-host.130.sudo-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        store
+            .put_secret(&sudo_id, RemoteHostSecretValue::new("sudo-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: Some(sudo_id),
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        };
+        let mut plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        );
+        plan.install_reachability_preflight_command = Some(install_reachability_preflight_command(
+            Some("https_proxy='http://127.0.0.1:7897'"),
+        ));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            store,
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 1, 0])),
+            },
+        );
+
+        bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 6);
+        assert!(calls[0].1.contains("nc -z -w"));
+        assert!(calls[1].1.contains("waitagent --version"));
+        assert!(calls[2].1.contains("https_proxy="));
+        assert!(calls[2].1.contains(WAITAGENT_INSTALL_SCRIPT_URL));
+        assert!(calls[3].1.starts_with("sudo -S -p '' sh -lc "));
+        assert!(calls[4].1.contains("ps -eo args="));
+        assert!(calls[5].1.contains("__remote-daemon"));
+    }
+
+    #[test]
+    fn remote_host_bootstrapper_reports_unreachable_local_endpoint_before_starting() {
+        let ssh_id = RemoteHostSecretId::new("waitagent.remote-host.130.ssh-password").unwrap();
+        let store = MemoryRemoteHostSecretStore::default();
+        store
+            .put_secret(&ssh_id, RemoteHostSecretValue::new("ssh-secret"))
+            .unwrap();
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: Some(ssh_id),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        };
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "192.168.31.178:7474",
+            "10.1.29.130#7476",
+        );
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let bootstrapper = SshRemoteHostBootstrapper::with_executor(
+            store,
+            RecordingSshExecutor {
+                calls: calls.clone(),
+                statuses: Rc::new(RefCell::new(vec![1])),
+            },
+        );
+
+        let error = bootstrapper.ensure_waitagent_and_start(&plan).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("remote host cannot reach local WaitAgent endpoint"));
+        assert!(error.to_string().contains("--public <host:port>"));
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn endpoint_preflight_command_rejects_malformed_endpoint() {
+        let command = endpoint_preflight_command("127.0.0.1");
+
+        assert!(command.contains("missing a port"));
+        assert!(command.contains("exit 2"));
     }
 
     #[test]
@@ -620,20 +854,22 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0])),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 3);
-        assert!(calls[0].1.contains("waitagent --version"));
+        assert_eq!(calls.len(), 4);
+        assert!(calls[0].1.contains("nc -z -w"));
         assert_eq!(calls[0].2, None);
-        assert!(calls[1].1.contains("ps -eo args="));
+        assert!(calls[1].1.contains("waitagent --version"));
         assert_eq!(calls[1].2, None);
-        assert!(calls[2].1.contains("__remote-daemon"));
+        assert!(calls[2].1.contains("ps -eo args="));
         assert_eq!(calls[2].2, None);
+        assert!(calls[3].1.contains("__remote-daemon"));
+        assert_eq!(calls[3].2, None);
         assert!(!calls.iter().any(|(_, command, _)| command.contains("sudo")));
     }
 
@@ -673,16 +909,17 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0])),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert!(calls[0].1.contains("waitagent --version"));
-        assert!(calls[1].1.contains("ps -eo args="));
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].1.contains("nc -z -w"));
+        assert!(calls[1].1.contains("waitagent --version"));
+        assert!(calls[2].1.contains("ps -eo args="));
         assert!(!calls
             .iter()
             .any(|(_, command, _)| command.contains("nohup")));
