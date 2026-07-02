@@ -45,8 +45,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    LocalSessionCatalog, LocalTargetExitObserver, NoopAuthorityPublicationGateway,
-    OutboundRemoteNodeTransport, SessionSyncAuthorityHost, SessionSyncAuthorityManager,
+    LocalSessionCatalog, LocalTargetExitObserver, OutboundRemoteNodeTransport,
+    SessionSyncAuthorityHost, SessionSyncAuthorityManager, SessionSyncAuthorityPublicationGateway,
     LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID, WAITAGENT_ACTIVE_TARGET_OPTION,
 };
 
@@ -1343,13 +1343,14 @@ pub(super) fn spawn_in_process_authority_target_host(
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
     writer_ready: Arc<Condvar>,
+    network: RemoteNetworkConfig,
     command: RemoteAuthorityTargetHostCommand,
 ) -> Result<(), LifecycleError> {
     let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?;
     let current_executable = current_waitagent_executable()?;
     let runtime = RemoteAuthorityTargetHostRuntime::new(
         gateway,
-        NoopAuthorityPublicationGateway,
+        SessionSyncAuthorityPublicationGateway::new(network),
         current_executable,
     );
     let authority_socket_path =

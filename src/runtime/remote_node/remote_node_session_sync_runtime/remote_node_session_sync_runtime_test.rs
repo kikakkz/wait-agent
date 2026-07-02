@@ -8,7 +8,8 @@ mod tests {
         remote_session_sync_owner_socket_path, sync_local_sessions, AuthorityHostSignal,
         LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
         OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
-        SourcePublicationAckOutcome, SourcePublicationTracker,
+        SessionSyncAuthorityPublicationGateway, SourcePublicationAckOutcome,
+        SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -26,6 +27,7 @@ mod tests {
     };
     use crate::infra::remote_transport_codec::read_control_plane_envelope;
     use crate::lifecycle::LifecycleError;
+    use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
     use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
     use std::collections::HashMap;
     use std::fs;
@@ -590,6 +592,36 @@ mod tests {
             }
         );
         notifier.join().expect("notifier should join");
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn session_sync_authority_gateway_signals_local_runtime_change() {
+        let socket_name = format!("wa-test-sync-gateway-{}", std::process::id());
+        let socket_path = remote_session_sync_owner_socket_path(&socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).expect("owner socket should bind");
+        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel();
+        let _owner_worker =
+            super::super::serve_owner_commands(listener, local_catalog_tx, shutdown_tx);
+        let gateway = SessionSyncAuthorityPublicationGateway::new(RemoteNetworkConfig {
+            port: 7474,
+            connect: Some("127.0.0.1:7474".to_string()),
+            node_id: None,
+            public_endpoint: None,
+        });
+
+        gateway
+            .signal_local_runtime_changed(&socket_name)
+            .expect("runtime change should notify session sync owner");
+
+        let reason = local_catalog_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runtime change should arrive without polling");
+        assert_eq!(reason, LocalCatalogChangeReason::LocalRuntimeChanged);
         let _ = fs::remove_file(&socket_path);
     }
 

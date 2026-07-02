@@ -198,8 +198,16 @@ pub(super) struct SessionSyncAuthorityHost {
     pub(super) writer_ready: Arc<Condvar>,
 }
 
-#[derive(Clone, Default)]
-pub(super) struct NoopAuthorityPublicationGateway;
+#[derive(Clone)]
+pub(super) struct SessionSyncAuthorityPublicationGateway {
+    network: RemoteNetworkConfig,
+}
+
+impl SessionSyncAuthorityPublicationGateway {
+    pub(super) fn new(network: RemoteNetworkConfig) -> Self {
+        Self { network }
+    }
+}
 
 impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBackend>> {
     pub fn from_build_env_with_network_and_socket(
@@ -831,6 +839,7 @@ impl SessionSyncAuthorityManager {
             running.clone(),
             writer.clone(),
             writer_ready.clone(),
+            self.network.clone(),
             RemoteAuthorityTargetHostCommand {
                 socket_name: socket_name.clone(),
                 target_session_name: session_name.clone(),
@@ -911,7 +920,7 @@ impl SessionSyncAuthorityManager {
     }
 }
 
-impl RemoteAuthorityPublicationGateway for NoopAuthorityPublicationGateway {
+impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
     fn ensure_live_session_registered(
         &self,
         socket_name: &str,
@@ -942,8 +951,12 @@ impl RemoteAuthorityPublicationGateway for NoopAuthorityPublicationGateway {
         Ok(())
     }
 
-    fn signal_local_runtime_changed(&self, _socket_name: &str) -> Result<(), LifecycleError> {
-        Ok(())
+    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
+            socket_name,
+            &self.network,
+            LocalCatalogChangeReason::LocalRuntimeChanged,
+        )
     }
 }
 
