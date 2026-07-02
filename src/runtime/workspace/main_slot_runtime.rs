@@ -2266,10 +2266,13 @@ impl MainSlotRuntime {
         let Some(target) = target else {
             return Ok(false);
         };
+        if self.remote_target_record(socket_name, target)?.is_some() {
+            return Ok(true);
+        }
         if let Some((authority_id, _)) = split_qualified_target(target) {
             return Ok(authority_id != socket_name);
         }
-        Ok(self.remote_target_record(socket_name, target)?.is_some())
+        Ok(false)
     }
 
     fn begin_main_pane_transition(
