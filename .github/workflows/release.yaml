@@ -6,19 +6,63 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version (without v prefix); defaults to ref name"
+      tag:
+        description: "Release tag, for example v0.0.111. Defaults to the latest v* tag."
         required: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release-linux-x86_64:
+  resolve-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != v* ]]; then
+              echo "release workflow must run from a v* tag" >&2
+              exit 1
+            fi
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          fi
+          git rev-parse --verify "${tag}^{commit}" >/dev/null
+          sha="$(git rev-list -n 1 "$tag")"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  release-linux-x86_64:
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+      VERSION: ${{ needs.resolve-release.outputs.version }}
+      RELEASE_SHA: ${{ needs.resolve-release.outputs.sha }}
+      CARGO_TARGET_DIR: target/release-${{ github.run_id }}-${{ github.run_attempt }}-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
           submodules: recursive
 
       - name: Install packaging deps
@@ -29,20 +73,20 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Resolve version
-        id: version
+      - name: Assert release source
         run: |
-          if [[ -n "${{ inputs.version }}" ]]; then
-            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$RELEASE_SHA"
+          grep -F "version = \"$VERSION\"" Cargo.toml
+          grep -A2 'name = "waitagent"' Cargo.lock | grep -F "version = \"$VERSION\""
 
       - name: cargo build --release
         run: |
           docker run --rm \
             -e CARGO_TERM_COLOR=always \
-            -e WAITAGENT_GIT_SHA="${GITHUB_SHA}" \
+            -e CARGO_TARGET_DIR="/workspace/${CARGO_TARGET_DIR}" \
+            -e WAITAGENT_GIT_SHA="${RELEASE_SHA}" \
             -v "$PWD:/workspace" \
             -w /workspace \
             ubuntu:20.04 \
@@ -58,31 +102,42 @@ jobs:
               . "$HOME/.cargo/env"
               export CC=clang
               export CXX=clang++
-              cargo build --release
+              cargo build --release --locked
             '
-          sudo chown -R "$(id -u):$(id -g)" target
+          sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"
+
+      - name: Verify built binary
+        run: |
+          set -euo pipefail
+          binary="$CARGO_TARGET_DIR/release/waitagent"
+          version_output="$("$binary" --version)"
+          echo "$version_output"
+          grep -F "waitagent $VERSION " <<<"$version_output"
+          if grep -F "(unknown)" <<<"$version_output"; then
+            echo "release binary is missing git sha metadata" >&2
+            exit 1
+          fi
+          grep -F "(${RELEASE_SHA:0:7})" <<<"$version_output"
 
       - name: Build .tar.gz archive
         run: |
-          VERSION="${{ steps.version.outputs.value }}"
+          rm -f waitagent-*-x86_64-linux.tar.gz waitagent_*.deb waitagent-*.rpm
           tar czf "waitagent-${VERSION}-x86_64-linux.tar.gz" \
-            -C target/release waitagent
+            -C "$CARGO_TARGET_DIR/release" waitagent
 
       - name: Build .deb package
         run: |
-          VERSION="${{ steps.version.outputs.value }}"
           chmod +x scripts/package-deb.sh
           ./scripts/package-deb.sh \
-            target/release/waitagent \
+            "$CARGO_TARGET_DIR/release/waitagent" \
             "waitagent_${VERSION}_amd64.deb" \
             "${VERSION}"
 
       - name: Build .rpm package
         run: |
-          VERSION="${{ steps.version.outputs.value }}"
           chmod +x scripts/package-rpm.sh
           ./scripts/package-rpm.sh \
-            target/release/waitagent \
+            "$CARGO_TARGET_DIR/release/waitagent" \
             "waitagent-${VERSION}-1.x86_64.rpm" \
             "${VERSION}"
 
@@ -95,10 +150,17 @@ jobs:
             waitagent-*-x86_64-linux.tar.gz
 
   release-macos:
+    needs: resolve-release
     runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+      VERSION: ${{ needs.resolve-release.outputs.version }}
+      RELEASE_SHA: ${{ needs.resolve-release.outputs.sha }}
+      CARGO_TARGET_DIR: target/release-${{ github.run_id }}-${{ github.run_attempt }}-macos
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
           submodules: recursive
 
       - name: Install system deps
@@ -108,34 +170,46 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Resolve version
-        id: version
+      - name: Assert release source
         run: |
-          if [[ -n "${{ inputs.version }}" ]]; then
-            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$RELEASE_SHA"
+          grep -F "version = \"$VERSION\"" Cargo.toml
+          grep -A2 'name = "waitagent"' Cargo.lock | grep -F "version = \"$VERSION\""
 
       - name: cargo build --release
-        run: cargo build --release
+        run: cargo build --release --locked
         env:
           PKG_CONFIG_PATH: /opt/homebrew/opt/ncurses/lib/pkgconfig:/opt/homebrew/opt/libevent/lib/pkgconfig:/opt/homebrew/opt/utf8proc/lib/pkgconfig
           LDFLAGS: -L/opt/homebrew/opt/ncurses/lib -L/opt/homebrew/opt/libevent/lib -L/opt/homebrew/opt/utf8proc/lib
           CPPFLAGS: -I/opt/homebrew/opt/ncurses/include -I/opt/homebrew/opt/libevent/include -I/opt/homebrew/opt/utf8proc/include
+          WAITAGENT_GIT_SHA: ${{ needs.resolve-release.outputs.sha }}
+
+      - name: Verify built binary
+        run: |
+          set -euo pipefail
+          binary="$CARGO_TARGET_DIR/release/waitagent"
+          version_output="$("$binary" --version)"
+          echo "$version_output"
+          grep -F "waitagent $VERSION " <<<"$version_output"
+          if grep -F "(unknown)" <<<"$version_output"; then
+            echo "release binary is missing git sha metadata" >&2
+            exit 1
+          fi
+          grep -F "(${RELEASE_SHA:0:7})" <<<"$version_output"
 
       - name: Build .tar.gz archive
         run: |
-          VERSION="${{ steps.version.outputs.value }}"
+          rm -f waitagent-*-aarch64-macos.tar.gz waitagent-*-aarch64-macos.dmg
           tar czf "waitagent-${VERSION}-aarch64-macos.tar.gz" \
-            -C target/release waitagent
+            -C "$CARGO_TARGET_DIR/release" waitagent
 
       - name: Build .dmg package
         run: |
-          VERSION="${{ steps.version.outputs.value }}"
           chmod +x scripts/package-dmg.sh
           ./scripts/package-dmg.sh \
-            target/release/waitagent \
+            "$CARGO_TARGET_DIR/release/waitagent" \
             "waitagent-${VERSION}-aarch64-macos.dmg" \
             "${VERSION}"
 
@@ -148,6 +222,7 @@ jobs:
 
   create-release:
     needs:
+      - resolve-release
       - release-linux-x86_64
       - release-macos
     runs-on: ubuntu-latest
@@ -161,9 +236,17 @@ jobs:
       - name: List all artifacts
         run: find artifacts -type f | sort
 
+      - name: Assert release target
+        run: |
+          set -euo pipefail
+          test "${{ needs.resolve-release.outputs.tag }}" = "v${{ needs.resolve-release.outputs.version }}"
+          echo "Publishing ${{ needs.resolve-release.outputs.tag }} at ${{ needs.resolve-release.outputs.sha }}"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
+          target_commitish: ${{ needs.resolve-release.outputs.sha }}
           files: artifacts/**/*
           generate_release_notes: true
           fail_on_unmatched_files: false
