@@ -4,6 +4,12 @@ use std::fmt;
 /// Shared list of shell program names used across agent detection and overlay logic.
 pub const SHELL_NAMES: &[&str] = &["bash", "zsh", "fish", "sh"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputStabilityPolicy {
+    Immediate,
+    StableContent,
+}
+
 /// A detector that identifies a specific agent (Claude, Codex, etc.)
 /// and infers its task state from process info and pane text.
 pub trait AgentDetector: Send + Sync {
@@ -26,6 +32,25 @@ pub trait AgentDetector: Send + Sync {
         command_name: Option<&str>,
         pane_text: &str,
     ) -> Option<ManagedSessionTaskState>;
+
+    /// Agent-specific policy for detector-reported Input states.
+    ///
+    /// Agents with a reliable input boundary can publish Input immediately.
+    /// Agents whose prompt is visible while output is still streaming can ask
+    /// the tmux metadata layer to wait until content above the prompt is stable.
+    fn input_stability_policy(
+        &self,
+        _command_name: Option<&str>,
+        _pane_text: &str,
+    ) -> Option<InputStabilityPolicy> {
+        None
+    }
+
+    /// Agent-specific hook compatibility. Most agents only match their own
+    /// command name; wrappers can opt into aliases here.
+    fn matches_agent_signal(&self, agent: &str, command_name: &str) -> bool {
+        agent == self.name() && command_name == self.name()
+    }
 }
 
 /// Registry of all known agent detectors.
@@ -144,6 +169,28 @@ impl DetectorRegistry {
 
         // 3. Fallback to Running
         ManagedSessionTaskState::Running
+    }
+
+    pub fn input_stability_policy(
+        &self,
+        command_name: Option<&str>,
+        pane_text: &str,
+    ) -> InputStabilityPolicy {
+        for detector in &self.detectors {
+            if let Some(policy) = detector.input_stability_policy(command_name, pane_text) {
+                return policy;
+            }
+        }
+        InputStabilityPolicy::StableContent
+    }
+
+    pub fn agent_signal_matches_command(&self, agent: &str, command_name: &str) -> bool {
+        if agent == command_name {
+            return true;
+        }
+        self.detectors
+            .iter()
+            .any(|detector| detector.matches_agent_signal(agent, command_name))
     }
 
     /// Returns true if the given name is a known shell program.

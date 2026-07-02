@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::AgentDetector;
+use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 pub struct KimiDetector;
@@ -75,6 +75,25 @@ impl AgentDetector for KimiDetector {
 
         Some(ManagedSessionTaskState::Running)
     }
+
+    fn input_stability_policy(
+        &self,
+        command_name: Option<&str>,
+        pane_text: &str,
+    ) -> Option<InputStabilityPolicy> {
+        if command_name.unwrap_or_default() != "kimi" {
+            return None;
+        }
+        if kimi_has_stable_input_prompt(pane_text) {
+            Some(InputStabilityPolicy::Immediate)
+        } else {
+            Some(InputStabilityPolicy::StableContent)
+        }
+    }
+
+    fn matches_agent_signal(&self, agent: &str, command_name: &str) -> bool {
+        agent == "kimi" && (command_name == "kimi" || command_name == "claude")
+    }
 }
 
 fn is_kimi_process_name(name: &str) -> bool {
@@ -128,4 +147,17 @@ fn looks_like_status_line(text: &str) -> bool {
         || lowered.contains("thinking")
         || lowered.contains("context:")
         || lowered.contains("/model")
+}
+
+fn kimi_has_stable_input_prompt(pane_text: &str) -> bool {
+    let normalized_lines = pane_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let recent_start = normalized_lines.len().saturating_sub(8);
+    normalized_lines
+        .iter()
+        .skip(recent_start)
+        .any(|line| kimi_prompt_line(line))
 }

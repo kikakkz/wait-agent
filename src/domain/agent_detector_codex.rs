@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::AgentDetector;
+use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 pub struct CodexDetector;
@@ -145,6 +145,18 @@ impl AgentDetector for CodexDetector {
         }
 
         Some(ManagedSessionTaskState::Running)
+    }
+
+    fn input_stability_policy(
+        &self,
+        command_name: Option<&str>,
+        _pane_text: &str,
+    ) -> Option<InputStabilityPolicy> {
+        if command_name.unwrap_or_default() == "codex" {
+            Some(InputStabilityPolicy::Immediate)
+        } else {
+            None
+        }
     }
 }
 

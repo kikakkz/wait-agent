@@ -1,3 +1,4 @@
+use crate::domain::agent_detector::InputStabilityPolicy;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use crate::infra::tmux_error::{parse_tmux_id, TmuxError};
 use crate::infra::tmux_types::{TmuxPaneId, TmuxPaneInfo, TmuxSocketName};
@@ -140,35 +141,16 @@ fn runtime_command_override_is_running(value: &str) -> bool {
     command_name == super::WAITAGENT_RUNTIME_RUNNING_OVERRIDE
 }
 
-fn has_stable_agent_input_prompt(command_name: &str, pane_text: &str) -> bool {
-    if command_name != "claude" {
-        return false;
-    }
-    let lines = pane_text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let recent_start = lines.len().saturating_sub(3);
-    lines.iter().skip(recent_start).any(|line| {
-        let after_claude_prompt = line.trim_start_matches('❯').trim_start();
-        line.starts_with('❯') && !after_claude_prompt.starts_with("1.")
-    })
-}
-
 fn apply_temporal_input_hysteresis(
     session_key: &str,
-    command_name: &str,
     pane_text: &str,
+    policy: InputStabilityPolicy,
     mut state: ManagedSessionTaskState,
 ) -> ManagedSessionTaskState {
     if state != ManagedSessionTaskState::Input {
         return state;
     }
-    if command_name == "codex" {
-        return state;
-    }
-    if has_stable_agent_input_prompt(command_name, pane_text) {
+    if policy == InputStabilityPolicy::Immediate {
         return state;
     }
 
@@ -234,10 +216,6 @@ fn apply_running_override(
     } else {
         state
     }
-}
-
-fn agent_signal_matches_command(agent: &str, command_name: &str) -> bool {
-    agent == command_name || (agent == "kimi" && command_name == "claude")
 }
 
 #[cfg(test)]
@@ -355,14 +333,14 @@ impl EmbeddedTmuxBackend {
             state = apply_running_override(running_override, state);
 
             // Temporal content-change check: when the detector reports Input
-            // but the pane content above the prompt area is actively changing
-            // between polls, the agent is actually Running (output streaming).
-            // This distinguishes the "awaiting user input" Input state from the
-            // "prompt visible during active execution" false positive.
-            if state == ManagedSessionTaskState::Input && command_name != "codex" {
+            // but the agent asks for content stability, actively changing
+            // content above the prompt means the agent is still Running.
+            if state == ManagedSessionTaskState::Input {
+                let policy = self
+                    .registry
+                    .input_stability_policy(Some(&command_name), &pane_text);
                 let session_key = format!("{}:{}", socket_name.as_str(), session_name);
-                state =
-                    apply_temporal_input_hysteresis(&session_key, &command_name, &pane_text, state);
+                state = apply_temporal_input_hysteresis(&session_key, &pane_text, policy, state);
             }
 
             state
@@ -385,7 +363,10 @@ impl EmbeddedTmuxBackend {
             .show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
             .ok()
             .flatten()?;
-        if !agent_signal_matches_command(&agent, command_name) {
+        if !self
+            .registry
+            .agent_signal_matches_command(&agent, command_name)
+        {
             return None;
         }
         let signal_pane = self
@@ -582,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_agent_input_prompt_matches_empty_codex_prompt_near_footer() {
+    fn detector_registry_provides_codex_input_policy() {
         let pane = "╭────────────────────────────────────────────╮\n\
                     │ >_ OpenAI Codex                          │\n\
                     ╰────────────────────────────────────────────╯\n\
@@ -591,7 +572,10 @@ mod tests {
                     \n\
                       gpt-5.5 high · ~";
 
-        assert!(!has_stable_agent_input_prompt("codex", pane));
+        assert_eq!(
+            DetectorRegistry::default().input_stability_policy(Some("codex"), pane),
+            InputStabilityPolicy::Immediate
+        );
     }
 
     #[test]
@@ -628,17 +612,19 @@ mod tests {
 
     #[test]
     fn agent_signal_matches_exact_agent_or_kimi_wrapped_claude() {
-        assert!(agent_signal_matches_command("codex", "codex"));
-        assert!(agent_signal_matches_command("kimi", "kimi"));
-        assert!(agent_signal_matches_command("kimi", "claude"));
-        assert!(!agent_signal_matches_command("claude", "kimi"));
-        assert!(!agent_signal_matches_command("codex", "claude"));
+        let registry = DetectorRegistry::default();
+
+        assert!(registry.agent_signal_matches_command("codex", "codex"));
+        assert!(registry.agent_signal_matches_command("kimi", "kimi"));
+        assert!(registry.agent_signal_matches_command("kimi", "claude"));
+        assert!(!registry.agent_signal_matches_command("claude", "kimi"));
+        assert!(!registry.agent_signal_matches_command("codex", "claude"));
     }
 
     #[test]
-    fn codex_input_skips_temporal_running_override() {
+    fn immediate_input_policy_skips_temporal_running_override() {
         clear_temporal_input_hysteresis_cache();
-        let session_key = "test:codex-input";
+        let session_key = "test:immediate-input";
         let pane_t1 = "• Working\n\
                        └ Searching files\n\
                        \n\
@@ -653,8 +639,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane_t1,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -662,8 +648,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane_t2,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -671,9 +657,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_input_does_not_wait_for_stable_polls() {
+    fn immediate_input_policy_does_not_wait_for_stable_polls() {
         clear_temporal_input_hysteresis_cache();
-        let session_key = "test:codex-idle";
+        let session_key = "test:immediate-idle";
         let pane = "Codex: Done.\n\
                     \n\
                     › \n\
@@ -682,8 +668,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -691,8 +677,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -700,8 +686,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -709,8 +695,8 @@ mod tests {
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
-                "codex",
                 pane,
+                InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
             ManagedSessionTaskState::Input
@@ -718,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_still_uses_stable_prompt_shortcut() {
+    fn detector_registry_provides_claude_stable_prompt_policy() {
         let pane = "● Bash(echo hello)\n\
                     \n\
                     ─────────────────────\n\
@@ -726,7 +712,25 @@ mod tests {
                     ─────────────────────\n\
                     esc to interrupt";
 
-        assert!(has_stable_agent_input_prompt("claude", pane));
+        assert_eq!(
+            DetectorRegistry::default().input_stability_policy(Some("claude"), pane),
+            InputStabilityPolicy::Immediate
+        );
+    }
+
+    #[test]
+    fn detector_registry_provides_kimi_stable_prompt_policy() {
+        let pane = "Welcome to Kimi Code!\n\
+                    ╭─────────────────────────────────────────╮\n\
+                    │ >                                       │\n\
+                    ╰─────────────────────────────────────────╯\n\
+                    K2.7 Code thinking  ~\n\
+                    context: 0.0% (0/262.1k)";
+
+        assert_eq!(
+            DetectorRegistry::default().input_stability_policy(Some("kimi"), pane),
+            InputStabilityPolicy::Immediate
+        );
     }
 
     #[test]

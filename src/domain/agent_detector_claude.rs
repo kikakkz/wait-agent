@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::AgentDetector;
+use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 pub struct ClaudeDetector;
@@ -138,4 +138,32 @@ impl AgentDetector for ClaudeDetector {
 
         Some(ManagedSessionTaskState::Running)
     }
+
+    fn input_stability_policy(
+        &self,
+        command_name: Option<&str>,
+        pane_text: &str,
+    ) -> Option<InputStabilityPolicy> {
+        if command_name.unwrap_or_default() != "claude" {
+            return None;
+        }
+        if claude_has_stable_input_prompt(pane_text) {
+            Some(InputStabilityPolicy::Immediate)
+        } else {
+            Some(InputStabilityPolicy::StableContent)
+        }
+    }
+}
+
+fn claude_has_stable_input_prompt(pane_text: &str) -> bool {
+    let lines = pane_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let recent_start = lines.len().saturating_sub(3);
+    lines.iter().skip(recent_start).any(|line| {
+        let after_claude_prompt = line.trim_start_matches('❯').trim_start();
+        line.starts_with('❯') && !after_claude_prompt.starts_with("1.")
+    })
 }

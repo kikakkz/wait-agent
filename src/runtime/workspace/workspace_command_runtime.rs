@@ -15,7 +15,6 @@ use crate::cli::{
     LocalTargetExitedCommand, LocalTargetHostCommand, MainPaneDiedCommand,
     NewSelectedRemoteSessionCommand, NewTargetCommand, RemoteNetworkConfig,
     RemoteTargetExitedCommand, RuntimeCommandSignal, StopCommand, ToggleFullscreenCommand,
-    UiPaneCommand,
 };
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
@@ -410,18 +409,6 @@ impl WorkspaceCommandRuntime {
             .ensure_configured_publications_on_socket(socket_name)?;
         WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
             .run_chrome_refresh_signal_on_socket(socket_name)
-    }
-
-    fn signal_workspace_chrome_refresh(
-        &self,
-        socket_name: &str,
-        session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
-            .run_chrome_refresh_signal(UiPaneCommand {
-                socket_name: socket_name.to_string(),
-                session_name: session_name.to_string(),
-            })
     }
 
     fn claim_remote_session_create<'a>(
