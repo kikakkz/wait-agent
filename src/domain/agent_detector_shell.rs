@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::{AgentDetector, SHELL_NAMES};
+use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy, SHELL_NAMES};
 use crate::domain::session_catalog::ManagedSessionTaskState;
 
 /// Default/fallback detector for plain shell sessions (bash, zsh, fish, sh).
@@ -47,5 +47,18 @@ impl AgentDetector for ShellDetector {
             return Some(ManagedSessionTaskState::Input);
         }
         Some(ManagedSessionTaskState::Running)
+    }
+
+    fn input_stability_policy(
+        &self,
+        command_name: Option<&str>,
+        _pane_text: &str,
+    ) -> Option<InputStabilityPolicy> {
+        let command_name = command_name.unwrap_or_default();
+        if SHELL_NAMES.contains(&command_name) || command_name.is_empty() {
+            Some(InputStabilityPolicy::Immediate)
+        } else {
+            None
+        }
     }
 }

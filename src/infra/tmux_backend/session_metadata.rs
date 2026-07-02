@@ -734,6 +734,43 @@ mod tests {
     }
 
     #[test]
+    fn detector_registry_provides_shell_immediate_input_policy() {
+        let pane = "root@host:/workspace#\n\n\n";
+
+        assert_eq!(
+            DetectorRegistry::default().input_stability_policy(Some("bash"), pane),
+            InputStabilityPolicy::Immediate
+        );
+    }
+
+    #[test]
+    fn shell_prompt_input_does_not_enter_temporal_hysteresis() {
+        clear_temporal_input_hysteresis_cache();
+        let session_key = "test:shell-idle";
+        let pane = "root@host:/workspace#\n\n\n";
+        let policy = DetectorRegistry::default().input_stability_policy(Some("bash"), pane);
+
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane,
+                policy,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Input
+        );
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane,
+                policy,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Input
+        );
+    }
+
+    #[test]
     fn very_short_panes_produce_stable_hash() {
         // Very short panes have no content above the prompt area — hash is
         // empty but consistent, so no spurious Running override.
