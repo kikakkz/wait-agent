@@ -164,7 +164,8 @@ struct ConnectRemoteHostState {
     focus: Focus,
     host: String,
     ssh_user: String,
-    remote_port: String,
+    remote_port_preference: String,
+    last_remote_port: Option<u16>,
     auth: AuthChoice,
     key_path: String,
     ssh_password: String,
@@ -200,7 +201,8 @@ impl ConnectRemoteHostState {
             focus: Focus::Hosts,
             host: String::new(),
             ssh_user: std::env::var("USER").unwrap_or_default(),
-            remote_port: "auto".to_string(),
+            remote_port_preference: "auto".to_string(),
+            last_remote_port: None,
             auth: AuthChoice::Password,
             key_path: String::new(),
             ssh_password: String::new(),
@@ -231,7 +233,8 @@ impl ConnectRemoteHostState {
         if self.selected >= self.profiles.len() {
             self.host.clear();
             self.ssh_user = std::env::var("USER").unwrap_or_default();
-            self.remote_port = "auto".to_string();
+            self.remote_port_preference = "auto".to_string();
+            self.last_remote_port = None;
             self.auth = AuthChoice::Password;
             self.key_path.clear();
             self.ssh_password.clear();
@@ -250,13 +253,11 @@ impl ConnectRemoteHostState {
         };
         self.host = profile.host.clone();
         self.ssh_user = profile.ssh_user.clone();
-        self.remote_port = match profile.last_remote_port {
-            Some(port) => port.to_string(),
-            None => match profile.preferred_remote_port {
-                RemotePortPreference::Auto => "auto".to_string(),
-                RemotePortPreference::Port(port) => port.to_string(),
-            },
+        self.remote_port_preference = match profile.preferred_remote_port {
+            RemotePortPreference::Auto => "auto".to_string(),
+            RemotePortPreference::Port(port) => port.to_string(),
         };
+        self.last_remote_port = profile.last_remote_port;
         let mut request = SecretLoadRequest {
             id: self.next_secret_request_id,
             selected: self.selected,
@@ -1635,11 +1636,19 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let rows = [
+    let mut rows = vec![
         detail_row("Host", &host_display(state), state, Focus::Host),
-        detail_row("Listen Port", &state.remote_port, state, Focus::Port),
-        detail_row("SSH User", &state.ssh_user, state, Focus::User),
+        detail_row(
+            "Listen Port",
+            &state.remote_port_preference,
+            state,
+            Focus::Port,
+        ),
     ];
+    if let Some(port) = state.last_remote_port {
+        rows.push(readonly_detail_row("Last Port", &port.to_string()));
+    }
+    rows.push(detail_row("SSH User", &state.ssh_user, state, Focus::User));
     render_detail_table(frame, area, "Connection", rows);
 }
 
@@ -1715,6 +1724,10 @@ fn detail_row(
     let prefix = " ";
     let style = detail_focus_style(state, focus);
     Row::new(vec![label.to_string(), format!("{prefix}{value}")]).style(style)
+}
+
+fn readonly_detail_row(label: &str, value: &str) -> Row<'static> {
+    Row::new(vec![label.to_string(), format!(" {value}")])
 }
 
 fn detail_focus_style(state: &ConnectRemoteHostState, focus: Focus) -> Style {
@@ -2302,7 +2315,7 @@ fn proxy_host_part(value: &str) -> Option<String> {
 fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut String {
     match field {
         EditField::Host => &mut state.host,
-        EditField::RemotePort => &mut state.remote_port,
+        EditField::RemotePort => &mut state.remote_port_preference,
         EditField::SshUser => &mut state.ssh_user,
         EditField::KeyPath => &mut state.key_path,
         EditField::SshPassword => &mut state.ssh_password,
@@ -2315,7 +2328,7 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
 fn edit_buffer_ref(state: &ConnectRemoteHostState, field: EditField) -> &str {
     match field {
         EditField::Host => &state.host,
-        EditField::RemotePort => &state.remote_port,
+        EditField::RemotePort => &state.remote_port_preference,
         EditField::SshUser => &state.ssh_user,
         EditField::KeyPath => &state.key_path,
         EditField::SshPassword => &state.ssh_password,
@@ -2461,7 +2474,7 @@ fn run_connect(
             "--auth".to_string(),
             state.auth.as_arg().to_string(),
             "--remote-port".to_string(),
-            normalized_port(&state.remote_port),
+            normalized_port(&state.remote_port_preference),
         ]);
         if state.remember {
             args.push("--save-profile".to_string());
@@ -2594,22 +2607,19 @@ fn default_profile_name_for(ssh_user: &str, host: &str) -> String {
 fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostState) -> bool {
     profile.host == state.host
         && profile.ssh_user == state.ssh_user
-        && normalized_port_matches_profile(&state.remote_port, profile)
+        && normalized_port_matches_profile(&state.remote_port_preference, profile)
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
 }
 
 fn normalized_port_matches_profile(value: &str, profile: &RemoteHostProfile) -> bool {
-    normalized_port(value) == profile_display_port(profile)
+    normalized_port(value) == profile_preferred_port(profile)
 }
 
-fn profile_display_port(profile: &RemoteHostProfile) -> String {
-    match profile.last_remote_port {
-        Some(port) => port.to_string(),
-        None => match profile.preferred_remote_port {
-            RemotePortPreference::Auto => "auto".to_string(),
-            RemotePortPreference::Port(port) => port.to_string(),
-        },
+fn profile_preferred_port(profile: &RemoteHostProfile) -> String {
+    match profile.preferred_remote_port {
+        RemotePortPreference::Auto => "auto".to_string(),
+        RemotePortPreference::Port(port) => port.to_string(),
     }
 }
 
@@ -2713,6 +2723,23 @@ mod tests {
         }
     }
 
+    fn saved_key_profile() -> RemoteHostProfile {
+        RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7575),
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        }
+    }
+
     fn menu_text_column(label: &str) -> Option<usize> {
         [
             "Saved Hosts",
@@ -2806,6 +2833,39 @@ mod tests {
         state.apply_key(KeyEvent::from(KeyCode::Char('8')));
 
         assert_eq!(state.proxy_config.https_proxy, "http://proxy.example:443");
+    }
+
+    #[test]
+    fn saved_host_keeps_port_preference_separate_from_last_port() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_key_profile()];
+        state.selected = 0;
+
+        let _ = state.sync_selected_profile();
+
+        assert_eq!(state.remote_port_preference, "auto");
+        assert_eq!(state.last_remote_port, Some(7575));
+        assert!(saved_profile_can_connect_by_id(
+            &state,
+            state.selected_profile().unwrap()
+        ));
+    }
+
+    #[test]
+    fn saved_host_dirty_check_ignores_observed_last_port() {
+        let mut state = ConnectRemoteHostState::load();
+        let mut profile = saved_key_profile();
+        profile.last_remote_port = Some(7474);
+        state.profiles = vec![profile];
+        state.selected = 0;
+
+        let _ = state.sync_selected_profile();
+        state.last_remote_port = Some(7575);
+
+        assert!(profile_matches_state(
+            state.selected_profile().unwrap(),
+            &state
+        ));
     }
 
     #[test]
