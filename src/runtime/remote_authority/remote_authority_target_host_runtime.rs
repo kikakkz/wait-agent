@@ -12,6 +12,9 @@ use crate::infra::tmux::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::output_quiet_refresh_scheduler::{
+    OutputQuietRefreshConfig, OutputQuietRefreshKind, OutputQuietRefreshScheduler,
+};
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
@@ -432,7 +435,8 @@ enum AuthorityHostEvent {
     OutputClosed { stream_id: u64 },
     PaneDied { pane_id: String },
     BindingRefresh,
-    RuntimeRefreshDue,
+    RuntimeRefreshDue { label: &'static str },
+    OutputQuietRefreshDue(OutputQuietRefreshKind),
     TransportClosed,
 }
 
@@ -565,7 +569,7 @@ impl RuntimeChangeSignal {
                         .expect("runtime change signal mutex should not be poisoned");
                     state.timer_pending = false;
                 }
-                let _ = tx.send(AuthorityHostEvent::RuntimeRefreshDue);
+                let _ = tx.send(AuthorityHostEvent::RuntimeRefreshDue { label: "throttled" });
             });
         }
         false
@@ -711,6 +715,13 @@ where
         let mut mirror_state = MirrorState::Inactive;
         let runtime_signal =
             RuntimeChangeSignal::new(event_tx.clone(), RUNTIME_CHANGE_SIGNAL_MIN_INTERVAL);
+        let output_quiet_refresh =
+            OutputQuietRefreshScheduler::new(OutputQuietRefreshConfig::default(), {
+                let event_tx = event_tx.clone();
+                move |kind| {
+                    let _ = event_tx.send(AuthorityHostEvent::OutputQuietRefreshDue(kind));
+                }
+            });
 
         let health = Arc::new(EventLoopHealth::new());
 
@@ -949,6 +960,7 @@ where
                     {
                         break Err(error);
                     }
+                    output_quiet_refresh.on_output();
                     output_seq += 1;
                     output_cache
                         .lock()
@@ -1071,8 +1083,26 @@ where
                         }
                     }
                 }
-                AuthorityHostEvent::RuntimeRefreshDue => {
+                AuthorityHostEvent::RuntimeRefreshDue { label } => {
                     health.record_event();
+                    ERROR_LOG.log(format!(
+                        "[diag-runtime] target host output {label} refresh due socket={} session={} target={}",
+                        command.socket_name, command.target_session_name, command.target_id
+                    ));
+                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    {
+                        break Err(error);
+                    }
+                }
+                AuthorityHostEvent::OutputQuietRefreshDue(kind) => {
+                    health.record_event();
+                    ERROR_LOG.log(format!(
+                        "[diag-runtime] target host output {} refresh due socket={} session={} target={}",
+                        kind.label(),
+                        command.socket_name,
+                        command.target_session_name,
+                        command.target_id
+                    ));
                     if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
                     {
                         break Err(error);

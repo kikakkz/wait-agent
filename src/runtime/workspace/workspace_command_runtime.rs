@@ -32,6 +32,9 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::local_target_host_runtime::LocalTargetHostRuntime;
 use crate::runtime::main_slot_runtime::MainSlotRuntime;
 use crate::runtime::native_pane_fullscreen_runtime::NativePaneFullscreenRuntime;
+use crate::runtime::output_quiet_refresh_scheduler::{
+    OutputQuietRefreshConfig, OutputQuietRefreshScheduler,
+};
 use crate::runtime::remote_host::remote_host_connect_runtime::{
     request_from_command, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
 };
@@ -50,15 +53,11 @@ use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const WAITAGENT_SIDEBAR_SELECTED_TARGET_OPTION: &str = "@waitagent_sidebar_selected_target";
 const WAITAGENT_REMOTE_SESSION_CREATE_LOCK_PREFIX: &str = "waitagent-remote-session-create-";
-const MAIN_PANE_OUTPUT_TRAILING_REFRESH_DELAY: Duration = Duration::from_millis(500);
-const MAIN_PANE_OUTPUT_SETTLED_REFRESH_DELAY: Duration = Duration::from_millis(2000);
 // This runtime owns the accepted default local command path for workspace
 // bootstrap, attach, target activation, fullscreen, and detach semantics.
 // Event-r4 keeps these user-facing entrypoints off historical polling paths.
@@ -838,7 +837,24 @@ impl WorkspaceCommandRuntime {
         let mut stdin = stdin.lock();
         let mut buffer = [0_u8; 4096];
         let mut signaled = false;
-        let trailing_refresh_seq = Arc::new(AtomicU64::new(0));
+        let output_quiet_refresh =
+            OutputQuietRefreshScheduler::new(OutputQuietRefreshConfig::default(), {
+                let socket_name = command.socket_name.clone();
+                let network = self.network.clone();
+                move |kind| {
+                    if let Err(error) =
+                        WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())
+                            .and_then(|runtime| {
+                                runtime.run_chrome_refresh_signal_on_socket(&socket_name)
+                            })
+                    {
+                        ERROR_LOG.log(format!(
+                            "[diag-output-bridge] {} refresh failed socket={socket_name}: {error}",
+                            kind.label()
+                        ));
+                    }
+                }
+            });
         loop {
             match stdin.read(&mut buffer) {
                 Ok(0) => return Ok(()),
@@ -851,18 +867,10 @@ impl WorkspaceCommandRuntime {
                         None,
                     )?;
                     signaled = true;
-                    schedule_main_pane_output_trailing_refresh(
-                        trailing_refresh_seq.clone(),
-                        command.socket_name.clone(),
-                        self.network.clone(),
-                    );
+                    output_quiet_refresh.on_output();
                 }
                 Ok(_) => {
-                    schedule_main_pane_output_trailing_refresh(
-                        trailing_refresh_seq.clone(),
-                        command.socket_name.clone(),
-                        self.network.clone(),
-                    );
+                    output_quiet_refresh.on_output();
                 }
                 Err(error) => {
                     return Err(LifecycleError::Io(
@@ -873,53 +881,6 @@ impl WorkspaceCommandRuntime {
             }
         }
     }
-}
-
-fn schedule_main_pane_output_trailing_refresh(
-    seq: Arc<AtomicU64>,
-    socket_name: String,
-    network: RemoteNetworkConfig,
-) {
-    let current_seq = seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    schedule_main_pane_output_refresh_after(
-        seq.clone(),
-        current_seq,
-        socket_name.clone(),
-        network.clone(),
-        MAIN_PANE_OUTPUT_TRAILING_REFRESH_DELAY,
-        "trailing",
-    );
-    schedule_main_pane_output_refresh_after(
-        seq,
-        current_seq,
-        socket_name,
-        network,
-        MAIN_PANE_OUTPUT_SETTLED_REFRESH_DELAY,
-        "settled",
-    );
-}
-
-fn schedule_main_pane_output_refresh_after(
-    seq: Arc<AtomicU64>,
-    expected_seq: u64,
-    socket_name: String,
-    network: RemoteNetworkConfig,
-    delay: Duration,
-    label: &'static str,
-) {
-    thread::spawn(move || {
-        thread::sleep(delay);
-        if seq.load(Ordering::Relaxed) != expected_seq {
-            return;
-        }
-        if let Err(error) = WorkspaceLayoutRuntime::from_build_env_with_network(network)
-            .and_then(|runtime| runtime.run_chrome_refresh_signal_on_socket(&socket_name))
-        {
-            ERROR_LOG.log(format!(
-                "[diag-output-bridge] {label} refresh failed socket={socket_name}: {error}"
-            ));
-        }
-    });
 }
 
 fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandle {
