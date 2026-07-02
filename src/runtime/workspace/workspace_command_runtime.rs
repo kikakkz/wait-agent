@@ -820,13 +820,7 @@ impl WorkspaceCommandRuntime {
                     .map_err(tmux_runtime_error)?;
             }
         }
-        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
-            .run_chrome_refresh_signal_on_socket(socket_name)?;
-        RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
-            socket_name,
-            &self.network,
-            LocalCatalogChangeReason::LocalRuntimeChanged,
-        )
+        signal_local_runtime_changed_on_socket(socket_name, &self.network)
     }
 
     pub fn run_main_pane_output_event_bridge(
@@ -837,24 +831,23 @@ impl WorkspaceCommandRuntime {
         let mut stdin = stdin.lock();
         let mut buffer = [0_u8; 4096];
         let mut signaled = false;
-        let output_quiet_refresh =
-            OutputQuietRefreshScheduler::new(OutputQuietRefreshConfig::default(), {
+        let output_quiet_refresh = OutputQuietRefreshScheduler::new(
+            OutputQuietRefreshConfig::default(),
+            {
                 let socket_name = command.socket_name.clone();
                 let network = self.network.clone();
                 move |kind| {
                     if let Err(error) =
-                        WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())
-                            .and_then(|runtime| {
-                                runtime.run_chrome_refresh_signal_on_socket(&socket_name)
-                            })
+                        signal_local_runtime_changed_on_socket(&socket_name, &network)
                     {
                         ERROR_LOG.log(format!(
-                            "[diag-output-bridge] {} refresh failed socket={socket_name}: {error}",
+                            "[diag-output-bridge] output quiet {} runtime changed signal failed socket={socket_name}: {error}",
                             kind.label()
                         ));
                     }
                 }
-            });
+            },
+        );
         loop {
             match stdin.read(&mut buffer) {
                 Ok(0) => return Ok(()),
@@ -881,6 +874,19 @@ impl WorkspaceCommandRuntime {
             }
         }
     }
+}
+
+fn signal_local_runtime_changed_on_socket(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Result<(), LifecycleError> {
+    WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?
+        .run_chrome_refresh_signal_on_socket(socket_name)?;
+    RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
+        socket_name,
+        network,
+        LocalCatalogChangeReason::LocalRuntimeChanged,
+    )
 }
 
 fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandle {
