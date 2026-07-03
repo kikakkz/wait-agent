@@ -697,6 +697,135 @@ mod tests {
     }
 
     #[test]
+    fn session_runtime_uses_authoritative_presentation_pane_text_for_agent_state() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let config = unique_workspace_config("runtime-presentation-agent-source");
+        let fake_kimi = config.workspace_dir.join("kimi");
+        let workspace = backend
+            .ensure_workspace(&config)
+            .expect("workspace bootstrap should succeed");
+        let target_config = WorkspaceInstanceConfig {
+            workspace_dir: config.workspace_dir.clone(),
+            workspace_key: "target-key".to_string(),
+            socket_name: workspace.socket_name.as_str().to_string(),
+            session_name: "target-session".to_string(),
+            session_role: WorkspaceSessionRole::TargetHost,
+            initial_rows: None,
+            initial_cols: None,
+            initial_program: None,
+        };
+        let target = backend
+            .ensure_workspace(&target_config)
+            .expect("target session should be created");
+        let workspace_main = backend
+            .current_pane(&workspace)
+            .expect("workspace main pane should resolve");
+        std::fs::copy("/bin/cat", &fake_kimi).expect("fake kimi should be copied");
+        let chmod_status = Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_kimi)
+            .status()
+            .expect("chmod should run");
+        assert!(chmod_status.success(), "fake kimi should be executable");
+
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    workspace_main.as_str().to_string(),
+                    fake_kimi.to_string_lossy().into_owned(),
+                    "Enter".to_string(),
+                ],
+            )
+            .expect("fake kimi should be started");
+        std::thread::sleep(Duration::from_millis(200));
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "C-l".to_string(),
+                ],
+            )
+            .expect("presentation pane should be cleared");
+        for line in [
+            "╭───────────────────────────────────────────╮",
+            "│ >                                         │",
+            "╰───────────────────────────────────────────╯",
+            "K2.7 Code thinking  ~/wait-agent  main",
+            "context: 0.0% (0/262.1k)",
+        ] {
+            backend
+                .run_on_socket(
+                    &workspace.socket_name,
+                    &[
+                        "send-keys".to_string(),
+                        "-t".to_string(),
+                        workspace_main.as_str().to_string(),
+                        "-l".to_string(),
+                        line.to_string(),
+                    ],
+                )
+                .expect("kimi prompt line should be written");
+            backend
+                .run_on_socket(
+                    &workspace.socket_name,
+                    &[
+                        "send-keys".to_string(),
+                        "-t".to_string(),
+                        workspace_main.as_str().to_string(),
+                        "Enter".to_string(),
+                    ],
+                )
+                .expect("kimi prompt line should be submitted");
+        }
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-t".to_string(),
+                    target.session_name.as_str().to_string(),
+                    "@waitagent_main_pane_id".to_string(),
+                    workspace_main.as_str().to_string(),
+                ],
+            )
+            .expect("target presentation pane should be configured");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-pt".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "@waitagent_target_session_name".to_string(),
+                    target.session_name.as_str().to_string(),
+                ],
+            )
+            .expect("presentation target option should be set");
+
+        let sessions = backend
+            .list_sessions_on_socket(&workspace.socket_name)
+            .expect("sessions should list");
+        kill_server(&backend, &workspace);
+
+        let target_record = sessions
+            .iter()
+            .find(|session| session.address.session_id() == target.session_name.as_str())
+            .expect("target session should be present");
+        assert_eq!(target_record.command_name.as_deref(), Some("kimi"));
+        assert_eq!(
+            target_record.task_state,
+            crate::domain::session_catalog::ManagedSessionTaskState::Input
+        );
+    }
+
+    #[test]
     fn embedded_backend_sets_new_workspace_history_limit_before_session_creation() {
         let backend = EmbeddedTmuxBackend::from_build_env()
             .expect("vendored tmux backend should discover build env");

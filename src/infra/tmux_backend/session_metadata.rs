@@ -288,29 +288,22 @@ pub(super) struct TmuxSessionRuntimeMetadata {
     pub(super) is_dead: bool,
 }
 
+struct RuntimeObservationSource {
+    pane: TmuxPaneInfo,
+    text: String,
+    command_name: String,
+}
+
 impl EmbeddedTmuxBackend {
     pub(super) fn session_runtime_metadata(
         &self,
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let process_pane = self.session_runtime_pane_info(socket_name, session_name)?;
-        let Some(process_pane) = process_pane else {
+        let source = self.session_runtime_observation_source(socket_name, session_name)?;
+        let Some(source) = source else {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
-        let observation_pane = self
-            .session_main_pane_info(socket_name, session_name)?
-            .unwrap_or_else(|| process_pane.clone());
-        let observation_ansi = self.capture_pane_text(socket_name, &observation_pane.pane_id)?;
-        let observation_text = strip_ansi(&observation_ansi);
-        let current_command = process_pane.current_command.as_deref().unwrap_or_default();
-        let foreground_argvs =
-            super::foreground_process_argvs_for_pane_shell(process_pane.pane_pid);
-        let detected_command_name = self.registry.detect_command_name_from_argv_candidates(
-            current_command,
-            &foreground_argvs,
-            &observation_text,
-        );
         let workspace = crate::infra::tmux_types::TmuxWorkspaceHandle {
             workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(session_name),
             socket_name: socket_name.clone(),
@@ -330,11 +323,11 @@ impl EmbeddedTmuxBackend {
             .as_ref()
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(&override_value))
-            .unwrap_or(detected_command_name);
+            .unwrap_or_else(|| source.command_name.clone());
         let observed_task_state = || {
             let mut state = self
                 .registry
-                .infer_task_state(Some(&command_name), &observation_text);
+                .infer_task_state(Some(&command_name), &source.text);
 
             state = apply_running_override(running_override, state);
 
@@ -344,20 +337,19 @@ impl EmbeddedTmuxBackend {
             if state == ManagedSessionTaskState::Input {
                 let policy = self
                     .registry
-                    .input_stability_policy(Some(&command_name), &observation_text);
+                    .input_stability_policy(Some(&command_name), &source.text);
                 let session_key = format!("{}:{}", socket_name.as_str(), session_name);
-                state =
-                    apply_temporal_input_hysteresis(&session_key, &observation_text, policy, state);
+                state = apply_temporal_input_hysteresis(&session_key, &source.text, policy, state);
             }
 
             state
         };
-        let task_state = if process_pane.in_mode {
+        let task_state = if source.pane.in_mode {
             ManagedSessionTaskState::Running
         } else if prompt_override {
             ManagedSessionTaskState::Input
         } else if let Some(hook_state) =
-            self.agent_signal_task_state(&workspace, &process_pane.pane_id, &command_name)
+            self.agent_signal_task_state(&workspace, &source.pane.pane_id, &command_name)
         {
             let observed_state = observed_task_state();
             reconcile_hook_and_observed_task_state(hook_state, observed_state)
@@ -366,9 +358,9 @@ impl EmbeddedTmuxBackend {
         };
         Ok(TmuxSessionRuntimeMetadata {
             command_name: Some(command_name.clone()),
-            current_path: process_pane.current_path.clone(),
+            current_path: source.pane.current_path.clone(),
             task_state,
-            is_dead: process_pane.is_dead,
+            is_dead: source.pane.is_dead,
         })
     }
 
@@ -446,21 +438,94 @@ impl EmbeddedTmuxBackend {
             .cloned())
     }
 
-    fn session_runtime_pane_info(
+    fn session_runtime_observation_source(
         &self,
         socket_name: &TmuxSocketName,
         session_name: &str,
-    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
-        match self.target_presentation_pane_on_socket(socket_name.as_str(), session_name) {
-            Ok(pane) => {
-                if let Some(info) = self.pane_info_on_socket(socket_name, &pane)? {
-                    return Ok(Some(info));
+    ) -> Result<Option<RuntimeObservationSource>, TmuxError> {
+        let target_main = self.session_main_pane_info(socket_name, session_name)?;
+        let presentation =
+            match self.target_presentation_pane_on_socket(socket_name.as_str(), session_name) {
+                Ok(pane) => {
+                    if let Some(info) = self.pane_info_on_socket(socket_name, &pane)? {
+                        Some(info)
+                    } else {
+                        None
+                    }
                 }
+                Err(error) if error.is_command_failure() => None,
+                Err(_) => None,
+            };
+
+        if let Some(presentation) = presentation {
+            let presentation_command_name =
+                self.detect_runtime_command_name_for_pane(&presentation, "");
+            if !presentation_command_name.is_empty()
+                && !self.registry.is_shell_name(&presentation_command_name)
+            {
+                return self
+                    .runtime_observation_source_for_pane_with_command(
+                        socket_name,
+                        presentation,
+                        presentation_command_name,
+                    )
+                    .map(Some);
             }
-            Err(error) if error.is_command_failure() => {}
-            Err(_) => {}
+            if let Some(target_main) = target_main {
+                return self
+                    .runtime_observation_source_for_pane(socket_name, target_main)
+                    .map(Some);
+            }
+            return self
+                .runtime_observation_source_for_pane_with_command(
+                    socket_name,
+                    presentation,
+                    presentation_command_name,
+                )
+                .map(Some);
         }
-        self.session_main_pane_info(socket_name, session_name)
+
+        if let Some(target_main) = target_main {
+            return self
+                .runtime_observation_source_for_pane(socket_name, target_main)
+                .map(Some);
+        }
+
+        Ok(None)
+    }
+
+    fn runtime_observation_source_for_pane(
+        &self,
+        socket_name: &TmuxSocketName,
+        pane: TmuxPaneInfo,
+    ) -> Result<RuntimeObservationSource, TmuxError> {
+        let command_name = self.detect_runtime_command_name_for_pane(&pane, "");
+        self.runtime_observation_source_for_pane_with_command(socket_name, pane, command_name)
+    }
+
+    fn runtime_observation_source_for_pane_with_command(
+        &self,
+        socket_name: &TmuxSocketName,
+        pane: TmuxPaneInfo,
+        command_name: String,
+    ) -> Result<RuntimeObservationSource, TmuxError> {
+        let ansi = self.capture_pane_text(socket_name, &pane.pane_id)?;
+        let text = strip_ansi(&ansi);
+        Ok(RuntimeObservationSource {
+            pane,
+            text,
+            command_name,
+        })
+    }
+
+    fn detect_runtime_command_name_for_pane(&self, pane: &TmuxPaneInfo, pane_text: &str) -> String {
+        let current_command = pane.current_command.as_deref().unwrap_or_default();
+        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(pane.pane_pid);
+        self.registry.detect_command_name_from_argv_candidates(
+            current_command,
+            &foreground_argvs,
+            pane_text,
+        )
     }
 
     fn pane_info_on_socket(
