@@ -119,6 +119,24 @@ impl DetectorRegistry {
         current_command.to_string()
     }
 
+    pub fn detect_command_name_from_argv_candidates(
+        &self,
+        current_command: &str,
+        argv_candidates: &[Vec<String>],
+        pane_text: &str,
+    ) -> String {
+        for argv in argv_candidates {
+            if let Some(name) = self.detect_from_process(current_command, Some(argv.as_slice())) {
+                return name.to_string();
+            }
+        }
+        self.detect_command_name(
+            current_command,
+            argv_candidates.first().map(Vec::as_slice),
+            pane_text,
+        )
+    }
+
     /// Infer task state using registered detectors.
     /// Process/text detection is not re-run here; the caller provides the resolved command_name.
     pub fn infer_task_state(

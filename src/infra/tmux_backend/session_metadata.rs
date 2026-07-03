@@ -281,17 +281,17 @@ impl EmbeddedTmuxBackend {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let main_pane = self.session_main_pane_info(socket_name, session_name)?;
+        let main_pane = self.session_runtime_pane_info(socket_name, session_name)?;
         let Some(main_pane) = main_pane else {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
         let pane_ansi = self.capture_pane_text(socket_name, &main_pane.pane_id)?;
         let pane_text = strip_ansi(&pane_ansi);
         let current_command = main_pane.current_command.as_deref().unwrap_or_default();
-        let foreground_argv = super::foreground_process_argv_for_pane_shell(main_pane.pane_pid);
-        let detected_command_name = self.registry.detect_command_name(
+        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(main_pane.pane_pid);
+        let detected_command_name = self.registry.detect_command_name_from_argv_candidates(
             current_command,
-            foreground_argv.as_deref(),
+            &foreground_argvs,
             &pane_text,
         );
         let workspace = crate::infra::tmux_types::TmuxWorkspaceHandle {
@@ -370,13 +370,36 @@ impl EmbeddedTmuxBackend {
             .show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
             .ok()
             .flatten()?;
-        if signal_pane != pane_id.as_str() {
+        if signal_pane != pane_id.as_str()
+            && !self.signal_pane_is_bound_to_session(
+                workspace.socket_name.as_str(),
+                &signal_pane,
+                workspace.session_name.as_str(),
+            )
+        {
             return None;
         }
         self.show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
             .ok()
             .flatten()
             .and_then(|state| ManagedSessionTaskState::parse(&state))
+    }
+
+    fn signal_pane_is_bound_to_session(
+        &self,
+        socket_name: &str,
+        pane_id: &str,
+        session_name: &str,
+    ) -> bool {
+        self.show_pane_option_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &TmuxPaneId::new(pane_id.to_string()),
+            "@waitagent_target_session_name",
+        )
+        .ok()
+        .flatten()
+        .as_deref()
+            == Some(session_name)
     }
 
     fn session_main_pane_info(
@@ -399,6 +422,51 @@ impl EmbeddedTmuxBackend {
                 })
             })
             .cloned())
+    }
+
+    fn session_runtime_pane_info(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
+        match self.target_presentation_pane_on_socket(socket_name.as_str(), session_name) {
+            Ok(pane) => {
+                if let Some(info) = self.pane_info_on_socket(socket_name, &pane)? {
+                    return Ok(Some(info));
+                }
+            }
+            Err(error) if error.is_command_failure() => {}
+            Err(_) => {}
+        }
+        self.session_main_pane_info(socket_name, session_name)
+    }
+
+    fn pane_info_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+        pane: &TmuxPaneId,
+    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
+        let output = match self.run_on_socket(
+            socket_name,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane.as_str().to_string(),
+                "#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_in_mode}"
+                    .to_string(),
+            ],
+        ) {
+            Ok(output) => output,
+            Err(error) if error.is_command_failure() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let line = output.stdout.trim_end();
+        if line.is_empty() {
+            Ok(None)
+        } else {
+            Self::pane_info_for_line(line).map(Some)
+        }
     }
 
     pub(crate) fn list_panes_on_target(

@@ -9,25 +9,30 @@ pub(crate) struct ProcessStat {
     pub foreground_process_group_id: i32,
 }
 
-pub(crate) fn foreground_process_argv_for_pane_shell(pane_pid: Option<u32>) -> Option<Vec<String>> {
-    let pane_pid = pane_pid?;
-    let shell_stat = read_process_stat(pane_pid).ok()?;
-    let foreground_pid = foreground_process_id_for_shell(
-        &shell_stat,
-        &descendant_process_stats(pane_pid),
-    )
-    .or_else(|| {
-        (shell_stat.process_group_id == shell_stat.foreground_process_group_id).then_some(pane_pid)
-    })?;
-    process_argv(foreground_pid).ok()
+pub(crate) fn foreground_process_argvs_for_pane_shell(pane_pid: Option<u32>) -> Vec<Vec<String>> {
+    let Some(pane_pid) = pane_pid else {
+        return Vec::new();
+    };
+    let Ok(shell_stat) = read_process_stat(pane_pid) else {
+        return Vec::new();
+    };
+    let descendants = descendant_process_stats(pane_pid);
+    let mut pids = foreground_process_ids_for_shell(&shell_stat, &descendants);
+    if shell_stat.process_group_id == shell_stat.foreground_process_group_id {
+        pids.push(pane_pid);
+    }
+    pids.into_iter()
+        .filter_map(|pid| process_argv(pid).ok())
+        .filter(|argv| !argv.is_empty())
+        .collect()
 }
 
-pub(crate) fn foreground_process_id_for_shell(
+pub(crate) fn foreground_process_ids_for_shell(
     shell_stat: &ProcessStat,
     descendants: &[ProcessStat],
-) -> Option<u32> {
+) -> Vec<u32> {
     if shell_stat.foreground_process_group_id <= 0 {
-        return None;
+        return Vec::new();
     }
 
     let mut matches = descendants
@@ -40,11 +45,13 @@ pub(crate) fn foreground_process_id_for_shell(
         .collect::<Vec<_>>();
     matches.sort_unstable();
 
-    matches
-        .iter()
-        .copied()
-        .find(|pid| *pid == shell_stat.foreground_process_group_id as u32)
-        .or_else(|| matches.into_iter().next())
+    let group_leader = shell_stat.foreground_process_group_id as u32;
+    let mut ordered = Vec::with_capacity(matches.len());
+    if matches.contains(&group_leader) {
+        ordered.push(group_leader);
+    }
+    ordered.extend(matches.into_iter().filter(|pid| *pid != group_leader));
+    ordered
 }
 
 fn process_argv(pid: u32) -> std::io::Result<Vec<String>> {

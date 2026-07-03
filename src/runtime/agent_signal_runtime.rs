@@ -132,9 +132,25 @@ impl AgentSignalRuntime {
     fn pane_matches(&self, signal: &AgentSignalEnvelope) -> Result<bool, String> {
         let authoritative_pane = self
             .backend
-            .target_main_pane_on_socket(&signal.socket, &signal.session)
+            .target_presentation_pane_on_socket(&signal.socket, &signal.session)
+            .or_else(|_| {
+                self.backend
+                    .target_main_pane_on_socket(&signal.socket, &signal.session)
+            })
             .map_err(|error| error.to_string())?;
-        Ok(authoritative_pane.as_str() == signal.pane)
+        if authoritative_pane.as_str() == signal.pane {
+            return Ok(true);
+        }
+        let signal_pane = crate::infra::tmux::TmuxPaneId::new(signal.pane.clone());
+        let signal_target = self
+            .backend
+            .show_pane_option_on_socket(
+                &TmuxSocketName::new(signal.socket.clone()),
+                &signal_pane,
+                "@waitagent_target_session_name",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(signal_target.as_deref() == Some(signal.session.as_str()))
     }
 
     fn apply_state_update(
@@ -306,6 +322,15 @@ mod tests {
     #[test]
     fn codex_signal_rejects_presentation_pane() {
         let fixture = SignalRuntimeFixture::new("agent-signal-wrong-pane");
+        fixture
+            .backend
+            .set_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.content_pane,
+                "@waitagent_target_session_name",
+                "other-target",
+            )
+            .expect("content target should be changed");
         let signal = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
 
         let error = fixture
@@ -319,6 +344,32 @@ mod tests {
 
         assert_eq!(error, "pane mismatch");
         assert_eq!(state, None);
+    }
+
+    #[test]
+    fn codex_signal_accepts_workspace_content_pane_bound_to_target() {
+        let fixture = SignalRuntimeFixture::new("agent-signal-content-pane");
+        let signal = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
+
+        fixture
+            .runtime
+            .apply_signal(signal)
+            .expect("target-bound content pane signal should apply");
+
+        let pane = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .expect("pane option should read");
+        let state = fixture
+            .backend
+            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .expect("state option should read");
+
+        assert_eq!(pane.as_deref(), Some(fixture.content_pane.as_str()));
+        assert_eq!(
+            state.as_deref(),
+            Some(ManagedSessionTaskState::Running.as_str())
+        );
     }
 
     #[test]

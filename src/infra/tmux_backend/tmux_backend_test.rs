@@ -47,6 +47,22 @@ mod tests {
     }
 
     #[test]
+    fn detector_registry_recognizes_codex_from_foreground_argv_candidates() {
+        let registry = DetectorRegistry::default();
+        let argv_candidates = vec![
+            vec!["node".to_string(), "/usr/bin/codex".to_string()],
+            vec![
+                "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex".to_string(),
+            ],
+        ];
+
+        assert_eq!(
+            registry.detect_command_name_from_argv_candidates("node", &argv_candidates, ""),
+            "codex"
+        );
+    }
+
+    #[test]
     fn detector_registry_does_not_detect_identity_from_pane_text() {
         let registry = DetectorRegistry::default();
 
@@ -145,8 +161,39 @@ mod tests {
         ];
 
         assert_eq!(
-            process_inspector::foreground_process_id_for_shell(&shell, &descendants),
+            process_inspector::foreground_process_ids_for_shell(&shell, &descendants)
+                .into_iter()
+                .next(),
             Some(200)
+        );
+    }
+
+    #[test]
+    fn foreground_process_ids_include_group_peers_after_leader() {
+        let shell = process_inspector::ProcessStat {
+            pid: 100,
+            process_group_id: 100,
+            tty_nr: 42,
+            foreground_process_group_id: 200,
+        };
+        let descendants = vec![
+            process_inspector::ProcessStat {
+                pid: 201,
+                process_group_id: 200,
+                tty_nr: 42,
+                foreground_process_group_id: 200,
+            },
+            process_inspector::ProcessStat {
+                pid: 200,
+                process_group_id: 200,
+                tty_nr: 42,
+                foreground_process_group_id: 200,
+            },
+        ];
+
+        assert_eq!(
+            process_inspector::foreground_process_ids_for_shell(&shell, &descendants),
+            vec![200, 201]
         );
     }
 
@@ -568,6 +615,84 @@ mod tests {
         assert_eq!(
             target_record.task_state,
             crate::domain::session_catalog::ManagedSessionTaskState::Input
+        );
+    }
+
+    #[test]
+    fn session_runtime_uses_authoritative_presentation_pane_process() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("runtime-presentation-source"))
+            .expect("workspace bootstrap should succeed");
+        let target_config = WorkspaceInstanceConfig {
+            workspace_dir: workspace_config().workspace_dir,
+            workspace_key: "target-key".to_string(),
+            socket_name: workspace.socket_name.as_str().to_string(),
+            session_name: "target-session".to_string(),
+            session_role: WorkspaceSessionRole::TargetHost,
+            initial_rows: None,
+            initial_cols: None,
+            initial_program: None,
+        };
+        let target = backend
+            .ensure_workspace(&target_config)
+            .expect("target session should be created");
+        let workspace_main = backend
+            .current_pane(&workspace)
+            .expect("workspace main pane should resolve");
+
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "sleep 60".to_string(),
+                    "Enter".to_string(),
+                ],
+            )
+            .expect("presentation pane command should be started");
+        std::thread::sleep(Duration::from_millis(200));
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-t".to_string(),
+                    target.session_name.as_str().to_string(),
+                    "@waitagent_main_pane_id".to_string(),
+                    workspace_main.as_str().to_string(),
+                ],
+            )
+            .expect("target presentation pane should be configured");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-pt".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "@waitagent_target_session_name".to_string(),
+                    target.session_name.as_str().to_string(),
+                ],
+            )
+            .expect("presentation target option should be set");
+
+        let sessions = backend
+            .list_sessions_on_socket(&workspace.socket_name)
+            .expect("sessions should list");
+        kill_server(&backend, &workspace);
+
+        let target_record = sessions
+            .iter()
+            .find(|session| session.address.session_id() == target.session_name.as_str())
+            .expect("target session should be present");
+        assert_eq!(target_record.command_name.as_deref(), Some("sleep"));
+        assert_eq!(
+            target_record.task_state,
+            crate::domain::session_catalog::ManagedSessionTaskState::Running
         );
     }
 

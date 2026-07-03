@@ -1532,7 +1532,7 @@ fn chrome_refresh_tmux_error(
 }
 
 pub(crate) mod process_inspector;
-pub(crate) use process_inspector::foreground_process_argv_for_pane_shell;
+pub(crate) use process_inspector::foreground_process_argvs_for_pane_shell;
 
 pub(crate) use crate::infra::tmux_error::parse_tmux_id;
 
