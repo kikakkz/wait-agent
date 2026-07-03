@@ -2582,7 +2582,11 @@ fn saved_profile_can_connect_by_id(
     state: &ConnectRemoteHostState,
     profile: &RemoteHostProfile,
 ) -> bool {
-    state.password_mode == PasswordMode::Saved
+    let auth_ready = match &profile.auth {
+        RemoteHostAuthProfile::Password { .. } => state.password_mode == PasswordMode::Saved,
+        RemoteHostAuthProfile::Key { .. } => true,
+    };
+    auth_ready
         && matches!(state.sudo_mode, SudoMode::Saved | SudoMode::None)
         && profile_matches_state(profile, state)
 }

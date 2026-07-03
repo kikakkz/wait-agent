@@ -2,15 +2,11 @@ use super::{
     exact_session_target, EmbeddedTmuxBackend, TmuxError, WAITAGENT_PANE_PIPE_OWNER_OPTION,
 };
 use crate::infra::tmux::{TmuxPaneId, TmuxSocketName};
-use crate::infra::tmux_error::parse_tmux_identifier;
 use std::str;
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
-const WAITAGENT_PANE_ROLE_OPTION: &str = "@waitagent_pane_role";
-const WAITAGENT_PANE_ROLE_CONTENT: &str = "content";
-const WAITAGENT_PANE_SESSION_INSTANCE_OPTION: &str = "@waitagent_session_instance_id";
 const WAITAGENT_PANE_TARGET_SESSION_OPTION: &str = "@waitagent_target_session_name";
 
 impl EmbeddedTmuxBackend {
@@ -19,20 +15,12 @@ impl EmbeddedTmuxBackend {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<TmuxPaneId, TmuxError> {
-        if let Some(pane) =
-            self.configured_target_presentation_pane_on_socket(socket_name, target_session_name)?
-        {
-            return Ok(pane);
-        }
-        if let Some(pane) =
-            self.content_pane_by_session_instance_on_socket(socket_name, target_session_name)?
-        {
-            return Ok(pane);
-        }
-
-        Err(TmuxError::new(format!(
-            "target session `{target_session_name}` on socket `{socket_name}` has no authoritative presentation pane"
-        )))
+        self.configured_target_presentation_pane_on_socket(socket_name, target_session_name)?
+            .ok_or_else(|| {
+                TmuxError::new(format!(
+                    "target session `{target_session_name}` on socket `{socket_name}` has no authoritative presentation pane"
+                ))
+            })
     }
 
     fn configured_target_presentation_pane_on_socket(
@@ -77,51 +65,6 @@ impl EmbeddedTmuxBackend {
             )));
         }
         Ok(Some(TmuxPaneId::new(pane)))
-    }
-
-    fn content_pane_by_session_instance_on_socket(
-        &self,
-        socket_name: &str,
-        session_instance_id: &str,
-    ) -> Result<Option<TmuxPaneId>, TmuxError> {
-        let socket = TmuxSocketName::new(socket_name);
-        let output = self.run_on_socket(
-            &socket,
-            &[
-                "list-panes".to_string(),
-                "-a".to_string(),
-                "-F".to_string(),
-                format!(
-                    "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}\t#{{{WAITAGENT_PANE_SESSION_INSTANCE_OPTION}}}"
-                ),
-            ],
-        )?;
-
-        let mut matches = Vec::new();
-        for line in output.stdout.lines() {
-            let mut parts = line.splitn(5, '\t');
-            let pane_id = parts.next().unwrap_or_default();
-            let pane_dead = parts.next().unwrap_or_default();
-            let pane_title = parts.next().unwrap_or_default();
-            let pane_role = parts.next().unwrap_or_default();
-            let pane_owner = parts.next().unwrap_or_default();
-            if pane_dead == "0"
-                && pane_title != WAITAGENT_SIDEBAR_PANE_TITLE
-                && pane_title != WAITAGENT_FOOTER_PANE_TITLE
-                && pane_role == WAITAGENT_PANE_ROLE_CONTENT
-                && pane_owner == session_instance_id
-            {
-                matches.push(TmuxPaneId::new(parse_tmux_identifier(pane_id, "pane id")?));
-            }
-        }
-
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.pop()),
-            _ => Err(TmuxError::new(format!(
-                "session instance `{session_instance_id}` owns multiple live content panes on socket `{socket_name}`"
-            ))),
-        }
     }
 
     fn pane_target_session_name_on_socket(

@@ -132,7 +132,7 @@ impl AgentSignalRuntime {
     fn pane_matches(&self, signal: &AgentSignalEnvelope) -> Result<bool, String> {
         let authoritative_pane = self
             .backend
-            .target_presentation_pane_on_socket(&signal.socket, &signal.session)
+            .target_main_pane_on_socket(&signal.socket, &signal.session)
             .map_err(|error| error.to_string())?;
         Ok(authoritative_pane.as_str() == signal.pane)
     }
@@ -273,14 +273,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_signal_accepts_owned_workspace_content_pane() {
+    fn codex_signal_accepts_target_pane() {
         let fixture = SignalRuntimeFixture::new("agent-signal-owned-pane");
-        let signal = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
+        let signal = fixture.signal("UserPromptSubmit", fixture.target_shell_pane.as_str());
 
         fixture
             .runtime
             .apply_signal(signal)
-            .expect("owned content pane signal should apply");
+            .expect("target pane signal should apply");
 
         let agent = fixture
             .backend
@@ -296,7 +296,7 @@ mod tests {
             .expect("state option should read");
 
         assert_eq!(agent.as_deref(), Some("codex"));
-        assert_eq!(pane.as_deref(), Some(fixture.content_pane.as_str()));
+        assert_eq!(pane.as_deref(), Some(fixture.target_shell_pane.as_str()));
         assert_eq!(
             state.as_deref(),
             Some(ManagedSessionTaskState::Running.as_str())
@@ -304,14 +304,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_signal_rejects_non_authoritative_pane() {
+    fn codex_signal_rejects_presentation_pane() {
         let fixture = SignalRuntimeFixture::new("agent-signal-wrong-pane");
-        let signal = fixture.signal("UserPromptSubmit", fixture.target_shell_pane.as_str());
+        let signal = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
 
         let error = fixture
             .runtime
             .apply_signal(signal)
-            .expect_err("non-authoritative pane should be rejected");
+            .expect_err("presentation pane should be rejected");
         let state = fixture
             .backend
             .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
@@ -333,14 +333,14 @@ mod tests {
 
     fn assert_agent_session_end_clears_metadata(agent_name: &str, fixture_name: &str) {
         let fixture = SignalRuntimeFixture::new(fixture_name);
-        let mut running = fixture.signal("UserPromptSubmit", fixture.content_pane.as_str());
+        let mut running = fixture.signal("UserPromptSubmit", fixture.target_shell_pane.as_str());
         running.agent = agent_name.to_string();
         fixture
             .runtime
             .apply_signal(running)
             .expect("running signal should apply");
 
-        let mut ended = fixture.signal("SessionEnd", fixture.content_pane.as_str());
+        let mut ended = fixture.signal("SessionEnd", fixture.target_shell_pane.as_str());
         ended.agent = agent_name.to_string();
         fixture
             .runtime

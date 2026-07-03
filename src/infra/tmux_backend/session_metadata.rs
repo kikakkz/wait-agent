@@ -281,10 +281,7 @@ impl EmbeddedTmuxBackend {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let main_pane = match self.session_presentation_pane_info(socket_name, session_name)? {
-            Some(pane) => Some(pane),
-            None => self.session_main_pane_info(socket_name, session_name)?,
-        };
+        let main_pane = self.session_main_pane_info(socket_name, session_name)?;
         let Some(main_pane) = main_pane else {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
@@ -380,21 +377,6 @@ impl EmbeddedTmuxBackend {
             .ok()
             .flatten()
             .and_then(|state| ManagedSessionTaskState::parse(&state))
-    }
-
-    fn session_presentation_pane_info(
-        &self,
-        socket_name: &TmuxSocketName,
-        session_name: &str,
-    ) -> Result<Option<TmuxPaneInfo>, TmuxError> {
-        let Ok(pane_id) =
-            self.target_presentation_pane_on_socket(socket_name.as_str(), session_name)
-        else {
-            return Ok(None);
-        };
-        let session_name = self.pane_session_name_on_socket(socket_name.as_str(), &pane_id)?;
-        let panes = self.list_panes_on_target(socket_name, &session_name)?;
-        Ok(panes.into_iter().find(|pane| pane.pane_id == pane_id))
     }
 
     fn session_main_pane_info(

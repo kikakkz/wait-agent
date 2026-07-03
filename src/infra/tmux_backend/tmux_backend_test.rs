@@ -359,11 +359,11 @@ mod tests {
     }
 
     #[test]
-    fn target_presentation_pane_falls_back_to_owned_live_content_pane() {
+    fn target_presentation_pane_requires_configured_pane() {
         let backend = EmbeddedTmuxBackend::from_build_env()
             .expect("vendored tmux backend should discover build env");
         let workspace = backend
-            .ensure_workspace(&unique_workspace_config("presentation-owner"))
+            .ensure_workspace(&unique_workspace_config("presentation-required"))
             .expect("workspace bootstrap should succeed");
         let target_config = WorkspaceInstanceConfig {
             workspace_dir: workspace_config().workspace_dir,
@@ -407,15 +407,17 @@ mod tests {
             )
             .expect("pane owner should be set");
 
-        let resolved = backend
+        let error = backend
             .target_presentation_pane_on_socket(
                 workspace.socket_name.as_str(),
                 target.session_name.as_str(),
             )
-            .expect("owned content pane should resolve");
+            .expect_err("owned content pane without explicit binding should fail");
         kill_server(&backend, &workspace);
 
-        assert_eq!(resolved, workspace_main);
+        assert!(error
+            .to_string()
+            .contains("has no authoritative presentation pane"));
     }
 
     #[test]
@@ -476,6 +478,97 @@ mod tests {
         kill_server(&backend, &workspace);
 
         assert!(error.to_string().contains("belongs to target session"));
+    }
+
+    #[test]
+    fn session_runtime_uses_target_pane_not_stale_presentation_pane() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("runtime-target-source"))
+            .expect("workspace bootstrap should succeed");
+        let target_config = WorkspaceInstanceConfig {
+            workspace_dir: workspace_config().workspace_dir,
+            workspace_key: "target-key".to_string(),
+            socket_name: workspace.socket_name.as_str().to_string(),
+            session_name: "target-session".to_string(),
+            session_role: WorkspaceSessionRole::TargetHost,
+            initial_rows: None,
+            initial_cols: None,
+            initial_program: None,
+        };
+        let target = backend
+            .ensure_workspace(&target_config)
+            .expect("target session should be created");
+        let workspace_main = backend
+            .current_pane(&workspace)
+            .expect("workspace main pane should resolve");
+
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "Welcome to Kimi Code!".to_string(),
+                    "Enter".to_string(),
+                    "K2.7 Code thinking  ~".to_string(),
+                    "Enter".to_string(),
+                ],
+            )
+            .expect("stale presentation text should be written");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "select-pane".to_string(),
+                    "-t".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "-T".to_string(),
+                    "Kimi Code".to_string(),
+                ],
+            )
+            .expect("presentation title should be set");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-t".to_string(),
+                    target.session_name.as_str().to_string(),
+                    "@waitagent_main_pane_id".to_string(),
+                    workspace_main.as_str().to_string(),
+                ],
+            )
+            .expect("target presentation pane should be configured");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "set-option".to_string(),
+                    "-pt".to_string(),
+                    workspace_main.as_str().to_string(),
+                    "@waitagent_target_session_name".to_string(),
+                    target.session_name.as_str().to_string(),
+                ],
+            )
+            .expect("presentation target option should be set");
+
+        let sessions = backend
+            .list_sessions_on_socket(&workspace.socket_name)
+            .expect("sessions should list");
+        kill_server(&backend, &workspace);
+
+        let target_record = sessions
+            .iter()
+            .find(|session| session.address.session_id() == target.session_name.as_str())
+            .expect("target session should be present");
+        assert_eq!(target_record.command_name.as_deref(), Some("bash"));
+        assert_eq!(
+            target_record.task_state,
+            crate::domain::session_catalog::ManagedSessionTaskState::Input
+        );
     }
 
     #[test]
