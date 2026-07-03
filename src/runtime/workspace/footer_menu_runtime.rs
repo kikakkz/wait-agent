@@ -267,11 +267,7 @@ fn connect_remote_host_command(
     ]
     .join(" ");
 
-    format!(
-        "display-popup -c {} -w 66 -h 18 -E {}",
-        tmux_quote_argument(&command.client_tty),
-        tmux_quote_argument(&pane_command)
-    )
+    connect_remote_host_popup_command(&pane_command, Some(&command.client_tty))
 }
 
 fn create_remote_session_command(
@@ -318,6 +314,16 @@ fn error_log_command(executable: &std::path::Path) -> String {
             "{} __error-log && echo '' && echo '--- Press ENTER to close ---' && read -r",
             executable.display(),
         ))
+    )
+}
+
+fn connect_remote_host_popup_command(pane_command: &str, client_tty: Option<&str>) -> String {
+    let client = client_tty
+        .map(|tty| format!("-c {} ", tmux_quote_argument(tty)))
+        .unwrap_or_default();
+    let command = tmux_quote_argument(pane_command);
+    format!(
+        "if -F '#{{e|>=:#{{client_width}},100}}' 'display-popup {client}-w 100 -h 18 -E {command}' 'display-popup {client}-w 100% -h 18 -E {command}'"
     )
 }
 

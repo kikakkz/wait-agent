@@ -23,6 +23,70 @@ impl RemoteInstallProxyConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInstallProxyProfile {
+    pub name: String,
+    pub all_proxy: String,
+    pub https_proxy: String,
+}
+
+impl RemoteInstallProxyProfile {
+    pub fn config(&self) -> RemoteInstallProxyConfig {
+        RemoteInstallProxyConfig {
+            all_proxy: self.all_proxy.clone(),
+            https_proxy: self.https_proxy.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RemoteInstallProxySettings {
+    pub active: Option<String>,
+    pub profiles: Vec<RemoteInstallProxyProfile>,
+}
+
+impl RemoteInstallProxySettings {
+    pub fn active_config(&self) -> RemoteInstallProxyConfig {
+        let Some(active) = &self.active else {
+            return RemoteInstallProxyConfig::default();
+        };
+        self.profiles
+            .iter()
+            .find(|profile| &profile.name == active)
+            .map(RemoteInstallProxyProfile::config)
+            .unwrap_or_default()
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteInstallProxyStoreError> {
+        let mut names = Vec::new();
+        for profile in &self.profiles {
+            let name = profile.name.trim();
+            if name.is_empty() {
+                return Err(RemoteInstallProxyStoreError::new(
+                    "proxy profile name is required",
+                ));
+            }
+            if names.iter().any(|existing| existing == name) {
+                return Err(RemoteInstallProxyStoreError::new(format!(
+                    "duplicate proxy profile `{name}`"
+                )));
+            }
+            names.push(name.to_string());
+            profile.config().validate()?;
+        }
+        if let Some(active) = &self.active {
+            if !active.trim().is_empty()
+                && !self.profiles.iter().any(|profile| profile.name == *active)
+            {
+                return Err(RemoteInstallProxyStoreError::new(format!(
+                    "active proxy profile `{active}` does not exist"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteInstallProxyStore {
     path: PathBuf,
@@ -37,22 +101,32 @@ impl RemoteInstallProxyStore {
         waitagent_home().join("remote-install-proxy.toml")
     }
 
-    pub fn load(&self) -> Result<RemoteInstallProxyConfig, RemoteInstallProxyStoreError> {
+    pub fn load_settings(
+        &self,
+    ) -> Result<RemoteInstallProxySettings, RemoteInstallProxyStoreError> {
         if !self.path.exists() {
-            return Ok(RemoteInstallProxyConfig::default());
+            return Ok(RemoteInstallProxySettings::default());
         }
-        parse_config(&fs::read_to_string(&self.path).map_err(RemoteInstallProxyStoreError::io)?)
+        parse_settings(&fs::read_to_string(&self.path).map_err(RemoteInstallProxyStoreError::io)?)
     }
 
-    pub fn save(
+    pub fn load_active_config(
         &self,
-        config: &RemoteInstallProxyConfig,
+    ) -> Result<RemoteInstallProxyConfig, RemoteInstallProxyStoreError> {
+        self.load_settings()
+            .map(|settings| settings.active_config())
+    }
+
+    pub fn save_settings(
+        &self,
+        settings: &RemoteInstallProxySettings,
     ) -> Result<(), RemoteInstallProxyStoreError> {
-        config.validate()?;
+        settings.validate()?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(RemoteInstallProxyStoreError::io)?;
         }
-        fs::write(&self.path, serialize_config(config)).map_err(RemoteInstallProxyStoreError::io)
+        fs::write(&self.path, serialize_settings(settings))
+            .map_err(RemoteInstallProxyStoreError::io)
     }
 }
 
@@ -201,31 +275,71 @@ fn validate_proxy_url(field: &str, value: &str) -> Result<(), RemoteInstallProxy
     Ok(())
 }
 
-fn parse_config(text: &str) -> Result<RemoteInstallProxyConfig, RemoteInstallProxyStoreError> {
-    let mut config = RemoteInstallProxyConfig::default();
+fn parse_settings(text: &str) -> Result<RemoteInstallProxySettings, RemoteInstallProxyStoreError> {
+    let mut settings = RemoteInstallProxySettings::default();
+    let mut current: Option<RemoteInstallProxyProfile> = None;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line == "[[proxy]]" {
+            if let Some(profile) = current.take() {
+                settings.profiles.push(profile);
+            }
+            current = Some(RemoteInstallProxyProfile {
+                name: String::new(),
+                all_proxy: String::new(),
+                https_proxy: String::new(),
+            });
+            continue;
+        }
         let (key, value) = parse_key_value(line)?;
-        match key.as_str() {
-            "all_proxy" => config.all_proxy = value,
-            "https_proxy" => config.https_proxy = value,
-            other => {
-                return Err(RemoteInstallProxyStoreError::new(format!(
-                    "unknown remote install proxy field `{other}`"
-                )));
+        if let Some(profile) = &mut current {
+            match key.as_str() {
+                "name" => profile.name = value,
+                "all_proxy" => profile.all_proxy = value,
+                "https_proxy" => profile.https_proxy = value,
+                other => {
+                    return Err(RemoteInstallProxyStoreError::new(format!(
+                        "unknown remote install proxy field `{other}`"
+                    )));
+                }
+            }
+        } else {
+            match key.as_str() {
+                "active" => {
+                    settings.active = if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value)
+                    };
+                }
+                other => {
+                    return Err(RemoteInstallProxyStoreError::new(format!(
+                        "unknown remote install proxy field `{other}`"
+                    )));
+                }
             }
         }
     }
-    Ok(config)
+    if let Some(profile) = current {
+        settings.profiles.push(profile);
+    }
+    settings.validate()?;
+    Ok(settings)
 }
 
-fn serialize_config(config: &RemoteInstallProxyConfig) -> String {
+fn serialize_settings(settings: &RemoteInstallProxySettings) -> String {
     let mut out = String::new();
-    push_string(&mut out, "all_proxy", &config.all_proxy);
-    push_string(&mut out, "https_proxy", &config.https_proxy);
+    push_string(&mut out, "active", settings.active.as_deref().unwrap_or(""));
+    for profile in &settings.profiles {
+        out.push('\n');
+        out.push_str("[[proxy]]\n");
+        push_string(&mut out, "name", &profile.name);
+        push_string(&mut out, "all_proxy", &profile.all_proxy);
+        push_string(&mut out, "https_proxy", &profile.https_proxy);
+    }
     out
 }
 
@@ -336,16 +450,57 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn proxy_store_round_trips_config() {
+    fn proxy_store_round_trips_settings_and_active_config() {
         let path = unique_path("remote-install-proxy.toml");
         let store = RemoteInstallProxyStore::new(&path);
-        let config = RemoteInstallProxyConfig {
-            all_proxy: "socks5://127.0.0.1:7897".to_string(),
-            https_proxy: "http://127.0.0.1:7897".to_string(),
+        let settings = RemoteInstallProxySettings {
+            active: Some("office".to_string()),
+            profiles: vec![
+                RemoteInstallProxyProfile {
+                    name: "home".to_string(),
+                    all_proxy: "socks5://192.168.31.1:7897".to_string(),
+                    https_proxy: "http://192.168.31.1:7897".to_string(),
+                },
+                RemoteInstallProxyProfile {
+                    name: "office".to_string(),
+                    all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                    https_proxy: "http://127.0.0.1:7897".to_string(),
+                },
+            ],
         };
-        store.save(&config).unwrap();
-        assert_eq!(store.load().unwrap(), config);
+        store.save_settings(&settings).unwrap();
+        assert_eq!(store.load_settings().unwrap(), settings);
+        assert_eq!(
+            store.load_active_config().unwrap(),
+            RemoteInstallProxyConfig {
+                all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                https_proxy: "http://127.0.0.1:7897".to_string(),
+            }
+        );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_store_rejects_duplicate_names() {
+        let settings = RemoteInstallProxySettings {
+            active: Some("office".to_string()),
+            profiles: vec![
+                RemoteInstallProxyProfile {
+                    name: "office".to_string(),
+                    all_proxy: String::new(),
+                    https_proxy: String::new(),
+                },
+                RemoteInstallProxyProfile {
+                    name: "office".to_string(),
+                    all_proxy: String::new(),
+                    https_proxy: String::new(),
+                },
+            ],
+        };
+
+        let error = settings.validate().unwrap_err();
+
+        assert!(error.to_string().contains("duplicate proxy profile"));
     }
 
     #[test]

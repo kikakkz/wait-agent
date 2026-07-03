@@ -8,9 +8,9 @@ use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretStore,
 };
 use crate::runtime::remote_host::remote_install_proxy_store::{
-    no_proxy_for_install, RemoteInstallProxyConfig, RemoteInstallProxyStore,
+    no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
+    RemoteInstallProxyStore,
 };
-use crate::ui::chrome::display_width;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
@@ -100,9 +100,25 @@ impl ConnectRemoteHostPaneRuntime {
                         spawn_secret_loader(request, secret_tx.clone());
                     }
                 }
-                PaneAction::SaveProxyConfig => match save_proxy_config(state) {
+                PaneAction::SaveProxyConfig => match state.save_proxy_settings() {
                     Ok(()) => {
-                        state.status = Status::Hint("Saved proxy configuration.".to_string());
+                        state.status = Status::Hint("Saved proxy profile.".to_string());
+                    }
+                    Err(message) => {
+                        state.status = Status::Error(message);
+                    }
+                },
+                PaneAction::ActivateProxyConfig => match state.activate_proxy_profile() {
+                    Ok(()) => {
+                        state.status = Status::Hint("Activated proxy profile.".to_string());
+                    }
+                    Err(message) => {
+                        state.status = Status::Error(message);
+                    }
+                },
+                PaneAction::DeleteProxyConfig => match state.delete_proxy_profile() {
+                    Ok(()) => {
+                        state.status = Status::Hint("Deleted proxy profile.".to_string());
                     }
                     Err(message) => {
                         state.status = Status::Error(message);
@@ -176,7 +192,8 @@ struct ConnectRemoteHostState {
     show_sudo_password: bool,
     remember: bool,
     use_install_proxy: bool,
-    proxy_config: RemoteInstallProxyConfig,
+    proxy_settings: RemoteInstallProxySettings,
+    proxy_draft: RemoteInstallProxyProfile,
     proxy_all_proxy_autofilled: bool,
     proxy_https_proxy_autofilled: bool,
     editing: Option<EditField>,
@@ -213,7 +230,12 @@ impl ConnectRemoteHostState {
             show_sudo_password: false,
             remember: true,
             use_install_proxy: true,
-            proxy_config: load_proxy_config(),
+            proxy_settings: load_proxy_settings(),
+            proxy_draft: RemoteInstallProxyProfile {
+                name: String::new(),
+                all_proxy: String::new(),
+                https_proxy: String::new(),
+            },
             proxy_all_proxy_autofilled: false,
             proxy_https_proxy_autofilled: false,
             editing: None,
@@ -612,6 +634,7 @@ impl ConnectRemoteHostState {
                 self.selected = selection;
                 self.set_focus(Focus::Hosts);
                 return if self.selected_proxy_config() {
+                    self.sync_selected_proxy();
                     PaneAction::None
                 } else {
                     PaneAction::LoadSecrets(self.sync_selected_profile())
@@ -626,9 +649,12 @@ impl ConnectRemoteHostState {
         if self.selected_proxy_config() {
             let details = ProxyDetailsGeometry::from_area(layout.details);
             match row {
+                row if row == details.rows.name => self.set_focus(Focus::ProxyName),
                 row if row == details.rows.all_proxy => self.set_focus(Focus::AllProxy),
                 row if row == details.rows.https_proxy => self.set_focus(Focus::HttpsProxy),
-                row if row == details.rows.save => return PaneAction::SaveProxyConfig,
+                row if row == details.rows.action => {
+                    return proxy_action_from_x(x, details.save);
+                }
                 _ => {}
             }
             return PaneAction::None;
@@ -683,6 +709,7 @@ impl ConnectRemoteHostState {
             if self.selected > 0 {
                 self.selected -= 1;
                 if self.selected_proxy_config() {
+                    self.sync_selected_proxy();
                     return PaneAction::None;
                 }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
@@ -699,9 +726,10 @@ impl ConnectRemoteHostState {
 
     fn move_down(&mut self) -> PaneAction {
         if self.focus == Focus::Hosts {
-            if self.selected < self.proxy_selection_index() {
+            if self.selected < self.new_proxy_selection_index() {
                 self.selected += 1;
                 if self.selected_proxy_config() {
+                    self.sync_selected_proxy();
                     return PaneAction::None;
                 }
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
@@ -722,7 +750,7 @@ impl ConnectRemoteHostState {
 
     fn default_detail_focus(&self) -> Focus {
         if self.selected_proxy_config() {
-            Focus::AllProxy
+            Focus::ProxyName
         } else if self.selected >= self.profiles.len() {
             Focus::Host
         } else {
@@ -787,9 +815,12 @@ impl ConnectRemoteHostState {
                 self.set_focus(self.default_detail_focus());
                 PaneAction::None
             }
-            Focus::Host | Focus::Port | Focus::User | Focus::AllProxy | Focus::HttpsProxy => {
-                PaneAction::None
-            }
+            Focus::Host
+            | Focus::Port
+            | Focus::User
+            | Focus::ProxyName
+            | Focus::AllProxy
+            | Focus::HttpsProxy => PaneAction::None,
             Focus::Auth => {
                 self.adjust_choice(1);
                 PaneAction::None
@@ -819,7 +850,9 @@ impl ConnectRemoteHostState {
             }
             Focus::Delete => self.delete_action(),
             Focus::Connect => self.connect_action(),
+            Focus::ProxyActive => PaneAction::ActivateProxyConfig,
             Focus::ProxySave => PaneAction::SaveProxyConfig,
+            Focus::ProxyDelete => PaneAction::DeleteProxyConfig,
         }
     }
 
@@ -941,32 +974,32 @@ impl ConnectRemoteHostState {
     }
 
     fn apply_proxy_default_from_all_proxy(&mut self) {
-        if !self.proxy_config.https_proxy.trim().is_empty() && !self.proxy_https_proxy_autofilled {
+        if !self.proxy_draft.https_proxy.trim().is_empty() && !self.proxy_https_proxy_autofilled {
             return;
         }
-        let Some(host) = proxy_host_part(&self.proxy_config.all_proxy) else {
+        let Some(host) = proxy_host_part(&self.proxy_draft.all_proxy) else {
             if self.proxy_https_proxy_autofilled {
-                self.proxy_config.https_proxy.clear();
+                self.proxy_draft.https_proxy.clear();
                 self.proxy_https_proxy_autofilled = false;
             }
             return;
         };
-        self.proxy_config.https_proxy = format!("http://{host}");
+        self.proxy_draft.https_proxy = format!("http://{host}");
         self.proxy_https_proxy_autofilled = true;
     }
 
     fn apply_proxy_default_from_https_proxy(&mut self) {
-        if !self.proxy_config.all_proxy.trim().is_empty() && !self.proxy_all_proxy_autofilled {
+        if !self.proxy_draft.all_proxy.trim().is_empty() && !self.proxy_all_proxy_autofilled {
             return;
         }
-        let Some(host) = proxy_host_part(&self.proxy_config.https_proxy) else {
+        let Some(host) = proxy_host_part(&self.proxy_draft.https_proxy) else {
             if self.proxy_all_proxy_autofilled {
-                self.proxy_config.all_proxy.clear();
+                self.proxy_draft.all_proxy.clear();
                 self.proxy_all_proxy_autofilled = false;
             }
             return;
         };
-        self.proxy_config.all_proxy = format!("socks5://{host}");
+        self.proxy_draft.all_proxy = format!("socks5://{host}");
         self.proxy_all_proxy_autofilled = true;
     }
 
@@ -997,7 +1030,126 @@ impl ConnectRemoteHostState {
     }
 
     fn selected_proxy_config(&self) -> bool {
-        self.selected == self.proxy_selection_index()
+        self.selected >= self.proxy_selection_index()
+            && self.selected <= self.new_proxy_selection_index()
+    }
+
+    fn proxy_profile_selection_start(&self) -> usize {
+        self.proxy_selection_index()
+    }
+
+    fn new_proxy_selection_index(&self) -> usize {
+        self.proxy_profile_selection_start()
+            .saturating_add(self.proxy_settings.profiles.len())
+    }
+
+    fn selected_proxy_profile_index(&self) -> Option<usize> {
+        if !self.selected_proxy_config()
+            || self.selected < self.proxy_profile_selection_start()
+            || self.selected >= self.new_proxy_selection_index()
+        {
+            return None;
+        }
+        Some(
+            self.selected
+                .saturating_sub(self.proxy_profile_selection_start()),
+        )
+    }
+
+    fn sync_selected_proxy(&mut self) {
+        if let Some(index) = self.selected_proxy_profile_index() {
+            if let Some(profile) = self.proxy_settings.profiles.get(index).cloned() {
+                self.proxy_draft = profile;
+            }
+        } else {
+            self.proxy_draft = RemoteInstallProxyProfile {
+                name: String::new(),
+                all_proxy: String::new(),
+                https_proxy: String::new(),
+            };
+        }
+        self.proxy_all_proxy_autofilled = false;
+        self.proxy_https_proxy_autofilled = false;
+    }
+
+    fn save_proxy_settings(&mut self) -> Result<(), String> {
+        self.proxy_draft
+            .config()
+            .validate()
+            .map_err(|error| error.to_string())?;
+        let name = proxy_profile_name(&self.proxy_draft);
+        if name.is_empty() {
+            return Err("Proxy profile name is required.".to_string());
+        }
+        self.proxy_draft.name = name.clone();
+        let mut settings = self.proxy_settings.clone();
+        if let Some(index) = self.selected_proxy_profile_index() {
+            if settings
+                .profiles
+                .iter()
+                .enumerate()
+                .any(|(other, profile)| other != index && profile.name == name)
+            {
+                return Err(format!("Proxy profile `{name}` already exists."));
+            }
+            if settings.active.as_deref()
+                == self
+                    .proxy_settings
+                    .profiles
+                    .get(index)
+                    .map(|profile| profile.name.as_str())
+                && settings.active.as_deref() != Some(name.as_str())
+            {
+                settings.active = Some(name.clone());
+            }
+            if let Some(profile) = settings.profiles.get_mut(index) {
+                *profile = self.proxy_draft.clone();
+            }
+        } else {
+            if settings.profiles.iter().any(|profile| profile.name == name) {
+                return Err(format!("Proxy profile `{name}` already exists."));
+            }
+            settings.profiles.push(self.proxy_draft.clone());
+            self.selected = self
+                .proxy_profile_selection_start()
+                .saturating_add(settings.profiles.len().saturating_sub(1));
+        }
+        RemoteInstallProxyStore::default()
+            .save_settings(&settings)
+            .map_err(|error| error.to_string())?;
+        self.proxy_settings = settings;
+        Ok(())
+    }
+
+    fn activate_proxy_profile(&mut self) -> Result<(), String> {
+        self.save_proxy_settings()?;
+        self.proxy_settings.active = Some(self.proxy_draft.name.clone());
+        RemoteInstallProxyStore::default()
+            .save_settings(&self.proxy_settings)
+            .map_err(|error| error.to_string())
+    }
+
+    fn delete_proxy_profile(&mut self) -> Result<(), String> {
+        let Some(index) = self.selected_proxy_profile_index() else {
+            return Ok(());
+        };
+        let mut settings = self.proxy_settings.clone();
+        let removed = settings.profiles.remove(index);
+        if settings.active.as_deref() == Some(removed.name.as_str()) {
+            settings.active = None;
+        }
+        RemoteInstallProxyStore::default()
+            .save_settings(&settings)
+            .map_err(|error| error.to_string())?;
+        self.proxy_settings = settings;
+        self.selected = if self.proxy_settings.profiles.is_empty() {
+            self.new_proxy_selection_index()
+        } else {
+            self.proxy_profile_selection_start()
+                .saturating_add(index.min(self.proxy_settings.profiles.len().saturating_sub(1)))
+        };
+        self.sync_selected_proxy();
+        Ok(())
     }
 
     fn selected_profile(&self) -> Option<&RemoteHostProfile> {
@@ -1033,9 +1185,12 @@ enum Focus {
     InstallProxy,
     Delete,
     Connect,
+    ProxyName,
     AllProxy,
     HttpsProxy,
+    ProxyActive,
     ProxySave,
+    ProxyDelete,
 }
 
 impl Focus {
@@ -1048,6 +1203,7 @@ impl Focus {
             Self::Host => Some(EditField::Host),
             Self::Port => Some(EditField::RemotePort),
             Self::User => Some(EditField::SshUser),
+            Self::ProxyName => Some(EditField::ProxyName),
             Self::AllProxy => Some(EditField::AllProxy),
             Self::HttpsProxy => Some(EditField::HttpsProxy),
             Self::Password if auth == AuthChoice::Key => Some(EditField::KeyPath),
@@ -1060,9 +1216,12 @@ impl Focus {
         if proxy_page {
             return vec![
                 Self::Hosts,
+                Self::ProxyName,
                 Self::AllProxy,
                 Self::HttpsProxy,
+                Self::ProxyActive,
                 Self::ProxySave,
+                Self::ProxyDelete,
             ];
         }
         let mut ordered = vec![
@@ -1104,6 +1263,7 @@ enum EditField {
     KeyPath,
     SshPassword,
     SudoPassword,
+    ProxyName,
     AllProxy,
     HttpsProxy,
 }
@@ -1188,6 +1348,8 @@ enum PaneAction {
     DeleteSelectedHost { profile_name: String },
     LoadSecrets(Option<SecretLoadRequest>),
     SaveProxyConfig,
+    ActivateProxyConfig,
+    DeleteProxyConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1261,10 +1423,11 @@ struct ProxyDetailsGeometry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProxyDetailsRows {
+    name: u16,
     all_proxy: u16,
     https_proxy: u16,
     no_proxy: u16,
-    save: u16,
+    action: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1350,7 +1513,9 @@ impl ConnectErrorGeometry {
 
 impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
-        let dialog = Rect::new(0, 0, cols, rows);
+        let width = popup_preferred_width(state).min(cols);
+        let x = cols.saturating_sub(width) / 2;
+        let dialog = Rect::new(x, 0, width, rows);
         let body = Rect::new(
             dialog.x,
             dialog.y.saturating_add(2),
@@ -1358,18 +1523,25 @@ impl PopupGeometry {
             dialog.height.saturating_sub(2),
         );
         let host_width = host_list_width(state, body.width);
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(host_width),
-                Constraint::Length(1),
-                Constraint::Min(DETAIL_MIN_WIDTH),
-            ])
-            .split(body);
+        let separator_width = u16::from(body.width > host_width);
+        let right_padding = DETAIL_RIGHT_PADDING.min(
+            body.width
+                .saturating_sub(host_width)
+                .saturating_sub(separator_width),
+        );
+        let details_x = body
+            .x
+            .saturating_add(host_width)
+            .saturating_add(separator_width);
+        let details_width = body
+            .width
+            .saturating_sub(host_width)
+            .saturating_sub(separator_width)
+            .saturating_sub(right_padding);
         Self {
             dialog,
-            hosts: columns[0],
-            details: columns[2],
+            hosts: Rect::new(body.x, body.y, host_width, body.height),
+            details: Rect::new(details_x, body.y, details_width, body.height),
         }
     }
 }
@@ -1414,18 +1586,18 @@ impl DetailsGeometry {
 impl ProxyDetailsGeometry {
     fn from_area(area: Rect) -> Self {
         let bottom = area.y.saturating_add(area.height);
-        let proxy_height = area.height.min(3);
+        let proxy_height = area.height.min(4);
         let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
         let no_proxy_y = area.y.saturating_add(proxy_height);
         let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
         let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
-        let save_y = no_proxy_y
+        let action_y = no_proxy_y
             .saturating_add(no_proxy_height)
             .saturating_add(1)
             .min(bottom);
-        let save_height = u16::from(save_y < bottom);
-        let save = Rect::new(area.x, save_y, area.width, save_height);
-        let status_y = save_y.saturating_add(save_height).min(bottom);
+        let action_height = u16::from(action_y < bottom);
+        let save = Rect::new(area.x, action_y, area.width, action_height);
+        let status_y = action_y.saturating_add(action_height).min(bottom);
         let status = Rect::new(
             area.x,
             status_y,
@@ -1433,10 +1605,11 @@ impl ProxyDetailsGeometry {
             bottom.saturating_sub(status_y),
         );
         let rows = ProxyDetailsRows {
-            all_proxy: proxy.y.saturating_add(1).saturating_sub(area.y),
-            https_proxy: proxy.y.saturating_add(2).saturating_sub(area.y),
+            name: proxy.y.saturating_add(1).saturating_sub(area.y),
+            all_proxy: proxy.y.saturating_add(2).saturating_sub(area.y),
+            https_proxy: proxy.y.saturating_add(3).saturating_sub(area.y),
             no_proxy: no_proxy.y.saturating_sub(area.y),
-            save: save.y.saturating_sub(area.y),
+            action: save.y.saturating_sub(area.y),
         };
         Self {
             proxy,
@@ -1496,7 +1669,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
             selected_host_style()
         });
     let mut list_state = ratatui::widgets::ListState::default();
-    list_state.select(Some(display_row_from_selection(state.selected)));
+    list_state.select(Some(display_row_from_selection(state, state.selected)));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -1515,40 +1688,64 @@ fn host_list_labels(state: &ConnectRemoteHostState) -> Vec<String> {
     labels.extend(state.profiles.iter().map(saved_host_menu_label));
     labels.push("New Host".to_string());
     labels.push("Proxy Configuration".to_string());
+    labels.extend(
+        state
+            .proxy_settings
+            .profiles
+            .iter()
+            .map(|profile| proxy_menu_label(state, profile)),
+    );
+    labels.push(format!("{HOST_MENU_CHILD_INDENT}New Proxy"));
     labels
+}
+
+fn proxy_menu_label(state: &ConnectRemoteHostState, profile: &RemoteInstallProxyProfile) -> String {
+    let active = if state.proxy_settings.active.as_deref() == Some(profile.name.as_str()) {
+        "* "
+    } else {
+        "  "
+    };
+    format!("{HOST_MENU_CHILD_INDENT}{active}{}", profile.name)
 }
 
 fn selection_from_display_row(state: &ConnectRemoteHostState, row: usize) -> Option<usize> {
     if row == 0 {
         return None;
     }
-    let selection = row - 1;
-    (selection <= state.proxy_selection_index()).then_some(selection)
+    let proxy_heading_row = proxy_heading_display_row(state);
+    if row == proxy_heading_row {
+        return Some(state.proxy_selection_index());
+    }
+    let selection = if row < proxy_heading_row {
+        row - 1
+    } else {
+        row.saturating_sub(2)
+    };
+    (selection <= state.new_proxy_selection_index()).then_some(selection)
 }
 
-fn display_row_from_selection(selection: usize) -> usize {
-    selection.saturating_add(1)
+fn display_row_from_selection(state: &ConnectRemoteHostState, selection: usize) -> usize {
+    if selection < state.proxy_selection_index() {
+        selection.saturating_add(1)
+    } else {
+        selection.saturating_add(2)
+    }
 }
 
-const HOST_LIST_MIN_WIDTH: u16 = 20;
-const HOST_LIST_MAX_WIDTH: u16 = 34;
-const DETAIL_MIN_WIDTH: u16 = 42;
-const SEPARATOR_WIDTH: u16 = 1;
-const LIST_PADDING: u16 = 6;
+fn proxy_heading_display_row(state: &ConnectRemoteHostState) -> usize {
+    state.proxy_selection_index().saturating_add(1)
+}
 
-fn host_list_width(state: &ConnectRemoteHostState, body_width: u16) -> u16 {
-    let content_width = host_list_labels(state)
-        .iter()
-        .map(|label| display_width(label) as u16)
-        .chain(std::iter::once(display_width("Saved Hosts") as u16))
-        .max()
-        .unwrap_or(0)
-        .saturating_add(LIST_PADDING);
-    let preferred = content_width.clamp(HOST_LIST_MIN_WIDTH, HOST_LIST_MAX_WIDTH);
-    let available = body_width.saturating_sub(DETAIL_MIN_WIDTH + SEPARATOR_WIDTH);
-    preferred
-        .min(available)
-        .max(HOST_LIST_MIN_WIDTH.min(available))
+const POPUP_WIDTH: u16 = 100;
+const HOST_LIST_WIDTH: u16 = 27;
+const DETAIL_RIGHT_PADDING: u16 = 2;
+
+fn popup_preferred_width(_state: &ConnectRemoteHostState) -> u16 {
+    POPUP_WIDTH
+}
+
+fn host_list_width(_state: &ConnectRemoteHostState, body_width: u16) -> u16 {
+    HOST_LIST_WIDTH.min(body_width)
 }
 
 fn status_message(state: &ConnectRemoteHostState) -> &str {
@@ -1575,15 +1772,16 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
 fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let geometry = ProxyDetailsGeometry::from_area(area);
     let rows = [
+        detail_row("Name", &state.proxy_draft.name, state, Focus::ProxyName),
         detail_row(
             "all_proxy",
-            &proxy_input_display(&state.proxy_config.all_proxy),
+            &proxy_input_display(&state.proxy_draft.all_proxy),
             state,
             Focus::AllProxy,
         ),
         detail_row(
             "https_proxy",
-            &proxy_input_display(&state.proxy_config.https_proxy),
+            &proxy_input_display(&state.proxy_draft.https_proxy),
             state,
             Focus::HttpsProxy,
         ),
@@ -1626,13 +1824,65 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
     if area.height == 0 {
         return;
     }
-    let style = action_focus_style(state.focus == Focus::ProxySave, Focus::ProxySave);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+    let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
+    let active_label = if active { "Active" } else { "Set Active" };
+    frame.render_widget(
+        Paragraph::new(active_label)
+            .style(action_focus_style(
+                state.focus == Focus::ProxyActive,
+                Focus::ProxyActive,
+            ))
+            .alignment(Alignment::Center),
+        columns[0],
+    );
     frame.render_widget(
         Paragraph::new("Save")
-            .style(style)
+            .style(action_focus_style(
+                state.focus == Focus::ProxySave,
+                Focus::ProxySave,
+            ))
             .alignment(Alignment::Center),
-        area,
+        columns[1],
     );
+    let delete_style = if state.focus == Focus::ProxyDelete {
+        delete_focus_style()
+    } else {
+        Style::default().fg(Color::Red)
+    };
+    frame.render_widget(
+        Paragraph::new("Delete")
+            .style(delete_style)
+            .alignment(Alignment::Center),
+        columns[2],
+    );
+}
+
+fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+    if point_in_rect(x, area.y, columns[0]) {
+        PaneAction::ActivateProxyConfig
+    } else if point_in_rect(x, area.y, columns[1]) {
+        PaneAction::SaveProxyConfig
+    } else if point_in_rect(x, area.y, columns[2]) {
+        PaneAction::DeleteProxyConfig
+    } else {
+        PaneAction::None
+    }
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -1846,12 +2096,12 @@ fn action_row(
 fn action_focus_style(focused: bool, focus: Focus) -> Style {
     if focused {
         match focus {
-            Focus::Delete => delete_focus_style(),
+            Focus::Delete | Focus::ProxyDelete => delete_focus_style(),
             _ => active_focus_style(),
         }
     } else {
         match focus {
-            Focus::Delete => Style::default().fg(Color::Red),
+            Focus::Delete | Focus::ProxyDelete => Style::default().fg(Color::Red),
             _ => Style::default().add_modifier(Modifier::BOLD),
         }
     }
@@ -2245,6 +2495,7 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
     if state.selected_proxy_config() {
         let rows = ProxyDetailsGeometry::from_area(details).rows;
         let row = match field {
+            EditField::ProxyName => rows.name,
             EditField::AllProxy => rows.all_proxy,
             EditField::HttpsProxy => rows.https_proxy,
             _ => return None,
@@ -2261,7 +2512,7 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         EditField::SshUser => rows.user,
         EditField::KeyPath | EditField::SshPassword => rows.password,
         EditField::SudoPassword => rows.sudo,
-        EditField::AllProxy | EditField::HttpsProxy => return None,
+        EditField::ProxyName | EditField::AllProxy | EditField::HttpsProxy => return None,
     };
     let value_width = state.edit_cursor as u16;
     let desired_x = details.x.saturating_add(14).saturating_add(value_width);
@@ -2312,6 +2563,16 @@ fn proxy_host_part(value: &str) -> Option<String> {
     (!authority.trim().is_empty()).then(|| authority.to_string())
 }
 
+fn proxy_profile_name(profile: &RemoteInstallProxyProfile) -> String {
+    let name = profile.name.trim();
+    if !name.is_empty() && name != "Default" && name != "Proxy" && name != "New Proxy" {
+        return name.to_string();
+    }
+    proxy_host_part(&profile.all_proxy)
+        .or_else(|| proxy_host_part(&profile.https_proxy))
+        .unwrap_or_else(|| name.to_string())
+}
+
 fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut String {
     match field {
         EditField::Host => &mut state.host,
@@ -2320,8 +2581,9 @@ fn edit_buffer(state: &mut ConnectRemoteHostState, field: EditField) -> &mut Str
         EditField::KeyPath => &mut state.key_path,
         EditField::SshPassword => &mut state.ssh_password,
         EditField::SudoPassword => &mut state.sudo_password,
-        EditField::AllProxy => &mut state.proxy_config.all_proxy,
-        EditField::HttpsProxy => &mut state.proxy_config.https_proxy,
+        EditField::ProxyName => &mut state.proxy_draft.name,
+        EditField::AllProxy => &mut state.proxy_draft.all_proxy,
+        EditField::HttpsProxy => &mut state.proxy_draft.https_proxy,
     }
 }
 
@@ -2333,8 +2595,9 @@ fn edit_buffer_ref(state: &ConnectRemoteHostState, field: EditField) -> &str {
         EditField::KeyPath => &state.key_path,
         EditField::SshPassword => &state.ssh_password,
         EditField::SudoPassword => &state.sudo_password,
-        EditField::AllProxy => &state.proxy_config.all_proxy,
-        EditField::HttpsProxy => &state.proxy_config.https_proxy,
+        EditField::ProxyName => &state.proxy_draft.name,
+        EditField::AllProxy => &state.proxy_draft.all_proxy,
+        EditField::HttpsProxy => &state.proxy_draft.https_proxy,
     }
 }
 
@@ -2353,6 +2616,7 @@ fn edit_focus(field: EditField) -> Focus {
         EditField::SshUser => Focus::User,
         EditField::KeyPath | EditField::SshPassword => Focus::Password,
         EditField::SudoPassword => Focus::Sudo,
+        EditField::ProxyName => Focus::ProxyName,
         EditField::AllProxy => Focus::AllProxy,
         EditField::HttpsProxy => Focus::HttpsProxy,
     }
@@ -2371,16 +2635,10 @@ fn spawn_secret_loader(request: SecretLoadRequest, tx: Sender<SecretLoadResult>)
     });
 }
 
-fn load_proxy_config() -> RemoteInstallProxyConfig {
+fn load_proxy_settings() -> RemoteInstallProxySettings {
     RemoteInstallProxyStore::default()
-        .load()
+        .load_settings()
         .unwrap_or_default()
-}
-
-fn save_proxy_config(state: &ConnectRemoteHostState) -> Result<(), String> {
-    RemoteInstallProxyStore::default()
-        .save(&state.proxy_config)
-        .map_err(|error| error.to_string())
 }
 
 fn load_profiles() -> Vec<RemoteHostProfile> {
@@ -2708,6 +2966,7 @@ fn write_error(error: io::Error) -> LifecycleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::chrome::display_width;
     use ratatui::backend::TestBackend;
 
     fn saved_password_profile() -> RemoteHostProfile {
@@ -2744,6 +3003,14 @@ mod tests {
         }
     }
 
+    fn blank_proxy_profile() -> RemoteInstallProxyProfile {
+        RemoteInstallProxyProfile {
+            name: String::new(),
+            all_proxy: String::new(),
+            https_proxy: String::new(),
+        }
+    }
+
     fn menu_text_column(label: &str) -> Option<usize> {
         [
             "Saved Hosts",
@@ -2776,9 +3043,9 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![saved_password_profile()];
         state.selected = state.proxy_selection_index();
-        let popup = PopupGeometry::from_terminal_size((66, 18), &state);
+        let popup = PopupGeometry::from_terminal_size((100, 18), &state);
         let details = ProxyDetailsGeometry::from_area(popup.details);
-        let output = rendered_text(66, 18, &state);
+        let output = rendered_text(100, 18, &state);
         let save_row = output
             .lines()
             .nth(details.save.y as usize)
@@ -2792,41 +3059,41 @@ mod tests {
     #[test]
     fn proxy_configuration_autofills_https_proxy_from_all_proxy_when_empty() {
         let mut state = ConnectRemoteHostState::load();
-        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.proxy_draft = blank_proxy_profile();
         state.set_focus(Focus::AllProxy);
 
         for ch in "socks5://127.0.0.1:7897".chars() {
             state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
         }
 
-        assert_eq!(state.proxy_config.all_proxy, "socks5://127.0.0.1:7897");
-        assert_eq!(state.proxy_config.https_proxy, "http://127.0.0.1:7897");
+        assert_eq!(state.proxy_draft.all_proxy, "socks5://127.0.0.1:7897");
+        assert_eq!(state.proxy_draft.https_proxy, "http://127.0.0.1:7897");
     }
 
     #[test]
     fn proxy_configuration_autofills_all_proxy_from_https_proxy_when_empty() {
         let mut state = ConnectRemoteHostState::load();
-        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.proxy_draft = blank_proxy_profile();
         state.set_focus(Focus::HttpsProxy);
 
         for ch in "http://10.0.0.1:8080".chars() {
             state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
         }
 
-        assert_eq!(state.proxy_config.https_proxy, "http://10.0.0.1:8080");
-        assert_eq!(state.proxy_config.all_proxy, "socks5://10.0.0.1:8080");
+        assert_eq!(state.proxy_draft.https_proxy, "http://10.0.0.1:8080");
+        assert_eq!(state.proxy_draft.all_proxy, "socks5://10.0.0.1:8080");
     }
 
     #[test]
     fn proxy_configuration_does_not_overwrite_user_edited_counterpart() {
         let mut state = ConnectRemoteHostState::load();
-        state.proxy_config = RemoteInstallProxyConfig::default();
+        state.proxy_draft = blank_proxy_profile();
         state.set_focus(Focus::AllProxy);
         for ch in "socks5://127.0.0.1:7897".chars() {
             state.apply_key(KeyEvent::from(KeyCode::Char(ch)));
         }
         state.set_focus(Focus::HttpsProxy);
-        while !state.proxy_config.https_proxy.is_empty() {
+        while !state.proxy_draft.https_proxy.is_empty() {
             state.apply_key(KeyEvent::from(KeyCode::Backspace));
         }
         for ch in "http://proxy.example:443".chars() {
@@ -2836,7 +3103,7 @@ mod tests {
         state.set_focus(Focus::AllProxy);
         state.apply_key(KeyEvent::from(KeyCode::Char('8')));
 
-        assert_eq!(state.proxy_config.https_proxy, "http://proxy.example:443");
+        assert_eq!(state.proxy_draft.https_proxy, "http://proxy.example:443");
     }
 
     #[test]
@@ -3136,19 +3403,24 @@ mod tests {
         state.selected = 1;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((66, 18), &state);
+        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
 
-        assert_eq!(geometry.dialog.width, 66);
+        assert_eq!(geometry.dialog.x, 10);
+        assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.dialog.height, 18);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 16);
-        assert_eq!(geometry.hosts.width, 23);
-        assert!(geometry.details.width >= DETAIL_MIN_WIDTH);
+        assert_eq!(geometry.hosts.width, 27);
+        assert_eq!(geometry.details.width, 70);
+        assert_eq!(
+            geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
+            geometry.dialog.x + geometry.dialog.width
+        );
     }
 
     #[test]
-    fn host_list_width_uses_compact_width_for_short_saved_hosts() {
+    fn popup_geometry_keeps_host_list_width_stable_for_saved_host_selection() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![RemoteHostProfile {
             name: "k@127.0.0.1".to_string(),
@@ -3164,13 +3436,47 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
         }];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
 
-        assert_eq!(host_list_width(&state, 98), 25);
+        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+
+        assert_eq!(geometry.dialog.x, 10);
+        assert_eq!(geometry.dialog.width, 100);
+        assert_eq!(geometry.hosts.width, 27);
+        assert_eq!(geometry.details.width, 70);
+        assert_eq!(
+            geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
+            geometry.dialog.x + geometry.dialog.width
+        );
     }
 
     #[test]
-    fn host_list_width_caps_long_saved_hosts() {
+    fn host_list_width_uses_compact_width_for_short_saved_hosts() {
         let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings::default();
+        state.profiles = vec![RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Password {
+                password_secret_id: None,
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7575),
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        }];
+
+        assert_eq!(host_list_width(&state, 98), 27);
+    }
+
+    #[test]
+    fn host_list_width_caps_content_at_proxy_host_budget() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings::default();
         state.profiles = vec![RemoteHostProfile {
             name: "deploy@very-long-host-name.example.internal".to_string(),
             host: "very-long-host-name.example.internal".to_string(),
@@ -3186,7 +3492,75 @@ mod tests {
             use_install_proxy: true,
         }];
 
-        assert_eq!(host_list_width(&state, 98), 34);
+        assert_eq!(host_list_width(&state, 98), 27);
+    }
+
+    #[test]
+    fn host_list_width_expands_for_proxy_profile_hosts() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings {
+            active: Some("10.1.29.96:7897".to_string()),
+            profiles: vec![RemoteInstallProxyProfile {
+                name: "10.1.29.96:7897".to_string(),
+                all_proxy: "socks5://10.1.29.96:7897".to_string(),
+                https_proxy: String::new(),
+            }],
+        };
+
+        assert_eq!(host_list_width(&state, 98), 27);
+    }
+
+    #[test]
+    fn host_list_width_fits_max_ipv4_proxy_profile_host() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings {
+            active: Some("255.255.255.255:65535".to_string()),
+            profiles: vec![RemoteInstallProxyProfile {
+                name: "255.255.255.255:65535".to_string(),
+                all_proxy: "socks5://255.255.255.255:65535".to_string(),
+                https_proxy: String::new(),
+            }],
+        };
+
+        assert_eq!(host_list_width(&state, 98), 27);
+    }
+
+    #[test]
+    fn proxy_configuration_geometry_keeps_details_complete_with_right_padding() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings {
+            active: Some("192.168.31.178:7897".to_string()),
+            profiles: vec![RemoteInstallProxyProfile {
+                name: "192.168.31.178:7897".to_string(),
+                all_proxy: "socks5://192.168.31.178:7897".to_string(),
+                https_proxy: String::new(),
+            }],
+        };
+        state.selected = state.proxy_profile_selection_start();
+        state.sync_selected_proxy();
+
+        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+
+        assert_eq!(geometry.dialog.x, 10);
+        assert_eq!(geometry.dialog.width, 100);
+        assert_eq!(geometry.hosts.width, 27);
+        assert_eq!(geometry.details.width, 70);
+        assert_eq!(
+            geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
+            geometry.dialog.x + geometry.dialog.width
+        );
+    }
+
+    #[test]
+    fn popup_geometry_clips_to_terminal_when_allocated_less_than_requested_width() {
+        let state = ConnectRemoteHostState::load();
+
+        let geometry = PopupGeometry::from_terminal_size((66, 18), &state);
+
+        assert_eq!(geometry.dialog.x, 0);
+        assert_eq!(geometry.dialog.width, 66);
+        assert_eq!(geometry.hosts.width, 27);
+        assert_eq!(geometry.details.width, 36);
     }
 
     #[test]
@@ -3328,9 +3702,12 @@ mod tests {
         let labels = host_list_labels(&state);
         assert_eq!(labels.first().map(String::as_str), Some("Saved Hosts"));
         assert_eq!(
-            labels.last().map(String::as_str),
+            labels
+                .get(proxy_heading_display_row(&state))
+                .map(String::as_str),
             Some("Proxy Configuration")
         );
+        assert_eq!(labels.last().map(String::as_str), Some("  New Proxy"));
         assert_eq!(
             labels.get(state.profiles.len() + 1).map(String::as_str),
             Some("New Host")
@@ -3341,13 +3718,109 @@ mod tests {
             menu_text_column(labels.get(state.profiles.len() + 1).unwrap()),
             Some(0)
         );
-        assert_eq!(menu_text_column(labels.last().unwrap()), Some(0));
+        assert!(labels.last().unwrap().starts_with(HOST_MENU_CHILD_INDENT));
         assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
 
         state.selected = state.proxy_selection_index();
         state.set_focus(Focus::Hosts);
-        assert_eq!(state.default_detail_focus(), Focus::AllProxy);
+        assert_eq!(state.default_detail_focus(), Focus::ProxyName);
         assert!(state.selected_profile().is_none());
+    }
+
+    #[test]
+    fn proxy_configuration_lists_profiles_and_new_proxy_entry() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles = vec![saved_password_profile()];
+        state.proxy_settings = RemoteInstallProxySettings {
+            active: Some("Office".to_string()),
+            profiles: vec![
+                RemoteInstallProxyProfile {
+                    name: "Home".to_string(),
+                    all_proxy: "socks5://192.168.31.1:7897".to_string(),
+                    https_proxy: "http://192.168.31.1:7897".to_string(),
+                },
+                RemoteInstallProxyProfile {
+                    name: "Office".to_string(),
+                    all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                    https_proxy: "http://127.0.0.1:7897".to_string(),
+                },
+            ],
+        };
+
+        let labels = host_list_labels(&state);
+
+        assert_eq!(
+            labels
+                .get(display_row_from_selection(
+                    &state,
+                    state.proxy_profile_selection_start()
+                ))
+                .map(String::as_str),
+            Some("    Home")
+        );
+        assert_eq!(
+            labels
+                .get(display_row_from_selection(
+                    &state,
+                    state.proxy_profile_selection_start() + 1
+                ))
+                .map(String::as_str),
+            Some("  * Office")
+        );
+        assert_eq!(
+            labels
+                .get(display_row_from_selection(
+                    &state,
+                    state.new_proxy_selection_index()
+                ))
+                .map(String::as_str),
+            Some("  New Proxy")
+        );
+    }
+
+    #[test]
+    fn proxy_configuration_selection_syncs_existing_and_new_drafts() {
+        let mut state = ConnectRemoteHostState::load();
+        state.proxy_settings = RemoteInstallProxySettings {
+            active: Some("Office".to_string()),
+            profiles: vec![RemoteInstallProxyProfile {
+                name: "Office".to_string(),
+                all_proxy: "socks5://127.0.0.1:7897".to_string(),
+                https_proxy: "http://127.0.0.1:7897".to_string(),
+            }],
+        };
+
+        state.selected = state.proxy_profile_selection_start();
+        state.sync_selected_proxy();
+        assert_eq!(state.proxy_draft.name, "Office");
+        assert_eq!(state.proxy_draft.all_proxy, "socks5://127.0.0.1:7897");
+
+        state.selected = state.new_proxy_selection_index();
+        state.sync_selected_proxy();
+        assert!(state.proxy_draft.name.is_empty());
+        assert!(state.proxy_draft.all_proxy.is_empty());
+    }
+
+    #[test]
+    fn proxy_configuration_derives_default_profile_name_from_all_proxy_host() {
+        let profile = RemoteInstallProxyProfile {
+            name: String::new(),
+            all_proxy: "socks5://10.1.29.96:7897".to_string(),
+            https_proxy: "http://192.168.31.1:7897".to_string(),
+        };
+
+        assert_eq!(proxy_profile_name(&profile), "10.1.29.96:7897");
+    }
+
+    #[test]
+    fn proxy_configuration_replaces_placeholder_profile_names_from_proxy_host() {
+        let profile = RemoteInstallProxyProfile {
+            name: "Default".to_string(),
+            all_proxy: String::new(),
+            https_proxy: "http://proxy.example:7897".to_string(),
+        };
+
+        assert_eq!(proxy_profile_name(&profile), "proxy.example:7897");
     }
 
     #[test]
@@ -3378,7 +3851,7 @@ mod tests {
         state.profiles = vec![saved_password_profile()];
         state.selected = 0;
         let _ = state.sync_selected_profile();
-        let popup = PopupGeometry::from_terminal_size((66, 18), &state);
+        let popup = PopupGeometry::from_terminal_size((100, 18), &state);
         let details = DetailsGeometry::from_area(popup.details, &state);
 
         assert_eq!(popup.details.y, 2);
@@ -3388,7 +3861,7 @@ mod tests {
             popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height
         );
 
-        let output = rendered_text(66, 18, &state);
+        let output = rendered_text(100, 18, &state);
         assert!(output.contains("Connect Remote Host"));
         assert!(output.contains("Remember host"));
         assert!(output.contains("Use proxy"));
@@ -3405,7 +3878,7 @@ mod tests {
         state.status = Status::Working("Connecting...".to_string());
 
         assert_eq!(connect_label(&state), "Connect");
-        let output = rendered_text(66, 18, &state);
+        let output = rendered_text(100, 18, &state);
         assert!(output.contains("Connecting"));
         assert!(output.contains("Connecting..."));
         assert!(output.contains("Connect"));
@@ -3795,13 +4268,13 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = state.proxy_selection_index();
-        state.proxy_config.all_proxy = "socks5://10.1.29.96:7897".to_string();
+        state.proxy_draft.all_proxy = "socks5://10.1.29.96:7897".to_string();
         state.set_focus(Focus::AllProxy);
 
         assert_eq!(state.editing, Some(EditField::AllProxy));
         assert_eq!(
             state.edit_cursor,
-            state.proxy_config.all_proxy.chars().count()
+            state.proxy_draft.all_proxy.chars().count()
         );
 
         assert_eq!(
@@ -3811,7 +4284,7 @@ mod tests {
         assert_eq!(state.focus, Focus::AllProxy);
         assert_eq!(
             state.edit_cursor,
-            state.proxy_config.all_proxy.chars().count() - 1
+            state.proxy_draft.all_proxy.chars().count() - 1
         );
 
         assert_eq!(
@@ -3821,10 +4294,10 @@ mod tests {
         assert_eq!(state.focus, Focus::AllProxy);
         assert_eq!(
             state.edit_cursor,
-            state.proxy_config.all_proxy.chars().count()
+            state.proxy_draft.all_proxy.chars().count()
         );
 
-        for _ in 0..state.proxy_config.all_proxy.chars().count() {
+        for _ in 0..state.proxy_draft.all_proxy.chars().count() {
             state.apply_key(KeyEvent::from(KeyCode::Left));
         }
         assert_eq!(state.focus, Focus::AllProxy);
@@ -3842,7 +4315,7 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = state.proxy_selection_index();
-        state.proxy_config.https_proxy = "ab好d".to_string();
+        state.proxy_draft.https_proxy = "ab好d".to_string();
         state.set_focus(Focus::HttpsProxy);
 
         state.apply_key(KeyEvent::from(KeyCode::Left));
@@ -3851,14 +4324,14 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Char('c'))),
             PaneAction::None
         );
-        assert_eq!(state.proxy_config.https_proxy, "ab好cd");
+        assert_eq!(state.proxy_draft.https_proxy, "ab好cd");
         assert_eq!(state.edit_cursor, 4);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
             PaneAction::None
         );
-        assert_eq!(state.proxy_config.https_proxy, "ab好d");
+        assert_eq!(state.proxy_draft.https_proxy, "ab好d");
         assert_eq!(state.edit_cursor, 3);
     }
 

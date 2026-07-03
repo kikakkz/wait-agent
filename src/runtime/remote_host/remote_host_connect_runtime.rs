@@ -132,7 +132,7 @@ where
             Some(install_reachability_preflight_command(None));
         if request.use_install_proxy {
             let proxy_config = RemoteInstallProxyStore::default()
-                .load()
+                .load_active_config()
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
             if proxy_config.has_proxy() {
                 plan.install_reachability_preflight_command = Some(

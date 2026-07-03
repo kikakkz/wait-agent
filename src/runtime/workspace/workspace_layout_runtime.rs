@@ -1128,10 +1128,7 @@ fn connect_remote_host_popup_command(
         ],
         network,
     );
-    format!(
-        "display-popup -w 66 -h 18 -E {}",
-        tmux_quote_argument(&pane_command)
-    )
+    connect_remote_host_display_popup_command(&pane_command)
 }
 
 fn create_remote_session_shell_command(
@@ -1232,6 +1229,13 @@ fn shell_escape(value: &str) -> String {
 
 fn tmux_quote_argument(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn connect_remote_host_display_popup_command(pane_command: &str) -> String {
+    let command = tmux_quote_argument(pane_command);
+    format!(
+        "if -F '#{{e|>=:#{{client_width}},100}}' 'display-popup -w 100 -h 18 -E {command}' 'display-popup -w 100% -h 18 -E {command}'"
+    )
 }
 
 fn resolve_effective_main_pane(
@@ -1365,7 +1369,9 @@ mod tests {
         assert!(connect.contains("'__connect-remote-host-pane'"));
         assert!(connect.contains("'--current-socket-name' 'wa-1'"));
         assert!(connect.contains("'--connect' '10.0.0.8:7474'"));
-        assert!(connect.contains("display-popup -w 66 -h 18 -E"));
+        assert!(connect.contains("#{client_width}"));
+        assert!(connect.contains("display-popup -w 100 -h 18 -E"));
+        assert!(connect.contains("display-popup -w 100% -h 18 -E"));
         assert!(remote_new.contains("'__new-selected-remote-session'"));
         assert!(remote_new.contains("'--current-session-name' 'session-1'"));
         assert!(remote_new.contains("'--port' '9001'"));
