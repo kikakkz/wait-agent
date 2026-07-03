@@ -1,4 +1,6 @@
+use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use serde_json::Value;
 use std::fmt;
 
 /// Shared list of shell program names used across agent detection and overlay logic.
@@ -50,6 +52,16 @@ pub trait AgentDetector: Send + Sync {
     /// command name; wrappers can opt into aliases here.
     fn matches_agent_signal(&self, agent: &str, command_name: &str) -> bool {
         agent == self.name() && command_name == self.name()
+    }
+
+    /// Agent-specific hook events that waitagent should install for this agent.
+    fn hook_events(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Agent-specific hook event reducer.
+    fn signal_state_effect(&self, _event: &str, _payload: &Value) -> Option<AgentStateEffect> {
+        None
     }
 }
 
@@ -211,6 +223,25 @@ impl DetectorRegistry {
             .any(|detector| detector.matches_agent_signal(agent, command_name))
     }
 
+    pub fn hook_events_for_agent(&self, agent: &str) -> Option<&'static [&'static str]> {
+        self.detectors
+            .iter()
+            .find(|detector| detector.name() == agent)
+            .map(|detector| detector.hook_events())
+    }
+
+    pub fn signal_state_effect(
+        &self,
+        agent: &str,
+        event: &str,
+        payload: &Value,
+    ) -> Option<AgentStateEffect> {
+        self.detectors
+            .iter()
+            .find(|detector| detector.name() == agent)
+            .and_then(|detector| detector.signal_state_effect(event, payload))
+    }
+
     /// Returns true if the given name is a known shell program.
     #[allow(dead_code)]
     pub fn is_shell_name(&self, name: &str) -> bool {
@@ -226,5 +257,61 @@ impl Default for DetectorRegistry {
         registry.register(Box::new(super::agent_detector_kimi::KimiDetector));
         registry.register(Box::new(super::agent_detector_shell::ShellDetector));
         registry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_routes_codex_signal_lifecycle_to_codex_detector() {
+        let registry = DetectorRegistry::default();
+
+        assert!(registry
+            .hook_events_for_agent("codex")
+            .is_some_and(|events| events.contains(&"Interrupt")));
+        assert_eq!(
+            registry.signal_state_effect("codex", "UserPromptSubmit", &Value::Null),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Running))
+        );
+        assert_eq!(
+            registry.signal_state_effect("codex", "PermissionRequest", &Value::Null),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Confirm))
+        );
+        assert_eq!(
+            registry.signal_state_effect("codex", "Interrupt", &Value::Null),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Input))
+        );
+        assert_eq!(
+            registry.signal_state_effect("codex", "SessionStart", &Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn registry_routes_agent_specific_signal_lifecycle() {
+        let registry = DetectorRegistry::default();
+
+        assert_eq!(
+            registry.signal_state_effect(
+                "kimi",
+                "PermissionResult",
+                &serde_json::json!({"approved": false}),
+            ),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Input))
+        );
+        assert_eq!(
+            registry.signal_state_effect(
+                "claude",
+                "Notification",
+                &serde_json::json!({"message": "needs permission"}),
+            ),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Confirm))
+        );
+        assert_eq!(
+            registry.signal_state_effect("claude", "SessionEnd", &Value::Null),
+            Some(AgentStateEffect::Clear)
+        );
     }
 }

@@ -1,5 +1,20 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use serde_json::Value;
+
+const KIMI_HOOK_EVENTS: &[&str] = &[
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "PermissionResult",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "Interrupt",
+    "SessionEnd",
+];
 
 pub struct KimiDetector;
 
@@ -93,6 +108,38 @@ impl AgentDetector for KimiDetector {
 
     fn matches_agent_signal(&self, agent: &str, command_name: &str) -> bool {
         agent == "kimi" && (command_name == "kimi" || command_name == "claude")
+    }
+
+    fn hook_events(&self) -> &'static [&'static str] {
+        KIMI_HOOK_EVENTS
+    }
+
+    fn signal_state_effect(&self, event: &str, payload: &Value) -> Option<AgentStateEffect> {
+        let state = match event {
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+                ManagedSessionTaskState::Running
+            }
+            "PermissionRequest" => ManagedSessionTaskState::Confirm,
+            "PermissionResult" => permission_result_state(payload),
+            "Stop" | "StopFailure" | "Interrupt" => ManagedSessionTaskState::Input,
+            "SessionEnd" => return Some(AgentStateEffect::Clear),
+            _ => return None,
+        };
+        Some(AgentStateEffect::Set(state))
+    }
+}
+
+fn permission_result_state(payload: &Value) -> ManagedSessionTaskState {
+    let lowered = payload.to_string().to_ascii_lowercase();
+    if lowered.contains("deny")
+        || lowered.contains("denied")
+        || lowered.contains("reject")
+        || lowered.contains("\"approved\":false")
+        || lowered.contains("\"allow\":false")
+    {
+        ManagedSessionTaskState::Input
+    } else {
+        ManagedSessionTaskState::Running
     }
 }
 

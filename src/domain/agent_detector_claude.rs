@@ -1,5 +1,18 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use serde_json::Value;
+
+const CLAUDE_HOOK_EVENTS: &[&str] = &[
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolBatch",
+    "Notification",
+    "Stop",
+    "SessionEnd",
+];
 
 pub struct ClaudeDetector;
 
@@ -153,6 +166,34 @@ impl AgentDetector for ClaudeDetector {
             Some(InputStabilityPolicy::StableContent)
         }
     }
+
+    fn hook_events(&self) -> &'static [&'static str] {
+        CLAUDE_HOOK_EVENTS
+    }
+
+    fn signal_state_effect(&self, event: &str, payload: &Value) -> Option<AgentStateEffect> {
+        let state = match event {
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolBatch" => {
+                ManagedSessionTaskState::Running
+            }
+            "PermissionRequest" => ManagedSessionTaskState::Confirm,
+            "Notification" if notification_mentions_permission(payload) => {
+                ManagedSessionTaskState::Confirm
+            }
+            "Stop" => ManagedSessionTaskState::Input,
+            "SessionEnd" => return Some(AgentStateEffect::Clear),
+            _ => return None,
+        };
+        Some(AgentStateEffect::Set(state))
+    }
+}
+
+fn notification_mentions_permission(payload: &Value) -> bool {
+    let lowered = payload.to_string().to_ascii_lowercase();
+    lowered.contains("permission")
+        || lowered.contains("approve")
+        || lowered.contains("approval")
+        || lowered.contains("allow")
 }
 
 fn claude_has_stable_input_prompt(pane_text: &str) -> bool {

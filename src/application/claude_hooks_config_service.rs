@@ -1,3 +1,4 @@
+use crate::domain::agent_detector::DetectorRegistry;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io;
@@ -5,16 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WAITAGENT_HOOK_TAG: &str = "waitagent-agent-signal";
-const CLAUDE_EVENTS: [&str; 8] = [
-    "UserPromptSubmit",
-    "PermissionRequest",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolBatch",
-    "Notification",
-    "Stop",
-    "SessionEnd",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeHooksConfigService {
@@ -41,7 +32,7 @@ impl ClaudeHooksConfigService {
     pub fn reconcile(&self) -> io::Result<()> {
         let settings_path = self.claude_home.join("settings.json");
         let value = read_json_or_backup(&settings_path)?;
-        let next = reconcile_hooks_value(value, &self.sender_path);
+        let next = reconcile_hooks_value(value, &self.sender_path, claude_hook_events());
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -74,7 +65,7 @@ fn read_json_or_backup(path: &Path) -> io::Result<Value> {
     }
 }
 
-fn reconcile_hooks_value(value: Value, sender_path: &Path) -> Value {
+fn reconcile_hooks_value(value: Value, sender_path: &Path, events: &[&str]) -> Value {
     let mut root = match value {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -88,9 +79,9 @@ fn reconcile_hooks_value(value: Value, sender_path: &Path) -> Value {
     let hooks = hooks
         .as_object_mut()
         .expect("hooks was just normalized to object");
-    for event in CLAUDE_EVENTS {
+    for event in events {
         let entries = hooks
-            .entry(event)
+            .entry(*event)
             .or_insert_with(|| Value::Array(Vec::new()));
         let array = match entries {
             Value::Array(array) => array,
@@ -119,6 +110,12 @@ fn reconcile_hooks_value(value: Value, sender_path: &Path) -> Value {
         array.push(waitagent_hook_group(event, sender_path));
     }
     Value::Object(root)
+}
+
+fn claude_hook_events() -> &'static [&'static str] {
+    DetectorRegistry::default()
+        .hook_events_for_agent("claude")
+        .unwrap_or(&[])
 }
 
 fn waitagent_hook_group(event: &str, sender_path: &Path) -> Value {
@@ -174,7 +171,7 @@ mod tests {
         });
 
         let sender = PathBuf::from("/tmp/agent signal send");
-        let next = reconcile_hooks_value(value, &sender);
+        let next = reconcile_hooks_value(value, &sender, claude_hook_events());
         let pre_tool = next
             .get("hooks")
             .and_then(|hooks| hooks.get("PreToolUse"))
@@ -201,7 +198,7 @@ mod tests {
             Some(claude_hook_command(&sender, "PreToolUse").as_str())
         );
         assert!(next.get("permissions").is_some());
-        for event in CLAUDE_EVENTS {
+        for event in claude_hook_events() {
             assert!(next
                 .get("hooks")
                 .and_then(|hooks| hooks.get(event))

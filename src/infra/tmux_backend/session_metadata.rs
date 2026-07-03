@@ -218,6 +218,19 @@ fn apply_running_override(
     }
 }
 
+fn reconcile_hook_and_observed_task_state(
+    hook_state: ManagedSessionTaskState,
+    observed_state: ManagedSessionTaskState,
+) -> ManagedSessionTaskState {
+    if hook_state == ManagedSessionTaskState::Running
+        && observed_state == ManagedSessionTaskState::Input
+    {
+        observed_state
+    } else {
+        hook_state
+    }
+}
+
 #[cfg(test)]
 fn clear_temporal_input_hysteresis_cache() {
     PREVIOUS_PANE_SIGNATURE.with(|cache| cache.borrow_mut().clear());
@@ -281,18 +294,22 @@ impl EmbeddedTmuxBackend {
         socket_name: &TmuxSocketName,
         session_name: &str,
     ) -> Result<TmuxSessionRuntimeMetadata, TmuxError> {
-        let main_pane = self.session_runtime_pane_info(socket_name, session_name)?;
-        let Some(main_pane) = main_pane else {
+        let process_pane = self.session_runtime_pane_info(socket_name, session_name)?;
+        let Some(process_pane) = process_pane else {
             return Ok(TmuxSessionRuntimeMetadata::default());
         };
-        let pane_ansi = self.capture_pane_text(socket_name, &main_pane.pane_id)?;
-        let pane_text = strip_ansi(&pane_ansi);
-        let current_command = main_pane.current_command.as_deref().unwrap_or_default();
-        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(main_pane.pane_pid);
+        let observation_pane = self
+            .session_main_pane_info(socket_name, session_name)?
+            .unwrap_or_else(|| process_pane.clone());
+        let observation_ansi = self.capture_pane_text(socket_name, &observation_pane.pane_id)?;
+        let observation_text = strip_ansi(&observation_ansi);
+        let current_command = process_pane.current_command.as_deref().unwrap_or_default();
+        let foreground_argvs =
+            super::foreground_process_argvs_for_pane_shell(process_pane.pane_pid);
         let detected_command_name = self.registry.detect_command_name_from_argv_candidates(
             current_command,
             &foreground_argvs,
-            &pane_text,
+            &observation_text,
         );
         let workspace = crate::infra::tmux_types::TmuxWorkspaceHandle {
             workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(session_name),
@@ -314,18 +331,10 @@ impl EmbeddedTmuxBackend {
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(&override_value))
             .unwrap_or(detected_command_name);
-        let task_state = if main_pane.in_mode {
-            ManagedSessionTaskState::Running
-        } else if prompt_override {
-            ManagedSessionTaskState::Input
-        } else if let Some(hook_state) =
-            self.agent_signal_task_state(&workspace, &main_pane.pane_id, &command_name)
-        {
-            hook_state
-        } else {
+        let observed_task_state = || {
             let mut state = self
                 .registry
-                .infer_task_state(Some(&command_name), &pane_text);
+                .infer_task_state(Some(&command_name), &observation_text);
 
             state = apply_running_override(running_override, state);
 
@@ -335,18 +344,31 @@ impl EmbeddedTmuxBackend {
             if state == ManagedSessionTaskState::Input {
                 let policy = self
                     .registry
-                    .input_stability_policy(Some(&command_name), &pane_text);
+                    .input_stability_policy(Some(&command_name), &observation_text);
                 let session_key = format!("{}:{}", socket_name.as_str(), session_name);
-                state = apply_temporal_input_hysteresis(&session_key, &pane_text, policy, state);
+                state =
+                    apply_temporal_input_hysteresis(&session_key, &observation_text, policy, state);
             }
 
             state
         };
+        let task_state = if process_pane.in_mode {
+            ManagedSessionTaskState::Running
+        } else if prompt_override {
+            ManagedSessionTaskState::Input
+        } else if let Some(hook_state) =
+            self.agent_signal_task_state(&workspace, &process_pane.pane_id, &command_name)
+        {
+            let observed_state = observed_task_state();
+            reconcile_hook_and_observed_task_state(hook_state, observed_state)
+        } else {
+            observed_task_state()
+        };
         Ok(TmuxSessionRuntimeMetadata {
             command_name: Some(command_name.clone()),
-            current_path: main_pane.current_path.clone(),
+            current_path: process_pane.current_path.clone(),
             task_state,
-            is_dead: main_pane.is_dead,
+            is_dead: process_pane.is_dead,
         })
     }
 
@@ -669,6 +691,35 @@ mod tests {
         assert!(registry.agent_signal_matches_command("kimi", "claude"));
         assert!(!registry.agent_signal_matches_command("claude", "kimi"));
         assert!(!registry.agent_signal_matches_command("codex", "claude"));
+    }
+
+    #[test]
+    fn stale_running_hook_is_invalidated_by_clear_input_observation() {
+        assert_eq!(
+            reconcile_hook_and_observed_task_state(
+                ManagedSessionTaskState::Running,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Input
+        );
+    }
+
+    #[test]
+    fn non_running_hook_remains_authoritative() {
+        assert_eq!(
+            reconcile_hook_and_observed_task_state(
+                ManagedSessionTaskState::Confirm,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Confirm
+        );
+        assert_eq!(
+            reconcile_hook_and_observed_task_state(
+                ManagedSessionTaskState::Input,
+                ManagedSessionTaskState::Running,
+            ),
+            ManagedSessionTaskState::Input
+        );
     }
 
     #[test]

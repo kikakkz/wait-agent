@@ -1,7 +1,5 @@
-use crate::domain::agent_signal::{
-    AgentSignalEnvelope, AgentSignalHandlerFactory, AgentStateEffect,
-    BuiltinAgentSignalHandlerFactory,
-};
+use crate::domain::agent_detector::DetectorRegistry;
+use crate::domain::agent_signal::{AgentSignalEnvelope, AgentStateEffect};
 #[cfg(test)]
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceSessionRole};
 use crate::infra::error_log::ERROR_LOG;
@@ -27,7 +25,7 @@ pub struct AgentSignalRuntime {
     publication_runtime: RemoteTargetPublicationRuntime,
     socket_name: String,
     socket_path: PathBuf,
-    factory: BuiltinAgentSignalHandlerFactory,
+    registry: DetectorRegistry,
 }
 
 impl AgentSignalRuntime {
@@ -44,7 +42,7 @@ impl AgentSignalRuntime {
             publication_runtime,
             socket_path: agent_signal_socket_path(&socket_name),
             socket_name,
-            factory: BuiltinAgentSignalHandlerFactory,
+            registry: DetectorRegistry::default(),
         }
     }
 
@@ -116,14 +114,11 @@ impl AgentSignalRuntime {
         if !self.pane_matches(&signal)? {
             return Err("pane mismatch".to_string());
         }
-        let handler = self
-            .factory
-            .create(&signal.agent)
-            .ok_or_else(|| format!("unsupported agent `{}`", signal.agent))?;
-        let update = handler
-            .handle(&signal)
+        let effect = self
+            .registry
+            .signal_state_effect(&signal.agent, &signal.event, &signal.payload)
             .ok_or_else(|| format!("unsupported event `{}`", signal.event))?;
-        self.apply_state_update(&workspace, &signal, update.effect)
+        self.apply_state_update(&workspace, &signal, effect)
             .map_err(|error| error.to_string())?;
         self.refresh(&signal);
         Ok(())

@@ -1,5 +1,16 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use serde_json::Value;
+
+const CODEX_HOOK_EVENTS: &[&str] = &[
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "Interrupt",
+];
 
 pub struct CodexDetector;
 
@@ -157,6 +168,20 @@ impl AgentDetector for CodexDetector {
         } else {
             None
         }
+    }
+
+    fn hook_events(&self) -> &'static [&'static str] {
+        CODEX_HOOK_EVENTS
+    }
+
+    fn signal_state_effect(&self, event: &str, _payload: &Value) -> Option<AgentStateEffect> {
+        let state = match event {
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => ManagedSessionTaskState::Running,
+            "PermissionRequest" => ManagedSessionTaskState::Confirm,
+            "Stop" | "Interrupt" => ManagedSessionTaskState::Input,
+            _ => return None,
+        };
+        Some(AgentStateEffect::Set(state))
     }
 }
 

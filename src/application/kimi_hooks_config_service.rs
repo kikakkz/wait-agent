@@ -1,21 +1,10 @@
+use crate::domain::agent_detector::DetectorRegistry;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WAITAGENT_HOOK_TAG: &str = "waitagent-agent-signal";
-const KIMI_EVENTS: [&str; 10] = [
-    "UserPromptSubmit",
-    "PermissionRequest",
-    "PermissionResult",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "Stop",
-    "StopFailure",
-    "Interrupt",
-    "SessionEnd",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KimiHooksConfigService {
@@ -42,7 +31,7 @@ impl KimiHooksConfigService {
     pub fn reconcile(&self) -> io::Result<()> {
         let config_path = self.kimi_home.join("config.toml");
         let content = read_config_or_backup(&config_path)?;
-        let next = reconcile_config_text(&content, &self.sender_path);
+        let next = reconcile_config_text(&content, &self.sender_path, kimi_hook_events());
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -70,7 +59,7 @@ fn read_config_or_backup(path: &Path) -> io::Result<String> {
     Ok(content)
 }
 
-fn reconcile_config_text(content: &str, sender_path: &Path) -> String {
+fn reconcile_config_text(content: &str, sender_path: &Path, events: &[&str]) -> String {
     let mut kept = Vec::new();
     let mut current_hook = Vec::new();
     let mut in_hook = false;
@@ -101,11 +90,17 @@ fn reconcile_config_text(content: &str, sender_path: &Path) -> String {
     if !out.is_empty() {
         out.push_str("\n\n");
     }
-    for event in KIMI_EVENTS {
+    for event in events {
         out.push_str(&kimi_hook_block(sender_path, event));
         out.push('\n');
     }
     out
+}
+
+fn kimi_hook_events() -> &'static [&'static str] {
+    DetectorRegistry::default()
+        .hook_events_for_agent("kimi")
+        .unwrap_or(&[])
 }
 
 fn flush_hook(kept: &mut Vec<String>, current_hook: &mut Vec<String>) {
@@ -186,7 +181,11 @@ command = "/tmp/agent-signal-send Stop"
 # waitagent-agent-signal:Stop
 "#;
 
-        let next = reconcile_config_text(content, Path::new("/tmp/agent signal send"));
+        let next = reconcile_config_text(
+            content,
+            Path::new("/tmp/agent signal send"),
+            kimi_hook_events(),
+        );
         assert!(next.contains("default_model = \"kimi-code/kimi-for-coding\""));
         assert!(next.contains("[providers.\"managed:kimi-code\"]"));
         assert!(next.contains("command = \"echo user\""));
