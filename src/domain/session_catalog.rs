@@ -282,6 +282,7 @@ impl ManagedSessionRecord {
         )
     }
 
+    #[allow(dead_code)]
     pub fn summary_line(&self) -> String {
         let role_tag = if self.is_workspace_chrome() {
             " [main]"

@@ -1022,6 +1022,41 @@ mod tests {
     }
 
     #[test]
+    fn embedded_backend_lists_waitagent_session_entries_without_runtime_probe() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let config = unique_workspace_config("entry-listing");
+        let workspace = backend
+            .ensure_workspace(&config)
+            .expect("workspace bootstrap should succeed");
+
+        let entries = backend
+            .list_waitagent_session_entries()
+            .expect("session entry listing should succeed");
+        kill_server(&backend, &workspace);
+
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.session_name == workspace.session_name.as_str())
+            .expect("workspace session entry should be listed");
+        assert_eq!(entry.socket_name, workspace.socket_name.as_str());
+        assert_eq!(
+            entry.session_role,
+            Some(WorkspaceSessionRole::WorkspaceChrome)
+        );
+        assert!(entry.created_at_unix_secs.is_some());
+        assert_eq!(
+            entry.display_session_id(),
+            workspace
+                .session_name
+                .as_str()
+                .strip_prefix("waitagent-")
+                .expect("test session should use waitagent prefix")
+        );
+        assert_eq!(entry.role_tag(), " [main]");
+    }
+
+    #[test]
     fn tmux_socket_dir_matches_tmux_uid_convention() {
         let socket_dir = tmux_socket_dir();
         assert!(socket_dir.to_string_lossy().contains("/tmux-"));

@@ -1,8 +1,9 @@
 use crate::cli::{Command, RemoteNetworkConfig};
 use crate::error::AppError;
-use crate::infra::tmux::EmbeddedTmuxBackend;
+use crate::infra::tmux::{EmbeddedTmuxBackend, WaitagentSessionListEntry};
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
+use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_authority_target_host_runtime::{
     run_pane_died_event, RemoteAuthorityTargetHostRuntime,
 };
@@ -17,6 +18,8 @@ use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRu
 use crate::runtime::workspace_command_runtime::WorkspaceCommandRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::ui::banner::print_banner;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // This dispatcher is the single command-side ownership boundary for the
 // accepted local default route. `workspace` and `attach` must continue to flow
@@ -245,16 +248,24 @@ impl CommandDispatcher {
 
     fn run_list(&self) -> Result<(), AppError> {
         let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_command_error)?;
-        let sessions = crate::application::session_service::SessionService::new(backend)
-            .list_sessions()
+        let sessions = backend
+            .list_waitagent_session_entries()
             .map_err(tmux_command_error)?;
         if sessions.is_empty() {
             println!("no waitagent tmux sessions running");
             return Ok(());
         }
 
+        let mut ports_by_socket = HashMap::new();
         for session in sessions {
-            println!("{}", session.summary_line());
+            let port = ports_by_socket
+                .entry(session.socket_name.clone())
+                .or_insert_with(|| {
+                    recover_network_config_for_socket(&backend, &session.socket_name)
+                        .map(|network| network.port.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                });
+            println!("{}", format_list_session_line(&session, &port));
         }
         Ok(())
     }
@@ -326,8 +337,82 @@ fn tmux_command_error(error: crate::infra::tmux::TmuxError) -> AppError {
     ))
 }
 
+fn format_list_session_line(session: &WaitagentSessionListEntry, port: &str) -> String {
+    format!(
+        "{}: port {}, up {}, {} windows ({}){}",
+        session.display_session_id(),
+        port,
+        format_uptime(session.created_at_unix_secs),
+        session.window_count,
+        if session.attached_clients > 0 {
+            "attached"
+        } else {
+            "detached"
+        },
+        session.role_tag(),
+    )
+}
+
+fn format_uptime(created_at_unix_secs: Option<u64>) -> String {
+    let Some(created_at_unix_secs) = created_at_unix_secs else {
+        return "-".to_string();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(created_at_unix_secs);
+    let elapsed = now.saturating_sub(created_at_unix_secs);
+    format_duration(elapsed)
+}
+
+fn format_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let secs = seconds % 60;
+
+    if days > 0 {
+        format!("{days}d{hours}h")
+    } else if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{format_duration, format_list_session_line};
+    use crate::domain::workspace::WorkspaceSessionRole;
+    use crate::infra::tmux::WaitagentSessionListEntry;
+
     #[test]
     fn dispatcher_module_builds_without_host_global_listener_gate() {}
+
+    #[test]
+    fn list_session_line_includes_port_uptime_and_role() {
+        let session = WaitagentSessionListEntry {
+            socket_name: "wa-1234".to_string(),
+            session_name: "waitagent-1234".to_string(),
+            attached_clients: 1,
+            window_count: 2,
+            created_at_unix_secs: None,
+            session_role: Some(WorkspaceSessionRole::WorkspaceChrome),
+        };
+
+        assert_eq!(
+            format_list_session_line(&session, "7474"),
+            "1234: port 7474, up -, 2 windows (attached) [main]"
+        );
+    }
+
+    #[test]
+    fn list_uptime_formatter_uses_compact_units() {
+        assert_eq!(format_duration(9), "9s");
+        assert_eq!(format_duration(65), "1m5s");
+        assert_eq!(format_duration(3_660), "1h1m");
+        assert_eq!(format_duration(90_000), "1d1h");
+    }
 }

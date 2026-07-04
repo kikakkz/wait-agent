@@ -78,6 +78,32 @@ pub struct EmbeddedTmuxBackend {
     registry: Arc<DetectorRegistry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitagentSessionListEntry {
+    pub socket_name: String,
+    pub session_name: String,
+    pub attached_clients: usize,
+    pub window_count: usize,
+    pub created_at_unix_secs: Option<u64>,
+    pub session_role: Option<WorkspaceSessionRole>,
+}
+
+impl WaitagentSessionListEntry {
+    pub fn display_session_id(&self) -> &str {
+        self.session_name
+            .strip_prefix("waitagent-")
+            .unwrap_or(self.session_name.as_str())
+    }
+
+    pub fn role_tag(&self) -> &'static str {
+        match self.session_role {
+            Some(WorkspaceSessionRole::WorkspaceChrome) => " [main]",
+            Some(WorkspaceSessionRole::TargetHost) => " [target]",
+            _ => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TmuxSessionMetadata {
     workspace_dir: Option<PathBuf>,
@@ -648,6 +674,68 @@ impl EmbeddedTmuxBackend {
         }
         sockets.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         Ok(sockets)
+    }
+
+    pub fn list_waitagent_session_entries(
+        &self,
+    ) -> Result<Vec<WaitagentSessionListEntry>, TmuxError> {
+        let mut entries = Vec::new();
+        for socket_name in self.discover_waitagent_sockets()? {
+            entries.extend(self.list_session_entries_on_socket(&socket_name)?);
+        }
+        entries.sort_by(|left, right| {
+            left.socket_name
+                .cmp(&right.socket_name)
+                .then_with(|| left.session_name.cmp(&right.session_name))
+        });
+        Ok(entries)
+    }
+
+    fn list_session_entries_on_socket(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<WaitagentSessionListEntry>, TmuxError> {
+        let args = vec![
+            "list-sessions".to_string(),
+            "-F".to_string(),
+            "#{session_name}\t#{session_attached}\t#{session_windows}\t#{session_created}"
+                .to_string(),
+        ];
+        let output = match self.run_on_socket(socket_name, &args) {
+            Ok(output) => output,
+            Err(error) if error.is_command_failure() => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut entries = Vec::new();
+        for line in output.stdout.lines() {
+            let mut parts = line.split('\t');
+            let Some(session_name) = parts.next() else {
+                continue;
+            };
+            let Some(attached_clients) = parts.next() else {
+                continue;
+            };
+            let Some(window_count) = parts.next() else {
+                continue;
+            };
+            let created_at_unix_secs = parts.next().and_then(|value| value.parse::<u64>().ok());
+            let metadata = match self.session_metadata(socket_name, session_name) {
+                Ok(metadata) => metadata,
+                Err(error) if error.is_command_failure() => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
+            entries.push(WaitagentSessionListEntry {
+                socket_name: socket_name.as_str().to_string(),
+                session_name: session_name.to_string(),
+                attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
+                window_count: window_count.parse::<usize>().unwrap_or(1),
+                created_at_unix_secs,
+                session_role: metadata.session_role,
+            });
+        }
+
+        Ok(entries)
     }
 
     fn list_sessions_on_socket(

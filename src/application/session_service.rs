@@ -18,6 +18,7 @@ where
         self.gateway.find_session(target)
     }
 
+    #[allow(dead_code)]
     pub fn list_sessions(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
         self.gateway.list_sessions()
     }
