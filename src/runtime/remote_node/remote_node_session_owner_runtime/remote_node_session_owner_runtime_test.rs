@@ -489,6 +489,49 @@ mod tests {
     }
 
     #[test]
+    fn reconnecting_shared_authority_session_restores_live_state_without_pending_exits() {
+        let shared_session = SharedAuthoritySession {
+            authority_id: "peer-a".to_string(),
+            transport_socket_path: "/tmp/unused.sock".to_string(),
+            publication_runtime: RemoteTargetPublicationRuntime::from_build_env()
+                .expect("publication runtime should build from env"),
+            network: RemoteNetworkConfig::default(),
+            running: Arc::new(AtomicBool::new(true)),
+            owner_started: Arc::new(AtomicBool::new(true)),
+            session: Arc::new(Mutex::new(None)),
+            routes: Arc::new(Mutex::new(HashMap::new())),
+            pending_exits: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        assert!(!super::super::should_restore_shared_authority_state(
+            false,
+            &shared_session
+        ));
+        assert!(super::super::should_restore_shared_authority_state(
+            true,
+            &shared_session
+        ));
+
+        let route = LiveSessionRoute {
+            socket_name: "wa-r".to_string(),
+            target_session_name: "target-r".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-r".to_string(),
+            transport_session_id: "target-r".to_string(),
+            transport_socket_path: "/tmp/unused.sock".to_string(),
+            socket_path: test_socket_path("restore-pending-exit-route"),
+            running: Arc::new(AtomicBool::new(true)),
+            writer: Arc::new(Mutex::new(None)),
+            pending_commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        shared_session.queue_pending_exit(&route);
+        assert!(super::super::should_restore_shared_authority_state(
+            false,
+            &shared_session
+        ));
+    }
+
+    #[test]
     fn shared_authority_session_reconnects_without_dropping_local_authority_bridge() {
         let _guard = crate::test_support::integration_test_lock();
         let socket_name = "wa-reconnect";

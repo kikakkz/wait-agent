@@ -154,7 +154,7 @@ impl SharedAuthoritySession {
             .is_empty()
     }
 
-    fn queue_pending_exit(&self, route: &LiveSessionRoute) {
+    pub(super) fn queue_pending_exit(&self, route: &LiveSessionRoute) {
         self.pending_exits
             .lock()
             .expect("shared authority pending exits mutex should not be poisoned")
@@ -668,19 +668,19 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
             if shared_session.stop_if_idle() {
                 break;
             }
+            let reconnecting = reconnect_attempt > 0;
             let session = match RemoteNodeSessionRuntime::connect(
                 &shared_session.transport_socket_path,
                 &shared_session.authority_id,
                 shared_session.network.connect_endpoint_uri().as_deref(),
             ) {
                 Ok(session) => {
-                    if reconnect_attempt > 0 {
+                    if reconnecting {
                         eprintln!(
                             "[waitagent-diag] authority session reconnected after {} attempt(s) for {}",
                             reconnect_attempt, shared_session.authority_id,
                         );
                     }
-                    reconnect_attempt = 0;
                     Arc::new(session)
                 }
                 Err(error) => {
@@ -696,7 +696,7 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
                 }
             };
             shared_session.replace_session(Some(session.clone()));
-            if (reconnect_attempt > 0 || shared_session.has_pending_exits())
+            if should_restore_shared_authority_state(reconnecting, &shared_session)
                 && !restore_shared_authority_state(&shared_session, &session)
             {
                 eprintln!(
@@ -707,6 +707,7 @@ fn start_shared_authority_command_dispatcher(shared_session: SharedAuthoritySess
                 thread::sleep(shared_authority_reconnect_delay(reconnect_attempt));
                 continue;
             }
+            reconnect_attempt = 0;
             while shared_session.is_running() {
                 if shared_session.stop_if_idle() {
                     break;
@@ -804,6 +805,13 @@ fn restore_shared_authority_state(
         }
     }
     true
+}
+
+pub(super) fn should_restore_shared_authority_state(
+    reconnecting: bool,
+    shared_session: &SharedAuthoritySession,
+) -> bool {
+    reconnecting || shared_session.has_pending_exits()
 }
 
 fn handle_create_session_request(
