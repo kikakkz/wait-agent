@@ -240,7 +240,7 @@ impl ConnectRemoteHostState {
             proxy_https_proxy_autofilled: false,
             editing: None,
             edit_cursor: 0,
-            status: Status::Hint("Select a saved host or fill a new host.".to_string()),
+            status: default_hint_status(),
             delete_confirm: DeleteConfirmState::Idle,
             secret_load: SecretLoadState::Idle,
             next_secret_request_id: 1,
@@ -267,7 +267,7 @@ impl ConnectRemoteHostState {
             self.show_sudo_password = false;
             self.remember = true;
             self.use_install_proxy = true;
-            self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
+            self.status = default_hint_status();
             return None;
         }
         let Some(profile) = self.profiles.get(self.selected).cloned() else {
@@ -329,7 +329,7 @@ impl ConnectRemoteHostState {
             };
             Some(request)
         } else {
-            self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
+            self.status = default_hint_status();
             None
         }
     }
@@ -373,7 +373,7 @@ impl ConnectRemoteHostState {
             }
         }
         if load_errors.is_empty() {
-            self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
+            self.status = default_hint_status();
         } else {
             self.status = Status::Error(format!(
                 "Failed to load saved secret: {}",
@@ -871,7 +871,7 @@ impl ConnectRemoteHostState {
 
     fn dismiss_error_popup(&mut self) {
         if matches!(self.status, Status::Error(_)) {
-            self.status = Status::Hint("Select a saved host or fill a new host.".to_string());
+            self.status = default_hint_status();
         }
     }
 
@@ -1323,6 +1323,10 @@ enum Status {
     Error(String),
 }
 
+fn default_hint_status() -> Status {
+    Status::Hint(String::new())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeleteConfirmState {
     Idle,
@@ -1763,7 +1767,7 @@ fn proxy_heading_display_row(state: &ConnectRemoteHostState) -> usize {
 }
 
 const POPUP_WIDTH: u16 = 100;
-const HOST_LIST_WIDTH: u16 = 27;
+const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 2;
 
 fn popup_preferred_width(_state: &ConnectRemoteHostState) -> u16 {
@@ -3438,8 +3442,8 @@ mod tests {
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 16);
-        assert_eq!(geometry.hosts.width, 27);
-        assert_eq!(geometry.details.width, 70);
+        assert_eq!(geometry.hosts.width, 29);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width
@@ -3470,8 +3474,8 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
-        assert_eq!(geometry.hosts.width, 27);
-        assert_eq!(geometry.details.width, 70);
+        assert_eq!(geometry.hosts.width, 29);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width
@@ -3497,7 +3501,7 @@ mod tests {
             use_install_proxy: true,
         }];
 
-        assert_eq!(host_list_width(&state, 98), 27);
+        assert_eq!(host_list_width(&state, 98), 29);
     }
 
     #[test]
@@ -3519,7 +3523,7 @@ mod tests {
             use_install_proxy: true,
         }];
 
-        assert_eq!(host_list_width(&state, 98), 27);
+        assert_eq!(host_list_width(&state, 98), 29);
     }
 
     #[test]
@@ -3534,7 +3538,7 @@ mod tests {
             }],
         };
 
-        assert_eq!(host_list_width(&state, 98), 27);
+        assert_eq!(host_list_width(&state, 98), 29);
     }
 
     #[test]
@@ -3549,7 +3553,7 @@ mod tests {
             }],
         };
 
-        assert_eq!(host_list_width(&state, 98), 27);
+        assert_eq!(host_list_width(&state, 98), 29);
     }
 
     #[test]
@@ -3570,8 +3574,8 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
-        assert_eq!(geometry.hosts.width, 27);
-        assert_eq!(geometry.details.width, 70);
+        assert_eq!(geometry.hosts.width, 29);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width
@@ -3586,8 +3590,8 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 0);
         assert_eq!(geometry.dialog.width, 66);
-        assert_eq!(geometry.hosts.width, 27);
-        assert_eq!(geometry.details.width, 36);
+        assert_eq!(geometry.hosts.width, 29);
+        assert_eq!(geometry.details.width, 34);
     }
 
     #[test]
