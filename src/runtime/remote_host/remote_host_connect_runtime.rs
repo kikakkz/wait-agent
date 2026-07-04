@@ -15,7 +15,7 @@ use crate::runtime::remote_host::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use crate::runtime::remote_host::remote_install_proxy_store::{
-    proxy_env_prefix, wrap_install_command_with_proxy, RemoteInstallProxyStore,
+    proxy_candidates, wrap_install_command_with_proxy, RemoteInstallProxyStore,
 };
 use crate::runtime::remote_host::remote_port_probe::{
     RemotePortProbe, RemotePortProbePreference, SshRemotePortProbe,
@@ -129,22 +129,24 @@ where
             authority_node_id.clone(),
         );
         plan.install_reachability_preflight_command =
-            Some(install_reachability_preflight_command(None));
+            Some(install_reachability_preflight_command(&[]));
         if request.use_install_proxy {
             let proxy_config = RemoteInstallProxyStore::default()
                 .load_active_config()
                 .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
             if proxy_config.has_proxy() {
-                plan.install_reachability_preflight_command = Some(
-                    install_reachability_preflight_command(Some(&proxy_env_prefix(
-                        &proxy_config,
-                        &profile.host,
-                        &request.local_connect_endpoint,
-                    ))),
-                );
+                let proxy_env_prefixes = proxy_candidates(&proxy_config)
+                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?
+                    .iter()
+                    .map(|candidate| {
+                        candidate.env_prefix(&profile.host, &request.local_connect_endpoint)
+                    })
+                    .collect::<Vec<_>>();
+                plan.install_reachability_preflight_command =
+                    Some(install_reachability_preflight_command(&proxy_env_prefixes));
             } else {
                 plan.install_reachability_preflight_command =
-                    Some(install_reachability_preflight_command(None));
+                    Some(install_reachability_preflight_command(&[]));
             }
             plan.install_or_update_command = wrap_install_command_with_proxy(
                 &plan.install_or_update_command,

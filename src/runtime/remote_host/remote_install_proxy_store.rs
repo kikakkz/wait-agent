@@ -24,6 +24,65 @@ impl RemoteInstallProxyConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInstallProxyCandidate {
+    variable: &'static str,
+    uppercase_variable: &'static str,
+    value: String,
+}
+
+impl RemoteInstallProxyCandidate {
+    pub fn env_prefix(&self, remote_host: &str, local_connect_endpoint: &str) -> String {
+        proxy_env_prefix_for_assignments(
+            [self.assignment(), self.uppercase_assignment()],
+            remote_host,
+            local_connect_endpoint,
+        )
+    }
+
+    fn export_prefix(&self, remote_host: &str, local_connect_endpoint: &str) -> String {
+        self.env_prefix(remote_host, local_connect_endpoint)
+            .split_whitespace()
+            .map(|assignment| format!("export {assignment};"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn assignment(&self) -> String {
+        format!("{}={}", self.variable, shell_single_quote(&self.value))
+    }
+
+    fn uppercase_assignment(&self) -> String {
+        format!(
+            "{}={}",
+            self.uppercase_variable,
+            shell_single_quote(&self.value)
+        )
+    }
+}
+
+pub fn proxy_candidates(
+    config: &RemoteInstallProxyConfig,
+) -> Result<Vec<RemoteInstallProxyCandidate>, RemoteInstallProxyStoreError> {
+    config.validate()?;
+    let mut candidates = Vec::new();
+    if !config.all_proxy.trim().is_empty() {
+        candidates.push(RemoteInstallProxyCandidate {
+            variable: "all_proxy",
+            uppercase_variable: "ALL_PROXY",
+            value: config.all_proxy.trim().to_string(),
+        });
+    }
+    if !config.https_proxy.trim().is_empty() {
+        candidates.push(RemoteInstallProxyCandidate {
+            variable: "https_proxy",
+            uppercase_variable: "HTTPS_PROXY",
+            value: config.https_proxy.trim().to_string(),
+        });
+    }
+    Ok(candidates)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteInstallProxyProfile {
     pub name: String,
     pub all_proxy: String,
@@ -183,28 +242,45 @@ pub fn proxy_env_prefix(
     remote_host: &str,
     local_connect_endpoint: &str,
 ) -> String {
-    let no_proxy = no_proxy_for_install(remote_host, local_connect_endpoint);
-    let mut parts = Vec::new();
+    proxy_env_prefix_for_assignments(
+        proxy_env_assignments(config),
+        remote_host,
+        local_connect_endpoint,
+    )
+}
+
+fn proxy_env_assignments(config: &RemoteInstallProxyConfig) -> Vec<String> {
+    let mut assignments = Vec::new();
     if !config.all_proxy.trim().is_empty() {
-        parts.push(format!(
+        assignments.push(format!(
             "all_proxy={}",
             shell_single_quote(config.all_proxy.trim())
         ));
-        parts.push(format!(
+        assignments.push(format!(
             "ALL_PROXY={}",
             shell_single_quote(config.all_proxy.trim())
         ));
     }
     if !config.https_proxy.trim().is_empty() {
-        parts.push(format!(
+        assignments.push(format!(
             "https_proxy={}",
             shell_single_quote(config.https_proxy.trim())
         ));
-        parts.push(format!(
+        assignments.push(format!(
             "HTTPS_PROXY={}",
             shell_single_quote(config.https_proxy.trim())
         ));
     }
+    assignments
+}
+
+fn proxy_env_prefix_for_assignments(
+    assignments: impl IntoIterator<Item = String>,
+    remote_host: &str,
+    local_connect_endpoint: &str,
+) -> String {
+    let no_proxy = no_proxy_for_install(remote_host, local_connect_endpoint);
+    let mut parts = assignments.into_iter().collect::<Vec<_>>();
     parts.push(format!("no_proxy={}", shell_single_quote(&no_proxy)));
     parts.push(format!("NO_PROXY={}", shell_single_quote(&no_proxy)));
     parts.join(" ")
@@ -231,12 +307,18 @@ pub fn wrap_install_command_with_proxy(
     if !config.has_proxy() {
         return Ok(command.to_string());
     }
-    config.validate()?;
-    Ok(format!(
-        "{} sh -lc {}",
-        proxy_export_prefix(config, remote_host, local_connect_endpoint),
-        shell_single_quote(command)
-    ))
+    let candidates = proxy_candidates(config)?;
+    let attempts = candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{{ {} sh -lc {}; }}",
+                candidate.export_prefix(remote_host, local_connect_endpoint),
+                shell_single_quote(command)
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(attempts.join(" || "))
 }
 
 fn validate_proxy_url(field: &str, value: &str) -> Result<(), RemoteInstallProxyStoreError> {
@@ -514,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_wrapper_sets_uppercase_and_lowercase_vars() {
+    fn proxy_wrapper_tries_candidates_one_at_a_time() {
         let config = RemoteInstallProxyConfig {
             all_proxy: "socks5://127.0.0.1:7897".to_string(),
             https_proxy: "http://127.0.0.1:7897".to_string(),
@@ -529,13 +611,37 @@ mod tests {
         assert!(command.contains("export all_proxy="));
         assert!(command.contains("export HTTPS_PROXY="));
         assert!(command.contains("export no_proxy="));
-        assert!(command.contains("all_proxy="));
-        assert!(command.contains("ALL_PROXY="));
-        assert!(command.contains("https_proxy="));
-        assert!(command.contains("HTTPS_PROXY="));
-        assert!(command.contains("no_proxy="));
-        assert!(command.contains("NO_PROXY="));
-        assert!(command.contains("sh -lc"));
+        assert!(command.contains(" || "));
+        assert_eq!(command.matches("sh -lc").count(), 2);
+
+        let attempts = command.split(" || ").collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts[0].contains("all_proxy="));
+        assert!(attempts[0].contains("ALL_PROXY="));
+        assert!(!attempts[0].contains("https_proxy="));
+        assert!(!attempts[0].contains("HTTPS_PROXY="));
+        assert!(attempts[1].contains("https_proxy="));
+        assert!(attempts[1].contains("HTTPS_PROXY="));
+        assert!(!attempts[1].contains("all_proxy="));
+        assert!(!attempts[1].contains("ALL_PROXY="));
+    }
+
+    #[test]
+    fn proxy_candidates_prefer_all_proxy_before_https_proxy() {
+        let config = RemoteInstallProxyConfig {
+            all_proxy: "socks5://127.0.0.1:7897".to_string(),
+            https_proxy: "http://127.0.0.1:7897".to_string(),
+        };
+
+        let candidates = proxy_candidates(&config).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0]
+            .env_prefix("10.0.0.2", "192.168.1.5:7474")
+            .contains("all_proxy="));
+        assert!(candidates[1]
+            .env_prefix("10.0.0.2", "192.168.1.5:7474")
+            .contains("https_proxy="));
     }
 
     #[test]

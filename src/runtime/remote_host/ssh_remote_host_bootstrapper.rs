@@ -388,14 +388,23 @@ fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
     )
 }
 
-pub fn install_reachability_preflight_command(env_prefix: Option<&str>) -> String {
-    let prefix = env_prefix
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("{value} "))
-        .unwrap_or_default();
+pub fn install_reachability_preflight_command(env_prefixes: &[String]) -> String {
+    let command = install_reachability_preflight_curl_command();
+    let attempts = env_prefixes
+        .iter()
+        .map(|prefix| prefix.trim())
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| format!("{{ {prefix} {command}; }}"))
+        .collect::<Vec<_>>();
+    if !attempts.is_empty() {
+        return attempts.join(" || ");
+    }
+    command
+}
+
+fn install_reachability_preflight_curl_command() -> String {
     format!(
-        "{prefix}curl -fsSL --connect-timeout {} --max-time {} -o /dev/null {}",
+        "curl -fsSL --connect-timeout {} --max-time {} -o /dev/null {}",
         REMOTE_ENDPOINT_PREFLIGHT_TIMEOUT_SECS,
         REMOTE_INSTALL_PREFLIGHT_TIMEOUT_SECS,
         shell_single_quote(WAITAGENT_INSTALL_SCRIPT_URL)
@@ -740,9 +749,12 @@ mod tests {
             "10.1.26.84:7474",
             "10.1.29.130#7476",
         );
-        plan.install_reachability_preflight_command = Some(install_reachability_preflight_command(
-            Some("https_proxy='http://127.0.0.1:7897'"),
-        ));
+        let env_prefixes = vec![
+            "all_proxy='socks5://127.0.0.1:7897'".to_string(),
+            "https_proxy='http://127.0.0.1:7897'".to_string(),
+        ];
+        plan.install_reachability_preflight_command =
+            Some(install_reachability_preflight_command(&env_prefixes));
         let calls = Rc::new(RefCell::new(Vec::new()));
         let bootstrapper = SshRemoteHostBootstrapper::with_executor(
             store,
@@ -758,7 +770,9 @@ mod tests {
         assert_eq!(calls.len(), 6);
         assert!(calls[0].1.contains("nc -z -w"));
         assert!(calls[1].1.contains("waitagent --version"));
+        assert!(calls[2].1.contains("all_proxy="));
         assert!(calls[2].1.contains("https_proxy="));
+        assert!(calls[2].1.contains(" || "));
         assert!(calls[2].1.contains(WAITAGENT_INSTALL_SCRIPT_URL));
         assert!(calls[3].1.starts_with("sudo -S -p '' sh -lc "));
         assert!(calls[4].1.contains("ps -eo args="));
