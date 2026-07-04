@@ -1677,35 +1677,61 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
     format!("{}@{}", profile.ssh_user, profile.host)
 }
 
-const HOST_MENU_CHILD_INDENT: &str = "  ";
+const HOST_MENU_BRANCH_PREFIX: &str = " ├─ ";
+const HOST_MENU_LAST_PREFIX: &str = " └─ ";
 
-fn saved_host_menu_label(profile: &RemoteHostProfile) -> String {
-    format!("{HOST_MENU_CHILD_INDENT}{}", saved_host_label(profile))
+fn child_menu_prefix(is_last: bool) -> &'static str {
+    if is_last {
+        HOST_MENU_LAST_PREFIX
+    } else {
+        HOST_MENU_BRANCH_PREFIX
+    }
+}
+
+fn saved_host_menu_label(profile: &RemoteHostProfile, is_last: bool) -> String {
+    format!(
+        "{}{}",
+        child_menu_prefix(is_last),
+        saved_host_label(profile)
+    )
 }
 
 fn host_list_labels(state: &ConnectRemoteHostState) -> Vec<String> {
     let mut labels = vec!["Saved Hosts".to_string()];
-    labels.extend(state.profiles.iter().map(saved_host_menu_label));
+    let last_saved_host = state.profiles.len().saturating_sub(1);
+    labels.extend(
+        state
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| saved_host_menu_label(profile, index == last_saved_host)),
+    );
     labels.push("New Host".to_string());
     labels.push("Proxy Configuration".to_string());
+    let last_proxy_profile = state.proxy_settings.profiles.len().saturating_sub(1);
     labels.extend(
         state
             .proxy_settings
             .profiles
             .iter()
-            .map(|profile| proxy_menu_label(state, profile)),
+            .enumerate()
+            .map(|(index, profile)| proxy_menu_label(state, profile, index == last_proxy_profile)),
     );
-    labels.push(format!("{HOST_MENU_CHILD_INDENT}New Proxy"));
+    labels.push("New Proxy".to_string());
     labels
 }
 
-fn proxy_menu_label(state: &ConnectRemoteHostState, profile: &RemoteInstallProxyProfile) -> String {
+fn proxy_menu_label(
+    state: &ConnectRemoteHostState,
+    profile: &RemoteInstallProxyProfile,
+    is_last: bool,
+) -> String {
     let active = if state.proxy_settings.active.as_deref() == Some(profile.name.as_str()) {
-        "* "
+        " *"
     } else {
-        "  "
+        ""
     };
-    format!("{HOST_MENU_CHILD_INDENT}{active}{}", profile.name)
+    format!("{}{}{active}", child_menu_prefix(is_last), profile.name)
 }
 
 fn selection_from_display_row(state: &ConnectRemoteHostState, row: usize) -> Option<usize> {
@@ -3015,6 +3041,7 @@ mod tests {
         [
             "Saved Hosts",
             "New Host",
+            "New Proxy",
             "Proxy Configuration",
             "k@127.0.0.1",
         ]
@@ -3707,18 +3734,18 @@ mod tests {
                 .map(String::as_str),
             Some("Proxy Configuration")
         );
-        assert_eq!(labels.last().map(String::as_str), Some("  New Proxy"));
+        assert_eq!(labels.last().map(String::as_str), Some("New Proxy"));
         assert_eq!(
             labels.get(state.profiles.len() + 1).map(String::as_str),
             Some("New Host")
         );
         assert_eq!(menu_text_column(labels.first().unwrap()), Some(0));
-        assert_eq!(menu_text_column(labels.get(1).unwrap()), Some(2));
+        assert_eq!(menu_text_column(labels.get(1).unwrap()), Some(4));
         assert_eq!(
             menu_text_column(labels.get(state.profiles.len() + 1).unwrap()),
             Some(0)
         );
-        assert!(labels.last().unwrap().starts_with(HOST_MENU_CHILD_INDENT));
+        assert_eq!(menu_text_column(labels.last().unwrap()), Some(0));
         assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
 
         state.selected = state.proxy_selection_index();
@@ -3756,7 +3783,7 @@ mod tests {
                     state.proxy_profile_selection_start()
                 ))
                 .map(String::as_str),
-            Some("    Home")
+            Some(" ├─ Home")
         );
         assert_eq!(
             labels
@@ -3765,7 +3792,7 @@ mod tests {
                     state.proxy_profile_selection_start() + 1
                 ))
                 .map(String::as_str),
-            Some("  * Office")
+            Some(" └─ Office *")
         );
         assert_eq!(
             labels
@@ -3774,7 +3801,7 @@ mod tests {
                     state.new_proxy_selection_index()
                 ))
                 .map(String::as_str),
-            Some("  New Proxy")
+            Some("New Proxy")
         );
     }
 
