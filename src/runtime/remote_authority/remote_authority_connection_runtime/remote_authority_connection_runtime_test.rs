@@ -21,6 +21,33 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    fn assert_connected(event: AuthorityTransportEvent, expected_authority: &str) -> u64 {
+        match event {
+            AuthorityTransportEvent::Connected {
+                authority_id,
+                generation,
+            } => {
+                assert_eq!(authority_id, expected_authority);
+                generation
+            }
+            other => panic!("unexpected authority event: {other:?}"),
+        }
+    }
+
+    fn assert_failed(event: AuthorityTransportEvent, expected_authority: &str, expected: &str) {
+        match event {
+            AuthorityTransportEvent::Failed {
+                authority_id,
+                message,
+                ..
+            } => {
+                assert_eq!(authority_id, expected_authority);
+                assert_eq!(message, expected);
+            }
+            other => panic!("unexpected authority event: {other:?}"),
+        }
+    }
+
     #[test]
     fn register_authority_stream_tracks_connection_and_forwards_inbound_envelopes() {
         let registry = RemoteConnectionRegistry::new();
@@ -32,15 +59,19 @@ mod tests {
             .expect("authority stream should register");
 
         assert!(registry.has_connection("peer-a"));
-        assert_eq!(
+        assert_connected(
             rx.recv().expect("transport event should be emitted"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
 
         write_control_plane_envelope(&mut client, &authority_target_output_envelope(1))
             .expect("target output should encode");
         match rx.recv().expect("authority envelope should arrive") {
-            AuthorityTransportEvent::Envelope(envelope) => {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => {
                 assert_eq!(envelope.sender_id, "peer-a");
                 match envelope.payload {
                     ControlPlanePayload::TargetOutput(payload) => {
@@ -64,9 +95,9 @@ mod tests {
         register_authority_stream(server, registry.clone(), "peer-a".to_string(), tx)
             .expect("authority stream should register");
 
-        assert_eq!(
+        assert_connected(
             rx.recv().expect("transport event should be emitted"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
 
         write_authority_transport_frame(
@@ -85,6 +116,7 @@ mod tests {
                 .expect("raw output event should arrive"),
             AuthorityTransportEvent::RawPtyOutput {
                 authority_id: "peer-a".to_string(),
+                generation: 1,
                 payload: RawPtyOutputPayload {
                     session_id: "shell-1".to_string(),
                     target_id: "remote-peer:peer-a:shell-1".to_string(),
@@ -112,10 +144,10 @@ mod tests {
         )
         .expect("authority stream should register");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         let frame = read_authority_transport_frame(&mut client)
             .expect("idle reader should send keepalive ping");
@@ -131,7 +163,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("authority envelope should arrive after keepalive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 21);
                     assert_eq!(payload.output_bytes, b"a".to_vec());
@@ -151,10 +187,10 @@ mod tests {
         write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
         register_authority_stream(server, registry, "peer-a".to_string(), tx)
             .expect("authority stream should register");
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
 
         write_authority_transport_frame(
@@ -202,10 +238,10 @@ mod tests {
         write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
         register_authority_stream(server, registry.clone(), "peer-a".to_string(), tx)
             .expect("authority stream should register");
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
 
         drop(client);
@@ -271,12 +307,11 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).expect("listener should accept");
         write_registration_frame(&mut stream, "peer-b").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_failed(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("failure event should arrive"),
-            AuthorityTransportEvent::Failed(
-                "unexpected authority node `peer-b`; expected `peer-a`".to_string()
-            )
+            "peer-a",
+            "unexpected authority node `peer-b`; expected `peer-a`",
         );
         assert!(!registry.has_connection("peer-a"));
         assert!(!registry.has_connection("peer-b"));
@@ -301,10 +336,10 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).expect("listener should accept");
         write_registration_frame(&mut stream, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
         let _ = fs::remove_file(&socket_path);
@@ -330,10 +365,10 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).expect("listener should accept");
         write_registration_frame(&mut stream, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
         let _ = fs::remove_file(&socket_path);
@@ -361,10 +396,10 @@ mod tests {
             .expect("queued source should accept injected stream");
         write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
 
@@ -374,7 +409,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("authority envelope should arrive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 7);
                     assert_eq!(payload.output_bytes, b"a".to_vec());
@@ -407,12 +446,11 @@ mod tests {
             .expect("queued source should accept injected stream");
         write_registration_frame(&mut client, "peer-b").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_failed(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("failed event should arrive"),
-            AuthorityTransportEvent::Failed(
-                "unexpected authority node `peer-b`; expected `peer-a`".to_string()
-            )
+            "peer-a",
+            "unexpected authority node `peer-b`; expected `peer-a`",
         );
         assert!(!registry.has_connection("peer-a"));
         assert!(!registry.has_connection("peer-b"));
@@ -438,10 +476,10 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).expect("bridge listener should accept");
         write_registration_frame(&mut stream, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
 
@@ -451,7 +489,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("authority envelope should arrive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 9);
                     assert_eq!(payload.output_bytes, b"a".to_vec());
@@ -484,10 +526,10 @@ mod tests {
             .expect("queued stream starter should accept injected stream");
         write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
 
@@ -497,7 +539,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("authority envelope should arrive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 13);
                     assert_eq!(payload.output_bytes, b"a".to_vec());
@@ -595,7 +641,11 @@ mod tests {
             let env = authority_target_output_envelope(i as u64);
             write_control_plane_envelope(&mut client, &env).expect("encode");
             match event_rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(AuthorityTransportEvent::Envelope(_)) => {}
+                Ok(AuthorityTransportEvent::Envelope {
+                    authority_id: _,
+                    generation: _,
+                    envelope: _,
+                }) => {}
                 other => panic!("{other:?}"),
             }
         }
@@ -616,7 +666,11 @@ mod tests {
         let recv_start = std::time::Instant::now();
         for _ in 0..ITERATIONS {
             match event_rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(AuthorityTransportEvent::Envelope(_)) => {}
+                Ok(AuthorityTransportEvent::Envelope {
+                    authority_id: _,
+                    generation: _,
+                    envelope: _,
+                }) => {}
                 other => panic!("{other:?}"),
             }
         }

@@ -5,6 +5,7 @@ use crate::runtime::remote_main_slot_runtime::{
     RemoteControlPlaneSink, RemoteControlPlaneTransportError,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 pub trait RemoteControlPlaneConnection: Send + Sync {
@@ -25,7 +26,14 @@ pub trait RemoteControlPlaneConnection: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct RemoteConnectionRegistry {
-    connections: Arc<Mutex<HashMap<String, Arc<dyn RemoteControlPlaneConnection>>>>,
+    connections: Arc<Mutex<HashMap<String, RegisteredRemoteConnection>>>,
+    next_generation: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+struct RegisteredRemoteConnection {
+    generation: u64,
+    connection: Arc<dyn RemoteControlPlaneConnection>,
 }
 
 impl RemoteConnectionRegistry {
@@ -38,10 +46,26 @@ impl RemoteConnectionRegistry {
         node_id: impl Into<String>,
         connection: Arc<dyn RemoteControlPlaneConnection>,
     ) {
+        let _ = self.register_connection_with_generation(node_id, connection);
+    }
+
+    pub fn register_connection_with_generation(
+        &self,
+        node_id: impl Into<String>,
+        connection: Arc<dyn RemoteControlPlaneConnection>,
+    ) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.connections
             .lock()
             .expect("remote connection registry mutex should not be poisoned")
-            .insert(node_id.into(), connection);
+            .insert(
+                node_id.into(),
+                RegisteredRemoteConnection {
+                    generation,
+                    connection,
+                },
+            );
+        generation
     }
 
     pub fn unregister_connection(&self, node_id: &str) -> bool {
@@ -50,6 +74,20 @@ impl RemoteConnectionRegistry {
             .expect("remote connection registry mutex should not be poisoned")
             .remove(node_id)
             .is_some()
+    }
+
+    pub fn unregister_connection_generation(&self, node_id: &str, generation: u64) -> bool {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("remote connection registry mutex should not be poisoned");
+        let Some(connection) = connections.get(node_id) else {
+            return false;
+        };
+        if connection.generation != generation {
+            return false;
+        }
+        connections.remove(node_id).is_some()
     }
 
     pub fn has_connection(&self, node_id: &str) -> bool {
@@ -78,7 +116,7 @@ impl RemoteConnectionRegistry {
             .lock()
             .expect("remote connection registry mutex should not be poisoned")
             .get(node_id)
-            .cloned()
+            .map(|registered| registered.connection.clone())
     }
 }
 
@@ -239,6 +277,24 @@ mod tests {
         registry.register_connection("observer-a", Arc::new(CapturingConnection::default()));
         assert!(registry.has_connection("observer-a"));
         assert!(registry.unregister_connection("observer-a"));
+        assert!(!registry.has_connection("observer-a"));
+    }
+
+    #[test]
+    fn registry_ignores_stale_generation_unregisters() {
+        let registry = RemoteConnectionRegistry::new();
+        let first = registry.register_connection_with_generation(
+            "observer-a",
+            Arc::new(CapturingConnection::default()),
+        );
+        let second = registry.register_connection_with_generation(
+            "observer-a",
+            Arc::new(CapturingConnection::default()),
+        );
+
+        assert!(!registry.unregister_connection_generation("observer-a", first));
+        assert!(registry.has_connection("observer-a"));
+        assert!(registry.unregister_connection_generation("observer-a", second));
         assert!(!registry.has_connection("observer-a"));
     }
 

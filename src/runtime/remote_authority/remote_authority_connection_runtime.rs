@@ -30,12 +30,27 @@ const AUTHORITY_TRANSPORT_WRITE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityTransportEvent {
-    Connected,
-    Disconnected,
-    Failed(String),
-    Envelope(ProtocolEnvelope<ControlPlanePayload>),
+    Connected {
+        authority_id: String,
+        generation: u64,
+    },
+    Disconnected {
+        authority_id: String,
+        generation: u64,
+    },
+    Failed {
+        authority_id: String,
+        generation: Option<u64>,
+        message: String,
+    },
+    Envelope {
+        authority_id: String,
+        generation: u64,
+        envelope: ProtocolEnvelope<ControlPlanePayload>,
+    },
     RawPtyOutput {
         authority_id: String,
+        generation: u64,
         payload: RawPtyOutputPayload,
     },
 }
@@ -193,7 +208,11 @@ pub fn spawn_authority_listener(
                 authority_id.clone(),
                 tx.clone(),
             ) {
-                let _ = tx.send(AuthorityTransportEvent::Failed(error.to_string()));
+                let _ = tx.send(AuthorityTransportEvent::Failed {
+                    authority_id: authority_id.clone(),
+                    generation: None,
+                    message: error.to_string(),
+                });
             }
         }
     });
@@ -244,7 +263,7 @@ pub(super) fn register_authority_stream_with_timeouts(
     writer.set_write_timeout(Some(AUTHORITY_TRANSPORT_WRITE_TIMEOUT))?;
     let connected = Arc::new(AtomicBool::new(true));
     let reader_tx = tx.clone();
-    registry.register_connection(
+    let generation = registry.register_connection_with_generation(
         node_id.clone(),
         Arc::new(SocketRemoteControlPlaneConnection {
             writer: Arc::new(Mutex::new(writer)),
@@ -256,6 +275,10 @@ pub(super) fn register_authority_stream_with_timeouts(
         node_id,
         t_register.elapsed()
     ));
+    let _ = tx.send(AuthorityTransportEvent::Connected {
+        authority_id: authority_id.clone(),
+        generation,
+    });
 
     // Clone a stream handle for sending Ping/Pong frames from the reader loop.
     // The reader loop needs its own write handle because `stream` is borrowed
@@ -288,7 +311,11 @@ pub(super) fn register_authority_stream_with_timeouts(
                     last_received = Instant::now();
                     keepalive_sent_at = None;
                     if reader_tx
-                        .send(AuthorityTransportEvent::Envelope(envelope))
+                        .send(AuthorityTransportEvent::Envelope {
+                            authority_id: node_id.clone(),
+                            generation,
+                            envelope,
+                        })
                         .is_err()
                     {
                         break;
@@ -313,15 +340,20 @@ pub(super) fn register_authority_stream_with_timeouts(
                         {
                             let _ = pong_writer.write_all(&buf);
                         }
-                        let _ = reader_tx.send(AuthorityTransportEvent::Failed(format!(
-                            "output seq gap: expected {}, got {}",
-                            next_expected_output_seq, payload.output_seq
-                        )));
+                        let _ = reader_tx.send(AuthorityTransportEvent::Failed {
+                            authority_id: node_id.clone(),
+                            generation: Some(generation),
+                            message: format!(
+                                "output seq gap: expected {}, got {}",
+                                next_expected_output_seq, payload.output_seq
+                            ),
+                        });
                     }
                     next_expected_output_seq = payload.output_seq.saturating_add(1);
                     if reader_tx
                         .send(AuthorityTransportEvent::RawPtyOutput {
                             authority_id: node_id.clone(),
+                            generation,
                             payload,
                         })
                         .is_err()
@@ -357,6 +389,7 @@ pub(super) fn register_authority_stream_with_timeouts(
                     if reader_tx
                         .send(AuthorityTransportEvent::RawPtyOutput {
                             authority_id: node_id.clone(),
+                            generation,
                             payload: RawPtyOutputPayload {
                                 session_id,
                                 target_id,
@@ -409,14 +442,16 @@ pub(super) fn register_authority_stream_with_timeouts(
             }
         }
         connected.store(false, Ordering::Relaxed);
-        registry.unregister_connection(&node_id);
+        registry.unregister_connection_generation(&node_id, generation);
         ERROR_LOG.log(format!(
             "[diag-timing] reader thread: loop exited, sending Disconnected for node={node_id}"
         ));
-        let _ = reader_tx.send(AuthorityTransportEvent::Disconnected);
+        let _ = reader_tx.send(AuthorityTransportEvent::Disconnected {
+            authority_id: node_id,
+            generation,
+        });
     });
 
-    let _ = tx.send(AuthorityTransportEvent::Connected);
     Ok(())
 }
 
@@ -476,7 +511,11 @@ impl AuthorityConnectionSource for QueuedAuthorityStreamSource {
                             authority_id.clone(),
                             tx.clone(),
                         ) {
-                            let _ = tx.send(AuthorityTransportEvent::Failed(error.to_string()));
+                            let _ = tx.send(AuthorityTransportEvent::Failed {
+                                authority_id: authority_id.clone(),
+                                generation: None,
+                                message: error.to_string(),
+                            });
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,

@@ -34,6 +34,19 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::Request;
 
+    fn assert_connected(event: AuthorityTransportEvent, expected_authority: &str) -> u64 {
+        match event {
+            AuthorityTransportEvent::Connected {
+                authority_id,
+                generation,
+            } => {
+                assert_eq!(authority_id, expected_authority);
+                generation
+            }
+            other => panic!("unexpected authority event: {other:?}"),
+        }
+    }
+
     #[test]
     fn grpc_source_handles_host_port_authority_in_target_ids() {
         let event = super::super::map_target_exited_envelope(
@@ -125,10 +138,10 @@ mod tests {
                 .expect("server hello should decode")
                 .expect("server hello should exist");
 
-            assert_eq!(
+            assert_connected(
                 rx.recv_timeout(Duration::from_secs(1))
                     .expect("connected event should arrive"),
-                AuthorityTransportEvent::Connected
+                "peer-a",
             );
             assert!(registry.has_connection("peer-a"));
 
@@ -139,7 +152,11 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("authority envelope event should arrive");
             match inbound_event {
-                AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                AuthorityTransportEvent::Envelope {
+                    authority_id: _,
+                    generation: _,
+                    envelope,
+                } => match envelope.payload {
                     ControlPlanePayload::TargetOutput(payload) => {
                         assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                         assert_eq!(payload.output_seq, 7);
@@ -157,7 +174,11 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("mirror bootstrap chunk should arrive");
             match inbound_event {
-                AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                AuthorityTransportEvent::Envelope {
+                    authority_id: _,
+                    generation: _,
+                    envelope,
+                } => match envelope.payload {
                     ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
                         target_id,
                         chunk_seq,
@@ -180,7 +201,11 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("mirror bootstrap complete should arrive");
             match inbound_event {
-                AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+                AuthorityTransportEvent::Envelope {
+                    authority_id: _,
+                    generation: _,
+                    envelope,
+                } => match envelope.payload {
                     ControlPlanePayload::MirrorBootstrapComplete(
                         MirrorBootstrapCompletePayload {
                             target_id,
@@ -271,10 +296,10 @@ mod tests {
 
         let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
             .expect("authority transport should connect");
-        assert_eq!(
+        assert_connected(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            "peer-a",
         );
         assert!(registry.has_connection("peer-a"));
 

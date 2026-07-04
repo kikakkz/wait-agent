@@ -206,9 +206,7 @@ impl RemoteControlPlaneService {
         if self
             .session_states
             .get(&session_id)
-            .map(|state| {
-                state.mirror_route.should_send_mirror_request() && state.attachments.len() == 1
-            })
+            .map(|state| state.mirror_route.should_send_mirror_request())
             .unwrap_or(false)
         {
             let has_log = self

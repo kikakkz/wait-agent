@@ -316,11 +316,15 @@ mod tests {
             .expect("runtime should accept external authority stream");
         write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
 
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1))
-                .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
-        );
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("connected event should arrive")
+        {
+            AuthorityTransportEvent::Connected { authority_id, .. } => {
+                assert_eq!(authority_id, "peer-a");
+            }
+            other => panic!("unexpected authority event: {other:?}"),
+        }
         assert!(registry.has_connection("peer-a"));
     }
 
@@ -1130,12 +1134,18 @@ mod tests {
             UnixStream::connect(&socket_path).expect("authority transport should connect");
         write_registration_frame(&mut authority, "peer-a")
             .expect("registration frame should encode");
-        assert_eq!(
-            pane_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("transport event should arrive"),
-            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::Connected)
-        );
+        match pane_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("transport event should arrive")
+        {
+            RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::Connected {
+                authority_id,
+                ..
+            }) => {
+                assert_eq!(authority_id, "peer-a");
+            }
+            other => panic!("unexpected pane event: {other:?}"),
+        }
 
         runtime
             .send_pty_resize(&target, &binding, 160, 50)
@@ -1207,6 +1217,7 @@ mod tests {
             RemotePaneEvent::AuthorityTransport(AuthorityTransportEvent::RawPtyOutput {
                 authority_id,
                 payload,
+                ..
             }) => {
                 assert_eq!(authority_id, "peer-a");
                 runtime

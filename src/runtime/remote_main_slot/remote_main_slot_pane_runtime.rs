@@ -277,6 +277,7 @@ impl RemoteMainSlotPaneRuntime {
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
         let mut authority_status = waiting_authority_status.clone();
+        let mut authority_generation: Option<u64> = None;
         // Always attempt activation — output_log replay comes from the
         // local mailbox; no need to wait for authority transport.
         match activate_remote_surface_binding(
@@ -482,7 +483,14 @@ impl RemoteMainSlotPaneRuntime {
                         }
                     }
                     RemotePaneEvent::AuthorityTransport(event) => match event {
-                        AuthorityTransportEvent::Connected => {
+                        AuthorityTransportEvent::Connected {
+                            authority_id,
+                            generation,
+                        } => {
+                            if authority_id != target.address.authority_id() {
+                                continue;
+                            }
+                            authority_generation = Some(generation);
                             let is_present = target_is_present(&target_presence);
                             // Only clear reconnect when target is also present.
                             // Otherwise, keep reconnecting_since to prevent an
@@ -512,7 +520,8 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut console_seq,
                                 )?;
                             }
-                            let needs_activation = binding.is_none()
+                            let needs_activation = reconnecting_since.is_some()
+                                || binding.is_none()
                                 || remote_runtime.is_mirror_pending(&target)
                                 || remote_runtime.is_mirror_needed(&target);
                             let mut activated = false;
@@ -563,13 +572,25 @@ impl RemoteMainSlotPaneRuntime {
                                 )?;
                             }
                         }
-                        AuthorityTransportEvent::Disconnected => {
-                            remote_runtime
-                                .handle_authority_disconnect(target.address.authority_id());
-                            authority_status = AuthorityTransportStatus::Disconnected;
-                            raw_screen_initialized = false;
-                            reconnecting_since = Some(Instant::now());
-                            reconnect_animation_frame = 0;
+                        AuthorityTransportEvent::Disconnected {
+                            authority_id,
+                            generation,
+                        } => {
+                            if authority_id != target.address.authority_id()
+                                || authority_generation != Some(generation)
+                            {
+                                continue;
+                            }
+                            begin_authority_reconnect(
+                                &remote_runtime,
+                                &target,
+                                &mut binding,
+                                &raw_input_route,
+                                &mut raw_screen_initialized,
+                                &mut authority_status,
+                                &mut reconnecting_since,
+                                &mut reconnect_animation_frame,
+                            );
                             // Fall through to the reconnecting branch below.
                             // The first ~500 ms are a "verifying exit" phase
                             // that polls the catalog every 10 ms without
@@ -577,7 +598,28 @@ impl RemoteMainSlotPaneRuntime {
                             // full reconnecting indicator.
                             continue;
                         }
-                        AuthorityTransportEvent::Failed(message) => {
+                        AuthorityTransportEvent::Failed {
+                            authority_id,
+                            generation,
+                            message,
+                        } => {
+                            if authority_id != target.address.authority_id()
+                                || (generation.is_some() && authority_generation != generation)
+                            {
+                                continue;
+                            }
+                            if generation.is_some() {
+                                begin_authority_reconnect(
+                                    &remote_runtime,
+                                    &target,
+                                    &mut binding,
+                                    &raw_input_route,
+                                    &mut raw_screen_initialized,
+                                    &mut authority_status,
+                                    &mut reconnecting_since,
+                                    &mut reconnect_animation_frame,
+                                );
+                            }
                             authority_status = AuthorityTransportStatus::Failed(message);
                             draw_remote_snapshot(
                                 &terminal,
@@ -592,8 +634,14 @@ impl RemoteMainSlotPaneRuntime {
                         }
                         AuthorityTransportEvent::RawPtyOutput {
                             authority_id,
+                            generation,
                             payload,
                         } => {
+                            if authority_id != target.address.authority_id()
+                                || authority_generation != Some(generation)
+                            {
+                                continue;
+                            }
                             let raw = collect_direct_raw_pty_output_payload(
                                 &target,
                                 &authority_id,
@@ -606,7 +654,16 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut raw_screen_initialized,
                             )?;
                         }
-                        AuthorityTransportEvent::Envelope(envelope) => {
+                        AuthorityTransportEvent::Envelope {
+                            authority_id,
+                            generation,
+                            envelope,
+                        } => {
+                            if authority_id != target.address.authority_id()
+                                || authority_generation != Some(generation)
+                            {
+                                continue;
+                            }
                             if let Some(raw) = collect_direct_raw_pty_output_envelope(
                                 &target,
                                 &envelope,
@@ -687,8 +744,16 @@ impl RemoteMainSlotPaneRuntime {
                             // During reconnect: target disappearance is a
                             // catalog side-effect of network jitter. Clear
                             // local state but keep reconnecting.
-                            binding = None;
-                            raw_input_route.clear();
+                            begin_authority_reconnect(
+                                &remote_runtime,
+                                &target,
+                                &mut binding,
+                                &raw_input_route,
+                                &mut raw_screen_initialized,
+                                &mut authority_status,
+                                &mut reconnecting_since,
+                                &mut reconnect_animation_frame,
+                            );
                         }
                         // During reconnect, keep status as Disconnected so the
                         // last known content stays visible with reconnecting bar
@@ -983,6 +1048,25 @@ fn activate_remote_surface_binding(
         console_seq,
     )?;
     Ok(activated_binding)
+}
+
+fn begin_authority_reconnect(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: &mut Option<RemoteAttachmentBinding>,
+    raw_input_route: &RawPtyInputRoute,
+    raw_screen_initialized: &mut bool,
+    authority_status: &mut AuthorityTransportStatus,
+    reconnecting_since: &mut Option<Instant>,
+    reconnect_animation_frame: &mut u8,
+) {
+    remote_runtime.handle_authority_disconnect(target.address.authority_id());
+    *binding = None;
+    raw_input_route.clear();
+    *raw_screen_initialized = false;
+    *authority_status = AuthorityTransportStatus::Disconnected;
+    *reconnecting_since = Some(Instant::now());
+    *reconnect_animation_frame = 0;
 }
 
 fn sync_remote_pty_size(

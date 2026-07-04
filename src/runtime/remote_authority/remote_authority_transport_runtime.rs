@@ -853,9 +853,14 @@ mod tests {
         let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
             .expect("authority runtime should connect");
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1))
-                .expect("connected event should arrive"),
-            AuthorityTransportEvent::Connected
+            match rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("connected event should arrive")
+            {
+                AuthorityTransportEvent::Connected { authority_id, .. } => authority_id,
+                other => panic!("unexpected authority event: {other:?}"),
+            },
+            "peer-a"
         );
         assert!(registry.has_connection("peer-a"));
 
@@ -922,7 +927,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("output envelope should arrive")
         {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope { envelope, .. } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.output_seq, 11);
                     assert_eq!(payload.output_bytes, b"b");
@@ -940,6 +945,7 @@ mod tests {
         {
             AuthorityTransportEvent::RawPtyOutput {
                 authority_id,
+                generation: _,
                 payload,
             } => {
                 assert_eq!(authority_id, "peer-a");

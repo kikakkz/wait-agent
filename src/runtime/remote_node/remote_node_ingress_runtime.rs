@@ -35,10 +35,13 @@ use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const AUTHORITY_FORWARDER_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub trait RemoteNodeIngressGuard: Send {}
 
@@ -261,6 +264,7 @@ pub(crate) fn run_grpc_node_ingress_worker(
 pub(crate) struct ActiveGrpcNodeSession {
     inbound_writer: UnixStream,
     outbound_shutdown: UnixStream,
+    outbound_stop: Arc<AtomicBool>,
     outbound_forwarder: Option<thread::JoinHandle<()>>,
 }
 
@@ -280,12 +284,15 @@ impl ActiveGrpcNodeSession {
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
         let inbound_writer = local_stream.try_clone()?;
         let outbound_shutdown = local_stream.try_clone()?;
+        let outbound_stop = Arc::new(AtomicBool::new(false));
+        let forwarder_stop = outbound_stop.clone();
         let outbound_forwarder = thread::spawn(move || {
-            let _ = forward_local_authority_outbound(local_stream, session);
+            let _ = forward_local_authority_outbound(local_stream, session, forwarder_stop);
         });
         Ok(Self {
             inbound_writer,
             outbound_shutdown,
+            outbound_stop,
             outbound_forwarder: Some(outbound_forwarder),
         })
     }
@@ -299,6 +306,7 @@ impl ActiveGrpcNodeSession {
     }
 
     fn shutdown(mut self) {
+        self.outbound_stop.store(true, Ordering::Relaxed);
         let _ = self.inbound_writer.shutdown(Shutdown::Both);
         let _ = self.outbound_shutdown.shutdown(Shutdown::Both);
         if let Some(forwarder) = self.outbound_forwarder.take() {
@@ -841,11 +849,16 @@ fn map_mirror_bootstrap_complete_envelope(
 fn forward_local_authority_outbound(
     mut local_stream: UnixStream,
     session: RemoteNodeSessionHandle,
+    stop: Arc<AtomicBool>,
 ) -> Result<(), io::Error> {
-    loop {
-        match read_authority_transport_frame(&mut local_stream)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
-        {
+    local_stream.set_read_timeout(Some(AUTHORITY_FORWARDER_READ_TIMEOUT))?;
+    while !stop.load(Ordering::Relaxed) {
+        let frame = match read_authority_transport_frame(&mut local_stream) {
+            Ok(frame) => frame,
+            Err(error) if error.is_read_timeout() => continue,
+            Err(error) => return Err(io::Error::new(io::ErrorKind::Other, error.to_string())),
+        };
+        match frame {
             AuthorityTransportFrame::Ping => {
                 let mut buf = Vec::new();
                 let _ = write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong);
@@ -901,6 +914,7 @@ fn forward_local_authority_outbound(
             }
         }
     }
+    Ok(())
 }
 
 fn map_outbound_control_plane_envelope(

@@ -84,7 +84,11 @@ mod tests {
         let session_writer = session.clone();
         let authority_thread = thread::spawn(move || {
             while let Ok(event) = event_rx.recv_timeout(TEST_TIMEOUT) {
-                if let AuthorityTransportEvent::Connected = event {
+                if let AuthorityTransportEvent::Connected {
+                    authority_id: _,
+                    generation: _,
+                } = event
+                {
                     break;
                 }
             }
@@ -197,7 +201,11 @@ mod tests {
         );
 
         while let Ok(event) = event_rx.recv_timeout(TEST_TIMEOUT) {
-            if let AuthorityTransportEvent::Connected = event {
+            if let AuthorityTransportEvent::Connected {
+                authority_id: _,
+                generation: _,
+            } = event
+            {
                 break;
             }
         }
@@ -215,7 +223,11 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("authority output should arrive");
         match authority_event {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::TargetOutput(payload) => {
                     assert_eq!(payload.target_id, "remote-peer:peer-a:shell-1");
                     assert_eq!(payload.output_seq, 7);
@@ -239,7 +251,11 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("open mirror request should arrive");
         match authority_event {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
                     session_id,
                     target_id,
@@ -279,7 +295,11 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("mirror bootstrap chunk should arrive");
         match authority_event {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::MirrorBootstrapChunk(MirrorBootstrapChunkPayload {
                     session_id,
                     target_id,
@@ -318,7 +338,11 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("mirror bootstrap complete should arrive");
         match authority_event {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::MirrorBootstrapComplete(MirrorBootstrapCompletePayload {
                     session_id,
                     target_id,
@@ -346,7 +370,11 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("close mirror request should arrive");
         match authority_event {
-            AuthorityTransportEvent::Envelope(envelope) => match envelope.payload {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
                 ControlPlanePayload::CloseMirrorRequest(CloseMirrorRequestPayload {
                     session_id,
                     target_id,

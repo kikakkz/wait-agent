@@ -385,6 +385,48 @@ mod tests {
     }
 
     #[test]
+    fn authority_disconnect_reopens_mirror_even_when_attachments_remain() {
+        let mut service = RemoteControlPlaneService::new();
+        let target = remote_target("peer-a", "shell-1");
+
+        service
+            .open_target(
+                &target,
+                console("console-a", "observer-a", ConsoleLocation::LocalWorkspace),
+                100,
+                30,
+            )
+            .expect("first open should succeed");
+        service.record_mirror_accepted("shell-1");
+        service
+            .open_target(
+                &target,
+                console("console-b", "observer-b", ConsoleLocation::ServerConsole),
+                140,
+                50,
+            )
+            .expect("second open should succeed");
+
+        service.handle_authority_disconnect("peer-a");
+        let reopen = service
+            .open_target(
+                &target,
+                console("console-c", "observer-c", ConsoleLocation::ServerConsole),
+                160,
+                60,
+            )
+            .expect("open during reconnect should succeed");
+
+        assert!(reopen.iter().any(|message| matches!(
+            message.envelope.payload,
+            ControlPlanePayload::OpenMirrorRequest(_)
+        )));
+        let state = service.session_states.get("shell-1").unwrap();
+        assert_eq!(state.mirror_route, MirrorRouteState::Pending);
+        assert_eq!(state.attachments.len(), 3);
+    }
+
+    #[test]
     fn closing_last_attachment_emits_close_mirror_request() {
         let mut service = RemoteControlPlaneService::new();
         let target = remote_target("peer-a", "shell-1");

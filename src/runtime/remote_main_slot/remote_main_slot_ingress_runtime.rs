@@ -499,9 +499,14 @@ mod tests {
                 .expect("server hello should exist");
 
             assert_eq!(
-                rx.recv_timeout(Duration::from_secs(1))
-                    .expect("connected event should arrive"),
-                AuthorityTransportEvent::Connected
+                match rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("connected event should arrive")
+                {
+                    AuthorityTransportEvent::Connected { authority_id, .. } => authority_id,
+                    other => panic!("unexpected authority event: {other:?}"),
+                },
+                "peer-a"
             );
 
             tx.send(target_output_envelope())
@@ -512,7 +517,7 @@ mod tests {
         let authority_event = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("authority target output should arrive");
-        let AuthorityTransportEvent::Envelope(envelope) = authority_event else {
+        let AuthorityTransportEvent::Envelope { envelope, .. } = authority_event else {
             panic!("unexpected authority event: {authority_event:?}");
         };
         apply_authority_envelope(&remote_runtime, &target, &envelope)
@@ -612,9 +617,14 @@ mod tests {
                 .expect("server hello should exist");
 
             assert_eq!(
-                rx.recv_timeout(Duration::from_secs(1))
-                    .expect("connected event should arrive"),
-                AuthorityTransportEvent::Connected
+                match rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("connected event should arrive")
+                {
+                    AuthorityTransportEvent::Connected { authority_id, .. } => authority_id,
+                    other => panic!("unexpected authority event: {other:?}"),
+                },
+                "peer-a"
             );
 
             tx.send(mirror_bootstrap_chunk_envelope())
@@ -628,7 +638,7 @@ mod tests {
         let authority_event = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("authority bootstrap chunk should arrive");
-        let AuthorityTransportEvent::Envelope(envelope) = authority_event else {
+        let AuthorityTransportEvent::Envelope { envelope, .. } = authority_event else {
             panic!("unexpected authority event: {authority_event:?}");
         };
         apply_authority_envelope(&remote_runtime, &target, &envelope)
@@ -637,7 +647,7 @@ mod tests {
         let authority_event = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("authority bootstrap complete should arrive");
-        let AuthorityTransportEvent::Envelope(envelope) = authority_event else {
+        let AuthorityTransportEvent::Envelope { envelope, .. } = authority_event else {
             panic!("unexpected authority event: {authority_event:?}");
         };
         apply_authority_envelope(&remote_runtime, &target, &envelope)
