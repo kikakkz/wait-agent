@@ -82,6 +82,10 @@ impl AgentDetector for KimiDetector {
             return Some(ManagedSessionTaskState::Running);
         }
 
+        if kimi_has_running_background_task(&normalized_lines) {
+            return Some(ManagedSessionTaskState::Running);
+        }
+
         for line in normalized_lines.iter().skip(last_lines_start) {
             if kimi_prompt_line(line) {
                 return Some(ManagedSessionTaskState::Input);
@@ -176,7 +180,9 @@ fn kimi_has_active_animation(lines: &[&str]) -> bool {
 }
 
 fn kimi_moon_spinner(line: &str) -> bool {
-    line.chars().count() == 1 && "🌑🌒🌓🌔🌕🌖🌗🌘".contains(line)
+    line.chars()
+        .next()
+        .is_some_and(|ch| "🌑🌒🌓🌔🌕🌖🌗🌘".contains(ch))
 }
 
 fn kimi_prompt_is_empty(line: &str) -> bool {
@@ -186,6 +192,33 @@ fn kimi_prompt_is_empty(line: &str) -> bool {
         || line
             .strip_prefix("│ >")
             .is_some_and(|rest| rest.trim().is_empty())
+}
+
+fn kimi_has_running_background_task(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let mut rest = *line;
+        while let Some((_, after_open)) = rest.split_once('[') {
+            let Some((status, after_close)) = after_open.split_once(']') else {
+                return false;
+            };
+            if kimi_background_task_status_is_running(status) {
+                return true;
+            }
+            rest = after_close;
+        }
+        false
+    })
+}
+
+fn kimi_background_task_status_is_running(status: &str) -> bool {
+    let lowered = status.trim().to_ascii_lowercase();
+    if lowered == "1 task running" {
+        return true;
+    }
+    lowered
+        .strip_suffix(" tasks running")
+        .and_then(|count| count.trim().parse::<usize>().ok())
+        .is_some_and(|count| count > 0)
 }
 
 fn looks_like_status_line(text: &str) -> bool {

@@ -632,6 +632,38 @@ mod tests {
     }
 
     #[test]
+    fn task_state_keeps_kimi_running_when_moon_spinner_with_tip_and_prompt_are_visible() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "● Using Bash (timeout 300 bash -c '...)\n\
+             14:33:27 E7jsue1gKL+Ia/5rVmKVZ1X173D8umpm\n\
+             🌖 · Tip: /goal for multi-step work with a clear finish line\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  ~/wait-agent  main [+46]\n\
+             context: 7.3% (19.1k/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
+    fn task_state_keeps_kimi_running_when_background_task_and_prompt_are_visible() {
+        let state = DetectorRegistry::default().infer_task_state(
+            Some("kimi"),
+            "● bash task started in background\n\
+             ╭────────────────────────────────────────╮\n\
+             │ >                                      │\n\
+             ╰────────────────────────────────────────╯\n\
+             K2.7 Code thinking  [1 task running]  ~/wait-agent  main\n\
+             context: 8.4% (22.0k/262.1k)",
+        );
+
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
     fn task_state_infers_input_from_claude_prompt_line_case_insensitively() {
         let state = DetectorRegistry::default()
             .infer_task_state(Some("claude"), "Ready\nType your message");
