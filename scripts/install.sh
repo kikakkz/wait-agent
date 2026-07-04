@@ -60,6 +60,25 @@ resolve_version() {
   fi
 }
 
+install_binary_atomically() {
+  local binary="$1"
+  local target="$2"
+  local use_sudo="${3:-false}"
+  local tmp
+
+  if [[ "$use_sudo" == "true" ]]; then
+    tmp="$(sudo mktemp "${target}.tmp.XXXXXXXX")"
+    sudo cp "$binary" "$tmp" || { sudo rm -f "$tmp"; return 1; }
+    sudo chmod 755 "$tmp" || { sudo rm -f "$tmp"; return 1; }
+    sudo mv -f "$tmp" "$target"
+  else
+    tmp="$(mktemp "${target}.tmp.XXXXXXXX")"
+    cp "$binary" "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 755 "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$target"
+  fi
+}
+
 # --- Main ---
 main() {
   local platform version url tarball
@@ -107,16 +126,13 @@ main() {
   if [[ -n "${PREFIX:-}" ]]; then
     # User-mode install under PREFIX
     mkdir -p "${PREFIX}${INSTALL_DIR}"
-    cp "$binary" "${PREFIX}${INSTALL_DIR}/waitagent"
-    chmod 755 "${PREFIX}${INSTALL_DIR}/waitagent"
+    install_binary_atomically "$binary" "${PREFIX}${INSTALL_DIR}/waitagent"
   elif [[ "$INSTALL_DIR" == /usr/local/bin && "$(id -u)" -ne 0 ]]; then
     # System install without root: use sudo
     echo ">>> (sudo required for ${INSTALL_DIR})"
-    sudo cp "$binary" "${INSTALL_DIR}/waitagent"
-    sudo chmod 755 "${INSTALL_DIR}/waitagent"
+    install_binary_atomically "$binary" "${INSTALL_DIR}/waitagent" true
   else
-    cp "$binary" "${INSTALL_DIR}/waitagent"
-    chmod 755 "${INSTALL_DIR}/waitagent"
+    install_binary_atomically "$binary" "${INSTALL_DIR}/waitagent"
   fi
 
   echo ""
