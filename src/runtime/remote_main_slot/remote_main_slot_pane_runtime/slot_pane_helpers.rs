@@ -2,7 +2,7 @@ use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::RemoteMainSlotCommand;
-use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord};
+use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionAvailability};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
@@ -663,35 +663,36 @@ pub(super) fn spawn_target_presence_watcher(
             if wait_for_presence_signal(&backend, &socket_name, &session_name).is_err() {
                 break;
             }
-            let raw_present = target_registry
-                .find_target(&target_id)
-                .ok()
-                .flatten()
-                .is_some();
-            let is_present = if raw_present {
+            let current_target = target_registry.find_target(&target_id).ok().flatten();
+            let raw_exists = current_target.is_some();
+            let raw_online = target_is_online(current_target.as_ref());
+            let is_present = if raw_exists {
                 consecutive_misses = 0;
                 true
             } else {
                 consecutive_misses = consecutive_misses.saturating_add(1);
                 consecutive_misses < TARGET_PRESENCE_MISS_GRACE_POLLS
             };
+            let is_available = is_present && raw_online;
             {
                 let mut guard = state
                     .lock()
                     .expect("target presence mutex should not be poisoned");
                 *guard = is_present;
             }
-            if is_present != last_present {
+            if is_available != last_present {
                 ERROR_LOG.log_exit_latency(format!(
-                    "[diag-exit] presence_changed target={} present={} raw_present={} consecutive_misses={} stage=presence_watcher",
+                    "[diag-exit] presence_changed target={} available={} present={} raw_exists={} raw_online={} consecutive_misses={} stage=presence_watcher",
                     target_id,
+                    is_available,
                     is_present,
-                    raw_present,
+                    raw_exists,
+                    raw_online,
                     consecutive_misses
                 ));
-                last_present = is_present;
+                last_present = is_available;
                 if tx
-                    .send(RemotePaneEvent::TargetPresenceChanged(is_present))
+                    .send(RemotePaneEvent::TargetPresenceChanged(is_available))
                     .is_err()
                 {
                     break;
@@ -713,6 +714,10 @@ pub(super) fn target_is_present(state: &Arc<Mutex<bool>>) -> bool {
     *state
         .lock()
         .expect("target presence mutex should not be poisoned")
+}
+
+pub(super) fn target_is_online(target: Option<&ManagedSessionRecord>) -> bool {
+    target.is_some_and(|target| target.availability == SessionAvailability::Online)
 }
 
 pub(crate) fn apply_authority_envelope(

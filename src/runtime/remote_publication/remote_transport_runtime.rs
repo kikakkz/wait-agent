@@ -68,14 +68,6 @@ impl RemoteConnectionRegistry {
         generation
     }
 
-    pub fn unregister_connection(&self, node_id: &str) -> bool {
-        self.connections
-            .lock()
-            .expect("remote connection registry mutex should not be poisoned")
-            .remove(node_id)
-            .is_some()
-    }
-
     pub fn unregister_connection_generation(&self, node_id: &str, generation: u64) -> bool {
         let mut connections = self
             .connections
@@ -274,9 +266,12 @@ mod tests {
         let registry = RemoteConnectionRegistry::new();
         assert!(!registry.has_connection("observer-a"));
 
-        registry.register_connection("observer-a", Arc::new(CapturingConnection::default()));
+        let generation = registry.register_connection_with_generation(
+            "observer-a",
+            Arc::new(CapturingConnection::default()),
+        );
         assert!(registry.has_connection("observer-a"));
-        assert!(registry.unregister_connection("observer-a"));
+        assert!(registry.unregister_connection_generation("observer-a", generation));
         assert!(!registry.has_connection("observer-a"));
     }
 

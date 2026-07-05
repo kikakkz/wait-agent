@@ -8,11 +8,11 @@ mod tests {
         placeholder_lines, should_draw_remote_snapshot, should_exit_surface_for_target_presence,
         should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
         should_sync_remote_pty_resize_for_state, spawn_mailbox_watcher,
-        sync_or_defer_remote_pty_size, write_remote_raw_output_with_initial_clear,
-        AuthorityTransportStatus, MirrorReadiness, RawPtyInputRoute,
-        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
-        RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
-        CLEAR_SCREEN_HOME_ESCAPE,
+        sync_or_defer_remote_pty_size, target_is_online,
+        write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, MirrorReadiness,
+        RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
+        RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
+        RemoteRawPtyMailboxReader, CLEAR_SCREEN_HOME_ESCAPE,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -905,6 +905,21 @@ mod tests {
             ),
             AuthorityTransportStatus::Disconnected
         );
+    }
+
+    #[test]
+    fn target_is_online_requires_online_availability() {
+        let mut target = remote_target();
+
+        assert!(target_is_online(Some(&target)));
+
+        target.availability = SessionAvailability::Offline;
+        assert!(!target_is_online(Some(&target)));
+
+        target.availability = SessionAvailability::Exited;
+        assert!(!target_is_online(Some(&target)));
+
+        assert!(!target_is_online(None));
     }
 
     #[test]

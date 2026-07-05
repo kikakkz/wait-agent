@@ -150,13 +150,47 @@ impl SourcePublicationTracker {
         next_message_id: &mut u64,
         session: &ManagedSessionRecord,
     ) -> Option<PendingSourcePublication> {
+        self.on_state_changed_with_mode(
+            node_id,
+            session_instance_id,
+            next_message_id,
+            session,
+            SourcePublicationMode::Delta,
+        )
+    }
+
+    pub(super) fn on_baseline_state(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+    ) -> PendingSourcePublication {
+        self.on_state_changed_with_mode(
+            node_id,
+            session_instance_id,
+            next_message_id,
+            session,
+            SourcePublicationMode::FullBaseline,
+        )
+        .expect("full baseline publication should always create a pending record")
+    }
+
+    fn on_state_changed_with_mode(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+        mode: SourcePublicationMode,
+    ) -> Option<PendingSourcePublication> {
         let target_id = format!("remote-peer:{node_id}:{}", session.address.session_id());
         let state = SourcePublicationState {
             session: session.clone(),
             exited: false,
         };
         let record = self.records.entry(target_id.clone()).or_default();
-        if record.last_state.as_ref() == Some(&state) {
+        if mode == SourcePublicationMode::Delta && record.last_state.as_ref() == Some(&state) {
             return None;
         }
         record.latest_revision += 1;
@@ -256,22 +290,6 @@ impl SourcePublicationTracker {
         pending.next_retry_at = Some(now + source_publication_retry_delay(pending.retry_attempt));
     }
 
-    pub(super) fn pending_replay_publications(&self) -> Vec<PendingSourcePublication> {
-        if !self.connected {
-            return Vec::new();
-        }
-        self.records
-            .values()
-            .filter_map(|record| {
-                record
-                    .pending
-                    .as_ref()
-                    .filter(|pending| pending.next_retry_at.is_none())
-                    .cloned()
-            })
-            .collect()
-    }
-
     pub(super) fn is_current_pending(&self, target_id: &str, revision: u64) -> bool {
         self.records
             .get(target_id)
@@ -324,6 +342,12 @@ impl SourcePublicationTracker {
             .filter_map(|record| record.pending.clone())
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePublicationMode {
+    Delta,
+    FullBaseline,
 }
 
 fn source_publication_retry_delay(attempt: u32) -> Duration {
@@ -567,6 +591,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                             &mut synced_sessions,
                             &mut next_message_id,
                             &mut publication_tracker,
+                            SessionSyncMode::Delta,
                         ) {
                             ERROR_LOG.log(
                                 "[diag-sync] sync_local_sessions after local catalog change failed, will reconnect"
@@ -611,7 +636,6 @@ where
     let Some(session_handle) = session_handle else {
         return false;
     };
-    let replay = publication_tracker.pending_replay_publications();
     if let Err(_) = sync_local_sessions(
         gateway,
         node_id,
@@ -620,24 +644,10 @@ where
         synced_sessions,
         next_message_id,
         publication_tracker,
+        SessionSyncMode::FullBaseline,
     ) {
         ERROR_LOG.log(format!(
             "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
-        ));
-        publication_tracker.on_disconnected();
-        return true;
-    }
-    if !replay.is_empty() {
-        ERROR_LOG.log(format!(
-            "[diag-publication] replaying pending source publications after {reason} count={}",
-            replay.len()
-        ));
-    }
-    if let Err(error) =
-        send_pending_source_publications(session_handle, publication_tracker, replay)
-    {
-        ERROR_LOG.log(format!(
-            "[diag-publication] pending source publication replay after {reason} failed, will reconnect: {error}"
         ));
         publication_tracker.on_disconnected();
         return true;
@@ -690,6 +700,7 @@ where
         synced_sessions,
         next_message_id,
         publication_tracker,
+        SessionSyncMode::Delta,
     ) {
         ERROR_LOG.log(format!(
             "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
@@ -883,6 +894,7 @@ pub(super) fn sync_local_sessions<G, O>(
     synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
     next_message_id: &mut u64,
     publication_tracker: &mut SourcePublicationTracker,
+    mode: SessionSyncMode,
 ) -> Result<(), io::Error>
 where
     G: LocalSessionCatalog,
@@ -933,7 +945,7 @@ where
         t_sync.elapsed()
     ));
     let current_sessions = local_sessions_by_local_id(local_sessions);
-    let delta = compute_session_sync_delta(synced_sessions, &current_sessions);
+    let delta = compute_session_sync_delta(synced_sessions, &current_sessions, mode);
     ERROR_LOG.log(format!(
         "[diag-newhost] sync_local_sessions delta node={} publish={} exit={} elapsed={:?}",
         node_id,
@@ -956,13 +968,24 @@ where
 
     for session in &delta.publish {
         let t_send = Instant::now();
-        let Some(publication) = publication_tracker.on_state_changed(
-            node_id,
-            session_handle.session_instance_id(),
-            next_message_id,
-            session,
-        ) else {
-            continue;
+        let publication = match mode {
+            SessionSyncMode::Delta => {
+                let Some(publication) = publication_tracker.on_state_changed(
+                    node_id,
+                    session_handle.session_instance_id(),
+                    next_message_id,
+                    session,
+                ) else {
+                    continue;
+                };
+                publication
+            }
+            SessionSyncMode::FullBaseline => publication_tracker.on_baseline_state(
+                node_id,
+                session_handle.session_instance_id(),
+                next_message_id,
+                session,
+            ),
         };
         if let Err(error) =
             send_source_publication(session_handle, publication_tracker, &publication)
@@ -1216,16 +1239,24 @@ pub(crate) struct SessionSyncDelta {
     pub(crate) exit: Vec<ManagedSessionRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSyncMode {
+    Delta,
+    FullBaseline,
+}
+
 pub(crate) fn compute_session_sync_delta(
     previous: &HashMap<String, ManagedSessionRecord>,
     current: &HashMap<String, ManagedSessionRecord>,
+    mode: SessionSyncMode,
 ) -> SessionSyncDelta {
     let publish = current
         .iter()
         .filter_map(|(local_id, session)| {
-            if previous
-                .get(local_id)
-                .is_some_and(|previous| session_records_equivalent_for_sync(previous, session))
+            if mode == SessionSyncMode::Delta
+                && previous
+                    .get(local_id)
+                    .is_some_and(|previous| session_records_equivalent_for_sync(previous, session))
             {
                 None
             } else {

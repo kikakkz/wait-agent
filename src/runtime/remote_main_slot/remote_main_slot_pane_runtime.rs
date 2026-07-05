@@ -207,7 +207,7 @@ impl RemoteMainSlotPaneRuntime {
     where
         F: FnMut(RemoteInteractSignal),
     {
-        let target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
+        let mut target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
         let _cursor_guard = RemotePaneCursorGuard::hide().map_err(|error| {
@@ -495,8 +495,16 @@ impl RemoteMainSlotPaneRuntime {
                             if authority_id != target.address.authority_id() {
                                 continue;
                             }
+                            let current_target =
+                                self.resolve_remote_target(&spec.target, "remote reconnect");
+                            let is_present = current_target
+                                .as_ref()
+                                .ok()
+                                .is_some_and(|target| target_is_online(Some(target)));
+                            if let Ok(current_target) = current_target {
+                                target = current_target;
+                            }
                             authority_generation = Some(generation);
-                            let is_present = target_is_present(&target_presence);
                             authority_status = if is_present {
                                 AuthorityTransportStatus::Connected
                             } else {
@@ -756,24 +764,37 @@ impl RemoteMainSlotPaneRuntime {
                             }
                         }
                     },
-                    RemotePaneEvent::TargetPresenceChanged(is_present) => {
-                        if !is_present {
+                    RemotePaneEvent::TargetPresenceChanged(is_available) => {
+                        let mut is_available = is_available;
+                        if is_available {
+                            let current_target =
+                                self.resolve_remote_target(&spec.target, "remote target presence");
+                            is_available = current_target
+                                .as_ref()
+                                .ok()
+                                .is_some_and(|target| target_is_online(Some(target)));
+                            if let Ok(current_target) = current_target {
+                                target = current_target;
+                            }
+                        }
+                        if !is_available {
+                            let target_exists_in_catalog = target_is_present(&target_presence);
                             let should_exit = should_exit_surface_for_target_presence_loss(
-                                false,
+                                target_exists_in_catalog,
                                 remote_runtime.has_connection(target.address.authority_id()),
                                 reconnecting_since.is_some(),
                             );
                             if should_exit {
                                 ERROR_LOG.log(format!(
                                     "[diag-timing] target presence loss classified as exit: in_catalog={} authority_connected={} reconnecting={}",
-                                    false,
+                                    target_exists_in_catalog,
                                     remote_runtime.has_connection(target.address.authority_id()),
                                     reconnecting_since.is_some(),
                                 ));
                                 return Ok(());
                             }
                         }
-                        if !is_present {
+                        if !is_available {
                             // During reconnect: target disappearance is a
                             // catalog side-effect of network jitter. Clear
                             // local state but keep reconnecting.
@@ -798,7 +819,7 @@ impl RemoteMainSlotPaneRuntime {
                         authority_status = authority_status_from_runtime(
                             &remote_runtime,
                             &target,
-                            is_present,
+                            is_available,
                             &waiting_authority_status,
                         );
                         if reconnecting_since.is_some()
@@ -812,7 +833,7 @@ impl RemoteMainSlotPaneRuntime {
                         // race where Connected arrives before or after
                         // TargetPresenceChanged(true).
                         let mut activated = false;
-                        if is_present
+                        if is_available
                             && binding.is_none()
                             && matches!(authority_status, AuthorityTransportStatus::Connected)
                         {

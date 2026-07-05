@@ -8,7 +8,7 @@ mod tests {
         remote_session_sync_owner_socket_path, sync_local_sessions, AuthorityHostSignal,
         LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
         OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
-        SessionSyncAuthorityPublicationGateway, SourcePublicationAckOutcome,
+        SessionSyncAuthorityPublicationGateway, SessionSyncMode, SourcePublicationAckOutcome,
         SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
@@ -50,7 +50,7 @@ mod tests {
             session("wa-1", "shell-2"),
         ]);
 
-        let delta = compute_session_sync_delta(&previous, &current);
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::Delta);
 
         assert_eq!(delta.publish.len(), 2);
         assert_eq!(delta.exit.len(), 1);
@@ -69,7 +69,7 @@ mod tests {
         let previous = local_sessions_by_local_id(vec![previous_session]);
         let current = local_sessions_by_local_id(vec![current_session]);
 
-        let delta = compute_session_sync_delta(&previous, &current);
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::Delta);
 
         assert_eq!(delta.publish.len(), 1);
         assert!(delta.exit.is_empty());
@@ -86,7 +86,7 @@ mod tests {
         let previous = local_sessions_by_local_id(vec![session.clone()]);
         let current = local_sessions_by_local_id(vec![session]);
 
-        let delta = compute_session_sync_delta(&previous, &current);
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::Delta);
 
         assert!(delta.publish.is_empty());
         assert!(delta.exit.is_empty());
@@ -102,7 +102,7 @@ mod tests {
         let previous = local_sessions_by_local_id(vec![previous_session]);
         let current = local_sessions_by_local_id(vec![current_session]);
 
-        let delta = compute_session_sync_delta(&previous, &current);
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::Delta);
 
         assert_eq!(delta.publish.len(), 1);
         assert!(delta.exit.is_empty());
@@ -119,7 +119,18 @@ mod tests {
         let previous = local_sessions_by_local_id(vec![previous_session]);
         let current = local_sessions_by_local_id(vec![current_session]);
 
-        let delta = compute_session_sync_delta(&previous, &current);
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::Delta);
+
+        assert_eq!(delta.publish.len(), 1);
+        assert!(delta.exit.is_empty());
+    }
+
+    #[test]
+    fn session_sync_full_baseline_publishes_unchanged_live_sessions() {
+        let previous = local_sessions_by_local_id(vec![session("wa-1", "shell-1")]);
+        let current = previous.clone();
+
+        let delta = compute_session_sync_delta(&previous, &current, SessionSyncMode::FullBaseline);
 
         assert_eq!(delta.publish.len(), 1);
         assert!(delta.exit.is_empty());
@@ -270,7 +281,7 @@ mod tests {
             .is_none());
 
         tracker.on_connected();
-        assert_eq!(tracker.pending_replay_publications()[0].revision, 1);
+        assert_eq!(tracker.pending_publications()[0].revision, 1);
         tracker.on_publication_sent(&publication.target_id, publication.revision, now);
         assert!(tracker
             .due_retry_publications(now + Duration::from_millis(499))
@@ -309,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn source_publication_tracker_full_baseline_republishes_unchanged_state() {
+        let mut tracker = SourcePublicationTracker::new();
+        let mut next_message_id = 0;
+        tracker.on_connected();
+        let session = session("wa-1", "shell-1");
+
+        let first = tracker
+            .on_state_changed(
+                "10.0.0.2",
+                "server-session-1",
+                &mut next_message_id,
+                &session,
+            )
+            .expect("new state should publish");
+        let second = tracker.on_baseline_state(
+            "10.0.0.2",
+            "server-session-2",
+            &mut next_message_id,
+            &session,
+        );
+
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 2);
+        let Some(Body::TargetPublished(payload)) = second.envelope.body.as_ref() else {
+            panic!("expected target published");
+        };
+        assert_eq!(payload.revision, 2);
+        assert_eq!(payload.node_instance_id, "server-session-2");
+        assert_eq!(payload.availability, "online");
+    }
+
+    #[test]
     fn sync_local_sessions_reports_target_exit_to_local_lifecycle() {
         let (handle, mut receiver) =
             RemoteNodeSessionHandle::new_for_tests("10.0.0.2", "server-session-1");
@@ -326,6 +369,7 @@ mod tests {
             &mut synced_sessions,
             &mut next_message_id,
             &mut publication_tracker,
+            SessionSyncMode::Delta,
         )
         .expect("local session sync should succeed");
 
@@ -544,9 +588,9 @@ mod tests {
         let replay = publications
             .iter()
             .find(|payload| payload.transport_session_id == "shell-1")
-            .expect("pending shell-1 publication should replay");
-        assert_eq!(replay.revision, 1);
-        assert_eq!(replay.node_instance_id, "server-session-1");
+            .expect("shell-1 baseline should republish after reconnect");
+        assert_eq!(replay.revision, 2);
+        assert_eq!(replay.node_instance_id, "server-session-2");
 
         let baseline = publications
             .iter()
