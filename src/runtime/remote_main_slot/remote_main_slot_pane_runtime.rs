@@ -65,6 +65,12 @@ pub(super) enum AuthorityTransportStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorReadiness {
+    Waiting,
+    Ready,
+}
+
 impl RemoteMainSlotPaneRuntime {
     pub fn from_build_env_with_external_authority_streams_and_network(
         network: RemoteNetworkConfig,
@@ -276,6 +282,7 @@ impl RemoteMainSlotPaneRuntime {
         let mut binding = None;
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
+        let mut mirror_readiness = MirrorReadiness::Waiting;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
         // Always attempt activation — output_log replay comes from the
@@ -290,8 +297,6 @@ impl RemoteMainSlotPaneRuntime {
             &mut pending_pty_size,
             &mut last_synced_size,
             &mut raw_screen_initialized,
-            &mut paused_input_buffer,
-            &mut console_seq,
             event_tx.clone(),
         ) {
             Ok(activated_binding) => {
@@ -492,14 +497,6 @@ impl RemoteMainSlotPaneRuntime {
                             }
                             authority_generation = Some(generation);
                             let is_present = target_is_present(&target_presence);
-                            // Only clear reconnect when target is also present.
-                            // Otherwise, keep reconnecting_since to prevent an
-                            // early exit from a stale TargetPresenceChanged(false)
-                            // event arriving after the authority reconnects but
-                            // before the target reappears in the catalog.
-                            if is_present {
-                                reconnecting_since = None;
-                            }
                             authority_status = if is_present {
                                 AuthorityTransportStatus::Connected
                             } else {
@@ -512,13 +509,15 @@ impl RemoteMainSlotPaneRuntime {
                                     binding,
                                     &mut pending_pty_size,
                                 )?;
-                                flush_paused_input(
-                                    &remote_runtime,
-                                    &target,
-                                    binding,
-                                    &mut paused_input_buffer,
-                                    &mut console_seq,
-                                )?;
+                                if mirror_readiness == MirrorReadiness::Ready {
+                                    flush_paused_input(
+                                        &remote_runtime,
+                                        &target,
+                                        binding,
+                                        &mut paused_input_buffer,
+                                        &mut console_seq,
+                                    )?;
+                                }
                             }
                             let needs_activation = reconnecting_since.is_some()
                                 || binding.is_none()
@@ -539,12 +538,11 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut pending_pty_size,
                                     &mut last_synced_size,
                                     &mut raw_screen_initialized,
-                                    &mut paused_input_buffer,
-                                    &mut console_seq,
                                     event_tx.clone(),
                                 ) {
                                     Ok(activated_binding) => {
                                         binding = Some(activated_binding);
+                                        mirror_readiness = MirrorReadiness::Waiting;
                                         activated = true;
                                     }
                                     Err(error) => {
@@ -587,6 +585,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut binding,
                                 &raw_input_route,
                                 &mut raw_screen_initialized,
+                                &mut mirror_readiness,
                                 &mut authority_status,
                                 &mut reconnecting_since,
                                 &mut reconnect_animation_frame,
@@ -615,6 +614,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut binding,
                                     &raw_input_route,
                                     &mut raw_screen_initialized,
+                                    &mut mirror_readiness,
                                     &mut authority_status,
                                     &mut reconnecting_since,
                                     &mut reconnect_animation_frame,
@@ -653,6 +653,17 @@ impl RemoteMainSlotPaneRuntime {
                                 &raw,
                                 &mut raw_screen_initialized,
                             )?;
+                            mark_mirror_ready_if_raw_arrived(
+                                &raw,
+                                &remote_runtime,
+                                &target,
+                                binding.as_ref(),
+                                &mut pending_pty_size,
+                                &mut paused_input_buffer,
+                                &mut console_seq,
+                                &mut mirror_readiness,
+                                &mut reconnecting_since,
+                            )?;
                         }
                         AuthorityTransportEvent::Envelope {
                             authority_id,
@@ -674,6 +685,17 @@ impl RemoteMainSlotPaneRuntime {
                                 write_remote_raw_output_with_initial_clear(
                                     &raw,
                                     &mut raw_screen_initialized,
+                                )?;
+                                mark_mirror_ready_if_raw_arrived(
+                                    &raw,
+                                    &remote_runtime,
+                                    &target,
+                                    binding.as_ref(),
+                                    &mut pending_pty_size,
+                                    &mut paused_input_buffer,
+                                    &mut console_seq,
+                                    &mut mirror_readiness,
+                                    &mut reconnecting_since,
                                 )?;
                                 continue;
                             }
@@ -704,6 +726,17 @@ impl RemoteMainSlotPaneRuntime {
                                 }
                                 return Err(remote_protocol_error(e));
                             }
+                            mark_mirror_ready_if_bootstrap_completed(
+                                &envelope,
+                                &remote_runtime,
+                                &target,
+                                binding.as_ref(),
+                                &mut pending_pty_size,
+                                &mut paused_input_buffer,
+                                &mut console_seq,
+                                &mut mirror_readiness,
+                                &mut reconnecting_since,
+                            )?;
                             // Drain observer mailbox immediately: the mailbox
                             // watcher may never fire because sync() below
                             // consumes envelopes via try_recv(), making the
@@ -750,6 +783,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut binding,
                                 &raw_input_route,
                                 &mut raw_screen_initialized,
+                                &mut mirror_readiness,
                                 &mut authority_status,
                                 &mut reconnecting_since,
                                 &mut reconnect_animation_frame,
@@ -793,13 +827,11 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut pending_pty_size,
                                 &mut last_synced_size,
                                 &mut raw_screen_initialized,
-                                &mut paused_input_buffer,
-                                &mut console_seq,
                                 event_tx.clone(),
                             ) {
                                 Ok(activated_binding) => {
-                                    reconnecting_since = None;
                                     binding = Some(activated_binding);
+                                    mirror_readiness = MirrorReadiness::Waiting;
                                     activated = true;
                                 }
                                 Err(error) => {
@@ -844,6 +876,10 @@ impl RemoteMainSlotPaneRuntime {
                             if raw_forwarded {
                                 // Raw mode sends PTY bytes directly from the stdin thread to avoid
                                 // adding the UI event loop to every keystroke.
+                                continue;
+                            }
+                            if mirror_readiness != MirrorReadiness::Ready {
+                                paused_input_buffer.push(bytes);
                                 continue;
                             }
                             if !remote_runtime.has_connection(target.address.authority_id()) {
@@ -1022,8 +1058,6 @@ fn activate_remote_surface_binding(
     pending_pty_size: &mut Option<TerminalSize>,
     last_synced_size: &mut TerminalSize,
     raw_screen_initialized: &mut bool,
-    paused_input_buffer: &mut Vec<Vec<u8>>,
-    console_seq: &mut u64,
     event_tx: mpsc::Sender<RemotePaneEvent>,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
     let (activated_binding, raw) =
@@ -1040,13 +1074,6 @@ fn activate_remote_surface_binding(
     *last_synced_size = *size;
     write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
     flush_pending_pty_size(remote_runtime, target, &activated_binding, pending_pty_size)?;
-    flush_paused_input(
-        remote_runtime,
-        target,
-        &activated_binding,
-        paused_input_buffer,
-        console_seq,
-    )?;
     Ok(activated_binding)
 }
 
@@ -1056,6 +1083,7 @@ fn begin_authority_reconnect(
     binding: &mut Option<RemoteAttachmentBinding>,
     raw_input_route: &RawPtyInputRoute,
     raw_screen_initialized: &mut bool,
+    mirror_readiness: &mut MirrorReadiness,
     authority_status: &mut AuthorityTransportStatus,
     reconnecting_since: &mut Option<Instant>,
     reconnect_animation_frame: &mut u8,
@@ -1064,9 +1092,96 @@ fn begin_authority_reconnect(
     *binding = None;
     raw_input_route.clear();
     *raw_screen_initialized = false;
+    *mirror_readiness = MirrorReadiness::Waiting;
     *authority_status = AuthorityTransportStatus::Disconnected;
     *reconnecting_since = Some(Instant::now());
     *reconnect_animation_frame = 0;
+}
+
+fn mark_mirror_ready_if_raw_arrived(
+    raw: &[u8],
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: Option<&RemoteAttachmentBinding>,
+    pending_pty_size: &mut Option<TerminalSize>,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    mirror_readiness: &mut MirrorReadiness,
+    reconnecting_since: &mut Option<Instant>,
+) -> Result<(), LifecycleError> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    mark_mirror_ready(
+        remote_runtime,
+        target,
+        binding,
+        pending_pty_size,
+        paused_input_buffer,
+        console_seq,
+        mirror_readiness,
+        reconnecting_since,
+    )
+}
+
+fn mark_mirror_ready_if_bootstrap_completed(
+    envelope: &crate::infra::remote_protocol::ProtocolEnvelope<
+        crate::infra::remote_protocol::ControlPlanePayload,
+    >,
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: Option<&RemoteAttachmentBinding>,
+    pending_pty_size: &mut Option<TerminalSize>,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    mirror_readiness: &mut MirrorReadiness,
+    reconnecting_since: &mut Option<Instant>,
+) -> Result<(), LifecycleError> {
+    if matches!(
+        envelope.payload,
+        crate::infra::remote_protocol::ControlPlanePayload::MirrorBootstrapComplete(_)
+    ) {
+        mark_mirror_ready(
+            remote_runtime,
+            target,
+            binding,
+            pending_pty_size,
+            paused_input_buffer,
+            console_seq,
+            mirror_readiness,
+            reconnecting_since,
+        )?;
+    }
+    Ok(())
+}
+
+fn mark_mirror_ready(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: Option<&RemoteAttachmentBinding>,
+    pending_pty_size: &mut Option<TerminalSize>,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    mirror_readiness: &mut MirrorReadiness,
+    reconnecting_since: &mut Option<Instant>,
+) -> Result<(), LifecycleError> {
+    if *mirror_readiness == MirrorReadiness::Ready {
+        *reconnecting_since = None;
+        return Ok(());
+    }
+    *mirror_readiness = MirrorReadiness::Ready;
+    *reconnecting_since = None;
+    if let Some(binding) = binding {
+        flush_pending_pty_size(remote_runtime, target, binding, pending_pty_size)?;
+        flush_paused_input(
+            remote_runtime,
+            target,
+            binding,
+            paused_input_buffer,
+            console_seq,
+        )?;
+    }
+    Ok(())
 }
 
 fn sync_remote_pty_size(

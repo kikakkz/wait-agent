@@ -4,13 +4,15 @@ mod tests {
         authority_status_from_runtime, authority_transport_event_sender,
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
         flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
+        mark_mirror_ready_if_bootstrap_completed, mark_mirror_ready_if_raw_arrived,
         placeholder_lines, should_draw_remote_snapshot, should_exit_surface_for_target_presence,
         should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
         should_sync_remote_pty_resize_for_state, spawn_mailbox_watcher,
         sync_or_defer_remote_pty_size, write_remote_raw_output_with_initial_clear,
-        AuthorityTransportStatus, RawPtyInputRoute, RemoteInteractInputSignalDecoder,
-        RemoteInteractSignal, RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime,
-        RemotePaneEvent, RemoteRawPtyMailboxReader, CLEAR_SCREEN_HOME_ESCAPE,
+        AuthorityTransportStatus, MirrorReadiness, RawPtyInputRoute,
+        RemoteInteractInputSignalDecoder, RemoteInteractSignal, RemoteInteractSurfaceSpec,
+        RemoteMainSlotPaneRuntime, RemotePaneEvent, RemoteRawPtyMailboxReader,
+        CLEAR_SCREEN_HOME_ESCAPE,
     };
     use crate::application::target_registry_service::{
         DefaultTargetCatalogGateway, TargetRegistryService,
@@ -322,6 +324,11 @@ mod tests {
         {
             AuthorityTransportEvent::Connected { authority_id, .. } => {
                 assert_eq!(authority_id, "peer-a");
+            }
+            AuthorityTransportEvent::Failed { message, .. }
+                if is_authority_transport_os_permission_denied(&message) =>
+            {
+                return;
             }
             other => panic!("unexpected authority event: {other:?}"),
         }
@@ -1050,6 +1057,77 @@ mod tests {
     }
 
     #[test]
+    fn mirror_readiness_keeps_reconnecting_until_bootstrap_or_raw_output() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        let authority_mailbox = runtime
+            .ensure_local_connection("peer-a")
+            .expect("authority loopback registration should succeed");
+        let target = remote_target();
+        let binding = runtime
+            .activate_target(
+                &target,
+                RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should open target");
+        assert_eq!(
+            authority_mailbox.snapshot()[0].message_type,
+            "open_mirror_request"
+        );
+        let mut pending_pty_size = None;
+        let mut paused_input_buffer = vec![b"x".to_vec()];
+        let mut console_seq = 0;
+        let mut readiness = MirrorReadiness::Waiting;
+        let mut reconnecting_since = Some(std::time::Instant::now());
+
+        mark_mirror_ready_if_raw_arrived(
+            b"",
+            &runtime,
+            &target,
+            Some(&binding),
+            &mut pending_pty_size,
+            &mut paused_input_buffer,
+            &mut console_seq,
+            &mut readiness,
+            &mut reconnecting_since,
+        )
+        .expect("empty raw should be ignored");
+
+        assert_eq!(readiness, MirrorReadiness::Waiting);
+        assert!(reconnecting_since.is_some());
+        assert_eq!(paused_input_buffer.len(), 1);
+
+        mark_mirror_ready_if_bootstrap_completed(
+            &authority_bootstrap_complete_envelope(1),
+            &runtime,
+            &target,
+            Some(&binding),
+            &mut pending_pty_size,
+            &mut paused_input_buffer,
+            &mut console_seq,
+            &mut readiness,
+            &mut reconnecting_since,
+        )
+        .expect("bootstrap complete should make mirror ready");
+
+        assert_eq!(readiness, MirrorReadiness::Ready);
+        assert!(reconnecting_since.is_none());
+        assert!(paused_input_buffer.is_empty());
+
+        let messages = authority_mailbox.snapshot();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].message_type, "raw_pty_input");
+    }
+
+    #[test]
     fn authority_target_output_envelope_flows_back_into_server_console_observer_terminal_state() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         let mailbox = runtime
@@ -1120,15 +1198,18 @@ mod tests {
         let _ = fs::remove_file(&socket_path);
         let (pane_tx, pane_rx) = mpsc::channel();
         let authority_tx = authority_transport_event_sender(pane_tx);
-        let _listener = spawn_authority_listener(
+        let _listener = match spawn_authority_listener(
             AuthorityConnectionRequest {
                 socket_path: socket_path.clone(),
                 authority_id: "peer-a".to_string(),
             },
             registry.clone(),
             authority_tx,
-        )
-        .expect("authority listener should bind");
+        ) {
+            Ok(listener) => listener,
+            Err(error) if is_os_permission_denied(&error) => return,
+            Err(error) => panic!("authority listener should bind: {error}"),
+        };
 
         let mut authority =
             UnixStream::connect(&socket_path).expect("authority transport should connect");
@@ -1652,6 +1733,15 @@ mod tests {
                 cursor_visible: true,
             }),
         }
+    }
+
+    fn is_os_permission_denied(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(libc::EPERM)
+    }
+
+    fn is_authority_transport_os_permission_denied(message: &str) -> bool {
+        message.contains("Operation not permitted") || message.contains("Permission denied")
     }
 
     fn remote_target() -> ManagedSessionRecord {
