@@ -222,12 +222,18 @@ pub(super) fn should_exit_surface_locally(spec: &RemoteInteractSurfaceSpec, byte
 }
 
 pub(super) fn should_exit_surface_for_target_presence_loss(
-    target_exists_in_catalog: bool,
+    target_availability: Option<SessionAvailability>,
     authority_connected: bool,
     reconnecting: bool,
 ) -> bool {
-    if !target_exists_in_catalog {
+    if target_availability.is_none() {
         return true;
+    }
+    if target_availability == Some(SessionAvailability::Exited) {
+        return true;
+    }
+    if target_availability == Some(SessionAvailability::Offline) {
+        return false;
     }
     if reconnecting {
         return false;
@@ -245,7 +251,7 @@ pub(super) fn should_exit_surface_for_target_presence(
 ) -> bool {
     !is_present
         && should_exit_surface_for_target_presence_loss(
-            target_exists_in_catalog,
+            target_exists_in_catalog.then_some(SessionAvailability::Unknown),
             authority_connected,
             reconnecting,
         )
@@ -718,6 +724,12 @@ pub(super) fn target_is_present(state: &Arc<Mutex<bool>>) -> bool {
 
 pub(super) fn target_is_online(target: Option<&ManagedSessionRecord>) -> bool {
     target.is_some_and(|target| target.availability == SessionAvailability::Online)
+}
+
+pub(super) fn target_availability(
+    target: Option<&ManagedSessionRecord>,
+) -> Option<SessionAvailability> {
+    target.map(|target| target.availability)
 }
 
 pub(crate) fn apply_authority_envelope(

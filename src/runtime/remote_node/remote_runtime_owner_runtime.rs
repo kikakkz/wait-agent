@@ -19,6 +19,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const OFFLINE_NODE_RETENTION: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRuntimeOwnerRuntime {
     current_executable: PathBuf,
@@ -60,6 +62,7 @@ struct OwnerStateRecord {
 #[derive(Clone)]
 struct RemoteRuntimeOwnerSharedState {
     records: Arc<Mutex<HashMap<String, OwnerStateRecord>>>,
+    offline_nodes: Arc<Mutex<HashMap<String, Instant>>>,
     running: Arc<AtomicBool>,
 }
 
@@ -115,6 +118,7 @@ impl RemoteRuntimeOwnerRuntime {
         };
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         };
         while state.running.load(Ordering::Relaxed) {
@@ -397,6 +401,7 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
         UnixListener::bind(&socket_path).expect("test remote runtime owner socket should bind");
     let state = RemoteRuntimeOwnerSharedState {
         records: Arc::new(Mutex::new(HashMap::new())),
+        offline_nodes: Arc::new(Mutex::new(HashMap::new())),
         running: Arc::new(AtomicBool::new(true)),
     };
     thread::spawn(move || {
@@ -430,6 +435,11 @@ fn handle_remote_runtime_owner_client(
         RemoteRuntimeOwnerCommandEnvelope::UpsertSession { node_id, session } => {
             let key = owned_record_key(&node_id, session.address.id().as_str());
             state
+                .offline_nodes
+                .lock()
+                .expect("remote runtime owner offline node mutex should not be poisoned")
+                .remove(&node_id);
+            state
                 .records
                 .lock()
                 .expect("remote runtime owner state mutex should not be poisoned")
@@ -451,6 +461,7 @@ fn handle_remote_runtime_owner_client(
                 .lock()
                 .expect("remote runtime owner state mutex should not be poisoned")
                 .remove(&key);
+            clear_offline_node_if_empty(state, &node_id);
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
@@ -459,6 +470,11 @@ fn handle_remote_runtime_owner_client(
                 .lock()
                 .expect("remote runtime owner state mutex should not be poisoned");
             guard.retain(|_, record| record.node_id != node_id);
+            state
+                .offline_nodes
+                .lock()
+                .expect("remote runtime owner offline node mutex should not be poisoned")
+                .remove(&node_id);
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
@@ -471,9 +487,18 @@ fn handle_remote_runtime_owner_client(
                     record.session.availability = SessionAvailability::Offline;
                 }
             }
+            if guard.values().any(|record| record.node_id == node_id) {
+                state
+                    .offline_nodes
+                    .lock()
+                    .expect("remote runtime owner offline node mutex should not be poisoned")
+                    .entry(node_id)
+                    .or_insert_with(Instant::now);
+            }
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => {
+            prune_expired_offline_nodes(state, Instant::now());
             let snapshot = render_remote_runtime_owner_snapshot(
                 &state
                     .records
@@ -508,6 +533,57 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { .. } => "mark_node_offline",
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot",
         RemoteRuntimeOwnerCommandEnvelope::Shutdown => "shutdown",
+    }
+}
+
+fn prune_expired_offline_nodes(state: &RemoteRuntimeOwnerSharedState, now: Instant) {
+    let expired_nodes = {
+        let offline_nodes = state
+            .offline_nodes
+            .lock()
+            .expect("remote runtime owner offline node mutex should not be poisoned");
+        offline_nodes
+            .iter()
+            .filter_map(|(node_id, since)| {
+                (now.duration_since(*since) >= OFFLINE_NODE_RETENTION).then(|| node_id.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    if expired_nodes.is_empty() {
+        return;
+    }
+
+    let mut records = state
+        .records
+        .lock()
+        .expect("remote runtime owner state mutex should not be poisoned");
+    for node_id in &expired_nodes {
+        records.retain(|_, record| &record.node_id != node_id);
+    }
+    drop(records);
+
+    let mut offline_nodes = state
+        .offline_nodes
+        .lock()
+        .expect("remote runtime owner offline node mutex should not be poisoned");
+    for node_id in expired_nodes {
+        offline_nodes.remove(&node_id);
+    }
+}
+
+fn clear_offline_node_if_empty(state: &RemoteRuntimeOwnerSharedState, node_id: &str) {
+    let has_records = state
+        .records
+        .lock()
+        .expect("remote runtime owner state mutex should not be poisoned")
+        .values()
+        .any(|record| record.node_id == node_id);
+    if !has_records {
+        state
+            .offline_nodes
+            .lock()
+            .expect("remote runtime owner offline node mutex should not be poisoned")
+            .remove(node_id);
     }
 }
 
@@ -1159,10 +1235,11 @@ fn remote_runtime_owner_io_error(error: io::Error) -> LifecycleError {
 mod tests {
     use super::{
         handle_remote_runtime_owner_client, parse_remote_runtime_owner_command,
-        parse_remote_runtime_owner_snapshot, remote_runtime_owner_args,
-        remote_runtime_owner_socket_path, render_remote_runtime_owner_command,
-        render_remote_runtime_owner_snapshot, OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope,
-        RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot,
+        parse_remote_runtime_owner_snapshot, prune_expired_offline_nodes,
+        remote_runtime_owner_args, remote_runtime_owner_socket_path,
+        render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
+        OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
+        RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -1176,6 +1253,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     fn remote_session(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
@@ -1363,6 +1441,7 @@ mod tests {
                     },
                 ),
             ]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
@@ -1418,6 +1497,7 @@ mod tests {
                     },
                 ),
             ]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
@@ -1462,12 +1542,59 @@ mod tests {
                 .availability,
             SessionAvailability::Online
         );
+        assert!(state
+            .offline_nodes
+            .lock()
+            .expect("remote runtime owner offline node mutex should not be poisoned")
+            .contains_key("peer-a"));
+    }
+
+    #[test]
+    fn expired_offline_node_is_pruned_from_snapshot_source() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty1"),
+                    },
+                ),
+                (
+                    "peer-b\tremote-peer:peer-b:pty9".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-b".to_string(),
+                        session: remote_session("peer-b", "pty9"),
+                    },
+                ),
+            ]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::from([(
+                "peer-a".to_string(),
+                Instant::now() - OFFLINE_NODE_RETENTION - Duration::from_secs(1),
+            )]))),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+
+        prune_expired_offline_nodes(&state, Instant::now());
+
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        assert_eq!(records.len(), 1);
+        assert!(records.contains_key("peer-b\tremote-peer:peer-b:pty9"));
+        assert!(state
+            .offline_nodes
+            .lock()
+            .expect("remote runtime owner offline node mutex should not be poisoned")
+            .is_empty());
     }
 
     #[test]
     fn shutdown_command_marks_owner_not_running() {
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");

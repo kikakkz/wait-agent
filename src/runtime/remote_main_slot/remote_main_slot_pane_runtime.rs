@@ -778,15 +778,21 @@ impl RemoteMainSlotPaneRuntime {
                         }
                         if !is_available {
                             let target_exists_in_catalog = target_is_present(&target_presence);
+                            let target_availability = self
+                                .resolve_remote_target(&spec.target, "remote target presence")
+                                .ok()
+                                .as_ref()
+                                .and_then(|target| target_availability(Some(target)));
                             let should_exit = should_exit_surface_for_target_presence_loss(
-                                target_exists_in_catalog,
+                                target_availability,
                                 remote_runtime.has_connection(target.address.authority_id()),
                                 reconnecting_since.is_some(),
                             );
                             if should_exit {
                                 ERROR_LOG.log(format!(
-                                    "[diag-timing] target presence loss classified as exit: in_catalog={} authority_connected={} reconnecting={}",
+                                    "[diag-timing] target presence loss classified as exit: in_catalog={} availability={:?} authority_connected={} reconnecting={}",
                                     target_exists_in_catalog,
+                                    target_availability,
                                     remote_runtime.has_connection(target.address.authority_id()),
                                     reconnecting_since.is_some(),
                                 ));

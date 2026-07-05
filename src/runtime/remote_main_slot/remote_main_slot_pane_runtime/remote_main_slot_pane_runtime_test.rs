@@ -925,22 +925,34 @@ mod tests {
     #[test]
     fn target_presence_loss_exits_when_target_is_removed_even_if_authority_stays_connected() {
         assert!(should_exit_surface_for_target_presence_loss(
-            true == false,
-            true,
-            false
+            None, true, false
         ));
         assert!(should_exit_surface_for_target_presence_loss(
-            false, true, true
+            None, true, true
+        ));
+        assert!(should_exit_surface_for_target_presence_loss(
+            Some(SessionAvailability::Exited),
+            false,
+            true
         ));
     }
 
     #[test]
     fn target_presence_loss_waits_during_reconnect_when_target_still_exists() {
         assert!(!should_exit_surface_for_target_presence_loss(
-            true, true, true
+            Some(SessionAvailability::Online),
+            true,
+            true
         ));
         assert!(!should_exit_surface_for_target_presence_loss(
-            true, false, true
+            Some(SessionAvailability::Online),
+            false,
+            true
+        ));
+        assert!(!should_exit_surface_for_target_presence_loss(
+            Some(SessionAvailability::Offline),
+            false,
+            false
         ));
     }
 

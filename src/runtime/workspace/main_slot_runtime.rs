@@ -443,7 +443,7 @@ impl MainSlotRuntime {
             "[diag-bug] run_main_pane_died: is_remote={is_remote}"
         ));
         if is_remote {
-            self.fallback_after_remote_main_pane_exit(
+            self.transition_after_remote_main_pane_exit(
                 &current_workspace,
                 &workspace,
                 &recovery_pane,
@@ -983,7 +983,7 @@ impl MainSlotRuntime {
         }
     }
 
-    fn fallback_after_remote_main_pane_exit(
+    fn transition_after_remote_main_pane_exit(
         &self,
         current_workspace: &CurrentWorkspace,
         workspace: &TmuxWorkspaceHandle,
@@ -1000,6 +1000,7 @@ impl MainSlotRuntime {
             .and_then(|target_id| {
                 sessions.iter().find(|session| {
                     session.address.qualified_target() == target_id
+                        && session.availability == SessionAvailability::Online
                         && (session.address.transport() == &SessionTransport::RemotePeer
                             || session.address.authority_id().contains('#'))
                 })
@@ -1027,7 +1028,7 @@ impl MainSlotRuntime {
             );
         }
         ERROR_LOG.log(format!(
-            "[diag-bug] fallback: found {} visible workspace sessions, active_target={active_target:?}",
+            "[diag-bug] remote_main_pane_exit_transition: found {} visible workspace sessions, active_target={active_target:?}",
             sessions.len()
         ));
         let next_target = next_remote_target(&sessions, active_target.as_deref()).or_else(|| {
@@ -1038,7 +1039,7 @@ impl MainSlotRuntime {
             )
         });
         ERROR_LOG.log(format!(
-            "[diag-bug] fallback: next_target={}",
+            "[diag-bug] remote_main_pane_exit_transition: next_target={}",
             next_target.as_ref().map_or("none".to_string(), |t| t
                 .address
                 .id()
@@ -1056,7 +1057,7 @@ impl MainSlotRuntime {
                 let is_remote = target.address.transport() == &SessionTransport::RemotePeer
                     || target.address.authority_id().contains('#');
                 ERROR_LOG.log(format!(
-                    "[diag-bug] fallback: activating target={} transport={:?} authority={} is_remote={is_remote}",
+                    "[diag-bug] remote_main_pane_exit_transition: activating target={} transport={:?} authority={} is_remote={is_remote}",
                     target.address.id().as_str(),
                     target.address.transport(),
                     target.address.authority_id(),
@@ -1113,7 +1114,7 @@ impl MainSlotRuntime {
             }
             None => {
                 ERROR_LOG.log(
-                    "[diag-bug] fallback: no next target, respawning with host only".to_string(),
+                    "[diag-bug] remote_main_pane_exit_transition: no next target, respawning with host only".to_string(),
                 );
                 self.backend
                     .respawn_pane(
@@ -2876,7 +2877,7 @@ fn next_target_host_session(
     let same_socket_targets = sessions
         .iter()
         .filter(|session| session.address.server_id() == socket_name && session.is_target_host())
-        .filter(|session| session.availability != SessionAvailability::Exited)
+        .filter(|session| session.availability == SessionAvailability::Online)
         .cloned()
         .collect::<Vec<_>>();
 
@@ -2920,6 +2921,7 @@ fn next_remote_target_matching_authority(
                 && authority_id.map_or(true, |authority| {
                     session.address.authority_id() == authority
                 })
+                && session.availability == SessionAvailability::Online
                 && (session.address.transport() == &SessionTransport::RemotePeer
                     || session.address.authority_id().contains('#'))
         })

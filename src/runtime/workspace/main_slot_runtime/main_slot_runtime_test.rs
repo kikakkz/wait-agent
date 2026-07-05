@@ -104,6 +104,20 @@ mod tests {
     }
 
     #[test]
+    fn next_target_host_session_ignores_offline_target_hosts() {
+        let _guard = crate::test_support::integration_test_lock();
+        let mut offline = session("wa-1", "target-b", WorkspaceSessionRole::TargetHost);
+        offline.availability = SessionAvailability::Offline;
+        let sessions = vec![
+            session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
+            session("wa-1", "target-a", WorkspaceSessionRole::TargetHost),
+            offline,
+        ];
+
+        assert!(next_target_host_session(&sessions, "wa-1", Some("wa-1:target-a")).is_none());
+    }
+
+    #[test]
     fn next_remote_target_prefers_another_remote_target() {
         let _guard = crate::test_support::integration_test_lock();
         let sessions = vec![
@@ -126,6 +140,20 @@ mod tests {
             session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
             session("wa-1", "target-a", WorkspaceSessionRole::TargetHost),
             remote_session("10.1.29.130#7474", "remote-a"),
+        ];
+
+        assert!(next_remote_target(&sessions, Some("10.1.29.130#7474:remote-a")).is_none());
+    }
+
+    #[test]
+    fn next_remote_target_ignores_offline_remote_targets() {
+        let _guard = crate::test_support::integration_test_lock();
+        let mut offline = remote_session("10.1.29.130#7474", "remote-b");
+        offline.availability = SessionAvailability::Offline;
+        let sessions = vec![
+            session("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
+            remote_session("10.1.29.130#7474", "remote-a"),
+            offline,
         ];
 
         assert!(next_remote_target(&sessions, Some("10.1.29.130#7474:remote-a")).is_none());
@@ -3672,7 +3700,7 @@ mod tests {
             .expect("main pane option should be corrupted to another live pane");
 
         runtime
-            .fallback_after_remote_main_pane_exit(
+            .transition_after_remote_main_pane_exit(
                 &CurrentWorkspace {
                     socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
                     session_name: workspace.workspace_handle.session_name.as_str().to_string(),
