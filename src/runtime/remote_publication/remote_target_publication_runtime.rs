@@ -42,6 +42,7 @@ pub struct RemoteTargetPublicationRuntime {
     local_tmux: EmbeddedTmuxBackend,
     current_executable: PathBuf,
     network: RemoteNetworkConfig,
+    discover_live_workspaces: bool,
 }
 
 #[derive(Clone)]
@@ -105,6 +106,7 @@ impl RemoteTargetPublicationRuntime {
                 .map_err(remote_target_publication_error)?,
             current_executable: current_waitagent_executable()?,
             network,
+            discover_live_workspaces: true,
         })
     }
 
@@ -117,6 +119,7 @@ impl RemoteTargetPublicationRuntime {
                 .map_err(remote_target_publication_error)?,
             current_executable: current_waitagent_executable()?,
             network: RemoteNetworkConfig::default(),
+            discover_live_workspaces: false,
         })
     }
 
@@ -336,6 +339,9 @@ impl RemoteTargetPublicationRuntime {
 
     pub fn mark_discovered_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
         self.signal_remote_runtime_owner_mark_node_offline(node_id)?;
+        if !self.discover_live_workspaces {
+            return Ok(());
+        }
         let live_workspace_sockets = self.live_workspace_socket_names()?;
         if !live_workspace_sockets.is_empty() {
             self.refresh_live_workspaces(&live_workspace_sockets)?;
@@ -442,6 +448,9 @@ impl RemoteTargetPublicationRuntime {
     }
 
     pub(crate) fn live_workspace_socket_names(&self) -> Result<Vec<String>, LifecycleError> {
+        if !self.discover_live_workspaces {
+            return Ok(Vec::new());
+        }
         let registered_sockets = live_workspace_socket_names_for_network(&self.network)?;
         if !registered_sockets.is_empty()
             || RemoteWorkspaceSocketRegistryRuntime::new(self.network.clone()).registry_exists()

@@ -89,6 +89,7 @@ struct ActiveNodeIngressSession {
     session: RemoteNodeSessionHandle,
     bridges: HashMap<PathBuf, ActiveAuthoritySocketBridge>,
     published_fingerprints: HashMap<String, String>,
+    opened_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -158,6 +159,11 @@ pub(super) enum InternalEvent {
     BridgeClosed {
         node_id: String,
         socket_path: PathBuf,
+    },
+    AuthorityCommandReceived {
+        node_id: String,
+        socket_path: PathBuf,
+        command: RemoteAuthorityCommand,
     },
     LocalCreateSession {
         envelope: GrpcNodeSessionEnvelope,
@@ -1294,6 +1300,7 @@ fn run_node_ingress_server_loop(
     let mut publication_revisions = ReceiverPublicationRevisionTable::default();
     let mut socket_discovery_retry_scheduled = false;
     let mut closed_session_instances = HashSet::<String>::new();
+    let mut next_session_open_seq = 0_u64;
 
     loop {
         drain_ingress_events(
@@ -1335,6 +1342,7 @@ fn run_node_ingress_server_loop(
                 internal_tx.clone(),
                 &mut socket_discovery_retry_scheduled,
                 &mut closed_session_instances,
+                &mut next_session_open_seq,
                 event,
             ),
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
@@ -1432,6 +1440,7 @@ fn handle_transport_event(
     internal_tx: mpsc::Sender<InternalEvent>,
     socket_discovery_retry_scheduled: &mut bool,
     closed_session_instances: &mut HashSet<String>,
+    next_session_open_seq: &mut u64,
     event: RemoteNodeTransportEvent,
 ) {
     match event {
@@ -1439,10 +1448,12 @@ fn handle_transport_event(
             let node_id = session.node_id().to_string();
             let session_instance_id = session.session_instance_id().to_string();
             closed_session_instances.remove(&session_instance_id);
+            *next_session_open_seq = next_session_open_seq.saturating_add(1);
             let mut active = ActiveNodeIngressSession {
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
+                opened_seq: *next_session_open_seq,
             };
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
@@ -1553,6 +1564,16 @@ fn has_active_ingress_session_for_node(
     sessions
         .values()
         .any(|active| active.session.node_id() == node_id)
+}
+
+fn current_active_ingress_session_for_node<'a>(
+    sessions: &'a HashMap<String, ActiveNodeIngressSession>,
+    node_id: &str,
+) -> Option<&'a ActiveNodeIngressSession> {
+    sessions
+        .values()
+        .filter(|active| active.session.node_id() == node_id)
+        .max_by_key(|active| active.opened_seq)
 }
 
 fn mark_discovered_node_offline_if_last_ingress_session(
@@ -1770,6 +1791,36 @@ fn handle_internal_event(
                 if active.session.node_id() == node_id {
                     active.bridges.remove(&socket_path);
                 }
+            }
+        }
+        InternalEvent::AuthorityCommandReceived {
+            node_id,
+            socket_path,
+            command,
+        } => {
+            let Some(active) = current_active_ingress_session_for_node(sessions, &node_id) else {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] dropping authority command for node={node_id} socket={} because no active session is open",
+                    socket_path.display()
+                ));
+                return;
+            };
+            let envelope = match map_authority_command_to_grpc(&active.session, command) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-node-ingress] failed to map authority command for node={node_id} socket={}: {error}",
+                        socket_path.display()
+                    ));
+                    return;
+                }
+            };
+            if let Err(error) = active.session.send(envelope) {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={} socket={}: {error}",
+                    active.session.session_instance_id(),
+                    socket_path.display()
+                ));
             }
         }
         InternalEvent::AuthoritySocketReady {
@@ -2443,29 +2494,12 @@ fn refresh_authority_bridge_path(
         }
     };
     let transport = Arc::new(transport);
-    let reader = transport.clone();
-    let transport_session = session.session.clone();
-    let node_id_owned = node_id.to_string();
-    let socket_path_owned = socket_path.clone();
-    let internal_tx_owned = internal_tx.clone();
-    thread::spawn(move || {
-        loop {
-            let command = match reader.recv_command() {
-                Ok(command) => command,
-                Err(_) => break,
-            };
-            let Ok(envelope) = map_authority_command_to_grpc(&transport_session, command) else {
-                break;
-            };
-            if transport_session.send(envelope).is_err() {
-                break;
-            }
-        }
-        let _ = internal_tx_owned.send(InternalEvent::BridgeClosed {
-            node_id: node_id_owned,
-            socket_path: socket_path_owned,
-        });
-    });
+    spawn_authority_bridge_reader(
+        node_id.to_string(),
+        socket_path.clone(),
+        transport.clone(),
+        internal_tx,
+    );
     session.bridges.insert(
         socket_path.clone(),
         ActiveAuthoritySocketBridge {
@@ -2508,30 +2542,12 @@ fn refresh_authority_bridges(
             }
         };
         let transport = Arc::new(transport);
-        let reader = transport.clone();
-        let transport_session = session.session.clone();
-        let node_id_owned = node_id.to_string();
-        let socket_path_owned = socket_path.clone();
-        let internal_tx_owned = internal_tx.clone();
-        thread::spawn(move || {
-            loop {
-                let command = match reader.recv_command() {
-                    Ok(command) => command,
-                    Err(_) => break,
-                };
-                let Ok(envelope) = map_authority_command_to_grpc(&transport_session, command)
-                else {
-                    break;
-                };
-                if transport_session.send(envelope).is_err() {
-                    break;
-                }
-            }
-            let _ = internal_tx_owned.send(InternalEvent::BridgeClosed {
-                node_id: node_id_owned,
-                socket_path: socket_path_owned,
-            });
-        });
+        spawn_authority_bridge_reader(
+            node_id.to_string(),
+            socket_path.clone(),
+            transport.clone(),
+            internal_tx.clone(),
+        );
         session.bridges.insert(
             socket_path,
             ActiveAuthoritySocketBridge {
@@ -2548,6 +2564,36 @@ fn refresh_authority_bridges(
         ));
     }
     outcome
+}
+
+fn spawn_authority_bridge_reader(
+    node_id: String,
+    socket_path: PathBuf,
+    reader: Arc<RemoteAuthorityTransportRuntime>,
+    internal_tx: mpsc::Sender<InternalEvent>,
+) {
+    thread::spawn(move || {
+        loop {
+            let command = match reader.recv_command() {
+                Ok(command) => command,
+                Err(_) => break,
+            };
+            if internal_tx
+                .send(InternalEvent::AuthorityCommandReceived {
+                    node_id: node_id.clone(),
+                    socket_path: socket_path.clone(),
+                    command,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = internal_tx.send(InternalEvent::BridgeClosed {
+            node_id,
+            socket_path,
+        });
+    });
 }
 
 fn discover_authority_socket_paths(authority_id: &str) -> io::Result<Vec<PathBuf>> {

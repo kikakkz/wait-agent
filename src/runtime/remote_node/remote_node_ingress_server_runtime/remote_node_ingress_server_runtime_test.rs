@@ -13,6 +13,11 @@ mod tests {
         TargetOutput,
     };
     use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
+    use crate::infra::remote_protocol::{
+        BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
+        REMOTE_PROTOCOL_VERSION,
+    };
+    use crate::infra::remote_transport_codec::write_control_plane_envelope;
     use crate::runtime::remote_authority_transport_runtime::{
         authority_transport_socket_path, RemoteAuthorityTransportRuntime,
     };
@@ -366,9 +371,11 @@ mod tests {
                 },
             )]),
             published_fingerprints: std::collections::HashMap::new(),
+            opened_seq: 1,
         };
-        let publication_runtime = RemoteTargetPublicationRuntime::from_build_env()
-            .expect("publication runtime should build");
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
 
         route_transport_envelope(
             &publication_runtime,
@@ -500,6 +507,7 @@ mod tests {
                 ),
             ]),
             published_fingerprints: std::collections::HashMap::new(),
+            opened_seq: 1,
         };
         let publication_runtime =
             RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
@@ -551,6 +559,7 @@ mod tests {
             session: session_handle,
             bridges: std::collections::HashMap::new(),
             published_fingerprints: std::collections::HashMap::new(),
+            opened_seq: 1,
         };
         let publication_runtime =
             RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
@@ -628,8 +637,9 @@ mod tests {
         let old_accept = thread::spawn(move || collect_authority_connections(old_listener));
         let new_accept = thread::spawn(move || collect_authority_connections(new_listener));
 
-        let publication_runtime = RemoteTargetPublicationRuntime::from_build_env()
-            .expect("publication runtime should build");
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
         let (transport_tx, transport_rx) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel();
         let worker_internal_tx = internal_tx.clone();
@@ -730,6 +740,108 @@ mod tests {
     }
 
     #[test]
+    fn authority_bridge_commands_follow_latest_active_session_after_reconnect() {
+        let _guard = crate::test_support::integration_test_lock();
+        use super::super::run_node_ingress_server_loop;
+        use crate::infra::remote_grpc_transport::{
+            RemoteNodeSessionHandle, RemoteNodeTransportEvent,
+        };
+        use std::sync::mpsc;
+        use std::thread;
+
+        let node_id = unique_node_id("peer-command-reconnect");
+        let socket_path = authority_transport_socket_path(
+            "test-socket-command",
+            "test-session-command",
+            &format!("remote-peer:{node_id}:shell-command"),
+        );
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("socket should bind");
+        let accept = thread::spawn(move || collect_authority_connections(listener));
+
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
+        let (transport_tx, transport_rx) = mpsc::channel();
+        let (internal_tx, internal_rx) = mpsc::channel();
+        let worker_internal_tx = internal_tx.clone();
+        let worker = thread::spawn(move || {
+            run_node_ingress_server_loop(
+                publication_runtime,
+                transport_rx,
+                internal_rx,
+                worker_internal_tx,
+                false,
+            );
+        });
+
+        let (old_session, mut old_outbound_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id.clone(), "session-old");
+        let (new_session, mut new_outbound_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id.clone(), "session-new");
+        transport_tx
+            .send(RemoteNodeTransportEvent::SessionOpened {
+                session: old_session,
+            })
+            .expect("old session should open");
+        internal_tx
+            .send(InternalEvent::SocketDirChanged)
+            .expect("authority socket event should send");
+        let mut writers = accept.join().expect("accept should join");
+        assert_eq!(writers.len(), 1, "bridge should connect once");
+
+        transport_tx
+            .send(RemoteNodeTransportEvent::SessionOpened {
+                session: new_session,
+            })
+            .expect("new session should open");
+        transport_tx
+            .send(RemoteNodeTransportEvent::SessionClosed {
+                node_id: node_id.clone(),
+                session_instance_id: "session-old".to_string(),
+            })
+            .expect("old session should close");
+
+        write_control_plane_envelope(
+            &mut writers[0],
+            &open_mirror_request_envelope(
+                &format!("remote-peer:{node_id}:shell-command"),
+                "shell-command",
+            ),
+        )
+        .expect("authority command should write");
+
+        let forwarded = recv_outbound_with_deadline(&mut new_outbound_rx)
+            .expect("command should be forwarded to latest active session");
+        assert_eq!(forwarded.session_instance_id, "session-new");
+        match forwarded.body {
+            Some(Body::OpenMirrorRequest(payload)) => {
+                assert_eq!(payload.session_id, "shell-command");
+                assert_eq!(
+                    payload.target_id,
+                    format!("remote-peer:{node_id}:shell-command")
+                );
+            }
+            other => panic!("unexpected forwarded body: {other:?}"),
+        }
+        assert!(
+            old_outbound_rx.try_recv().is_err(),
+            "command must not be sent through stale session"
+        );
+
+        for writer in &writers {
+            let _ = writer.shutdown(Shutdown::Both);
+        }
+        internal_tx
+            .send(InternalEvent::Shutdown)
+            .expect("shutdown event should send");
+        drop(transport_tx);
+        drop(internal_tx);
+        let _ = worker.join();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
     fn closed_session_instance_drops_late_envelopes() {
         let _guard = crate::test_support::integration_test_lock();
         use super::super::run_node_ingress_server_loop;
@@ -749,8 +861,9 @@ mod tests {
             std::os::unix::net::UnixListener::bind(&socket_path).expect("socket should bind");
         let accept = thread::spawn(move || collect_authority_connections(listener));
 
-        let publication_runtime = RemoteTargetPublicationRuntime::from_build_env()
-            .expect("publication runtime should build");
+        let publication_runtime =
+            RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
+                .expect("publication runtime should build");
         let (transport_tx, transport_rx) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel();
         let worker_internal_tx = internal_tx.clone();
@@ -847,6 +960,7 @@ mod tests {
                     session: same_node_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
+                    opened_seq: 2,
                 },
             ),
             (
@@ -855,6 +969,7 @@ mod tests {
                     session: other_node_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
+                    opened_seq: 1,
                 },
             ),
         ]);
@@ -871,9 +986,28 @@ mod tests {
                 session: RemoteNodeSessionHandle::new_for_tests(other_node_id, "session-other-2").0,
                 bridges: std::collections::HashMap::new(),
                 published_fingerprints: std::collections::HashMap::new(),
+                opened_seq: 1,
             },
         )]);
         assert!(!has_active_ingress_session_for_node(&sessions, node_id));
+    }
+
+    fn recv_outbound_with_deadline(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<NodeSessionEnvelope>,
+    ) -> Option<NodeSessionEnvelope> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match receiver.try_recv() {
+                Ok(envelope) => return Some(envelope),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+            }
+        }
     }
 
     fn collect_authority_connections(
@@ -994,6 +1128,34 @@ mod tests {
             other => panic!("unexpected expected status {other}"),
         };
         assert_eq!(actual, expected);
+    }
+
+    fn open_mirror_request_envelope(
+        target_id: &str,
+        session_id: &str,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
+        let payload = ControlPlanePayload::OpenMirrorRequest(OpenMirrorRequestPayload {
+            session_id: session_id.to_string(),
+            target_id: target_id.to_string(),
+            console_id: "console-1".to_string(),
+            cols: 80,
+            rows: 24,
+            raw_pty_passthrough: false,
+            bootstrap_mode: BootstrapMode::Full,
+        });
+        ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: "open-mirror-request-test".to_string(),
+            message_type: payload.message_type(),
+            timestamp: "0Z".to_string(),
+            sender_id: "test-authority".to_string(),
+            correlation_id: None,
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
+            attachment_id: None,
+            console_id: Some("console-1".to_string()),
+            payload,
+        }
     }
 
     fn target_published_envelope_with_revision(
