@@ -449,8 +449,16 @@ impl RemoteMainSlotPaneRuntime {
                         if raw.is_empty() {
                             continue;
                         }
-                        write_remote_raw_output_with_initial_clear(
+                        render_remote_output_and_mark_ready(
                             &raw,
+                            &remote_runtime,
+                            &target,
+                            binding.as_ref(),
+                            &mut pending_pty_size,
+                            &mut paused_input_buffer,
+                            &mut console_seq,
+                            &mut mirror_readiness,
+                            &mut reconnecting_since,
                             &mut raw_screen_initialized,
                         )?;
                     }
@@ -657,11 +665,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut direct_raw_output_last_seq,
                             )
                             .map_err(remote_protocol_error)?;
-                            write_remote_raw_output_with_initial_clear(
-                                &raw,
-                                &mut raw_screen_initialized,
-                            )?;
-                            mark_mirror_ready_if_raw_arrived(
+                            render_remote_output_and_mark_ready(
                                 &raw,
                                 &remote_runtime,
                                 &target,
@@ -671,6 +675,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut console_seq,
                                 &mut mirror_readiness,
                                 &mut reconnecting_since,
+                                &mut raw_screen_initialized,
                             )?;
                         }
                         AuthorityTransportEvent::Envelope {
@@ -690,11 +695,7 @@ impl RemoteMainSlotPaneRuntime {
                             )
                             .map_err(remote_protocol_error)?
                             {
-                                write_remote_raw_output_with_initial_clear(
-                                    &raw,
-                                    &mut raw_screen_initialized,
-                                )?;
-                                mark_mirror_ready_if_raw_arrived(
+                                render_remote_output_and_mark_ready(
                                     &raw,
                                     &remote_runtime,
                                     &target,
@@ -704,6 +705,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut console_seq,
                                     &mut mirror_readiness,
                                     &mut reconnecting_since,
+                                    &mut raw_screen_initialized,
                                 )?;
                                 continue;
                             }
@@ -734,17 +736,6 @@ impl RemoteMainSlotPaneRuntime {
                                 }
                                 return Err(remote_protocol_error(e));
                             }
-                            mark_mirror_ready_if_bootstrap_completed(
-                                &envelope,
-                                &remote_runtime,
-                                &target,
-                                binding.as_ref(),
-                                &mut pending_pty_size,
-                                &mut paused_input_buffer,
-                                &mut console_seq,
-                                &mut mirror_readiness,
-                                &mut reconnecting_since,
-                            )?;
                             // Drain observer mailbox immediately: the mailbox
                             // watcher may never fire because sync() below
                             // consumes envelopes via try_recv(), making the
@@ -757,8 +748,16 @@ impl RemoteMainSlotPaneRuntime {
                                     "[diag-timing] Envelope drain: writing {} bytes to pane",
                                     output.len()
                                 ));
-                                write_remote_raw_output_with_initial_clear(
+                                render_remote_output_and_mark_ready(
                                     &output,
+                                    &remote_runtime,
+                                    &target,
+                                    binding.as_ref(),
+                                    &mut pending_pty_size,
+                                    &mut paused_input_buffer,
+                                    &mut console_seq,
+                                    &mut mirror_readiness,
+                                    &mut reconnecting_since,
                                     &mut raw_screen_initialized,
                                 )?;
                             }
@@ -1098,6 +1097,34 @@ fn activate_remote_surface_binding(
     Ok(activated_binding)
 }
 
+fn render_remote_output_and_mark_ready(
+    raw: &[u8],
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: Option<&RemoteAttachmentBinding>,
+    pending_pty_size: &mut Option<TerminalSize>,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    mirror_readiness: &mut MirrorReadiness,
+    reconnecting_since: &mut Option<Instant>,
+    raw_screen_initialized: &mut bool,
+) -> Result<(), LifecycleError> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    write_remote_raw_output_with_initial_clear(raw, raw_screen_initialized)?;
+    mark_mirror_ready(
+        remote_runtime,
+        target,
+        binding,
+        pending_pty_size,
+        paused_input_buffer,
+        console_seq,
+        mirror_readiness,
+        reconnecting_since,
+    )
+}
+
 fn begin_authority_reconnect(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
@@ -1119,6 +1146,7 @@ fn begin_authority_reconnect(
     *reconnect_animation_frame = 0;
 }
 
+#[cfg(test)]
 fn mark_mirror_ready_if_raw_arrived(
     raw: &[u8],
     remote_runtime: &RemoteMainSlotRuntime,
@@ -1143,37 +1171,6 @@ fn mark_mirror_ready_if_raw_arrived(
         mirror_readiness,
         reconnecting_since,
     )
-}
-
-fn mark_mirror_ready_if_bootstrap_completed(
-    envelope: &crate::infra::remote_protocol::ProtocolEnvelope<
-        crate::infra::remote_protocol::ControlPlanePayload,
-    >,
-    remote_runtime: &RemoteMainSlotRuntime,
-    target: &ManagedSessionRecord,
-    binding: Option<&RemoteAttachmentBinding>,
-    pending_pty_size: &mut Option<TerminalSize>,
-    paused_input_buffer: &mut Vec<Vec<u8>>,
-    console_seq: &mut u64,
-    mirror_readiness: &mut MirrorReadiness,
-    reconnecting_since: &mut Option<Instant>,
-) -> Result<(), LifecycleError> {
-    if matches!(
-        envelope.payload,
-        crate::infra::remote_protocol::ControlPlanePayload::MirrorBootstrapComplete(_)
-    ) {
-        mark_mirror_ready(
-            remote_runtime,
-            target,
-            binding,
-            pending_pty_size,
-            paused_input_buffer,
-            console_seq,
-            mirror_readiness,
-            reconnecting_since,
-        )?;
-    }
-    Ok(())
 }
 
 fn mark_mirror_ready(

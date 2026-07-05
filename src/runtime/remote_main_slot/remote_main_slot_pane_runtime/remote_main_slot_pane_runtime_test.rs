@@ -4,8 +4,8 @@ mod tests {
         authority_status_from_runtime, authority_transport_event_sender,
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
         flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
-        mark_mirror_ready_if_bootstrap_completed, mark_mirror_ready_if_raw_arrived,
-        placeholder_lines, should_draw_remote_snapshot, should_exit_surface_for_target_presence,
+        mark_mirror_ready_if_raw_arrived, placeholder_lines, render_remote_output_and_mark_ready,
+        should_draw_remote_snapshot, should_exit_surface_for_target_presence,
         should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
         should_sync_remote_pty_resize_for_state, spawn_mailbox_watcher,
         sync_or_defer_remote_pty_size, target_is_online,
@@ -1072,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_readiness_keeps_reconnecting_until_bootstrap_or_raw_output() {
+    fn mirror_readiness_keeps_reconnecting_until_remote_output_is_rendered() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         runtime
             .ensure_local_observer_connection("observer-a")
@@ -1120,8 +1120,17 @@ mod tests {
         assert!(reconnecting_since.is_some());
         assert_eq!(paused_input_buffer.len(), 1);
 
-        mark_mirror_ready_if_bootstrap_completed(
-            &authority_bootstrap_complete_envelope(1),
+        runtime
+            .send_mirror_bootstrap_complete(&target, 1, false, false, true)
+            .expect("bootstrap complete should update mailbox without making mirror ready");
+
+        assert_eq!(readiness, MirrorReadiness::Waiting);
+        assert!(reconnecting_since.is_some());
+        assert_eq!(paused_input_buffer.len(), 1);
+
+        let mut raw_screen_initialized = false;
+        render_remote_output_and_mark_ready(
+            b"\x1b[?25h",
             &runtime,
             &target,
             Some(&binding),
@@ -1130,12 +1139,14 @@ mod tests {
             &mut console_seq,
             &mut readiness,
             &mut reconnecting_since,
+            &mut raw_screen_initialized,
         )
-        .expect("bootstrap complete should make mirror ready");
+        .expect("rendered remote output should make mirror ready");
 
         assert_eq!(readiness, MirrorReadiness::Ready);
         assert!(reconnecting_since.is_none());
         assert!(paused_input_buffer.is_empty());
+        assert!(raw_screen_initialized);
 
         let messages = authority_mailbox.snapshot();
         assert_eq!(messages.len(), 2);

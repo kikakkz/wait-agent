@@ -190,12 +190,20 @@ pub(super) struct SessionSyncAuthorityManager {
     pub(super) running_hosts: HashMap<String, SessionSyncAuthorityHost>,
     network: RemoteNetworkConfig,
     local_target_socket_name: Option<String>,
+    output_route: SessionSyncAuthorityOutputRoute,
 }
 
 pub(super) struct SessionSyncAuthorityHost {
     pub(super) writer: Arc<Mutex<Option<UnixStream>>>,
     pub(super) running: Arc<AtomicBool>,
     pub(super) writer_ready: Arc<Condvar>,
+}
+
+#[derive(Clone)]
+pub(in crate::runtime::remote_node::remote_node_session_sync_runtime) enum SessionSyncAuthorityOutputRoute
+{
+    DirectSession,
+    OwnerEvent(mpsc::Sender<SessionSyncEvent>),
 }
 
 #[derive(Clone)]
@@ -633,6 +641,20 @@ impl SessionSyncAuthorityManager {
             running_hosts: HashMap::new(),
             network,
             local_target_socket_name,
+            output_route: SessionSyncAuthorityOutputRoute::DirectSession,
+        }
+    }
+
+    fn with_session_events(
+        network: RemoteNetworkConfig,
+        local_target_socket_name: Option<String>,
+        session_event_tx: mpsc::Sender<SessionSyncEvent>,
+    ) -> Self {
+        Self {
+            running_hosts: HashMap::new(),
+            network,
+            local_target_socket_name,
+            output_route: SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx),
         }
     }
 
@@ -831,6 +853,7 @@ impl SessionSyncAuthorityManager {
         spawn_live_authority_listener(
             authority_socket_path.clone(),
             session_handle.clone(),
+            self.output_route.clone(),
             running.clone(),
             writer.clone(),
             writer_ready.clone(),
