@@ -1451,7 +1451,7 @@ pub(super) fn spawn_in_process_authority_target_host(
 
 pub(super) fn spawn_live_authority_listener(
     socket_path: PathBuf,
-    session_handle: RemoteNodeSessionHandle,
+    node_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1467,7 +1467,7 @@ pub(super) fn spawn_live_authority_listener(
                 Ok((stream, _)) => {
                     let _ = bridge_live_authority_stream(
                         stream,
-                        session_handle.clone(),
+                        node_id.clone(),
                         output_route.clone(),
                         running.clone(),
                         writer.clone(),
@@ -1495,7 +1495,7 @@ fn bind_live_authority_listener(socket_path: &Path) -> Result<UnixListener, io::
 
 fn bridge_live_authority_stream(
     mut host_stream: UnixStream,
-    session_handle: RemoteNodeSessionHandle,
+    node_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1523,7 +1523,7 @@ fn bridge_live_authority_stream(
     }
     writer_ready.notify_all();
     ERROR_LOG.log("[diag-timing] bridge_live_authority_stream: writer set, ready signalled, starting forward_host_output_to_owner".to_string());
-    let result = forward_host_output(host_reader, session_handle, output_route, running.clone());
+    let result = forward_host_output(host_reader, node_id, output_route, running.clone());
     ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_owner exited, result={:?}", result));
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
@@ -1541,7 +1541,7 @@ fn bridge_live_authority_stream(
 
 fn forward_host_output(
     mut host_reader: UnixStream,
-    session_handle: RemoteNodeSessionHandle,
+    node_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
@@ -1551,14 +1551,10 @@ fn forward_host_output(
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => ProtocolEnvelope {
                 protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
                     .to_string(),
-                message_id: format!(
-                    "{}-raw-pty-output-{}",
-                    session_handle.node_id(),
-                    payload.output_seq
-                ),
+                message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
                 message_type: "raw_pty_output",
                 timestamp: String::new(),
-                sender_id: session_handle.node_id().to_string(),
+                sender_id: node_id.clone(),
                 correlation_id: None,
                 session_id: Some(payload.session_id.clone()),
                 target_id: Some(payload.target_id.clone()),
@@ -1583,27 +1579,6 @@ fn forward_host_output(
             }
         };
         match &output_route {
-            SessionSyncAuthorityOutputRoute::DirectSession => {
-                let grpc = map_outbound_grpc_envelope(
-                    session_handle.node_id(),
-                    NodeSessionChannel::Authority,
-                    &envelope,
-                )
-                .map_err(remote_session_sync_error)?;
-                ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output: forwarding envelope type={} to gRPC",
-                    envelope.payload.message_type()
-                ));
-                if let Err(e) = session_handle.send(grpc) {
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] forward_host_output: session_handle.send failed: {e}, exiting"
-                    ));
-                    return Err(remote_session_sync_error(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        e.to_string(),
-                    )));
-                }
-            }
             SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx) => {
                 ERROR_LOG.log(format!(
                     "[diag-timing] forward_host_output: forwarding envelope type={} to session-sync owner",
@@ -1614,6 +1589,26 @@ fn forward_host_output(
                 {
                     ERROR_LOG.log(format!(
                         "[diag-timing] forward_host_output: owner event send failed: {e}, exiting"
+                    ));
+                    return Err(remote_session_sync_error(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        e.to_string(),
+                    )));
+                }
+            }
+            SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx) => {
+                ERROR_LOG.log(format!(
+                    "[diag-timing] forward_host_output: forwarding envelope type={} to ingress owner",
+                    envelope.payload.message_type()
+                ));
+                if let Err(e) = ingress_event_tx.send(
+                    crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent::AuthorityHostOutput {
+                        node_id: node_id.clone(),
+                        envelope,
+                    },
+                ) {
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] forward_host_output: ingress event send failed: {e}, exiting"
                     ));
                     return Err(remote_session_sync_error(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,

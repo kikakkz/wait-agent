@@ -15,7 +15,7 @@ mod tests {
     use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
     use crate::infra::remote_protocol::{
         BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
-        REMOTE_PROTOCOL_VERSION,
+        RawPtyOutputPayload, REMOTE_PROTOCOL_VERSION,
     };
     use crate::infra::remote_transport_codec::write_control_plane_envelope;
     use crate::runtime::remote_authority_transport_runtime::{
@@ -842,6 +842,71 @@ mod tests {
     }
 
     #[test]
+    fn authority_host_output_follows_latest_active_session_after_reconnect() {
+        let node_id = "peer-output-reconnect";
+        let (old_session, mut old_outbound_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id, "session-old");
+        let (new_session, mut new_outbound_rx) =
+            RemoteNodeSessionHandle::new_for_tests(node_id, "session-new");
+        let mut sessions = std::collections::HashMap::from([
+            (
+                "session-old".to_string(),
+                ActiveNodeIngressSession {
+                    session: old_session,
+                    bridges: std::collections::HashMap::new(),
+                    published_fingerprints: std::collections::HashMap::new(),
+                    opened_seq: 1,
+                },
+            ),
+            (
+                "session-new".to_string(),
+                ActiveNodeIngressSession {
+                    session: new_session,
+                    bridges: std::collections::HashMap::new(),
+                    published_fingerprints: std::collections::HashMap::new(),
+                    opened_seq: 2,
+                },
+            ),
+        ]);
+        let mut registered = BTreeSet::new();
+        let (internal_tx, _internal_rx) = mpsc::channel();
+        let mut retry_scheduled = false;
+
+        handle_internal_event(
+            &mut sessions,
+            &mut registered,
+            internal_tx,
+            &mut retry_scheduled,
+            InternalEvent::AuthorityHostOutput {
+                node_id: node_id.to_string(),
+                envelope: raw_pty_output_envelope(
+                    node_id,
+                    &format!("remote-peer:{node_id}:shell-output"),
+                    "shell-output",
+                ),
+            },
+        );
+
+        let forwarded = recv_outbound_with_deadline(&mut new_outbound_rx)
+            .expect("authority host output should be sent to latest active session");
+        match forwarded.body {
+            Some(Body::RawPtyOutput(payload)) => {
+                assert_eq!(payload.session_id, "shell-output");
+                assert_eq!(
+                    payload.target_id,
+                    format!("remote-peer:{node_id}:shell-output")
+                );
+                assert_eq!(payload.output_bytes, b"from-authority-host");
+            }
+            other => panic!("unexpected forwarded body: {other:?}"),
+        }
+        assert!(
+            old_outbound_rx.try_recv().is_err(),
+            "authority host output must not be sent through stale session"
+        );
+    }
+
+    #[test]
     fn closed_session_instance_drops_late_envelopes() {
         let _guard = crate::test_support::integration_test_lock();
         use super::super::run_node_ingress_server_loop;
@@ -1154,6 +1219,32 @@ mod tests {
             target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: Some("console-1".to_string()),
+            payload,
+        }
+    }
+
+    fn raw_pty_output_envelope(
+        sender_id: &str,
+        target_id: &str,
+        session_id: &str,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
+        let payload = ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
+            session_id: session_id.to_string(),
+            target_id: target_id.to_string(),
+            output_seq: 1,
+            output_bytes: b"from-authority-host".to_vec(),
+        });
+        ProtocolEnvelope {
+            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+            message_id: format!("{sender_id}-raw-pty-output-test"),
+            message_type: payload.message_type(),
+            timestamp: "0Z".to_string(),
+            sender_id: sender_id.to_string(),
+            correlation_id: None,
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
+            attachment_id: None,
+            console_id: None,
             payload,
         }
     }

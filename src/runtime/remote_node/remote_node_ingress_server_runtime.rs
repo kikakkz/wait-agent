@@ -165,6 +165,10 @@ pub(super) enum InternalEvent {
         socket_path: PathBuf,
         command: RemoteAuthorityCommand,
     },
+    AuthorityHostOutput {
+        node_id: String,
+        envelope: ProtocolEnvelope<ControlPlanePayload>,
+    },
     LocalCreateSession {
         envelope: GrpcNodeSessionEnvelope,
         reply_tx: mpsc::Sender<GrpcNodeSessionEnvelope>,
@@ -1252,8 +1256,11 @@ fn run_node_ingress_server_loop(
     start_authority_socket_watcher: bool,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
-    let mut authority_manager =
-        SessionSyncAuthorityManager::new(RemoteNetworkConfig::default(), None);
+    let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
+        RemoteNetworkConfig::default(),
+        None,
+        internal_tx.clone(),
+    );
     let mut pending_create_sessions =
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let mut registered_workspace_sockets = BTreeSet::<String>::new();
@@ -1820,6 +1827,41 @@ fn handle_internal_event(
                     "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={} socket={}: {error}",
                     active.session.session_instance_id(),
                     socket_path.display()
+                ));
+            }
+        }
+        InternalEvent::AuthorityHostOutput { node_id, envelope } => {
+            let Some(active) = current_active_ingress_session_for_node(sessions, &node_id) else {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] dropping authority output for node={node_id} type={} because no active session is open",
+                    envelope.payload.message_type()
+                ));
+                return;
+            };
+            let grpc = match map_outbound_grpc_envelope(
+                active.session.node_id(),
+                crate::infra::remote_protocol::NodeSessionChannel::Authority,
+                &envelope,
+            ) {
+                Ok(grpc) => grpc,
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-node-ingress] failed to map authority output for node={node_id} type={}: {error}",
+                        envelope.payload.message_type()
+                    ));
+                    return;
+                }
+            };
+            ERROR_LOG.log(format!(
+                "[diag-timing] ingress authority output: forwarding envelope type={} to current session_instance_id={}",
+                envelope.payload.message_type(),
+                active.session.session_instance_id()
+            ));
+            if let Err(error) = active.session.send(grpc) {
+                ERROR_LOG.log(format!(
+                    "[remote-node-ingress] failed to send authority output for node={node_id} session_instance_id={} type={}: {error}",
+                    active.session.session_instance_id(),
+                    envelope.payload.message_type()
                 ));
             }
         }

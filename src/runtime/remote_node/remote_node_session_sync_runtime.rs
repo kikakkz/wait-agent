@@ -202,8 +202,12 @@ pub(super) struct SessionSyncAuthorityHost {
 #[derive(Clone)]
 pub(in crate::runtime::remote_node::remote_node_session_sync_runtime) enum SessionSyncAuthorityOutputRoute
 {
-    DirectSession,
     OwnerEvent(mpsc::Sender<SessionSyncEvent>),
+    IngressEvent(
+        mpsc::Sender<
+            crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent,
+        >,
+    ),
 }
 
 #[derive(Clone)]
@@ -633,15 +637,18 @@ fn sync_now_millis() -> u128 {
 }
 
 impl SessionSyncAuthorityManager {
-    pub(super) fn new(
+    pub(super) fn with_ingress_events(
         network: RemoteNetworkConfig,
         local_target_socket_name: Option<String>,
+        ingress_event_tx: mpsc::Sender<
+            crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent,
+        >,
     ) -> Self {
         Self {
             running_hosts: HashMap::new(),
             network,
             local_target_socket_name,
-            output_route: SessionSyncAuthorityOutputRoute::DirectSession,
+            output_route: SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx),
         }
     }
 
@@ -852,7 +859,7 @@ impl SessionSyncAuthorityManager {
         let writer_ready = Arc::new(Condvar::new());
         spawn_live_authority_listener(
             authority_socket_path.clone(),
-            session_handle.clone(),
+            session_handle.node_id().to_string(),
             self.output_route.clone(),
             running.clone(),
             writer.clone(),
