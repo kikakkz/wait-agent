@@ -601,6 +601,64 @@ mod tests {
     }
 
     #[test]
+    fn runtime_observes_catalog_change_while_reconnecting_and_publishes_latest_baseline() {
+        let transport = ControlledReconnectTransport::default();
+        let mut initial = session("wa-1", "shell-1");
+        initial.command_name = Some("bash".to_string());
+        initial.task_state = ManagedSessionTaskState::Input;
+        let sessions = Arc::new(Mutex::new(vec![initial]));
+        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let runtime = RemoteNodeSessionSyncRuntime {
+            gateway: MutableFakeGateway {
+                sessions: sessions.clone(),
+            },
+            transport: transport.clone(),
+            local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            network: RemoteNetworkConfig {
+                port: 7474,
+                connect: Some("127.0.0.1:7474".to_string()),
+                node_id: Some("node-a".to_string()),
+                public_endpoint: None,
+            },
+            reconnect_delay: Duration::from_millis(100),
+        };
+
+        let guard = runtime
+            .start_with_local_catalog_changes(local_catalog_rx)
+            .expect("runtime should start");
+        let first = wait_for_controlled_envelope(&transport.receivers, 0);
+        let Some(Body::TargetPublished(first_payload)) = first.body else {
+            panic!("expected initial target_published body");
+        };
+        assert_eq!(first_payload.command_name.as_deref(), Some("bash"));
+        assert_eq!(first_payload.task_state.as_deref(), Some("input"));
+
+        {
+            let mut sessions = sessions
+                .lock()
+                .expect("fake sessions mutex should not be poisoned");
+            sessions[0].command_name = Some("kimi".to_string());
+            sessions[0].task_state = ManagedSessionTaskState::Running;
+        }
+        transport.close_session(0, "node-a", "server-session-1");
+        local_catalog_tx
+            .send(LocalCatalogChangeReason::LocalRuntimeChanged)
+            .expect("local catalog change should send while reconnecting");
+        wait_for_controlled_receiver_count(&transport.receivers, 2);
+        let second = wait_for_controlled_envelope(&transport.receivers, 1);
+        drop(guard);
+
+        let Some(Body::TargetPublished(second_payload)) = second.body else {
+            panic!("expected reconnected target_published body");
+        };
+        assert_eq!(second_payload.transport_session_id, "shell-1");
+        assert_eq!(second_payload.node_instance_id, "server-session-2");
+        assert_eq!(second_payload.command_name.as_deref(), Some("kimi"));
+        assert_eq!(second_payload.task_state.as_deref(), Some("running"));
+        assert_eq!(second_payload.revision, 2);
+    }
+
+    #[test]
     fn local_catalog_notify_wakes_sync_without_poll_wait() {
         let socket_name = format!("wa-test-sync-notify-{}", std::process::id());
         let socket_path = remote_session_sync_owner_socket_path(&socket_name);

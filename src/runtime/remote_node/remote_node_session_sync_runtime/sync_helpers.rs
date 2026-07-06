@@ -420,8 +420,10 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     let local_target_socket_name = gateway.local_target_socket_name().map(str::to_string);
     let mut next_message_id = 0_u64;
     let mut publication_tracker = SourcePublicationTracker::new();
-    let mut synced_sessions = HashMap::<String, ManagedSessionRecord>::new();
-    let mut pending_local_catalog_sync = false;
+    let mut observed_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let mut observed_initialized = false;
+    let mut published_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let mut publication_dirty = false;
     let (session_event_tx, session_event_rx) = mpsc::channel::<SessionSyncEvent>();
     {
         let session_event_tx = session_event_tx.clone();
@@ -459,7 +461,14 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                 match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
                     ReconnectWaitOutcome::Stop => return,
                     ReconnectWaitOutcome::LocalCatalogChanged => {
-                        pending_local_catalog_sync = true;
+                        if observe_local_session_catalog(
+                            &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        ) {
+                            publication_dirty = true;
+                        }
                     }
                     ReconnectWaitOutcome::Elapsed => {}
                 }
@@ -516,47 +525,60 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                         &mut publication_tracker,
                         outcome.publication_ack.as_ref(),
                     );
-                    if outcome.local_catalog_changed {
-                        should_reconnect |= sync_local_sessions_after_catalog_transport_event(
+                    if outcome.local_catalog_changed
+                        && observe_local_session_catalog(
                             &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        )
+                    {
+                        publication_dirty = true;
+                        should_reconnect |= publish_observed_session_catalog(
                             &node_id,
                             active_session.as_ref(),
                             &local_target_exit_observer,
-                            &mut synced_sessions,
+                            &mut published_sessions,
+                            &observed_sessions,
                             &mut next_message_id,
                             &mut publication_tracker,
+                            SessionSyncMode::Delta,
                             "local catalog transport event",
                         );
+                        if !should_reconnect {
+                            publication_dirty = false;
+                        }
                     }
                     if session_opened {
-                        should_reconnect |= sync_after_session_opened(
+                        publication_tracker.on_connected();
+                        let had_pending_publication = publication_dirty;
+                        if observe_local_session_catalog(
                             &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        ) {
+                            publication_dirty = true;
+                        }
+                        should_reconnect |= publish_observed_session_catalog(
                             &node_id,
                             active_session.as_ref(),
                             &local_target_exit_observer,
-                            &mut synced_sessions,
+                            &mut published_sessions,
+                            &observed_sessions,
                             &mut next_message_id,
                             &mut publication_tracker,
+                            SessionSyncMode::FullBaseline,
                             "SessionOpened",
                         );
-                        if !should_reconnect && pending_local_catalog_sync {
+                        if !should_reconnect && had_pending_publication {
                             ERROR_LOG.log(
                                 "[diag-sync] replaying pending local catalog change after SessionOpened"
                                     .to_string(),
                             );
-                            should_reconnect |= sync_local_sessions_after_catalog_transport_event(
-                                &gateway,
-                                &node_id,
-                                active_session.as_ref(),
-                                &local_target_exit_observer,
-                                &mut synced_sessions,
-                                &mut next_message_id,
-                                &mut publication_tracker,
-                                "pending local catalog change",
-                            );
-                            if !should_reconnect {
-                                pending_local_catalog_sync = false;
-                            }
+                            publication_dirty = false;
+                        } else if !should_reconnect {
+                            publication_dirty = false;
                         }
                     }
                 }
@@ -605,25 +627,29 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                         "[diag-exit] sync_event_received reason={} stage=session_sync",
                         reason.as_str()
                     ));
-                    if let Some(session_handle) = active_session.as_ref() {
-                        if let Err(_) = sync_local_sessions(
-                            &gateway,
+                    if observe_local_session_catalog(
+                        &gateway,
+                        &node_id,
+                        &mut observed_sessions,
+                        &mut observed_initialized,
+                    ) {
+                        publication_dirty = true;
+                    }
+                    if active_session.is_some() && publication_dirty {
+                        should_reconnect |= publish_observed_session_catalog(
                             &node_id,
-                            session_handle,
+                            active_session.as_ref(),
                             &local_target_exit_observer,
-                            &mut synced_sessions,
+                            &mut published_sessions,
+                            &observed_sessions,
                             &mut next_message_id,
                             &mut publication_tracker,
                             SessionSyncMode::Delta,
-                        ) {
-                            ERROR_LOG.log(
-                                "[diag-sync] sync_local_sessions after local catalog change failed, will reconnect"
-                                    .to_string(),
-                            );
-                            should_reconnect = true;
+                            "local catalog change",
+                        );
+                        if !should_reconnect {
+                            publication_dirty = false;
                         }
-                    } else {
-                        pending_local_catalog_sync = true;
                     }
                 }
                 SessionSyncEvent::Stop => return,
@@ -633,49 +659,19 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
         match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
             ReconnectWaitOutcome::Stop => return,
             ReconnectWaitOutcome::LocalCatalogChanged => {
-                pending_local_catalog_sync = true;
+                if observe_local_session_catalog(
+                    &gateway,
+                    &node_id,
+                    &mut observed_sessions,
+                    &mut observed_initialized,
+                ) {
+                    publication_dirty = true;
+                }
             }
             ReconnectWaitOutcome::Elapsed => {}
         }
         authority_manager.shutdown();
     }
-}
-
-fn sync_after_session_opened<G, O>(
-    gateway: &G,
-    node_id: &str,
-    session_handle: Option<&RemoteNodeSessionHandle>,
-    local_target_exit_observer: &O,
-    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
-    next_message_id: &mut u64,
-    publication_tracker: &mut SourcePublicationTracker,
-    reason: &str,
-) -> bool
-where
-    G: LocalSessionCatalog,
-    O: LocalTargetExitObserver,
-{
-    publication_tracker.on_connected();
-    let Some(session_handle) = session_handle else {
-        return false;
-    };
-    if let Err(_) = sync_local_sessions(
-        gateway,
-        node_id,
-        session_handle,
-        local_target_exit_observer,
-        synced_sessions,
-        next_message_id,
-        publication_tracker,
-        SessionSyncMode::FullBaseline,
-    ) {
-        ERROR_LOG.log(format!(
-            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
-        ));
-        publication_tracker.on_disconnected();
-        return true;
-    }
-    false
 }
 
 fn handle_publication_ack_outcome(
@@ -698,6 +694,7 @@ fn handle_publication_ack_outcome(
     }
 }
 
+#[cfg(test)]
 pub(super) fn sync_local_sessions_after_catalog_transport_event<G, O>(
     gateway: &G,
     node_id: &str,
@@ -760,15 +757,10 @@ pub(super) fn wait_for_reconnect_delay_or_stop(
     duration: Duration,
 ) -> ReconnectWaitOutcome {
     let deadline = Instant::now() + duration;
-    let mut saw_local_catalog_change = false;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return if saw_local_catalog_change {
-                ReconnectWaitOutcome::LocalCatalogChanged
-            } else {
-                ReconnectWaitOutcome::Elapsed
-            };
+            return ReconnectWaitOutcome::Elapsed;
         }
         match session_event_rx.recv_timeout(remaining) {
             Ok(SessionSyncEvent::Stop) => return ReconnectWaitOutcome::Stop,
@@ -777,15 +769,11 @@ pub(super) fn wait_for_reconnect_delay_or_stop(
                     "[diag-exit] sync_event_queued_for_reconnect reason={} stage=session_sync",
                     reason.as_str()
                 ));
-                saw_local_catalog_change = true;
+                return ReconnectWaitOutcome::LocalCatalogChanged;
             }
             Ok(_) => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                return if saw_local_catalog_change {
-                    ReconnectWaitOutcome::LocalCatalogChanged
-                } else {
-                    ReconnectWaitOutcome::Elapsed
-                }
+                return ReconnectWaitOutcome::Elapsed;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return ReconnectWaitOutcome::Stop,
         }
@@ -928,25 +916,14 @@ fn send_pending_source_publications(
     Ok(())
 }
 
-pub(super) fn sync_local_sessions<G, O>(
+fn observe_current_local_sessions<G>(
     gateway: &G,
     node_id: &str,
-    session_handle: &RemoteNodeSessionHandle,
-    local_target_exit_observer: &O,
-    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
-    next_message_id: &mut u64,
-    publication_tracker: &mut SourcePublicationTracker,
-    mode: SessionSyncMode,
-) -> Result<(), io::Error>
+    t_sync: Instant,
+) -> Option<HashMap<String, ManagedSessionRecord>>
 where
     G: LocalSessionCatalog,
-    O: LocalTargetExitObserver,
 {
-    let t_sync = Instant::now();
-    ERROR_LOG.log(format!(
-        "[diag-newhost] sync_local_sessions start node={}",
-        node_id
-    ));
     let local_sessions = match gateway.list_local_sessions() {
         Ok(sessions) => {
             ERROR_LOG.log(format!(
@@ -969,7 +946,7 @@ where
                 node_id,
                 t_sync.elapsed()
             ));
-            return Ok(());
+            return None;
         }
     };
     let local_sessions: Vec<ManagedSessionRecord> = local_sessions
@@ -986,7 +963,123 @@ where
         local_sessions.len(),
         t_sync.elapsed()
     ));
-    let current_sessions = local_sessions_by_local_id(local_sessions);
+    Some(local_sessions_by_local_id(local_sessions))
+}
+
+fn observe_local_session_catalog<G>(
+    gateway: &G,
+    node_id: &str,
+    observed_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    observed_initialized: &mut bool,
+) -> bool
+where
+    G: LocalSessionCatalog,
+{
+    let t_sync = Instant::now();
+    ERROR_LOG.log(format!(
+        "[diag-newhost] observe_local_sessions start node={}",
+        node_id
+    ));
+    let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
+        return false;
+    };
+    let changed = !*observed_initialized || *observed_sessions != current_sessions;
+    *observed_sessions = current_sessions;
+    *observed_initialized = true;
+    ERROR_LOG.log(format!(
+        "[diag-newhost] observe_local_sessions done node={} changed={} elapsed={:?}",
+        node_id,
+        changed,
+        t_sync.elapsed()
+    ));
+    changed
+}
+
+fn publish_observed_session_catalog<O>(
+    node_id: &str,
+    session_handle: Option<&RemoteNodeSessionHandle>,
+    local_target_exit_observer: &O,
+    published_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    observed_sessions: &HashMap<String, ManagedSessionRecord>,
+    next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
+    mode: SessionSyncMode,
+    reason: &str,
+) -> bool
+where
+    O: LocalTargetExitObserver,
+{
+    let Some(session_handle) = session_handle else {
+        return false;
+    };
+    if let Err(_) = publish_current_local_sessions(
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        published_sessions,
+        observed_sessions,
+        next_message_id,
+        publication_tracker,
+        mode,
+    ) {
+        ERROR_LOG.log(format!(
+            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ));
+        publication_tracker.on_disconnected();
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+pub(super) fn sync_local_sessions<G, O>(
+    gateway: &G,
+    node_id: &str,
+    session_handle: &RemoteNodeSessionHandle,
+    local_target_exit_observer: &O,
+    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
+    mode: SessionSyncMode,
+) -> Result<(), io::Error>
+where
+    G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
+{
+    let t_sync = Instant::now();
+    ERROR_LOG.log(format!(
+        "[diag-newhost] sync_local_sessions start node={}",
+        node_id
+    ));
+    let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
+        return Ok(());
+    };
+    publish_current_local_sessions(
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        synced_sessions,
+        &current_sessions,
+        next_message_id,
+        publication_tracker,
+        mode,
+    )
+}
+
+fn publish_current_local_sessions<O>(
+    node_id: &str,
+    session_handle: &RemoteNodeSessionHandle,
+    local_target_exit_observer: &O,
+    synced_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    current_sessions: &HashMap<String, ManagedSessionRecord>,
+    next_message_id: &mut u64,
+    publication_tracker: &mut SourcePublicationTracker,
+    mode: SessionSyncMode,
+) -> Result<(), io::Error>
+where
+    O: LocalTargetExitObserver,
+{
+    let t_sync = Instant::now();
     let delta = compute_session_sync_delta(synced_sessions, &current_sessions, mode);
     ERROR_LOG.log(format!(
         "[diag-newhost] sync_local_sessions delta node={} publish={} exit={} elapsed={:?}",
@@ -1098,7 +1191,7 @@ where
         ));
     }
 
-    *synced_sessions = current_sessions;
+    *synced_sessions = current_sessions.clone();
     ERROR_LOG.log(format!(
         "[diag-newhost] sync_local_sessions done node={} elapsed={:?}",
         node_id,
