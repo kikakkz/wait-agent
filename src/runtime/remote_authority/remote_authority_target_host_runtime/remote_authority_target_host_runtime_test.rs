@@ -46,6 +46,7 @@ mod tests {
         clear_hook_calls: Arc<Mutex<Vec<String>>>,
         clear_runtime_override_calls: Arc<Mutex<Vec<String>>>,
         chrome_refresh_calls: Arc<Mutex<Vec<String>>>,
+        runtime_signal_order: Arc<Mutex<Vec<String>>>,
         capture_bootstrap_screen: Arc<Mutex<String>>,
         cursor_position: Arc<Mutex<(usize, usize)>>,
         terminal_flags: Arc<Mutex<RemoteTargetTerminalFlags>>,
@@ -64,6 +65,7 @@ mod tests {
                 clear_hook_calls: Arc::new(Mutex::new(Vec::new())),
                 clear_runtime_override_calls: Arc::new(Mutex::new(Vec::new())),
                 chrome_refresh_calls: Arc::new(Mutex::new(Vec::new())),
+                runtime_signal_order: Arc::new(Mutex::new(Vec::new())),
                 capture_bootstrap_screen: Arc::new(Mutex::new(String::new())),
                 cursor_position: Arc::new(Mutex::new((0, 0))),
                 terminal_flags: Arc::new(Mutex::new(RemoteTargetTerminalFlags::default())),
@@ -244,6 +246,10 @@ mod tests {
                 .lock()
                 .expect("chrome refresh calls mutex should not be poisoned")
                 .push(socket_name.to_string());
+            self.runtime_signal_order
+                .lock()
+                .expect("runtime signal order mutex should not be poisoned")
+                .push("chrome-refresh".to_string());
             Ok(())
         }
     }
@@ -260,6 +266,8 @@ mod tests {
         live_session: Arc<Mutex<Option<FakeLiveSession>>>,
         closed_sessions: Arc<Mutex<Vec<String>>>,
         runtime_changed_sockets: Arc<Mutex<Vec<String>>>,
+        runtime_signal_order: Arc<Mutex<Vec<String>>>,
+        runtime_change_error: Arc<Mutex<Option<String>>>,
     }
 
     impl RemoteAuthorityPublicationGateway for FakePublicationGateway {
@@ -334,6 +342,18 @@ mod tests {
                 .lock()
                 .expect("runtime changed sockets mutex should not be poisoned")
                 .push(socket_name.to_string());
+            self.runtime_signal_order
+                .lock()
+                .expect("runtime signal order mutex should not be poisoned")
+                .push("local-runtime-changed".to_string());
+            if let Some(message) = self
+                .runtime_change_error
+                .lock()
+                .expect("runtime change error mutex should not be poisoned")
+                .clone()
+            {
+                return Err(LifecycleError::Protocol(message));
+            }
             Ok(())
         }
     }
@@ -431,7 +451,10 @@ mod tests {
             })),
             ..FakeGateway::default()
         };
-        let fake_publication_gateway = FakePublicationGateway::default();
+        let fake_publication_gateway = FakePublicationGateway {
+            runtime_signal_order: fake_gateway.runtime_signal_order.clone(),
+            ..FakePublicationGateway::default()
+        };
         let fake_publication_gateway_for_assert = fake_publication_gateway.clone();
         let runtime = RemoteAuthorityTargetHostRuntime::new(
             fake_gateway.clone(),
@@ -662,6 +685,17 @@ mod tests {
                 .expect("runtime changed sockets mutex should not be poisoned")
                 .clone(),
             vec![socket_name.clone()]
+        );
+        assert_eq!(
+            fake_gateway
+                .runtime_signal_order
+                .lock()
+                .expect("runtime signal order mutex should not be poisoned")
+                .as_slice(),
+            &[
+                "local-runtime-changed".to_string(),
+                "chrome-refresh".to_string()
+            ]
         );
         let _ = fs::remove_file(&transport_socket_path);
     }
@@ -895,7 +929,10 @@ mod tests {
             ..FakeGateway::default()
         };
         let fake_gateway_for_assert = fake_gateway.clone();
-        let fake_publication = FakePublicationGateway::default();
+        let fake_publication = FakePublicationGateway {
+            runtime_signal_order: fake_gateway.runtime_signal_order.clone(),
+            ..FakePublicationGateway::default()
+        };
         let fake_publication_for_assert = fake_publication.clone();
         let runtime = RemoteAuthorityTargetHostRuntime::new(
             fake_gateway,
@@ -1010,6 +1047,17 @@ mod tests {
                 .expect("runtime changed sockets mutex should not be poisoned")
                 .as_slice(),
             &[socket_name]
+        );
+        assert_eq!(
+            fake_gateway_for_assert
+                .runtime_signal_order
+                .lock()
+                .expect("runtime signal order mutex should not be poisoned")
+                .as_slice(),
+            &[
+                "local-runtime-changed".to_string(),
+                "chrome-refresh".to_string()
+            ]
         );
         let _ = fs::remove_file(&transport_socket_path);
     }
@@ -1510,6 +1558,63 @@ mod tests {
         assert!(rendered.contains("waitagent-authority-output-"));
         assert!(rendered.ends_with(".sock"));
         assert!(!rendered.contains("7474:6a1b816eb1111435"));
+    }
+
+    #[test]
+    fn output_runtime_change_signal_failure_does_not_skip_chrome_refresh() {
+        let socket_name = unique_test_socket_name("wa-runtime-signal-failure");
+        let fake_gateway = FakeGateway::default();
+        let fake_publication = FakePublicationGateway {
+            runtime_signal_order: fake_gateway.runtime_signal_order.clone(),
+            runtime_change_error: Arc::new(Mutex::new(Some("owner busy".to_string()))),
+            ..FakePublicationGateway::default()
+        };
+        let runtime = RemoteAuthorityTargetHostRuntime::new(
+            fake_gateway.clone(),
+            fake_publication.clone(),
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let command = RemoteAuthorityTargetHostCommand {
+            socket_name: socket_name.clone(),
+            target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-1".to_string(),
+            transport_socket_path: "/tmp/transport.sock".to_string(),
+        };
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let signal = super::super::RuntimeChangeSignal::new(event_tx, std::time::Duration::ZERO);
+
+        super::super::emit_runtime_change_signal(&runtime, &command, &signal)
+            .expect("chrome refresh should still be signaled");
+
+        assert_eq!(
+            fake_publication
+                .runtime_changed_sockets
+                .lock()
+                .expect("runtime changed sockets mutex should not be poisoned")
+                .as_slice(),
+            &[socket_name.clone()]
+        );
+        assert_eq!(
+            fake_gateway
+                .chrome_refresh_calls
+                .lock()
+                .expect("chrome refresh calls mutex should not be poisoned")
+                .as_slice(),
+            &[socket_name]
+        );
+        assert_eq!(
+            fake_gateway
+                .runtime_signal_order
+                .lock()
+                .expect("runtime signal order mutex should not be poisoned")
+                .as_slice(),
+            &[
+                "local-runtime-changed".to_string(),
+                "chrome-refresh".to_string()
+            ]
+        );
     }
 
     fn wait_for_path(path: &Path) {

@@ -209,6 +209,7 @@ impl CommandDispatcher {
                 .run_attach(command)
                 .map_err(AppError::from),
             Command::List => self.run_list(),
+            Command::Cleanup => self.run_cleanup(),
             Command::Detach(command) => self
                 .workspace()?
                 .run_detach(command)
@@ -267,6 +268,18 @@ impl CommandDispatcher {
                 });
             println!("{}", format_list_session_line(&session, &port));
         }
+        Ok(())
+    }
+
+    fn run_cleanup(&self) -> Result<(), AppError> {
+        let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_command_error)?;
+        let report = backend
+            .cleanup_stale_waitagent_socket_files()
+            .map_err(tmux_command_error)?;
+        println!(
+            "cleaned {} stale waitagent tmux sockets (kept {} live)",
+            report.removed, report.live
+        );
         Ok(())
     }
 

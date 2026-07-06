@@ -405,6 +405,30 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             }
         }
     }
+
+    pub fn signal_local_catalog_changed(
+        socket_name: &str,
+        network: &RemoteNetworkConfig,
+        reason: LocalCatalogChangeReason,
+    ) -> Result<(), LifecycleError> {
+        if network.connect_endpoint_uri().is_none() {
+            return Ok(());
+        }
+        let socket_path = remote_session_sync_owner_socket_path(socket_name);
+        match signal_remote_session_sync_owner(&socket_path, reason.clone()) {
+            Ok(()) => Ok(()),
+            Err(first_error) => {
+                ERROR_LOG.log(format!(
+                    "[diag-exit] session_sync_signal retry socket={} reason={} first_error={}",
+                    socket_name,
+                    reason.as_str(),
+                    first_error
+                ));
+                Self::ensure_owner_running(socket_name, network)?;
+                signal_remote_session_sync_owner(&socket_path, reason)
+            }
+        }
+    }
 }
 
 struct OwnerStartupLock {
@@ -982,7 +1006,7 @@ impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGatewa
     }
 
     fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
+        RemoteNodeSessionSyncRuntime::signal_local_catalog_changed(
             socket_name,
             &self.network,
             LocalCatalogChangeReason::LocalRuntimeChanged,

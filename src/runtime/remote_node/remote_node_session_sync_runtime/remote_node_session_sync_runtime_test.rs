@@ -5,11 +5,11 @@ mod tests {
         notify_remote_session_sync_owner, overlay_workspace_runtime_onto_active_local_target_hosts,
         remote_session_exited_envelope, remote_session_published_envelope,
         remote_session_sync_owner_args, remote_session_sync_owner_available,
-        remote_session_sync_owner_socket_path, sync_local_sessions, AuthorityHostSignal,
-        LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
-        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
-        SessionSyncAuthorityPublicationGateway, SessionSyncMode, SourcePublicationAckOutcome,
-        SourcePublicationTracker,
+        remote_session_sync_owner_socket_path, signal_remote_session_sync_owner,
+        sync_local_sessions, AuthorityHostSignal, LocalCatalogChangeReason, LocalSessionCatalog,
+        LocalTargetExitObserver, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
+        SessionSyncAuthorityHost, SessionSyncAuthorityPublicationGateway, SessionSyncMode,
+        SourcePublicationAckOutcome, SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -755,6 +755,44 @@ mod tests {
     }
 
     #[test]
+    fn local_catalog_signal_does_not_wait_for_owner_processing_ack() {
+        let socket_name = format!("wa-test-sync-signal-no-ack-{}", std::process::id());
+        let socket_path = remote_session_sync_owner_socket_path(&socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).expect("owner socket should bind");
+        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel();
+        let _owner_worker =
+            super::super::serve_owner_commands(listener, local_catalog_tx, shutdown_tx);
+
+        signal_remote_session_sync_owner(
+            &socket_path,
+            LocalCatalogChangeReason::LocalRuntimeChanged,
+        )
+        .expect("signal should write owner command without waiting for ack");
+
+        let request = local_catalog_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("owner signal should arrive without polling");
+        assert_eq!(
+            request.reason,
+            LocalCatalogChangeReason::LocalRuntimeChanged
+        );
+        assert!(
+            request.ack_tx.is_some(),
+            "owner still owns processing ack even when caller does not wait"
+        );
+        request
+            .ack_tx
+            .expect("owner command should request processing ack")
+            .send(Ok(super::super::LocalCatalogChangeAck::Published))
+            .expect("owner command ack should send");
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
     fn session_sync_authority_gateway_signals_local_runtime_change() {
         let socket_name = format!("wa-test-sync-gateway-{}", std::process::id());
         let socket_path = remote_session_sync_owner_socket_path(&socket_name);
@@ -775,14 +813,18 @@ mod tests {
 
         gateway
             .signal_local_runtime_changed(&socket_name)
-            .expect("runtime change should notify session sync owner");
+            .expect("runtime change should signal session sync owner");
 
         let request = local_catalog_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("runtime change should arrive without polling");
+            .expect("runtime change signal should arrive without polling");
         assert_eq!(
             request.reason,
             LocalCatalogChangeReason::LocalRuntimeChanged
+        );
+        assert!(
+            request.ack_tx.is_some(),
+            "owner still owns processing ack even when gateway signal does not wait"
         );
         request
             .ack_tx

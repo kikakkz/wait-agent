@@ -170,6 +170,7 @@ pub enum Command {
     ShowErrorLog,
     Attach(AttachCommand),
     List,
+    Cleanup,
     Detach(DetachCommand),
     Stop(StopCommand),
     Help(String),
@@ -629,6 +630,11 @@ impl Cli {
                 args.remove(0);
                 parse_no_args(args)?;
                 Command::List
+            }
+            "cleanup" => {
+                args.remove(0);
+                parse_no_args(args)?;
+                Command::Cleanup
             }
             "detach" => {
                 args.remove(0);
@@ -1686,6 +1692,7 @@ fn help_text() -> String {
         "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>]",
         "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<target>]",
         "  waitagent ls",
+        "  waitagent cleanup",
         "  waitagent detach [<target>]",
         "  waitagent stop [<target>]",
         "  waitagent version",
@@ -1810,6 +1817,14 @@ mod tests {
     #[test]
     fn parses_list_command() {
         assert!(matches!(parse(&["waitagent", "ls"]).command, Command::List));
+    }
+
+    #[test]
+    fn parses_cleanup_command() {
+        assert!(matches!(
+            parse(&["waitagent", "cleanup"]).command,
+            Command::Cleanup
+        ));
     }
 
     #[test]

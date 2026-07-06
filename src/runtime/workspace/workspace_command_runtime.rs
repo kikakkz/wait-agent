@@ -102,6 +102,7 @@ impl Drop for RemoteSessionCreateGuard<'_> {
 
 struct LiveWorkspaceRegistration<'a> {
     runtime: &'a WorkspaceCommandRuntime,
+    backend: EmbeddedTmuxBackend,
     socket_name: String,
 }
 
@@ -109,6 +110,16 @@ impl Drop for LiveWorkspaceRegistration<'_> {
     fn drop(&mut self) {
         self.runtime
             .unregister_live_workspace_socket(self.socket_name.as_str());
+        let socket_name = TmuxSocketName::new(self.socket_name.as_str());
+        if self.backend.socket_is_live(&socket_name) {
+            return;
+        }
+        if let Err(error) = self.backend.remove_waitagent_socket_file(&socket_name) {
+            ERROR_LOG.log(format!(
+                "[diag-exit] waitagent_socket_cleanup_failed socket={} error={}",
+                self.socket_name, error
+            ));
+        }
     }
 }
 
@@ -290,7 +301,8 @@ impl WorkspaceCommandRuntime {
         match command.target.clone() {
             Some(target) => {
                 let session = self.attachable_session(target)?;
-                self.register_live_workspace_socket(session.address.server_id())?;
+                let _live_workspace_registration =
+                    self.register_live_workspace(session.address.server_id())?;
                 self.ensure_agent_signal_runtime(session.address.server_id())?;
                 self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
@@ -304,7 +316,8 @@ impl WorkspaceCommandRuntime {
                     .session_service
                     .resolve_default_attach_session()
                     .map_err(tmux_runtime_error)?;
-                self.register_live_workspace_socket(session.address.server_id())?;
+                let _live_workspace_registration =
+                    self.register_live_workspace(session.address.server_id())?;
                 self.ensure_agent_signal_runtime(session.address.server_id())?;
                 self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
@@ -661,6 +674,7 @@ impl WorkspaceCommandRuntime {
         self.register_live_workspace_socket(socket_name)?;
         Ok(LiveWorkspaceRegistration {
             runtime: self,
+            backend: self.backend.clone(),
             socket_name: socket_name.to_string(),
         })
     }

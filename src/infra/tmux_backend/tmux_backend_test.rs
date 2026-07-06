@@ -1267,6 +1267,73 @@ mod tests {
         kill_server(&backend, &workspace);
     }
 
+    #[test]
+    fn kill_server_removes_waitagent_tmux_socket_file() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("kill-server-socket-cleanup"))
+            .expect("workspace bootstrap should succeed");
+        let socket_path = super::super::waitagent_socket_path(&workspace.socket_name)
+            .expect("waitagent socket path should resolve");
+        assert!(
+            socket_path.exists(),
+            "tmux socket should exist before kill-server"
+        );
+
+        backend
+            .kill_server(&workspace.socket_name)
+            .expect("kill-server should succeed");
+
+        assert!(
+            !socket_path.exists(),
+            "waitagent socket file should be removed after kill-server"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_waitagent_socket_files_removes_dead_sockets_and_keeps_live_sockets() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let live_workspace = backend
+            .ensure_workspace(&unique_workspace_config("cleanup-live"))
+            .expect("live workspace bootstrap should succeed");
+        let stale_socket_name = TmuxSocketName::new(format!(
+            "wa-test-cleanup-stale-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        let stale_socket_path = super::super::waitagent_socket_path(&stale_socket_name)
+            .expect("stale socket path should resolve");
+        let _ = std::fs::remove_file(&stale_socket_path);
+        std::os::unix::net::UnixListener::bind(&stale_socket_path)
+            .expect("stale socket fixture should bind");
+
+        let report = backend
+            .cleanup_stale_waitagent_socket_files()
+            .expect("cleanup should succeed");
+
+        assert!(report.live >= 1, "cleanup should keep the live tmux socket");
+        assert!(
+            report.removed >= 1,
+            "cleanup should remove the stale waitagent socket"
+        );
+        assert!(
+            !stale_socket_path.exists(),
+            "stale waitagent socket should be removed"
+        );
+        assert!(
+            super::super::waitagent_socket_path(&live_workspace.socket_name)
+                .expect("live socket path should resolve")
+                .exists(),
+            "live waitagent socket should be kept"
+        );
+
+        kill_server(&backend, &live_workspace);
+    }
+
     fn unique_workspace_config(prefix: &str) -> WorkspaceInstanceConfig {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1288,6 +1355,6 @@ mod tests {
     }
 
     fn kill_server(backend: &EmbeddedTmuxBackend, workspace: &TmuxWorkspaceHandle) {
-        let _ = backend.run_workspace_command(workspace, &["kill-server".to_string()]);
+        let _ = backend.kill_server(&workspace.socket_name);
     }
 }

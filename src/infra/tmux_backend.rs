@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
@@ -86,6 +87,12 @@ pub struct WaitagentSessionListEntry {
     pub window_count: usize,
     pub created_at_unix_secs: Option<u64>,
     pub session_role: Option<WorkspaceSessionRole>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WaitagentSocketCleanupReport {
+    pub live: usize,
+    pub removed: usize,
 }
 
 impl WaitagentSessionListEntry {
@@ -668,7 +675,12 @@ impl EmbeddedTmuxBackend {
                 ))
             })?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(WAITAGENT_SOCKET_PREFIX) {
+            if name.starts_with(WAITAGENT_SOCKET_PREFIX)
+                && entry
+                    .file_type()
+                    .map(|file_type| file_type.is_socket())
+                    .unwrap_or(false)
+            {
                 sockets.push(TmuxSocketName::new(name));
             }
         }
@@ -689,6 +701,29 @@ impl EmbeddedTmuxBackend {
                 .then_with(|| left.session_name.cmp(&right.session_name))
         });
         Ok(entries)
+    }
+
+    pub fn cleanup_stale_waitagent_socket_files(
+        &self,
+    ) -> Result<WaitagentSocketCleanupReport, TmuxError> {
+        let mut report = WaitagentSocketCleanupReport::default();
+        for socket_name in self.discover_waitagent_sockets()? {
+            if self.socket_is_live(&socket_name) {
+                report.live += 1;
+                continue;
+            }
+            if remove_waitagent_socket_file(&socket_name)? {
+                report.removed += 1;
+            }
+        }
+        Ok(report)
+    }
+
+    pub fn remove_waitagent_socket_file(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<bool, TmuxError> {
+        remove_waitagent_socket_file(socket_name)
     }
 
     fn list_session_entries_on_socket(
@@ -1223,6 +1258,30 @@ impl EmbeddedTmuxBackend {
 
 pub(crate) fn exact_session_target(session_name: &str) -> String {
     format!("={session_name}:")
+}
+
+pub(crate) fn waitagent_socket_path(socket_name: &TmuxSocketName) -> Result<PathBuf, TmuxError> {
+    if !socket_name.as_str().starts_with(WAITAGENT_SOCKET_PREFIX) {
+        return Err(TmuxError::new(format!(
+            "refusing to manage non-waitagent tmux socket `{}`",
+            socket_name.as_str()
+        )));
+    }
+    Ok(tmux_socket_dir().join(socket_name.as_str()))
+}
+
+pub(crate) fn remove_waitagent_socket_file(
+    socket_name: &TmuxSocketName,
+) -> Result<bool, TmuxError> {
+    let socket_path = waitagent_socket_path(socket_name)?;
+    match fs::remove_file(&socket_path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TmuxError::new(format!(
+            "failed to remove stale waitagent tmux socket {}: {error}",
+            socket_path.display()
+        ))),
+    }
 }
 
 fn tmux_shell_command(program: &str, program_args: &[String]) -> String {

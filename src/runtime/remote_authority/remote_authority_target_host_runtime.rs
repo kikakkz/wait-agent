@@ -1561,13 +1561,23 @@ where
         .gateway
         .clear_runtime_command_override(&command.socket_name, &command.target_session_name)
         .map_err(remote_authority_error)?;
+    match runtime
+        .publication_gateway
+        .signal_local_runtime_changed(&command.socket_name)
+    {
+        Ok(()) => ERROR_LOG.log(format!(
+            "[diag-runtime] target host output local runtime change notified socket={} session={} target={}",
+            command.socket_name, command.target_session_name, command.target_id
+        )),
+        Err(error) => ERROR_LOG.log(format!(
+            "[diag-runtime] target host output local runtime change notify failed socket={} session={} target={} error={}",
+            command.socket_name, command.target_session_name, command.target_id, error
+        )),
+    }
     runtime
         .gateway
         .signal_chrome_refresh_targets(&command.socket_name)
-        .map_err(remote_authority_error)?;
-    runtime
-        .publication_gateway
-        .signal_local_runtime_changed(&command.socket_name)
+        .map_err(remote_authority_error)
 }
 
 fn spawn_output_ingest_thread(

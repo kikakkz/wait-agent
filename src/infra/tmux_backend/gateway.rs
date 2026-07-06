@@ -226,7 +226,9 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
     }
 
     fn kill_server(&self, socket_name: &TmuxSocketName) -> Result<(), Self::Error> {
-        self.run_socket_command(socket_name, &["kill-server".to_string()])
+        self.run_socket_command(socket_name, &["kill-server".to_string()])?;
+        super::remove_waitagent_socket_file(socket_name)?;
+        Ok(())
     }
 
     fn current_client_session(&self) -> Result<Option<ManagedSessionRecord>, Self::Error> {

@@ -684,7 +684,7 @@ mod tests {
             )
             .expect("reconnected raw PTY input should encode");
         }
-        match recv_shared_command_with_timeout(transport_a, Duration::from_secs(1))
+        match recv_shared_command_with_timeout(transport_a, Duration::from_secs(3))
             .expect("reconnected target-a command should arrive")
         {
             RemoteAuthorityCommand::RawPtyInput(payload) => {

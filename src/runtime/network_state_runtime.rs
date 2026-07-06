@@ -277,6 +277,7 @@ fn recover_network_config_for_command(
         | Command::ShowErrorLog
         | Command::Attach(_)
         | Command::List
+        | Command::Cleanup
         | Command::Detach(_)
         | Command::Stop(_)
         | Command::Help(_)

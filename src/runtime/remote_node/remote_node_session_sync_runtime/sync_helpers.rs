@@ -2031,6 +2031,16 @@ pub(crate) fn notify_remote_session_sync_owner(
     )
 }
 
+pub(crate) fn signal_remote_session_sync_owner(
+    socket_path: &Path,
+    reason: LocalCatalogChangeReason,
+) -> Result<(), LifecycleError> {
+    send_owner_command_without_response(
+        socket_path,
+        &format!("local-catalog-changed {}\n", reason.encode()),
+    )
+}
+
 pub(crate) fn shutdown_remote_session_sync_owner(socket_path: &Path) -> Result<(), LifecycleError> {
     send_owner_command(socket_path, "shutdown\n")
 }
@@ -2146,6 +2156,18 @@ fn send_owner_command(socket_path: &Path, command: &str) -> Result<(), Lifecycle
             response
         )))
     }
+}
+
+fn send_owner_command_without_response(
+    socket_path: &Path,
+    command: &str,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(remote_session_sync_error)?;
+    stream
+        .write_all(command.as_bytes())
+        .map_err(remote_session_sync_error)?;
+    stream.shutdown(Shutdown::Write).ok();
+    Ok(())
 }
 
 pub(super) fn backend_socket_still_exists(socket_name: &str) -> bool {
