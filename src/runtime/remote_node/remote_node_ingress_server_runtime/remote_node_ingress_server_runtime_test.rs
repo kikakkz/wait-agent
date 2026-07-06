@@ -646,6 +646,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
                 worker_internal_tx,
@@ -768,6 +769,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
                 worker_internal_tx,
@@ -935,6 +937,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
                 worker_internal_tx,

@@ -364,10 +364,12 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
+        let network = self.network.clone();
         let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
             let _ = run_node_ingress_server_loop(
                 publication_runtime,
+                network,
                 transport_rx,
                 internal_rx,
                 internal_tx,
@@ -1250,17 +1252,15 @@ enum IngressEventPriority {
 
 fn run_node_ingress_server_loop(
     publication_runtime: RemoteTargetPublicationRuntime,
+    network: RemoteNetworkConfig,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
     start_authority_socket_watcher: bool,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
-    let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
-        RemoteNetworkConfig::default(),
-        None,
-        internal_tx.clone(),
-    );
+    let mut authority_manager =
+        SessionSyncAuthorityManager::with_ingress_events(network, None, internal_tx.clone());
     let mut pending_create_sessions =
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let mut registered_workspace_sockets = BTreeSet::<String>::new();
