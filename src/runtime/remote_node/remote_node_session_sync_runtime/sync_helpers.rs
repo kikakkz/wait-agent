@@ -53,11 +53,54 @@ use super::{
 
 const SOURCE_PUBLICATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const SOURCE_PUBLICATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
+const OWNER_COMMAND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalCatalogChangeReason {
     LocalTargetExited { target_session_name: String },
     LocalRuntimeChanged,
+}
+
+#[derive(Debug)]
+pub(super) struct LocalCatalogChangeRequest {
+    pub(super) reason: LocalCatalogChangeReason,
+    pub(super) ack_tx: Option<mpsc::Sender<Result<LocalCatalogChangeAck, String>>>,
+}
+
+impl LocalCatalogChangeRequest {
+    pub(super) fn notify(reason: LocalCatalogChangeReason) -> Self {
+        Self {
+            reason,
+            ack_tx: None,
+        }
+    }
+
+    fn with_ack(
+        reason: LocalCatalogChangeReason,
+        ack_tx: mpsc::Sender<Result<LocalCatalogChangeAck, String>>,
+    ) -> Self {
+        Self {
+            reason,
+            ack_tx: Some(ack_tx),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalCatalogChangeAck {
+    Published,
+    Queued,
+    Unchanged,
+}
+
+impl LocalCatalogChangeAck {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Queued => "queued",
+            Self::Unchanged => "unchanged",
+        }
+    }
 }
 
 impl LocalCatalogChangeReason {
@@ -387,7 +430,7 @@ fn exited_source_publication_state(
 pub(super) enum SessionSyncEvent {
     Transport(RemoteNodeTransportEvent),
     AuthorityHostOutput(ProtocolEnvelope<ControlPlanePayload>),
-    LocalCatalogChanged(LocalCatalogChangeReason),
+    LocalCatalogChanged(LocalCatalogChangeRequest),
     RetryDue,
     Stop,
 }
@@ -399,7 +442,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     local_target_exit_observer: O,
     node_id: String,
     endpoint_uri: String,
-    local_catalog_rx: mpsc::Receiver<LocalCatalogChangeReason>,
+    local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     reconnect_delay: Duration,
     stop_rx: mpsc::Receiver<()>,
 ) where
@@ -428,9 +471,9 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
     {
         let session_event_tx = session_event_tx.clone();
         thread::spawn(move || {
-            while let Ok(reason) = local_catalog_rx.recv() {
+            while let Ok(request) = local_catalog_rx.recv() {
                 if session_event_tx
-                    .send(SessionSyncEvent::LocalCatalogChanged(reason))
+                    .send(SessionSyncEvent::LocalCatalogChanged(request))
                     .is_err()
                 {
                     return;
@@ -460,15 +503,19 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                 publication_tracker.on_disconnected();
                 match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
                     ReconnectWaitOutcome::Stop => return,
-                    ReconnectWaitOutcome::LocalCatalogChanged => {
-                        if observe_local_session_catalog(
+                    ReconnectWaitOutcome::LocalCatalogChanged(request) => {
+                        let ack = if observe_local_session_catalog(
                             &gateway,
                             &node_id,
                             &mut observed_sessions,
                             &mut observed_initialized,
                         ) {
                             publication_dirty = true;
-                        }
+                            LocalCatalogChangeAck::Queued
+                        } else {
+                            LocalCatalogChangeAck::Unchanged
+                        };
+                        acknowledge_local_catalog_change(request, Ok(ack));
                     }
                     ReconnectWaitOutcome::Elapsed => {}
                 }
@@ -622,19 +669,24 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                         should_reconnect = true;
                     }
                 }
-                SessionSyncEvent::LocalCatalogChanged(reason) => {
+                SessionSyncEvent::LocalCatalogChanged(request) => {
+                    let reason = request.reason.clone();
                     ERROR_LOG.log_exit_latency(format!(
                         "[diag-exit] sync_event_received reason={} stage=session_sync",
                         reason.as_str()
                     ));
-                    if observe_local_session_catalog(
+                    let ack = if observe_local_session_catalog(
                         &gateway,
                         &node_id,
                         &mut observed_sessions,
                         &mut observed_initialized,
                     ) {
                         publication_dirty = true;
-                    }
+                        LocalCatalogChangeAck::Queued
+                    } else {
+                        LocalCatalogChangeAck::Unchanged
+                    };
+                    let mut ack = ack;
                     if active_session.is_some() && publication_dirty {
                         should_reconnect |= publish_observed_session_catalog(
                             &node_id,
@@ -649,8 +701,18 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
                         );
                         if !should_reconnect {
                             publication_dirty = false;
+                            ack = LocalCatalogChangeAck::Published;
                         }
                     }
+                    ERROR_LOG.log(format!(
+                        "[diag-sync] local catalog change processed reason={} ack={} active_session={} dirty={} should_reconnect={}",
+                        reason.as_str(),
+                        ack.as_str(),
+                        active_session.is_some(),
+                        publication_dirty,
+                        should_reconnect
+                    ));
+                    acknowledge_local_catalog_change(request, Ok(ack));
                 }
                 SessionSyncEvent::Stop => return,
             }
@@ -658,15 +720,19 @@ pub(super) fn run_remote_session_sync_loop<G, T, O>(
 
         match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
             ReconnectWaitOutcome::Stop => return,
-            ReconnectWaitOutcome::LocalCatalogChanged => {
-                if observe_local_session_catalog(
+            ReconnectWaitOutcome::LocalCatalogChanged(request) => {
+                let ack = if observe_local_session_catalog(
                     &gateway,
                     &node_id,
                     &mut observed_sessions,
                     &mut observed_initialized,
                 ) {
                     publication_dirty = true;
-                }
+                    LocalCatalogChangeAck::Queued
+                } else {
+                    LocalCatalogChangeAck::Unchanged
+                };
+                acknowledge_local_catalog_change(request, Ok(ack));
             }
             ReconnectWaitOutcome::Elapsed => {}
         }
@@ -745,10 +811,10 @@ fn recv_session_sync_event(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum ReconnectWaitOutcome {
     Elapsed,
-    LocalCatalogChanged,
+    LocalCatalogChanged(LocalCatalogChangeRequest),
     Stop,
 }
 
@@ -764,12 +830,12 @@ pub(super) fn wait_for_reconnect_delay_or_stop(
         }
         match session_event_rx.recv_timeout(remaining) {
             Ok(SessionSyncEvent::Stop) => return ReconnectWaitOutcome::Stop,
-            Ok(SessionSyncEvent::LocalCatalogChanged(reason)) => {
+            Ok(SessionSyncEvent::LocalCatalogChanged(request)) => {
                 ERROR_LOG.log_exit_latency(format!(
                     "[diag-exit] sync_event_queued_for_reconnect reason={} stage=session_sync",
-                    reason.as_str()
+                    request.reason.as_str()
                 ));
-                return ReconnectWaitOutcome::LocalCatalogChanged;
+                return ReconnectWaitOutcome::LocalCatalogChanged(request);
             }
             Ok(_) => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1971,7 +2037,7 @@ pub(crate) fn shutdown_remote_session_sync_owner(socket_path: &Path) -> Result<(
 
 pub(super) fn serve_owner_commands(
     listener: UnixListener,
-    local_catalog_tx: mpsc::Sender<LocalCatalogChangeReason>,
+    local_catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
     shutdown_tx: mpsc::Sender<()>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -1984,10 +2050,9 @@ pub(super) fn serve_owner_commands(
             let response = match parse_owner_command(request.trim()) {
                 OwnerCommand::Ping => "ok\n".to_string(),
                 OwnerCommand::LocalCatalogChanged(reason) => {
-                    if local_catalog_tx.send(reason).is_ok() {
-                        "ok\n".to_string()
-                    } else {
-                        "error local-catalog-channel-closed\n".to_string()
+                    match request_local_catalog_change(&local_catalog_tx, reason) {
+                        Ok(ack) => format!("ok {}\n", ack.as_str()),
+                        Err(message) => format!("error {message}\n"),
                     }
                 }
                 OwnerCommand::Shutdown => {
@@ -2003,6 +2068,40 @@ pub(super) fn serve_owner_commands(
             let _ = stream.flush();
         }
     })
+}
+
+fn request_local_catalog_change(
+    local_catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
+    reason: LocalCatalogChangeReason,
+) -> Result<LocalCatalogChangeAck, String> {
+    let reason_label = reason.as_str();
+    let (ack_tx, ack_rx) = mpsc::channel();
+    local_catalog_tx
+        .send(LocalCatalogChangeRequest::with_ack(reason, ack_tx))
+        .map_err(|_| "local-catalog-channel-closed".to_string())?;
+    match ack_rx.recv_timeout(OWNER_COMMAND_ACK_TIMEOUT) {
+        Ok(Ok(ack)) => {
+            ERROR_LOG.log(format!(
+                "[diag-sync] owner local catalog command ack reason={reason_label} ack={}",
+                ack.as_str()
+            ));
+            Ok(ack)
+        }
+        Ok(Err(message)) => Err(message),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("local-catalog-ack-timeout".to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("local-catalog-ack-channel-closed".to_string())
+        }
+    }
+}
+
+fn acknowledge_local_catalog_change(
+    request: LocalCatalogChangeRequest,
+    result: Result<LocalCatalogChangeAck, String>,
+) {
+    if let Some(ack_tx) = request.ack_tx {
+        let _ = ack_tx.send(result);
+    }
 }
 
 enum OwnerCommand {
@@ -2037,13 +2136,14 @@ fn send_owner_command(socket_path: &Path, command: &str) -> Result<(), Lifecycle
     stream
         .read_to_string(&mut response)
         .map_err(remote_session_sync_error)?;
-    if response.trim() == "ok" {
+    let response = response.trim();
+    if response == "ok" || response.strip_prefix("ok ").is_some() {
         Ok(())
     } else {
         Err(LifecycleError::Protocol(format!(
             "remote session sync owner rejected command `{}` with `{}`",
             command.trim(),
-            response.trim()
+            response
         )))
     }
 }

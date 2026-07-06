@@ -642,7 +642,9 @@ mod tests {
         }
         transport.close_session(0, "node-a", "server-session-1");
         local_catalog_tx
-            .send(LocalCatalogChangeReason::LocalRuntimeChanged)
+            .send(super::super::LocalCatalogChangeRequest::notify(
+                LocalCatalogChangeReason::LocalRuntimeChanged,
+            ))
             .expect("local catalog change should send while reconnecting");
         wait_for_controlled_receiver_count(&transport.receivers, 2);
         let second = wait_for_controlled_envelope(&transport.receivers, 1);
@@ -684,16 +686,71 @@ mod tests {
             }
         });
 
-        let reason = local_catalog_rx
+        let request = local_catalog_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("owner notify should arrive without polling");
         assert_eq!(
-            reason,
+            request.reason,
             LocalCatalogChangeReason::LocalTargetExited {
                 target_session_name: "shell-1".to_string(),
             }
         );
+        request
+            .ack_tx
+            .expect("owner command should request processing ack")
+            .send(Ok(super::super::LocalCatalogChangeAck::Queued))
+            .expect("owner command ack should send");
         notifier.join().expect("notifier should join");
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn local_catalog_notify_waits_for_owner_processing_ack() {
+        let socket_name = format!("wa-test-sync-notify-ack-{}", std::process::id());
+        let socket_path = remote_session_sync_owner_socket_path(&socket_name);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).expect("owner socket should bind");
+        let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel();
+        let _owner_worker =
+            super::super::serve_owner_commands(listener, local_catalog_tx, shutdown_tx);
+
+        let notify_finished = Arc::new(AtomicBool::new(false));
+        let notifier = thread::spawn({
+            let socket_path = socket_path.clone();
+            let notify_finished = notify_finished.clone();
+            move || {
+                notify_remote_session_sync_owner(
+                    &socket_path,
+                    LocalCatalogChangeReason::LocalRuntimeChanged,
+                )
+                .expect("notify should be acknowledged after processing");
+                notify_finished.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let request = local_catalog_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("owner notify should arrive without polling");
+        assert_eq!(
+            request.reason,
+            LocalCatalogChangeReason::LocalRuntimeChanged
+        );
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !notify_finished.load(Ordering::SeqCst),
+            "owner notify must wait for processing ack"
+        );
+        request
+            .ack_tx
+            .expect("owner command should request processing ack")
+            .send(Ok(super::super::LocalCatalogChangeAck::Published))
+            .expect("owner command ack should send");
+
+        notifier.join().expect("notifier should join");
+        assert!(notify_finished.load(Ordering::SeqCst));
         let _ = fs::remove_file(&socket_path);
     }
 
@@ -720,10 +777,18 @@ mod tests {
             .signal_local_runtime_changed(&socket_name)
             .expect("runtime change should notify session sync owner");
 
-        let reason = local_catalog_rx
+        let request = local_catalog_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("runtime change should arrive without polling");
-        assert_eq!(reason, LocalCatalogChangeReason::LocalRuntimeChanged);
+        assert_eq!(
+            request.reason,
+            LocalCatalogChangeReason::LocalRuntimeChanged
+        );
+        request
+            .ack_tx
+            .expect("owner command should request processing ack")
+            .send(Ok(super::super::LocalCatalogChangeAck::Published))
+            .expect("owner command ack should send");
         let _ = fs::remove_file(&socket_path);
     }
 
@@ -763,9 +828,11 @@ mod tests {
             .expect("fake sessions mutex should not be poisoned")
             .clear();
         local_catalog_tx
-            .send(LocalCatalogChangeReason::LocalTargetExited {
-                target_session_name: "shell-1".to_string(),
-            })
+            .send(super::super::LocalCatalogChangeRequest::notify(
+                LocalCatalogChangeReason::LocalTargetExited {
+                    target_session_name: "shell-1".to_string(),
+                },
+            ))
             .expect("local catalog change should send");
 
         let second = wait_for_envelope(&receiver_slot);
@@ -821,7 +888,9 @@ mod tests {
             sessions[0].task_state = ManagedSessionTaskState::Running;
         }
         local_catalog_tx
-            .send(LocalCatalogChangeReason::LocalRuntimeChanged)
+            .send(super::super::LocalCatalogChangeRequest::notify(
+                LocalCatalogChangeReason::LocalRuntimeChanged,
+            ))
             .expect("local runtime change should send");
 
         let second = wait_for_envelope(&receiver_slot);
@@ -839,14 +908,21 @@ mod tests {
     fn reconnect_wait_preserves_local_catalog_change_signal() {
         let (tx, rx) = mpsc::channel();
         tx.send(super::super::SessionSyncEvent::LocalCatalogChanged(
-            LocalCatalogChangeReason::LocalRuntimeChanged,
+            super::super::LocalCatalogChangeRequest::notify(
+                LocalCatalogChangeReason::LocalRuntimeChanged,
+            ),
         ))
         .expect("local catalog event should send");
 
-        assert_eq!(
-            super::super::wait_for_reconnect_delay_or_stop(&rx, Duration::from_millis(1)),
-            super::super::ReconnectWaitOutcome::LocalCatalogChanged
-        );
+        match super::super::wait_for_reconnect_delay_or_stop(&rx, Duration::from_millis(1)) {
+            super::super::ReconnectWaitOutcome::LocalCatalogChanged(request) => {
+                assert_eq!(
+                    request.reason,
+                    LocalCatalogChangeReason::LocalRuntimeChanged
+                );
+            }
+            other => panic!("expected local catalog change outcome, got {other:?}"),
+        }
     }
 
     #[test]

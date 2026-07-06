@@ -565,7 +565,7 @@ where
 
     pub fn start_with_local_catalog_changes(
         self,
-        local_catalog_rx: mpsc::Receiver<LocalCatalogChangeReason>,
+        local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     ) -> Result<RemoteNodeSessionSyncGuard, LifecycleError> {
         let endpoint_uri = self.network.connect_endpoint_uri().ok_or_else(|| {
             LifecycleError::Protocol("remote session sync requires `--connect`".to_string())
