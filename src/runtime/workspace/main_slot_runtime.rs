@@ -521,10 +521,11 @@ impl MainSlotRuntime {
                     ));
                     error
                 })?;
-                let result = self.activate_target_in_workspace(&current_workspace, &target)
+                let result = self
+                    .activate_target_in_workspace(&current_workspace, &target)
                     .map_err(|error| {
                         ERROR_LOG.log(format!(
-                            "[diag-bug] run_main_pane_died: activate fallback target failed: {error}"
+                            "[diag-bug] run_main_pane_died: activate next target failed: {error}"
                         ));
                         error
                     });
@@ -542,7 +543,7 @@ impl MainSlotRuntime {
             }
             None => {
                 ERROR_LOG.log(format!(
-                    "[diag-bug] run_main_pane_died: no local fallback, closing active target {active_target:?} and killing socket"
+                    "[diag-bug] run_main_pane_died: no local transition target, closing active target {active_target:?} and killing socket"
                 ));
                 self.close_non_remote_target_session_identity(active_target.as_deref())
                     .map_err(|error| {
@@ -694,7 +695,7 @@ impl MainSlotRuntime {
         let previous_remote_main_pane =
             self.active_remote_session_pane(&workspace, active_target.as_deref())?;
         let t_workspace_main = Instant::now();
-        let mut workspace_main_pane = if switching_from_remote {
+        let workspace_main_pane = if switching_from_remote {
             self.configured_recoverable_main_pane(&workspace)?
                 .or_else(|| previous_remote_main_pane.clone())
                 .filter(|pane| {
@@ -736,17 +737,17 @@ impl MainSlotRuntime {
         ));
 
         if active_target.is_some() && switching_from_remote {
-            workspace_main_pane = self.prepare_remote_main_pane_for_local_switch(
-                current_workspace,
-                &workspace,
-                &workspace_main_pane,
-                previous_remote_main_pane.as_ref(),
-            )?;
             self.cleanup_stale_isolation_pane(&workspace, &workspace_main_pane)?;
         }
 
         let t_target_pane = Instant::now();
-        let target_main_pane = self.target_main_pane(target)?;
+        let target_main_pane = if let Some(pane) =
+            self.find_local_target_pane_by_identity(&workspace, target.address.session_id())?
+        {
+            pane
+        } else {
+            self.target_main_pane(target)?
+        };
         ERROR_LOG.log(format!(
             "[diag-newhost] activate_local target_main_pane socket={} session={} target={} pane={} elapsed={:?} total={:?}",
             current_workspace.socket_name,
@@ -1031,13 +1032,19 @@ impl MainSlotRuntime {
             "[diag-bug] remote_main_pane_exit_transition: found {} visible workspace sessions, active_target={active_target:?}",
             sessions.len()
         ));
-        let next_target = next_remote_target(&sessions, active_target.as_deref()).or_else(|| {
-            next_target_host_session(
-                &sessions,
-                workspace.socket_name.as_str(),
-                active_target.as_deref(),
-            )
-        });
+        let next_target = next_remote_target(&sessions, active_target.as_deref())
+            .or_else(|| {
+                next_target_host_session(
+                    &sessions,
+                    workspace.socket_name.as_str(),
+                    active_target.as_deref(),
+                )
+            })
+            .map(Some)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.next_owned_local_target_content_pane(workspace, active_target.as_deref())
+            })?;
         ERROR_LOG.log(format!(
             "[diag-bug] remote_main_pane_exit_transition: next_target={}",
             next_target.as_ref().map_or("none".to_string(), |t| t
@@ -1348,6 +1355,9 @@ impl MainSlotRuntime {
         ) {
             return Ok(RemoteTargetExitTransition::ActivateLocal(target));
         }
+        if let Some(target) = self.next_owned_local_target_content_pane(workspace, active_target)? {
+            return Ok(RemoteTargetExitTransition::ActivateLocal(target));
+        }
         Ok(RemoteTargetExitTransition::CloseWorkspace)
     }
 
@@ -1362,48 +1372,6 @@ impl MainSlotRuntime {
         let _ = self
             .backend
             .set_pane_option(workspace, recovery_pane, "remain-on-exit", "off");
-    }
-
-    fn prepare_remote_main_pane_for_local_switch(
-        &self,
-        current_workspace: &CurrentWorkspace,
-        workspace: &TmuxWorkspaceHandle,
-        workspace_main_pane: &TmuxPaneId,
-        previous_remote_main_pane: Option<&TmuxPaneId>,
-    ) -> Result<TmuxPaneId, LifecycleError> {
-        if previous_remote_main_pane != Some(workspace_main_pane) {
-            return Ok(workspace_main_pane.clone());
-        }
-
-        let parking_pane =
-            self.create_workspace_parking_pane(current_workspace, workspace, workspace_main_pane)?;
-
-        if parking_pane == *workspace_main_pane {
-            return Ok(workspace_main_pane.clone());
-        }
-
-        self.backend
-            .swap_panes(workspace, &parking_pane, workspace_main_pane)
-            .map_err(main_slot_error)?;
-        self.park_content_pane_in_hidden_window(workspace, workspace_main_pane);
-        Ok(parking_pane)
-    }
-
-    fn create_workspace_parking_pane(
-        &self,
-        current_workspace: &CurrentWorkspace,
-        workspace: &TmuxWorkspaceHandle,
-        main_pane: &TmuxPaneId,
-    ) -> Result<TmuxPaneId, LifecycleError> {
-        self.backend
-            .split_pane_bottom_with_program(
-                workspace,
-                main_pane,
-                TmuxSplitSize::Cells(1),
-                true,
-                &workspace_shell_program(&current_workspace.workspace_dir),
-            )
-            .map_err(main_slot_error)
     }
 
     fn park_content_pane_in_hidden_window(
@@ -1609,7 +1577,13 @@ impl MainSlotRuntime {
             )));
         }
 
-        let target_main_pane = self.target_main_pane(target)?;
+        let target_main_pane = if let Some(pane) =
+            self.find_local_target_pane_by_identity(workspace, target.address.session_id())?
+        {
+            pane
+        } else {
+            self.target_main_pane(target)?
+        };
         if target_main_pane != *exiting_pane {
             self.backend
                 .swap_panes(workspace, &target_main_pane, exiting_pane)
@@ -1629,6 +1603,72 @@ impl MainSlotRuntime {
             active_target: target.address.qualified_target(),
             cleanup_exiting_pane,
         })
+    }
+
+    fn next_owned_local_target_content_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        active_target: Option<&str>,
+    ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    format!(
+                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}\t#{{{WAITAGENT_PANE_SESSION_INSTANCE_OPTION}}}\t#{{{WAITAGENT_PANE_TARGET_ID_OPTION}}}"
+                    ),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        let active_target = active_target.filter(|target| !target.is_empty());
+        for line in output.stdout.lines() {
+            let mut parts = line.split('\t');
+            let pane_id = parts.next().unwrap_or_default();
+            let pane_dead = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            let role = parts.next().unwrap_or_default();
+            let session_instance_id = parts.next().unwrap_or_default();
+            let target_id = parts.next().unwrap_or_default();
+            if pane_id.is_empty()
+                || pane_dead != "0"
+                || title == SIDEBAR_PANE_TITLE
+                || title == FOOTER_PANE_TITLE
+                || role != WAITAGENT_PANE_ROLE_CONTENT
+            {
+                continue;
+            }
+            let Some((target_socket, target_session)) = split_qualified_target(target_id) else {
+                continue;
+            };
+            if target_socket != workspace.socket_name.as_str()
+                || active_target == Some(target_id)
+                || session_instance_id != target_session
+            {
+                continue;
+            }
+            return Ok(Some(ManagedSessionRecord {
+                address: crate::domain::session_catalog::ManagedSessionAddress::local_tmux(
+                    target_socket,
+                    target_session,
+                ),
+                selector: Some(target_id.to_string()),
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: Some(WorkspaceSessionRole::TargetHost),
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 0,
+                command_name: None,
+                current_path: None,
+                task_state: crate::domain::session_catalog::ManagedSessionTaskState::Unknown,
+            }));
+        }
+        Ok(None)
     }
 
     fn ensure_pane_in_workspace_window(
@@ -1763,7 +1803,6 @@ impl MainSlotRuntime {
         if let Some(pane) =
             self.find_local_target_pane_by_identity(workspace, target_session_name)?
         {
-            self.set_workspace_main_pane(workspace, &pane)?;
             self.signal_local_target_presentation_refresh(workspace, target_session_name);
             return Ok(pane);
         }
@@ -1802,7 +1841,6 @@ impl MainSlotRuntime {
         if let Some(pane) =
             self.find_local_target_pane_by_identity(workspace, workspace.session_name.as_str())?
         {
-            self.set_workspace_main_pane(workspace, &pane)?;
             return Ok(pane);
         }
         self.backend
@@ -2178,6 +2216,14 @@ impl MainSlotRuntime {
         let Some(target) = target else {
             return Ok(());
         };
+        if let Some((socket_name, session_name)) = split_qualified_target(target) {
+            if !socket_name.contains('#') {
+                let workspace = workspace_handle(socket_name, session_name);
+                self.clear_local_target_content_identity(&workspace, target, session_name)?;
+                self.close_target_session_identity(Some(target))?;
+                return Ok(());
+            }
+        }
         if self
             .target_registry
             .find_target(target)
@@ -2189,7 +2235,33 @@ impl MainSlotRuntime {
         if target.contains('#') {
             return Ok(());
         }
-        self.close_target_session_identity(Some(target))
+        self.close_target_session_identity(Some(target))?;
+        Ok(())
+    }
+
+    fn clear_local_target_content_identity(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        qualified_target: &str,
+        session_instance_id: &str,
+    ) -> Result<(), LifecycleError> {
+        let _ = self.clear_session_pane(workspace, qualified_target);
+        let Some(pane) =
+            self.find_content_pane_by_session_instance(workspace, session_instance_id)?
+        else {
+            return Ok(());
+        };
+        for option in [
+            WAITAGENT_PANE_ROLE_OPTION,
+            WAITAGENT_PANE_SESSION_INSTANCE_OPTION,
+            WAITAGENT_PANE_TARGET_SESSION_OPTION,
+            WAITAGENT_PANE_TARGET_ID_OPTION,
+        ] {
+            let _ = self
+                .backend
+                .unset_pane_option_on_socket(&workspace.socket_name, &pane, option);
+        }
+        Ok(())
     }
 
     fn current_workspace(
@@ -2769,6 +2841,40 @@ impl MainSlotRuntime {
         socket_name: &TmuxSocketName,
         target: &str,
     ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
+        if let Some((target_socket_name, target_session_name)) = split_qualified_target(target) {
+            if target_socket_name == socket_name.as_str() {
+                if let Some(session) = target_registry
+                    .resolve_target_on_authority_session(socket_name.as_str(), target_session_name)
+                    .map_err(main_slot_error)?
+                {
+                    return Ok(Some(session));
+                }
+                let workspace = workspace_handle(socket_name.as_str(), target_session_name);
+                if self
+                    .find_local_target_pane_by_identity(&workspace, target_session_name)?
+                    .is_some()
+                {
+                    return Ok(Some(ManagedSessionRecord {
+                        address: crate::domain::session_catalog::ManagedSessionAddress::local_tmux(
+                            socket_name.as_str(),
+                            target_session_name,
+                        ),
+                        selector: Some(target.to_string()),
+                        availability: SessionAvailability::Online,
+                        workspace_dir: None,
+                        workspace_key: None,
+                        session_role: Some(WorkspaceSessionRole::TargetHost),
+                        opened_by: Vec::new(),
+                        attached_clients: 0,
+                        window_count: 0,
+                        command_name: None,
+                        current_path: None,
+                        task_state:
+                            crate::domain::session_catalog::ManagedSessionTaskState::Unknown,
+                    }));
+                }
+            }
+        }
         target_registry
             .find_target_on_authority(socket_name.as_str(), target)
             .map_err(main_slot_error)

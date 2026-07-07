@@ -269,21 +269,20 @@ mod tests {
         let workspace = entry_runtime
             .bootstrap_workspace(&workspace_dir)
             .expect("workspace bootstrap should succeed");
-        let target_host = backend
-            .ensure_workspace(
-                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                    &workspace_dir,
-                    workspace.workspace_handle.socket_name.as_str(),
-                    None,
-                    None,
-                ),
-            )
+        let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())
+            .expect("target host runtime should build");
+        let target_host = target_host_runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &workspace_dir,
+                workspace.workspace_handle.socket_name.as_str(),
+                None,
+                None,
+            ))
             .expect("target host bootstrap should succeed");
 
         let runtime = MainSlotRuntime::new(
             backend.clone(),
-            TargetHostRuntime::from_build_env(backend.clone())
-                .expect("target host runtime should build"),
+            target_host_runtime,
             WorkspaceLayoutRuntime::new_for_tests(
                 backend.clone(),
                 waitagent_executable.clone(),
@@ -303,7 +302,7 @@ mod tests {
         let local_target = format!(
             "{}:{}",
             workspace.workspace_handle.socket_name.as_str(),
-            target_host.session_name.as_str()
+            target_host.workspace_handle.session_name.as_str()
         );
         runtime
             .run_activate_target(ActivateTargetCommand {
@@ -376,15 +375,10 @@ mod tests {
             "materializing an active remote target must not reinstall the output bridge"
         );
 
-        let target_host_handle = TmuxWorkspaceHandle {
-            workspace_id: WorkspaceInstanceId::new(target_host.session_name.as_str().to_string()),
-            socket_name: TmuxSocketName::new(
-                workspace.workspace_handle.socket_name.as_str().to_string(),
-            ),
-            session_name: TmuxSessionName::new(target_host.session_name.as_str().to_string()),
-        };
-        let target_host_command =
-            workspace_main_pane_command(&backend, &target_host_handle).expect("target host pane");
+        let target_host_command = hidden_content_panes(&backend, &workspace.workspace_handle)
+            .into_iter()
+            .find_map(|(_, _, command)| (command == "bash").then_some(command))
+            .expect("target host content pane should remain live");
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);
 
@@ -552,21 +546,20 @@ mod tests {
         let workspace = entry_runtime
             .bootstrap_workspace(&workspace_dir)
             .expect("workspace bootstrap should succeed");
-        let target_host = backend
-            .ensure_workspace(
-                &WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                    &workspace_dir,
-                    workspace.workspace_handle.socket_name.as_str(),
-                    None,
-                    None,
-                ),
-            )
+        let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())
+            .expect("target host runtime should build");
+        let target_host = target_host_runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &workspace_dir,
+                workspace.workspace_handle.socket_name.as_str(),
+                None,
+                None,
+            ))
             .expect("target host bootstrap should succeed");
 
         let runtime = MainSlotRuntime::new(
             backend.clone(),
-            TargetHostRuntime::from_build_env(backend.clone())
-                .expect("target host runtime should build"),
+            target_host_runtime,
             WorkspaceLayoutRuntime::new_for_tests(
                 backend.clone(),
                 waitagent_executable.clone(),
@@ -586,7 +579,7 @@ mod tests {
         let local_target = format!(
             "{}:{}",
             workspace.workspace_handle.socket_name.as_str(),
-            target_host.session_name.as_str()
+            target_host.workspace_handle.session_name.as_str()
         );
         runtime
             .run_activate_target(ActivateTargetCommand {
@@ -629,6 +622,13 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane should read after remote activation")
             .expect("remote activation should set main pane");
+        let hidden_panes_after_remote_activation =
+            hidden_content_panes(&backend, &workspace.workspace_handle);
+        let hidden_count_after_remote_activation = hidden_panes_after_remote_activation.len();
+        let hidden_bash_count_after_remote_activation = hidden_panes_after_remote_activation
+            .iter()
+            .filter(|(_, _, command)| command == "bash")
+            .count();
         backend
             .set_session_option(
                 &workspace.workspace_handle,
@@ -758,6 +758,21 @@ mod tests {
             hidden_windows.stdout.contains("wa-hidden-"),
             "normal session switching should park inactive content panes in owned hidden windows"
         );
+        let hidden_panes_after_local_switch =
+            hidden_content_panes(&backend, &workspace.workspace_handle);
+        assert_eq!(
+            hidden_panes_after_local_switch.len(),
+            hidden_count_after_remote_activation,
+            "switching from remote back to local must reuse existing content panes"
+        );
+        let hidden_bash_count_after_local_switch = hidden_panes_after_local_switch
+            .iter()
+            .filter(|(_, _, command)| command == "bash")
+            .count();
+        assert!(
+            hidden_bash_count_after_local_switch <= hidden_bash_count_after_remote_activation,
+            "switching from remote back to local must not create a parking bash pane"
+        );
 
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);
@@ -862,14 +877,9 @@ mod tests {
             .expect("main pane option should read")
             .expect("main pane option should be populated");
 
-        let _ = backend.run_socket_command(
-            &TmuxSocketName::new(workspace.workspace_handle.socket_name.as_str().to_string()),
-            &[
-                "kill-session".to_string(),
-                "-t".to_string(),
-                target_host.session_name.as_str().to_string(),
-            ],
-        );
+        runtime
+            .close_non_remote_target_session_identity(Some(local_target.as_str()))
+            .expect("local target should close before the remote target exits");
 
         let pane_generation = include_generation.then(|| {
             runtime
@@ -921,11 +931,9 @@ mod tests {
             })
             .expect("last local main pane exit should stop workspace");
 
-        wait_for_condition(|| {
-            !backend.socket_is_live(&TmuxSocketName::new(
-                workspace.workspace_handle.socket_name.as_str().to_string(),
-            ))
-        });
+        let socket =
+            TmuxSocketName::new(workspace.workspace_handle.socket_name.as_str().to_string());
+        wait_for_condition(|| !backend.socket_is_live(&socket));
 
         let workspace_still_exists = backend.current_window(&workspace.workspace_handle).is_ok();
         assert!(
@@ -2179,14 +2187,9 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read")
             .expect("main pane option should be populated");
-        let _ = backend.run_socket_command(
-            &TmuxSocketName::new(workspace.workspace_handle.socket_name.as_str().to_string()),
-            &[
-                "kill-session".to_string(),
-                "-t".to_string(),
-                target_host.session_name.as_str().to_string(),
-            ],
-        );
+        runtime
+            .close_non_remote_target_session_identity(Some(local_target.as_str()))
+            .expect("local target should close before the remote target exits");
 
         runtime
             .run_remote_target_exited(RemoteTargetExitedCommand {
@@ -3669,27 +3672,11 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read")
             .expect("main pane option should be populated");
-        let detached_target_handle = TmuxWorkspaceHandle {
-            workspace_id: WorkspaceInstanceId::new(target_host.session_name.as_str().to_string()),
-            socket_name: TmuxSocketName::new(
-                workspace.workspace_handle.socket_name.as_str().to_string(),
-            ),
-            session_name: TmuxSessionName::new(target_host.session_name.as_str().to_string()),
-        };
-        let detached_target_pane = backend
-            .list_panes(
-                &detached_target_handle,
-                &backend
-                    .current_window(&detached_target_handle)
-                    .expect("target host window should exist"),
-            )
-            .expect("target host panes should list")
+        let detached_target_pane = hidden_content_panes(&backend, &workspace.workspace_handle)
             .into_iter()
-            .find(|pane| !pane.is_dead)
-            .expect("target host pane should remain live")
-            .pane_id
-            .as_str()
-            .to_string();
+            .find(|(_, pane_id, _)| pane_id != &recovery_pane_id)
+            .expect("inactive target content pane should remain live")
+            .1;
 
         backend
             .set_session_option(
@@ -3710,7 +3697,7 @@ mod tests {
                 &crate::infra::tmux::TmuxPaneId::new(recovery_pane_id.clone()),
                 Some(remote_target.address.qualified_target()),
             )
-            .expect("remote main pane fallback should honor the explicit recovery pane");
+            .expect("remote main pane transition should honor the explicit recovery pane");
 
         wait_for_condition(|| {
             let active_target = backend
@@ -3725,7 +3712,7 @@ mod tests {
         assert_eq!(recovered_main_pane, recovery_pane_id);
         assert!(
             pane_exists(&backend, &workspace.workspace_handle, &recovered_main_pane),
-            "recovery pane should remain available after fallback"
+            "recovery pane should remain available after transition"
         );
 
         kill_server(&backend, &workspace.workspace_handle);
@@ -3837,6 +3824,46 @@ mod tests {
             .into_iter()
             .find(|pane| pane.pane_id == current_pane)
             .and_then(|pane| pane.current_command)
+    }
+
+    fn hidden_content_panes(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Vec<(String, String, String)> {
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_current_command}"
+                        .to_string(),
+                ],
+            )
+            .expect("hidden content panes should list");
+        output
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let session_name = parts.next()?;
+                let window_name = parts.next()?;
+                let pane_id = parts.next()?;
+                let command = parts.next()?;
+                if session_name == workspace.session_name.as_str()
+                    && window_name.starts_with("wa-hidden-")
+                {
+                    Some((
+                        window_name.to_string(),
+                        pane_id.to_string(),
+                        command.to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn workspace_footer_height(
