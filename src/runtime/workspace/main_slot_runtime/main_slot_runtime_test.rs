@@ -3672,11 +3672,12 @@ mod tests {
             .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
             .expect("main pane option should read")
             .expect("main pane option should be populated");
-        let detached_target_pane = hidden_content_panes(&backend, &workspace.workspace_handle)
-            .into_iter()
-            .find(|(_, pane_id, _)| pane_id != &recovery_pane_id)
-            .expect("inactive target content pane should remain live")
-            .1;
+        let detached_target_pane = content_pane_by_session_identity(
+            &backend,
+            &workspace.workspace_handle,
+            target_host.session_name.as_str(),
+        )
+        .expect("inactive target content pane should remain live");
 
         backend
             .set_session_option(
@@ -3864,6 +3865,43 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn content_pane_by_session_identity(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+        session_instance_id: &str,
+    ) -> Option<String> {
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}\t#{pane_dead}\t#{pane_title}\t#{@waitagent_pane_role}\t#{@waitagent_session_instance_id}"
+                        .to_string(),
+                ],
+            )
+            .expect("content panes should list");
+        output.stdout.lines().find_map(|line| {
+            let mut parts = line.split('\t');
+            let pane_id = parts.next()?;
+            let pane_dead = parts.next()?;
+            let title = parts.next()?;
+            let role = parts.next()?;
+            let owner = parts.next()?;
+            if pane_dead == "0"
+                && title != SIDEBAR_PANE_TITLE
+                && title != FOOTER_PANE_TITLE
+                && role == "content"
+                && owner == session_instance_id
+            {
+                Some(pane_id.to_string())
+            } else {
+                None
+            }
+        })
     }
 
     fn workspace_footer_height(

@@ -2625,7 +2625,9 @@ impl MainSlotRuntime {
                 .layout_runtime
                 .disable_main_pane_output_bridge(workspace);
         };
-        if self.active_target_is_remote(workspace.socket_name.as_str(), Some(target))? {
+        if target_is_remote_for_socket(workspace.socket_name.as_str(), target)
+            || self.active_target_is_remote(workspace.socket_name.as_str(), Some(target))?
+        {
             return self
                 .layout_runtime
                 .disable_main_pane_output_bridge(workspace);
@@ -2961,6 +2963,12 @@ fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandl
 
 fn target_socket_name(target: &str) -> Option<&str> {
     split_qualified_target(target).map(|(socket_name, _)| socket_name)
+}
+
+fn target_is_remote_for_socket(socket_name: &str, target: &str) -> bool {
+    split_qualified_target(target)
+        .map(|(authority_id, _)| authority_id.contains('#') || authority_id != socket_name)
+        .unwrap_or(false)
 }
 
 fn target_session_name(target: &str) -> Option<&str> {
