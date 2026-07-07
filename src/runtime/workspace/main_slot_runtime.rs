@@ -194,6 +194,16 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         if let Some(active_target) = active_target {
+            let t_bindings = Instant::now();
+            self.layout_runtime
+                .sync_main_slot_bindings(workspace, workspace_dir)?;
+            ERROR_LOG.log(format!(
+                "[diag-newhost] materialize active_sync_bindings socket={} session={} elapsed={:?} total={:?}",
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+                t_bindings.elapsed(),
+                t_total.elapsed()
+            ));
             let t_bridge = Instant::now();
             self.configure_main_pane_output_bridge_for_active_target(
                 workspace,
@@ -204,16 +214,6 @@ impl MainSlotRuntime {
                 workspace.socket_name.as_str(),
                 workspace.session_name.as_str(),
                 t_bridge.elapsed(),
-                t_total.elapsed()
-            ));
-            let t_bindings = Instant::now();
-            self.layout_runtime
-                .sync_main_slot_bindings(workspace, workspace_dir)?;
-            ERROR_LOG.log(format!(
-                "[diag-newhost] materialize active_sync_bindings socket={} session={} elapsed={:?} total={:?}",
-                workspace.socket_name.as_str(),
-                workspace.session_name.as_str(),
-                t_bindings.elapsed(),
                 t_total.elapsed()
             ));
             return Ok(());
