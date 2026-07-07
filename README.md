@@ -1,52 +1,68 @@
-# WaitAgent
+<p align="center">
+  <img src="docs/logo.svg" alt="WaitAgent logo" width="120" height="120">
+</p>
+
+# WaitAgent: One Terminal Workspace for Local and Remote AI Agents
+
+WaitAgent is a tmux-native workspace for running many Claude Code, Codex CLI,
+Kimi, shell, and other terminal sessions across local and remote machines. It
+keeps one active input surface, one session sidebar, and one workflow for the
+agents you already run in terminals.
 
 [![CI](https://github.com/kikakkz/wait-agent/actions/workflows/ci.yaml/badge.svg)](https://github.com/kikakkz/wait-agent/actions/workflows/ci.yaml)
+![Project status](https://img.shields.io/badge/status-public_alpha-yellow)
 [![Rust](https://img.shields.io/badge/rust-1.86.0-orange?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 [![tmux](https://img.shields.io/badge/tmux-vendored-1e90ff?logo=tmux)](https://github.com/tmux/tmux)
 
-WaitAgent is a tmux-style workspace for running multiple Claude Code, Codex CLI, Kimi, shell, and other terminal sessions across local and remote machines.
+**Public alpha:** local workflows are usable, and remote multi-machine workflows
+are implemented and actively hardening. Expect rapid iteration around reconnects,
+agent state detection, and remote security boundaries.
 
-- One terminal UI for many agent sessions
-- Local and remote sessions in one sidebar
-- Exactly one session receives input at a time
-- No account, no cloud service, no terminal replacement
-- Built as one Rust binary with a vendored tmux runtime
-
-Status: early but usable. The local workflow is stable; the remote multi-machine workflow is implemented and actively hardening.
+<!-- TODO: add short demo GIF here. -->
+<!-- TODO: add walkthrough video link here. -->
 
 ---
 
-## Demo
+## Table of Contents
 
-GIF/video demo coming soon.
+- [Why WaitAgent?](#why-waitagent)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Remote Machines](#remote-machines)
+- [How WaitAgent Works](#how-waitagent-works)
+- [Capabilities](#capabilities)
+- [Status](#status)
+- [Security](#security)
+- [Compared With Other Tools](#compared-with-other-tools)
+- [Supported Platforms](#supported-platforms)
+- [Documentation](#documentation)
+- [License](#license)
 
-The intended 30-second flow:
+---
 
-1. Start `waitagent`.
-2. Create two local sessions.
-3. Connect a remote host.
-4. Switch between `codex@local`, `kimi@remote`, and `bash@remote` from one sidebar.
-5. Keep output, history, and input focus tied to the selected session.
+## Why WaitAgent?
 
-The current UI shape:
+Coding agents are easiest to adopt as terminal tools, but running several of
+them quickly becomes messy:
 
-```text
-┌──────────────────────────────────────────────────────────────┬──────────────────────┐
-│ Main Slot                                                    │ Sessions  [h] hide   │
-│ Active local or remote PTY                                   │──────────────────────│
-│                                                              │ > codex@local     I  │
-│ - shell, Claude Code, Codex CLI, Kimi, or any terminal app   │ * bash@10.1.29.130   │
-│ - raw output, input, and resize flow through this pane       │   claude@remote   C  │
-│ - remote targets render through a session-scoped mirror      │                      │
-│                                                              │ selected target info │
-├──────────────────────────────────────────────────────────────┴──────────────────────┤
-│ Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu  │
-│ Listen 0.0.0.0:7474  Connect 192.168.1.20:7474                         /repo/path │
-└─────────────────────────────────────────────────────────────────────────────────────┘
-```
+- one Codex session is waiting for input
+- one Kimi session is still running
+- one Claude Code session is asking for confirmation
+- a remote machine has the shell you need
+- tmux panes keep multiplying until it is unclear where input will go
 
-Badges show task state: `I` input, `R` running, `C` confirm, `U` unknown.
+WaitAgent adds the missing coordination layer underneath those agents:
+
+- a catalog of local and remote terminal sessions
+- task-state badges for input, running, confirm, and unknown states
+- one stable main slot that receives input
+- remote discovery, switching, resize, output, and session creation
+- tmux as the terminal substrate instead of a custom terminal replacement
+
+The goal is not to become an IDE or agent platform. WaitAgent is terminal
+infrastructure for developers who already live in tmux, SSH, shells, and CLI
+agents.
 
 ---
 
@@ -58,9 +74,11 @@ One-line install for Linux x86_64 and macOS Apple Silicon:
 curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
 ```
 
-The installer resolves the latest GitHub release tag and downloads the matching release artifact. It does not build from `main`.
+The installer resolves the latest GitHub release tag and downloads the matching
+release artifact. It does not build from `main`.
 
-Manual install is also available from the [GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
+Manual downloads are available from the
+[GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
 
 Build from source:
 
@@ -83,12 +101,14 @@ waitagent
 
 Inside the workspace:
 
-- `Ctrl-N` creates a new local session.
-- `Ctrl-W` opens the remote host connector.
-- `Ctrl-S` creates a new session on the selected remote endpoint.
-- `Ctrl-O` opens history for the main slot.
-- `Ctrl-E` opens logs.
-- `Ctrl-M` opens the menu.
+```text
+Ctrl-N  new local session
+Ctrl-W  connect a remote host
+Ctrl-S  new session on the selected remote endpoint
+Ctrl-O  main-slot history
+Ctrl-E  logs
+Ctrl-M  menu
+```
 
 CLI helpers:
 
@@ -97,92 +117,101 @@ waitagent ls
 waitagent attach <target>
 waitagent detach
 waitagent stop <target>
+waitagent cleanup
 ```
+
+Task badges:
+
+| Badge | Meaning |
+|---|---|
+| `I` | waiting for input |
+| `R` | running |
+| `C` | waiting for confirmation |
+| `U` | unknown |
 
 ---
 
 ## Remote Machines
 
-WaitAgent can aggregate sessions from remote machines into the same local sidebar.
+WaitAgent can aggregate sessions from remote machines into the same local
+sidebar.
 
-Start a listener:
+Start a reachable listener on the machine with the UI:
 
 ```bash
-waitagent --port 7474
+waitagent --public <reachable-ip>:7474
 ```
 
-Connect a remote node to that listener:
+Then use `Ctrl-W` in the UI to connect a remote host over SSH. The connector can:
+
+- install or update `waitagent` on the remote host
+- start the remote daemon
+- connect the remote node back to the local listener
+- show remote sessions in the same sidebar
+- create new remote sessions with `Ctrl-S`
+
+Direct connection is also available:
 
 ```bash
 waitagent --connect <server-ip>:7474
 ```
 
-From the interactive UI, `Ctrl-W` opens **Connect Remote Host**. It can SSH into a host, install or update `waitagent`, start the remote daemon, and activate the default remote session after the connection signal arrives.
+For WSL2, use an address reachable from remote machines. WSL mirrored networking
+works in some environments; Windows NAT plus `netsh interface portproxy` is more
+predictable in others.
 
-Remote bootstrap supports:
+---
 
-- password or key-based SSH
-- optional sudo password
-- saved host profiles
-- multiple proxy profiles for remote install
-- remote session creation with `Ctrl-S`
+## How WaitAgent Works
 
-For WSL2, start the listener with a reachable public endpoint:
+WaitAgent embeds a vendored tmux and builds one persistent workspace out of real
+tmux panes.
 
-```bash
-waitagent --public <reachable-wsl-or-windows-ip>:7474
+```text
+┌──────────────────────────────────────────────────────┬──────────────────────┐
+│ Main Slot                                            │ Sessions             │
+│ Active local or remote PTY                           │──────────────────────│
+│                                                      │ > codex@local     I  │
+│ - shell, Claude Code, Codex CLI, Kimi, or any TUI    │ * kimi@remote     R  │
+│ - raw input/output/resize stay tied to one target    │   bash@remote     U  │
+│ - remote targets render through a live mirror        │                      │
+├──────────────────────────────────────────────────────┴──────────────────────┤
+│ Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-M Menu        │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-WSL remote workflows require the remote machine to dial back into the WaitAgent listener. Use WSL mirrored networking when it is reliable in your environment, or Windows NAT plus a `netsh interface portproxy` rule when mirrored networking is unstable.
+Core pieces:
+
+| Component | Role |
+|---|---|
+| **Main Slot** | The only surface that receives normal input. |
+| **Sidebar** | Local and remote session catalog with task-state badges. |
+| **Footer** | Commands, listener/connect state, and workspace path. |
+| **Target hosts** | Real tmux sessions running agents or shells. |
+| **Remote nodes** | gRPC-connected peers that publish catalogs and PTY traffic. |
+| **Live mirror** | Session-scoped rendering path for remote PTYs. |
+
+Switching a sidebar item rebinds the main slot. Sidebar and footer stay mounted,
+so the workspace remains stable while the active PTY changes.
 
 ---
 
-## Why Not Just tmux?
+## Capabilities
 
-tmux gives you panes, windows, sessions, and a battle-tested terminal substrate. WaitAgent uses tmux instead of replacing it.
-
-The missing layer is session management for parallel AI-assisted development:
-
-- a catalog of local and remote agent sessions
-- one stable main slot that can attach to different PTYs
-- task-state badges for agent sessions
-- remote session discovery and switching
-- input focus discipline so keystrokes go to exactly one target
-
-You can build parts of this manually with tmux, SSH, shell scripts, and discipline. WaitAgent packages that workflow into a single terminal UI.
-
----
-
-## How It Works
-
-WaitAgent embeds a vendored tmux and builds one persistent workspace out of real tmux panes.
-
-- **Main Slot**: the focused session surface. It receives input and renders the active local or remote PTY.
-- **Sidebar**: a fixed session catalog. `>` marks the selected row; `*` marks the active target.
-- **Footer**: command/status bar with listener/connect endpoints and workspace path.
-- **Session switching**: selecting a sidebar item rebinds the main slot while sidebar and footer stay mounted.
-- **Remote sessions**: node-scoped gRPC carries catalog updates and PTY traffic; session-scoped routing keeps targets separate.
-- **Fullscreen/history**: the main slot can zoom or enter history without replacing the workspace model.
-
-WaitAgent is not an IDE, not an agent platform, and not an orchestration layer. It is terminal infrastructure underneath the agents you already run.
+| Capability | Current behavior |
+|---|---|
+| **Local agent workspace** | Run many shell, Codex, Claude, Kimi, or generic terminal sessions from one tmux workspace. |
+| **Remote session catalog** | Connect remote machines and show their sessions next to local sessions. |
+| **Single input authority** | Only the active main-slot target receives normal keystrokes. |
+| **Agent state badges** | Detect input, running, confirm, and unknown states for common CLI agents. |
+| **Remote bootstrap** | SSH install/update/start flow from the UI, with saved hosts and proxy profiles. |
+| **Remote session creation** | Create a new session on the selected remote endpoint with `Ctrl-S`. |
+| **History/fullscreen** | Inspect main-slot history or focus the active target without changing the workspace model. |
+| **Local binary** | One Rust binary, no account, no hosted control plane. |
 
 ---
 
-## Security Model
-
-WaitAgent is currently intended for trusted machines on a trusted LAN, VPN, private network, or similarly controlled environment.
-
-- Remote host bootstrap uses SSH.
-- The remote runtime connection is gRPC-based.
-- Do not expose the WaitAgent listener directly to the public Internet unless you understand and accept the trust boundary.
-- Treat connected remote nodes as trusted peers.
-- Saved host/proxy configuration should be treated as local machine state, not as a cloud account or managed secret store.
-
-If you need a public-Internet deployment model, put WaitAgent behind your own network controls first.
-
----
-
-## Current Status
+## Status
 
 Works today:
 
@@ -190,19 +219,19 @@ Works today:
 - macOS Apple Silicon release artifacts: `.tar.gz`, `.dmg`
 - WSL2 through the Linux build
 - local tmux-backed workspace with fixed main slot, sidebar, and footer
-- local session create/switch/attach/detach
-- main-slot fullscreen/history view
-- sidebar task-state badges for Codex, Claude, Kimi, shell, and unknown sessions
-- `waitagent --port` server listener
-- `waitagent --connect` remote node connection
+- local session create/switch/attach/detach/stop
+- main-slot fullscreen and history view
+- task-state badges for Codex, Claude, Kimi, shell, and unknown sessions
+- `waitagent --public` listener and `waitagent --connect` remote node
 - `Ctrl-W` SSH remote-host bootstrap
 - `Ctrl-S` new session on selected remote endpoint
 - remote input/output/resize path
 - remote session exit synchronization
+- reconnect handling for common network interruptions
 
 Still hardening:
 
-- reconnect edge cases across flaky networks
+- long-running remote reconnect edge cases
 - broader agent-specific TUI state detection
 - Linux aarch64 release artifacts
 - remote security model for untrusted networks
@@ -211,8 +240,26 @@ Still hardening:
 Planned:
 
 - per-item automatic handling rules
-- session switch lists for Codex, Claude, Kimi, and similar CLI agents
+- richer session switch lists for Codex, Claude, Kimi, and similar CLI agents
 - WeChat and Telegram connection support
+
+---
+
+## Security
+
+WaitAgent is currently intended for trusted machines on a trusted LAN, VPN,
+private network, or similarly controlled environment.
+
+- Remote host bootstrap uses SSH.
+- Remote runtime transport is gRPC-based.
+- Connected remote nodes should be treated as trusted peers.
+- Saved host and proxy profiles are local machine state, not a managed secret
+  store.
+- Do not expose the WaitAgent listener directly to the public Internet unless
+  you understand and accept the trust boundary.
+
+If you need public-Internet access, put WaitAgent behind your own network
+controls first.
 
 ---
 
@@ -220,12 +267,10 @@ Planned:
 
 | Tool | What it is | Where WaitAgent differs |
 |---|---|---|
-| tmux / Zellij | Terminal multiplexers | WaitAgent adds a local/remote session catalog, agent state badges, and a fixed main-slot workflow. |
-| SSH + tmux manually | Flexible remote workflow | WaitAgent automates discovery, bootstrap, switching, and focus discipline across machines. |
-| Warp | Full terminal/agentic IDE product | WaitAgent is a local terminal-native binary with no account and no cloud platform. |
-| Cursor / Codex App | IDE or app-level agent surface | WaitAgent sits underneath CLI agents and keeps your terminal workflow. |
-
-WaitAgent is deliberately narrower than an IDE. It is for developers who already use terminal agents and want to run several of them without losing track of where each one lives.
+| tmux / Zellij | Terminal multiplexers | WaitAgent adds local/remote session cataloging, agent state badges, and a fixed main-slot workflow. |
+| SSH + tmux manually | Flexible remote workflow | WaitAgent automates discovery, bootstrap, switching, resize, and focus discipline across machines. |
+| Warp | Full terminal/agentic IDE product | WaitAgent is a local terminal-native binary with no account and no hosted platform. |
+| Cursor / Codex App | IDE or app-level agent surface | WaitAgent sits underneath CLI agents and keeps the terminal workflow. |
 
 ---
 
@@ -239,50 +284,30 @@ WaitAgent is deliberately narrower than an IDE. It is for developers who already
 | Linux aarch64 | Source build expected; release artifact not currently published |
 | Intel macOS | Source build may work; release artifact not currently published |
 
-Source builds need Rust plus the dependencies required for the vendored tmux build. `./scripts/install-build-deps.sh` supports Debian/Ubuntu, Fedora, Arch/Manjaro, Alpine, openSUSE/SLES, and Homebrew.
-
----
-
-## Remote Protocol Notes
-
-Implemented pieces:
-
-- protocol namespace and protobuf envelope: `waitagent.remote.v1`
-- node-scoped gRPC connection: `OpenNodeSession`
-- `client_hello` / `server_hello` handshake
-- session-scoped routing by `session_id`
-- remote target catalog publication
-- remote open target / input / resize / output envelopes
-- authority transport and live PTY host bridge
-- session-scoped live mirror lifecycle
-- reconnect with bounded replay
-- create-session request routing for `Ctrl-S`
-- remote exit synchronization
-
-This section is intentionally short in the README. Deeper protocol notes live in [docs/protocol.md](docs/protocol.md).
+Source builds need Rust plus the dependencies required for the vendored tmux
+build. `./scripts/install-build-deps.sh` supports Debian/Ubuntu, Fedora,
+Arch/Manjaro, Alpine, openSUSE/SLES, and Homebrew.
 
 ---
 
 ## Documentation
 
-- [Product PRD](docs/wait-agent-prd.md)
 - [Architecture](docs/architecture.md)
-- [Tmux-First Workspace Plan](docs/tmux-first-workspace-plan.md)
-- [Tmux-First Runtime Architecture](docs/tmux-first-runtime-architecture.md)
 - [Functional Design](docs/functional-design.md)
 - [Remote Node Connection Architecture](docs/remote-node-connection-architecture.md)
-- [Remote Network Completion Plan](docs/remote-network-completion-plan.md)
 - [Remote Live Mirror Design](docs/remote-live-mirror-design.md)
-- [Interaction Flows](docs/interaction-flows.md)
+- [Remote Transport Stability Design](docs/remote-transport-stability-design.md)
 - [Protocol](docs/protocol.md)
-- [Local Acceptance Checklist](docs/local-acceptance-checklist.md)
+- [Interaction Flows](docs/interaction-flows.md)
+- [UI Design](docs/ui-design.md)
 - [Execution Status Board](docs/execution-status-board.md)
 
 ---
 
 ## Topics
 
-`tmux` `terminal-multiplexer` `multiplexer` `workspace-manager` `terminal` `rust` `cli` `tui` `multi-agent` `ai-agents` `multi-machine` `session-manager` `grpc`
+`tmux` `terminal-multiplexer` `workspace-manager` `terminal` `rust` `cli`
+`tui` `multi-agent` `ai-agents` `multi-machine` `session-manager` `grpc`
 
 ## License
 
