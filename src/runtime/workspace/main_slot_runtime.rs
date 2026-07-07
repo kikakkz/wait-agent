@@ -43,6 +43,18 @@ const WAITAGENT_MAIN_PANE_TRANSITION_OPTION: &str = "@waitagent_main_pane_transi
 const MAIN_PANE_DIED_HOOK: &str = "pane-died[10]";
 const HIDDEN_CONTENT_WINDOW_PREFIX: &str = "wa-hidden";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneGeometry {
+    width: u16,
+    height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrokenPaneLocation {
+    window_id: String,
+    pane_id: TmuxPaneId,
+}
+
 pub struct MainSlotRuntime {
     backend: EmbeddedTmuxBackend,
     target_host_runtime: TargetHostRuntime,
@@ -758,6 +770,9 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         if target_main_pane != workspace_main_pane {
+            let main_geometry = self.pane_geometry(&workspace, &workspace_main_pane)?;
+            self.sync_local_content_pane_geometries(&workspace, main_geometry)?;
+            self.resize_pane_to_geometry(&workspace, &target_main_pane, main_geometry)?;
             let t_swap = Instant::now();
             self.backend
                 .swap_panes(&workspace, &target_main_pane, &workspace_main_pane)
@@ -771,7 +786,12 @@ impl MainSlotRuntime {
                 t_swap.elapsed(),
                 t_total.elapsed()
             ));
-            self.park_content_pane_in_hidden_window(&workspace, &workspace_main_pane);
+            self.park_content_pane_in_hidden_window(
+                &workspace,
+                &workspace_main_pane,
+                main_geometry,
+            )?;
+            self.sync_local_content_pane_geometries(&workspace, main_geometry)?;
         }
         let t_identity = Instant::now();
         self.set_local_target_pane_identity(
@@ -816,7 +836,7 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         let t_restore = Instant::now();
-        self.restore_workspace_main_pane(
+        self.transition_workspace_main_pane(
             current_workspace,
             &workspace,
             &target_main_pane,
@@ -890,11 +910,19 @@ impl MainSlotRuntime {
         )?;
 
         if session_pane != workspace_main_pane {
+            let main_geometry = self.pane_geometry(&workspace, &workspace_main_pane)?;
+            self.sync_local_content_pane_geometries(&workspace, main_geometry)?;
+            self.resize_pane_to_geometry(&workspace, &session_pane, main_geometry)?;
             self.backend
                 .swap_panes(&workspace, &session_pane, &workspace_main_pane)
                 .map_err(main_slot_error)?;
 
-            self.park_content_pane_in_hidden_window(&workspace, &workspace_main_pane);
+            self.park_content_pane_in_hidden_window(
+                &workspace,
+                &workspace_main_pane,
+                main_geometry,
+            )?;
+            self.sync_local_content_pane_geometries(&workspace, main_geometry)?;
             if let Ok(window) = self.backend.current_window(&workspace) {
                 if let Ok(panes) = self.backend.list_panes(&workspace, &window) {
                     if let Some(footer) = panes
@@ -909,7 +937,7 @@ impl MainSlotRuntime {
 
         let _ = self.select_workspace_content_pane(&workspace, &session_pane);
 
-        let result = self.restore_workspace_main_pane(
+        let result = self.transition_workspace_main_pane(
             current_workspace,
             &workspace,
             &session_pane,
@@ -1378,18 +1406,30 @@ impl MainSlotRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
-    ) {
-        let _ = self.backend.run_on_socket(
-            &workspace.socket_name,
-            &[
-                "break-pane".to_string(),
-                "-d".to_string(),
-                "-s".to_string(),
-                pane.as_str().to_string(),
-                "-n".to_string(),
-                self.hidden_content_window_name(pane),
-            ],
-        );
+        geometry: PaneGeometry,
+    ) -> Result<(), LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "break-pane".to_string(),
+                    "-d".to_string(),
+                    "-P".to_string(),
+                    "-F".to_string(),
+                    "#{window_id}\t#{pane_id}".to_string(),
+                    "-s".to_string(),
+                    pane.as_str().to_string(),
+                    "-t".to_string(),
+                    format!("{}:", workspace.session_name.as_str()),
+                    "-n".to_string(),
+                    self.hidden_content_window_name(pane),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        let location = parse_break_pane_output(&output.stdout)?;
+        self.resize_window_to_geometry(workspace, &location.window_id, geometry)?;
+        self.resize_pane_to_geometry(workspace, &location.pane_id, geometry)
     }
 
     fn hidden_content_window_name(&self, pane: &TmuxPaneId) -> String {
@@ -1398,6 +1438,151 @@ impl MainSlotRuntime {
             HIDDEN_CONTENT_WINDOW_PREFIX,
             pane.as_str().trim_start_matches('%')
         )
+    }
+
+    fn pane_geometry(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<PaneGeometry, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane.as_str().to_string(),
+                    "#{pane_width}\t#{pane_height}".to_string(),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        parse_pane_geometry(&output.stdout)
+    }
+
+    fn resize_pane_to_geometry(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        geometry: PaneGeometry,
+    ) -> Result<(), LifecycleError> {
+        self.backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "resize-pane".to_string(),
+                    "-t".to_string(),
+                    pane.as_str().to_string(),
+                    "-x".to_string(),
+                    geometry.width.to_string(),
+                    ";".to_string(),
+                    "resize-pane".to_string(),
+                    "-t".to_string(),
+                    pane.as_str().to_string(),
+                    "-y".to_string(),
+                    geometry.height.to_string(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(main_slot_error)
+    }
+
+    fn resize_window_to_geometry(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        window_id: &str,
+        geometry: PaneGeometry,
+    ) -> Result<(), LifecycleError> {
+        self.backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "resize-window".to_string(),
+                    "-t".to_string(),
+                    window_id.to_string(),
+                    "-x".to_string(),
+                    geometry.width.to_string(),
+                    "-y".to_string(),
+                    geometry.height.to_string(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(main_slot_error)
+    }
+
+    fn pane_window_id(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> Result<String, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane.as_str().to_string(),
+                    "#{window_id}".to_string(),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        let window_id = output.stdout.trim();
+        if window_id.is_empty() {
+            return Err(LifecycleError::Protocol(format!(
+                "tmux did not return a window id for pane `{}`",
+                pane.as_str()
+            )));
+        }
+        Ok(window_id.to_string())
+    }
+
+    fn sync_local_content_pane_geometries(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        geometry: PaneGeometry,
+    ) -> Result<(), LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    format!(
+                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{pane_width}}\t#{{pane_height}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}"
+                    ),
+                ],
+            )
+            .map_err(main_slot_error)?;
+        for line in output.stdout.lines() {
+            let mut parts = line.split('\t');
+            let pane_id = parts.next().unwrap_or_default();
+            let pane_dead = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            let width = parts.next().and_then(|value| value.parse::<u16>().ok());
+            let height = parts.next().and_then(|value| value.parse::<u16>().ok());
+            let role = parts.next().unwrap_or_default();
+            if pane_id.is_empty()
+                || pane_dead != "0"
+                || title == SIDEBAR_PANE_TITLE
+                || title == FOOTER_PANE_TITLE
+                || role != WAITAGENT_PANE_ROLE_CONTENT
+            {
+                continue;
+            }
+            if width == Some(geometry.width) && height == Some(geometry.height) {
+                continue;
+            }
+            let pane = TmuxPaneId::new(pane_id);
+            let window_id = self.pane_window_id(workspace, &pane)?;
+            self.resize_window_to_geometry(workspace, &window_id, geometry)?;
+            self.resize_pane_to_geometry(workspace, &pane, geometry)?;
+        }
+        Ok(())
     }
 
     fn deactivate_inactive_remote_session_pane(
@@ -1494,6 +1679,69 @@ impl MainSlotRuntime {
             .map_err(main_slot_error)?;
         self.select_workspace_content_pane(workspace, pane)?;
         result
+    }
+
+    fn transition_workspace_main_pane(
+        &self,
+        _current_workspace: &CurrentWorkspace,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        active_target: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        let previous_main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(main_slot_error)?
+            .filter(|previous| previous != pane.as_str())
+            .map(TmuxPaneId::new);
+        if let Some(previous_main_pane) = previous_main_pane.as_ref() {
+            if self.pane_exists(workspace, previous_main_pane.as_str()) {
+                let _ = self.backend.unset_pane_hook(
+                    workspace,
+                    previous_main_pane,
+                    MAIN_PANE_DIED_HOOK,
+                );
+                let _ = self.backend.set_pane_option(
+                    workspace,
+                    previous_main_pane,
+                    "remain-on-exit",
+                    "off",
+                );
+            }
+        }
+
+        self.backend
+            .set_pane_option(workspace, pane, "remain-on-exit", "on")
+            .map_err(main_slot_error)?;
+        self.set_workspace_main_pane(workspace, pane)?;
+        self.set_active_target(workspace, active_target)?;
+        self.backend
+            .set_session_option(workspace, WAITAGENT_MAIN_PANE_TRANSITION_OPTION, "")
+            .map_err(main_slot_error)?;
+        self.configure_main_pane_output_bridge_for_active_target(workspace, active_target)?;
+
+        let pane_generation = self.bump_main_pane_generation(workspace)?;
+        let pane_died_command = self
+            .layout_runtime
+            .main_pane_died_hook_command(workspace, &pane_generation);
+        self.backend
+            .set_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK, &pane_died_command)
+            .map_err(main_slot_error)?;
+        self.backend
+            .set_pane_option(workspace, pane, "remain-on-exit", "on")
+            .map_err(main_slot_error)?;
+        self.select_workspace_content_pane(workspace, pane)?;
+        self.layout_runtime
+            .sync_existing_workspace_controls(workspace)?;
+        self.layout_runtime
+            .signal_existing_workspace_chrome(workspace)?;
+        if !self.pane_is_recoverable_content_pane(workspace, pane.as_str())? {
+            return Err(LifecycleError::Protocol(format!(
+                "transitioned main pane `{}` disappeared",
+                pane.as_str()
+            )));
+        }
+        Ok(())
     }
 
     fn prepare_remote_target_in_workspace(
@@ -2981,6 +3229,54 @@ fn split_qualified_target(target: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((socket_name, session_name))
+}
+
+fn parse_pane_geometry(output: &str) -> Result<PaneGeometry, LifecycleError> {
+    let mut parts = output.trim().split('\t');
+    let width = parts
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "tmux did not return a valid pane width: `{}`",
+                output.trim()
+            ))
+        })?;
+    let height = parts
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "tmux did not return a valid pane height: `{}`",
+                output.trim()
+            ))
+        })?;
+    Ok(PaneGeometry { width, height })
+}
+
+fn parse_break_pane_output(output: &str) -> Result<BrokenPaneLocation, LifecycleError> {
+    let mut parts = output.trim().split('\t');
+    let window_id = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "tmux break-pane did not return a window id: `{}`",
+                output.trim()
+            ))
+        })?
+        .to_string();
+    parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "tmux break-pane did not return a pane id: `{}`",
+                output.trim()
+            ))
+        })
+        .map(TmuxPaneId::new)
+        .map(|pane_id| BrokenPaneLocation { window_id, pane_id })
 }
 
 fn next_target_host_session(

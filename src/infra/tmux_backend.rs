@@ -42,6 +42,11 @@ const WAITAGENT_SESSION_ROLE_ENV: &str = "WAITAGENT_SESSION_ROLE";
 const WAITAGENT_TRANSPORT_ENV: &str = "WAITAGENT_SESSION_TRANSPORT";
 const WAITAGENT_TRANSPORT_LOCAL_TMUX: &str = "local-tmux";
 pub(crate) const WAITAGENT_PANE_PIPE_OWNER_OPTION: &str = "@waitagent_pane_pipe_owner";
+pub(crate) const WAITAGENT_PANE_ROLE_OPTION: &str = "@waitagent_pane_role";
+pub(crate) const WAITAGENT_PANE_ROLE_CONTENT: &str = "content";
+pub(crate) const WAITAGENT_PANE_SESSION_INSTANCE_OPTION: &str = "@waitagent_session_instance_id";
+pub(crate) const WAITAGENT_PANE_TARGET_SESSION_OPTION: &str = "@waitagent_target_session_name";
+pub(crate) const WAITAGENT_PANE_TARGET_ID_OPTION: &str = "@waitagent_target_id";
 pub(crate) const WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION: &str =
     "@waitagent_runtime_command_override";
 pub(crate) const WAITAGENT_RUNTIME_RUNNING_OVERRIDE: &str = "__waitagent_running__";

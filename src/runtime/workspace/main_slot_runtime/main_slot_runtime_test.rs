@@ -386,6 +386,145 @@ mod tests {
     }
 
     #[test]
+    fn switching_between_local_targets_parks_inactive_content_in_workspace_hidden_window() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("local-target-parking");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+        let waitagent_executable = waitagent_test_executable();
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())
+            .expect("target host runtime should build");
+        let first_target_host = target_host_runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &workspace_dir,
+                workspace.workspace_handle.socket_name.as_str(),
+                None,
+                None,
+            ))
+            .expect("first target host bootstrap should succeed");
+        let second_target_host = target_host_runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &workspace_dir,
+                workspace.workspace_handle.socket_name.as_str(),
+                None,
+                None,
+            ))
+            .expect("second target host bootstrap should succeed");
+
+        let runtime = MainSlotRuntime::new(
+            backend.clone(),
+            target_host_runtime,
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            RemoteNetworkConfig::default(),
+        );
+
+        let first_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            first_target_host.workspace_handle.session_name.as_str()
+        );
+        let second_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            second_target_host.workspace_handle.session_name.as_str()
+        );
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: first_target.clone(),
+            })
+            .expect("first local target activation should succeed");
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: second_target.clone(),
+            })
+            .expect("second local target activation should succeed");
+
+        wait_for_condition(|| {
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read")
+                .as_deref()
+                == Some(second_target.as_str())
+        });
+
+        let content_locations =
+            content_pane_locations_by_session_identity(&backend, &workspace.workspace_handle);
+        assert!(
+            content_locations.iter().any(|(session, window, _, owner)| {
+                session == workspace.workspace_handle.session_name.as_str()
+                    && owner == first_target_host.workspace_handle.session_name.as_str()
+                    && window.starts_with("wa-hidden-")
+            }),
+            "inactive local content pane should be parked in a workspace hidden window"
+        );
+        assert!(
+            content_locations.iter().any(|(session, window, _, owner)| {
+                session == workspace.workspace_handle.session_name.as_str()
+                    && owner == second_target_host.workspace_handle.session_name.as_str()
+                    && window == "bash"
+            }),
+            "active local content pane should live in the workspace main window"
+        );
+        assert!(
+            content_locations.iter().all(|(session, _, _, owner)| {
+                session == workspace.workspace_handle.session_name.as_str()
+                    || owner != first_target_host.workspace_handle.session_name.as_str()
+            }),
+            "inactive local content pane must not remain in its target session, where moving it would close that session and emit a false session-closed hook"
+        );
+        assert!(
+            content_pane_by_session_identity(
+                &backend,
+                &workspace.workspace_handle,
+                first_target_host.workspace_handle.session_name.as_str(),
+            )
+            .is_some(),
+            "first local target content pane should remain live"
+        );
+        assert!(
+            content_pane_by_session_identity(
+                &backend,
+                &workspace.workspace_handle,
+                second_target_host.workspace_handle.session_name.as_str(),
+            )
+            .is_some(),
+            "second local target content pane should remain live"
+        );
+
+        kill_server(&backend, &workspace.workspace_handle);
+        let _ = fs::remove_dir_all(workspace_dir);
+    }
+
+    #[test]
     fn stale_layout_reconcile_during_main_slot_transition_must_not_rewrite_main_pane_metadata() {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()
@@ -3902,6 +4041,53 @@ mod tests {
                 None
             }
         })
+    }
+
+    fn content_pane_locations_by_session_identity(
+        backend: &EmbeddedTmuxBackend,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Vec<(String, String, String, String)> {
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_dead}\t#{pane_title}\t#{@waitagent_pane_role}\t#{@waitagent_session_instance_id}"
+                        .to_string(),
+                ],
+            )
+            .expect("content pane locations should list");
+        output
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let session_name = parts.next()?;
+                let window_name = parts.next()?;
+                let pane_id = parts.next()?;
+                let pane_dead = parts.next()?;
+                let title = parts.next()?;
+                let role = parts.next()?;
+                let owner = parts.next()?;
+                if pane_dead == "0"
+                    && title != SIDEBAR_PANE_TITLE
+                    && title != FOOTER_PANE_TITLE
+                    && role == "content"
+                    && !owner.is_empty()
+                {
+                    Some((
+                        session_name.to_string(),
+                        window_name.to_string(),
+                        pane_id.to_string(),
+                        owner.to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn workspace_footer_height(

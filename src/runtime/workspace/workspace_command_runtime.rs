@@ -22,8 +22,10 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::session_catalog_snapshot_store::SessionCatalogSnapshotStore;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxError, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
-    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION, WAITAGENT_RUNTIME_RUNNING_OVERRIDE,
+    EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSessionName, TmuxSocketName,
+    TmuxWorkspaceHandle, WAITAGENT_PANE_ROLE_CONTENT, WAITAGENT_PANE_ROLE_OPTION,
+    WAITAGENT_PANE_SESSION_INSTANCE_OPTION, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+    WAITAGENT_RUNTIME_RUNNING_OVERRIDE,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::agent_signal_runtime::AgentSignalRuntime;
@@ -795,46 +797,175 @@ impl WorkspaceCommandRuntime {
         event_seq: Option<u64>,
     ) -> Result<(), LifecycleError> {
         if let Some(target_session_name) = target_session_name {
-            let workspace = TmuxWorkspaceHandle {
-                workspace_id: WorkspaceInstanceId::new(target_session_name),
-                socket_name: TmuxSocketName::new(socket_name),
-                session_name: TmuxSessionName::new(target_session_name),
-            };
             let command_override = match runtime_signal {
                 RuntimeCommandSignal::Running => Some(WAITAGENT_RUNTIME_RUNNING_OVERRIDE),
                 RuntimeCommandSignal::Prompt => command_name,
             };
-            if let Some(command_override) = command_override {
-                let command_override = event_seq
-                    .map(|seq| format!("{seq}:{command_override}"))
-                    .unwrap_or_else(|| command_override.to_string());
-                if let Some(seq) = event_seq {
-                    if let Some(current) = self
-                        .backend
-                        .show_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
-                        .map_err(tmux_runtime_error)?
-                    {
-                        if runtime_command_override_seq(&current)
-                            .is_some_and(|current_seq| current_seq > seq)
-                        {
-                            return Ok(());
-                        }
-                    }
-                }
-                self.backend
-                    .set_session_option(
-                        &workspace,
-                        WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
-                        &command_override,
-                    )
-                    .map_err(tmux_runtime_error)?;
+
+            if let Some(pane) = self.local_target_content_pane(socket_name, target_session_name)? {
+                self.write_runtime_command_override_to_pane(
+                    socket_name,
+                    &pane,
+                    command_override,
+                    event_seq,
+                )?;
             } else {
-                self.backend
-                    .unset_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
-                    .map_err(tmux_runtime_error)?;
+                let workspace = workspace_handle(socket_name, target_session_name);
+                if self
+                    .backend
+                    .run_on_socket(
+                        &workspace.socket_name,
+                        &[
+                            "has-session".to_string(),
+                            "-t".to_string(),
+                            format!("={}:", target_session_name),
+                        ],
+                    )
+                    .is_ok()
+                {
+                    self.write_runtime_command_override_to_session(
+                        &workspace,
+                        command_override,
+                        event_seq,
+                    )?;
+                }
             }
         }
         signal_local_runtime_changed_on_socket(socket_name, &self.network)
+    }
+
+    fn write_runtime_command_override_to_pane(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        command_override: Option<&str>,
+        event_seq: Option<u64>,
+    ) -> Result<(), LifecycleError> {
+        let socket = TmuxSocketName::new(socket_name);
+        if let Some(command_override) = command_override {
+            let command_override = event_seq
+                .map(|seq| format!("{seq}:{command_override}"))
+                .unwrap_or_else(|| command_override.to_string());
+            if let Some(seq) = event_seq {
+                if let Some(current) = self
+                    .backend
+                    .show_pane_option_on_socket(
+                        &socket,
+                        pane,
+                        WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                    )
+                    .map_err(tmux_runtime_error)?
+                {
+                    if runtime_command_override_seq(&current)
+                        .is_some_and(|current_seq| current_seq > seq)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            self.backend
+                .set_pane_option_on_socket(
+                    &socket,
+                    pane,
+                    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                    &command_override,
+                )
+                .map_err(tmux_runtime_error)?;
+        } else {
+            self.backend
+                .unset_pane_option_on_socket(
+                    &socket,
+                    pane,
+                    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                )
+                .map_err(tmux_runtime_error)?;
+        }
+        Ok(())
+    }
+
+    fn write_runtime_command_override_to_session(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        command_override: Option<&str>,
+        event_seq: Option<u64>,
+    ) -> Result<(), LifecycleError> {
+        if let Some(command_override) = command_override {
+            let command_override = event_seq
+                .map(|seq| format!("{seq}:{command_override}"))
+                .unwrap_or_else(|| command_override.to_string());
+            if let Some(seq) = event_seq {
+                if let Some(current) = self
+                    .backend
+                    .show_session_option(workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+                    .map_err(tmux_runtime_error)?
+                {
+                    if runtime_command_override_seq(&current)
+                        .is_some_and(|current_seq| current_seq > seq)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            self.backend
+                .set_session_option(
+                    workspace,
+                    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                    &command_override,
+                )
+                .map_err(tmux_runtime_error)?;
+        } else {
+            self.backend
+                .unset_session_option(workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+                .map_err(tmux_runtime_error)?;
+        }
+        Ok(())
+    }
+
+    fn local_target_content_pane(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let output = self
+            .backend
+            .run_on_socket(
+                &TmuxSocketName::new(socket_name),
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    format!(
+                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}\t#{{{WAITAGENT_PANE_SESSION_INSTANCE_OPTION}}}"
+                    ),
+                ],
+            )
+            .map_err(tmux_runtime_error)?;
+        let mut matches = Vec::new();
+        for line in output.stdout.lines() {
+            let mut parts = line.split('\t');
+            let pane_id = parts.next().unwrap_or_default();
+            let pane_dead = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            let role = parts.next().unwrap_or_default();
+            let owner = parts.next().unwrap_or_default();
+            if pane_id.is_empty()
+                || pane_dead != "0"
+                || title == "waitagent-sidebar"
+                || title == "waitagent-footer"
+                || role != WAITAGENT_PANE_ROLE_CONTENT
+                || owner != target_session_name
+            {
+                continue;
+            }
+            matches.push(TmuxPaneId::new(pane_id));
+        }
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.into_iter().next()),
+            _ => Err(LifecycleError::Protocol(format!(
+                "target session `{target_session_name}` owns multiple content panes"
+            ))),
+        }
     }
 
     pub fn run_main_pane_output_event_bridge(

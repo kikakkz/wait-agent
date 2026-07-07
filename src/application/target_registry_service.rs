@@ -164,6 +164,7 @@ impl DefaultTargetCatalogGateway {
         let store = SessionCatalogSnapshotStore::for_socket(socket_name);
         match store.load() {
             Ok(Some(sessions)) => {
+                let sessions = self.merge_live_local_content_panes(socket_name, sessions)?;
                 ERROR_LOG.log(format!(
                     "[diag-newhost] list_targets local_projection current_socket={:?} sessions={}",
                     self.current_socket_name,
@@ -186,9 +187,13 @@ impl DefaultTargetCatalogGateway {
         &self,
         socket_name: &str,
     ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
-        let sessions = self
+        let session_backed = self
             .local_tmux
             .list_sessions_on_socket(&TmuxSocketName::new(socket_name))?;
+        let pane_backed = self
+            .local_tmux
+            .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
+        let sessions = merge_local_targets_by_identity(session_backed, pane_backed);
         if let Err(error) = SessionCatalogSnapshotStore::for_socket(socket_name).store(&sessions) {
             ERROR_LOG.log(format!(
                 "[diag-newhost] list_targets local_projection_store_failed current_socket={:?} error={}",
@@ -196,6 +201,27 @@ impl DefaultTargetCatalogGateway {
             ));
         }
         Ok(sessions)
+    }
+
+    fn merge_live_local_content_panes(
+        &self,
+        socket_name: &str,
+        sessions: Vec<ManagedSessionRecord>,
+    ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
+        let pane_backed = self
+            .local_tmux
+            .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
+        let merged = merge_local_targets_by_identity(sessions.clone(), pane_backed);
+        if merged != sessions {
+            if let Err(error) = SessionCatalogSnapshotStore::for_socket(socket_name).store(&merged)
+            {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] list_targets local_projection_live_pane_store_failed current_socket={:?} error={}",
+                    self.current_socket_name, error
+                ));
+            }
+        }
+        Ok(merged)
     }
 
     fn remote_snapshot(
@@ -295,6 +321,36 @@ fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 2]) -> Vec<Mana
                 positions.insert(target_id, merged.len());
                 merged.push(target);
             }
+        }
+    }
+    merged
+}
+
+fn merge_local_targets_by_identity(
+    session_backed: Vec<ManagedSessionRecord>,
+    pane_backed: Vec<ManagedSessionRecord>,
+) -> Vec<ManagedSessionRecord> {
+    let mut merged = Vec::new();
+    let mut positions = HashMap::<String, usize>::new();
+    for target in session_backed {
+        let target_id = target.address.id().as_str().to_string();
+        positions.insert(target_id, merged.len());
+        merged.push(target);
+    }
+    for target in pane_backed {
+        let target_id = target.address.id().as_str().to_string();
+        if let Some(index) = positions.get(&target_id).copied() {
+            if !merged[index].is_target_host() {
+                continue;
+            }
+            merged[index].command_name = target.command_name;
+            merged[index].current_path = target.current_path;
+            merged[index].task_state = target.task_state;
+            merged[index].availability = target.availability;
+            merged[index].selector = target.selector;
+        } else {
+            positions.insert(target_id, merged.len());
+            merged.push(target);
         }
     }
     merged

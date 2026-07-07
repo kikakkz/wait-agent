@@ -36,6 +36,10 @@ use std::time::Duration;
 mod publication_helpers;
 pub(crate) use publication_helpers::*;
 
+const WAITAGENT_PANE_ROLE_OPTION: &str = "@waitagent_pane_role";
+const WAITAGENT_PANE_ROLE_CONTENT: &str = "content";
+const WAITAGENT_PANE_SESSION_INSTANCE_OPTION: &str = "@waitagent_session_instance_id";
+
 #[derive(Clone)]
 pub struct RemoteTargetPublicationRuntime {
     remote_runtime_owner: RemoteRuntimeOwnerClient,
@@ -799,6 +803,10 @@ impl RemoteTargetPublicationRuntime {
             }
             SocketLifecyclePublicationAction::TargetedExit => {
                 if let Some(session_name) = session_name {
+                    if self.live_content_pane_for_session(&command.socket_name, session_name)? {
+                        self.signal_source_session_refresh(&command.socket_name, session_name)?;
+                        return Ok(());
+                    }
                     if publication_owner_available(&remote_target_publication_owner_socket_path(
                         &command.socket_name,
                         session_name,
@@ -812,6 +820,36 @@ impl RemoteTargetPublicationRuntime {
                 self.ensure_configured_publications_on_socket(&command.socket_name)
             }
         }
+    }
+
+    fn live_content_pane_for_session(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<bool, LifecycleError> {
+        let socket_name = TmuxSocketName::new(socket_name);
+        let format = format!(
+            "#{{pane_dead}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}\t#{{{WAITAGENT_PANE_SESSION_INSTANCE_OPTION}}}"
+        );
+        let output = self
+            .local_tmux
+            .run_on_socket(
+                &socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-a".to_string(),
+                    "-F".to_string(),
+                    format,
+                ],
+            )
+            .map_err(remote_target_publication_error)?;
+        Ok(output.stdout.lines().any(|line| {
+            let mut parts = line.split('\t');
+            let pane_dead = parts.next().unwrap_or_default();
+            let role = parts.next().unwrap_or_default();
+            let owner = parts.next().unwrap_or_default();
+            pane_dead == "0" && role == WAITAGENT_PANE_ROLE_CONTENT && owner == session_name
+        }))
     }
 
     pub fn ensure_publication_server_running(

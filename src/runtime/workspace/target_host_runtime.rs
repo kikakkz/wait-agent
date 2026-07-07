@@ -7,7 +7,9 @@ use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxSocketName,
-    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION, WAITAGENT_PANE_ROLE_CONTENT, WAITAGENT_PANE_ROLE_OPTION,
+    WAITAGENT_PANE_SESSION_INSTANCE_OPTION, WAITAGENT_PANE_TARGET_ID_OPTION,
+    WAITAGENT_PANE_TARGET_SESSION_OPTION,
 };
 use crate::lifecycle::LifecycleError;
 #[cfg(test)]
@@ -23,7 +25,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
-const WAITAGENT_PANE_TARGET_SESSION_OPTION: &str = "@waitagent_target_session_name";
 
 pub struct TargetHostRuntime {
     workspace_runtime: WorkspaceRuntime<EmbeddedTmuxBackend>,
@@ -135,11 +136,34 @@ impl TargetHostRuntime {
             t_total.elapsed()
         ));
         let t_metadata = Instant::now();
+        let qualified_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            workspace.workspace_handle.session_name.as_str()
+        );
+        self.backend.set_pane_option(
+            &workspace.workspace_handle,
+            &pane,
+            WAITAGENT_PANE_ROLE_OPTION,
+            WAITAGENT_PANE_ROLE_CONTENT,
+        )?;
+        self.backend.set_pane_option(
+            &workspace.workspace_handle,
+            &pane,
+            WAITAGENT_PANE_SESSION_INSTANCE_OPTION,
+            workspace.workspace_handle.session_name.as_str(),
+        )?;
         self.backend.set_pane_option(
             &workspace.workspace_handle,
             &pane,
             WAITAGENT_PANE_TARGET_SESSION_OPTION,
             workspace.workspace_handle.session_name.as_str(),
+        )?;
+        self.backend.set_pane_option(
+            &workspace.workspace_handle,
+            &pane,
+            WAITAGENT_PANE_TARGET_ID_OPTION,
+            &qualified_target,
         )?;
         self.backend.set_session_option(
             &workspace.workspace_handle,

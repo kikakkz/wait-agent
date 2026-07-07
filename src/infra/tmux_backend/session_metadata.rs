@@ -1,5 +1,8 @@
 use crate::domain::agent_detector::InputStabilityPolicy;
-use crate::domain::session_catalog::ManagedSessionTaskState;
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+};
+use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::tmux_error::{parse_tmux_id, TmuxError};
 use crate::infra::tmux_types::{TmuxPaneId, TmuxPaneInfo, TmuxSocketName};
 use std::cell::RefCell;
@@ -123,6 +126,11 @@ fn runtime_command_override_name(value: &str) -> String {
         .map(|(_, command_name)| command_name)
         .unwrap_or(value)
         .to_string()
+}
+
+fn split_qualified_target(target: &str) -> Option<(&str, &str)> {
+    let (socket_name, session_name) = target.split_once(':')?;
+    (!socket_name.is_empty() && !session_name.is_empty()).then_some((socket_name, session_name))
 }
 
 fn runtime_command_override_is_prompt(value: &str) -> bool {
@@ -294,6 +302,12 @@ struct RuntimeObservationSource {
     command_name: String,
 }
 
+struct LocalTargetContentPane {
+    pane: TmuxPaneInfo,
+    session_instance_id: String,
+    target_id: String,
+}
+
 impl EmbeddedTmuxBackend {
     pub(super) fn session_runtime_metadata(
         &self,
@@ -309,10 +323,86 @@ impl EmbeddedTmuxBackend {
             socket_name: socket_name.clone(),
             session_name: crate::infra::tmux_types::TmuxSessionName::new(session_name),
         };
+        Ok(self.runtime_metadata_from_observation_source(
+            socket_name,
+            session_name,
+            &workspace,
+            source,
+        ))
+    }
+
+    pub(crate) fn list_local_target_content_pane_sessions(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
+        let panes = self.local_target_content_panes(socket_name)?;
+        let mut records = Vec::new();
+        for pane in panes {
+            let Some((target_socket, target_session)) = split_qualified_target(&pane.target_id)
+            else {
+                continue;
+            };
+            if target_socket != socket_name.as_str() || pane.session_instance_id != target_session {
+                continue;
+            }
+            let workspace = crate::infra::tmux_types::TmuxWorkspaceHandle {
+                workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(target_session),
+                socket_name: socket_name.clone(),
+                session_name: crate::infra::tmux_types::TmuxSessionName::new(target_session),
+            };
+            let source =
+                self.runtime_observation_source_for_pane(socket_name, pane.pane.clone())?;
+            let runtime = self.runtime_metadata_from_observation_source(
+                socket_name,
+                target_session,
+                &workspace,
+                source,
+            );
+            records.push(ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux(target_socket, target_session),
+                selector: Some(pane.target_id),
+                availability: if runtime.is_dead {
+                    SessionAvailability::Exited
+                } else {
+                    SessionAvailability::Online
+                },
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: Some(WorkspaceSessionRole::TargetHost),
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: runtime.command_name,
+                current_path: runtime.current_path,
+                task_state: runtime.task_state,
+            });
+        }
+        Ok(records)
+    }
+
+    fn runtime_metadata_from_observation_source(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_name: &str,
+        workspace: &crate::infra::tmux_types::TmuxWorkspaceHandle,
+        source: RuntimeObservationSource,
+    ) -> TmuxSessionRuntimeMetadata {
         let runtime_override = self
-            .show_session_option(&workspace, super::WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
+            .show_pane_option_on_socket(
+                socket_name,
+                &source.pane.pane_id,
+                super::WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+            )
             .ok()
-            .flatten();
+            .flatten()
+            .or_else(|| {
+                self.show_session_option(
+                    workspace,
+                    super::WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+                )
+                .ok()
+                .flatten()
+            });
         let prompt_override = runtime_override
             .as_deref()
             .is_some_and(runtime_command_override_is_prompt);
@@ -322,7 +412,7 @@ impl EmbeddedTmuxBackend {
         let command_name = runtime_override
             .as_ref()
             .filter(|override_value| !runtime_command_override_is_running(override_value))
-            .map(|override_value| runtime_command_override_name(&override_value))
+            .map(|override_value| runtime_command_override_name(override_value))
             .unwrap_or_else(|| source.command_name.clone());
         let observed_task_state = || {
             let mut state = self
@@ -349,19 +439,19 @@ impl EmbeddedTmuxBackend {
         } else if prompt_override {
             ManagedSessionTaskState::Input
         } else if let Some(hook_state) =
-            self.agent_signal_task_state(&workspace, &source.pane.pane_id, &command_name)
+            self.agent_signal_task_state(workspace, &source.pane.pane_id, &command_name)
         {
             let observed_state = observed_task_state();
             reconcile_hook_and_observed_task_state(hook_state, observed_state)
         } else {
             observed_task_state()
         };
-        Ok(TmuxSessionRuntimeMetadata {
-            command_name: Some(command_name.clone()),
-            current_path: source.pane.current_path.clone(),
+        TmuxSessionRuntimeMetadata {
+            command_name: Some(command_name),
+            current_path: source.pane.current_path,
             task_state,
             is_dead: source.pane.is_dead,
-        })
+        }
     }
 
     fn agent_signal_task_state(
@@ -516,6 +606,60 @@ impl EmbeddedTmuxBackend {
             text,
             command_name,
         })
+    }
+
+    fn local_target_content_panes(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<LocalTargetContentPane>, TmuxError> {
+        let output = match self.run_on_socket(
+            socket_name,
+            &[
+                "list-panes".to_string(),
+                "-a".to_string(),
+                "-F".to_string(),
+                format!(
+                    "#{{pane_id}}\t#{{pane_pid}}\t#{{pane_title}}\t#{{pane_current_command}}\t#{{pane_current_path}}\t#{{pane_dead}}\t#{{pane_in_mode}}\t#{{{}}}\t#{{{}}}\t#{{{}}}",
+                    super::WAITAGENT_PANE_ROLE_OPTION,
+                    super::WAITAGENT_PANE_SESSION_INSTANCE_OPTION,
+                    super::WAITAGENT_PANE_TARGET_ID_OPTION
+                ),
+            ],
+        ) {
+            Ok(output) => output,
+            Err(error) if error.is_command_failure() => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut panes = Vec::new();
+        for line in output.stdout.lines() {
+            let mut parts = line.splitn(10, '\t');
+            let pane_info_line = (0..7)
+                .filter_map(|_| parts.next())
+                .collect::<Vec<_>>()
+                .join("\t");
+            let role = parts.next().unwrap_or_default();
+            let session_instance_id = parts.next().unwrap_or_default();
+            let target_id = parts.next().unwrap_or_default();
+            if role != super::WAITAGENT_PANE_ROLE_CONTENT
+                || session_instance_id.is_empty()
+                || target_id.is_empty()
+            {
+                continue;
+            }
+            let pane = Self::pane_info_for_line(&pane_info_line)?;
+            if pane.is_dead
+                || pane.title == super::WAITAGENT_SIDEBAR_PANE_TITLE
+                || pane.title == super::WAITAGENT_FOOTER_PANE_TITLE
+            {
+                continue;
+            }
+            panes.push(LocalTargetContentPane {
+                pane,
+                session_instance_id: session_instance_id.to_string(),
+                target_id: target_id.to_string(),
+            });
+        }
+        Ok(panes)
     }
 
     fn detect_runtime_command_name_for_pane(&self, pane: &TmuxPaneInfo, pane_text: &str) -> String {

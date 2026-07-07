@@ -60,6 +60,16 @@ where
         self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
     }
 
+    pub fn sync_workspace_controls(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        layout: &WorkspaceChromeLayout,
+        footer_bindings: Option<&FooterMenuBindings>,
+    ) -> Result<(), G::Error> {
+        self.bind_waitagent_sidebar_controls(workspace, layout)?;
+        self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
+    }
+
     fn configure_session_chrome(
         &self,
         workspace: &TmuxWorkspaceHandle,

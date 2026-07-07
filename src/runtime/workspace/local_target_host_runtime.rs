@@ -460,7 +460,7 @@ impl ShellRuntimeHooks {
             LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
         })?;
         file.write_all(
-            b"__waitagent_preexec() { local __waitagent_command_line=\"$1\"; case \"$__waitagent_command_line\" in ''|__waitagent_*|*__chrome-refresh*|*__remote-session-sync-owner*|*__remote-node-ingress-server*) return 0;; esac; local __waitagent_trap; __waitagent_trap=$(trap -p DEBUG); trap - DEBUG; __WAITAGENT_COMMAND_RUNNING=1; __waitagent_signal_runtime running; eval \"$__waitagent_trap\"; }\n",
+            b"__waitagent_preexec() { local __waitagent_command_line=\"$1\"; case \"$__waitagent_command_line\" in ''|__waitagent_*|*__chrome-refresh*|*__remote-session-sync-owner*|*__remote-node-ingress-server*) return 0;; esac; if [ \"${__WAITAGENT_COMMAND_RUNNING:-}\" = 1 ]; then return 0; fi; local __waitagent_trap; __waitagent_trap=$(trap -p DEBUG); trap - DEBUG; __WAITAGENT_COMMAND_RUNNING=1; __waitagent_signal_runtime running; eval \"$__waitagent_trap\"; }\n",
         )
         .map_err(|error| {
             LifecycleError::Io("failed to write waitagent bash runtime hook".to_string(), error)
@@ -652,6 +652,9 @@ mod tests {
         assert!(!content.contains("__waitagent_command_name"));
         assert!(content.contains("& disown"));
         assert!(content.contains("__waitagent_preexec"));
+        assert!(
+            content.contains("if [ \"${__WAITAGENT_COMMAND_RUNNING:-}\" = 1 ]; then return 0; fi")
+        );
         assert!(content.contains("__waitagent_prompt_command"));
         assert!(content.contains("WAITAGENT_SIGNAL_SOCKET"));
         assert!(content.contains("WAITAGENT_PANE_ID=\"${TMUX_PANE:-}\""));

@@ -10,6 +10,7 @@ use crate::cli::{
     UiPaneCommand,
 };
 use crate::domain::workspace::WorkspaceInstanceId;
+use crate::domain::workspace_layout::WorkspaceChromeLayout;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
@@ -187,6 +188,36 @@ impl WorkspaceLayoutRuntime {
         } else {
             self.refresh_chrome(workspace, workspace_dir)
         }
+    }
+
+    pub fn signal_existing_workspace_chrome(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        if self.native_fullscreen_active(workspace)? {
+            return self
+                .backend
+                .signal_chrome_refresh_on_socket(
+                    workspace.socket_name.as_str(),
+                    workspace.session_name.as_str(),
+                )
+                .map_err(tmux_layout_error);
+        }
+        self.notify_existing_chrome_panes(workspace).map(|_| ())
+    }
+
+    pub fn sync_existing_workspace_controls(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        if self.native_fullscreen_active(workspace)? {
+            return Ok(());
+        }
+        let layout = self.existing_workspace_chrome_layout(workspace)?;
+        let footer_bindings = self.footer_menu_bindings(workspace);
+        self.control_service
+            .sync_workspace_controls(workspace, &layout, Some(&footer_bindings))
+            .map_err(tmux_layout_error)
     }
 
     pub fn suspend_main_pane_output_bridge(
@@ -524,12 +555,76 @@ impl WorkspaceLayoutRuntime {
         Ok(true)
     }
 
+    fn existing_workspace_chrome_layout(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<WorkspaceChromeLayout, LifecycleError> {
+        let window = self
+            .backend
+            .current_window(workspace)
+            .map_err(tmux_layout_error)?;
+        let panes = self
+            .backend
+            .list_panes(workspace, &window)
+            .map_err(tmux_layout_error)?;
+        let main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|pane| !pane.is_empty())
+            .map(TmuxPaneId::new)
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no recorded main pane",
+                    workspace.session_name.as_str()
+                ))
+            })?;
+        if !panes
+            .iter()
+            .any(|pane| pane.pane_id == main_pane && !pane.is_dead)
+        {
+            return Err(LifecycleError::Protocol(format!(
+                "workspace `{}` recorded main pane `{}` is not live",
+                workspace.session_name.as_str(),
+                main_pane.as_str()
+            )));
+        }
+        let sidebar_pane = panes
+            .iter()
+            .find(|pane| pane.title == SIDEBAR_PANE_TITLE && !pane.is_dead)
+            .map(|pane| pane.pane_id.clone())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no live sidebar pane",
+                    workspace.session_name.as_str()
+                ))
+            })?;
+        let footer_pane = panes
+            .iter()
+            .find(|pane| pane.title == FOOTER_PANE_TITLE && !pane.is_dead)
+            .map(|pane| pane.pane_id.clone())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no live footer pane",
+                    workspace.session_name.as_str()
+                ))
+            })?;
+
+        Ok(WorkspaceChromeLayout {
+            window,
+            main_pane,
+            sidebar_pane,
+            footer_pane,
+            sidebar_width: 32,
+        })
+    }
+
     fn ensure_layout_topology(
         &self,
         workspace: &TmuxWorkspaceHandle,
         workspace_dir: &Path,
         focus_behavior: LayoutFocusBehavior,
-    ) -> Result<crate::domain::workspace_layout::WorkspaceChromeLayout, LifecycleError> {
+    ) -> Result<WorkspaceChromeLayout, LifecycleError> {
         let t_total = Instant::now();
         let sidebar_program = self.sidebar_program(workspace, workspace_dir);
         let footer_program = self.footer_program(workspace, workspace_dir);
