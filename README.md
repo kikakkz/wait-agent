@@ -1,26 +1,45 @@
+<div align="center">
+
 <p align="center">
-  <img src="docs/logo.svg" alt="WaitAgent logo" width="120" height="120">
+  <img src="docs/logo.svg" alt="WaitAgent" width="180" />
 </p>
 
-# WaitAgent: One Terminal Workspace for Local and Remote AI Agents
+<h1>WaitAgent: One Terminal Workspace for Local and Remote AI Agents</h1>
 
-WaitAgent is a tmux-native workspace for running many Claude Code, Codex CLI,
-Kimi, shell, and other terminal sessions across local and remote machines. It
-keeps one active input surface, one session sidebar, and one workflow for the
-agents you already run in terminals.
+<p>
+Run Claude Code, Codex CLI, Kimi, shells, and remote machine sessions from one
+tmux-native workspace. Keep one active input surface, one session sidebar, and
+one workflow for the agents you already use in terminals.
+</p>
 
-[![CI](https://github.com/kikakkz/wait-agent/actions/workflows/ci.yaml/badge.svg)](https://github.com/kikakkz/wait-agent/actions/workflows/ci.yaml)
-![Project status](https://img.shields.io/badge/status-public_alpha-yellow)
-[![Rust](https://img.shields.io/badge/rust-1.86.0-orange?logo=rust)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
-[![tmux](https://img.shields.io/badge/tmux-vendored-1e90ff?logo=tmux)](https://github.com/tmux/tmux)
+<p align="center">
+  <a href="https://github.com/kikakkz/wait-agent/actions/workflows/ci.yaml?branch=main"><img src="https://img.shields.io/github/actions/workflow/status/kikakkz/wait-agent/ci.yaml?branch=main&style=for-the-badge" alt="CI status"></a>
+  <a href="https://github.com/kikakkz/wait-agent/releases"><img src="https://img.shields.io/badge/status-public%20alpha-orange?style=for-the-badge" alt="Project status: public alpha"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.86.0-orange?style=for-the-badge&logo=rust" alt="Rust 1.86.0"></a>
+  <a href="https://github.com/tmux/tmux"><img src="https://img.shields.io/badge/tmux-vendored-1e90ff?style=for-the-badge" alt="Vendored tmux"></a>
+</p>
 
-**Public alpha:** local workflows are usable, and remote multi-machine workflows
-are implemented and actively hardening. Expect rapid iteration around reconnects,
-agent state detection, and remote security boundaries.
+<p align="center">
+  <strong>
+    <a href="#install">Install</a> ·
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#remote-machines">Remote Machines</a> ·
+    <a href="#how-waitagent-works">How It Works</a> ·
+    <a href="#documentation">Docs</a>
+  </strong>
+</p>
 
 <!-- TODO: add short demo GIF here. -->
 <!-- TODO: add walkthrough video link here. -->
+
+</div>
+
+---
+
+> Public Alpha: local workflows are usable, and remote multi-machine workflows
+> are implemented and actively hardening. Expect rapid iteration around
+> reconnects, agent state detection, and remote security boundaries.
 
 ---
 
