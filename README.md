@@ -99,6 +99,37 @@ release artifact. It does not build from `main`.
 Manual downloads are available from the
 [GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
 
+### Windows / WSL2
+
+WaitAgent does not run as a native Windows binary yet. Install and run the Linux
+build inside WSL2:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kikakkz/wait-agent/main/scripts/install.sh | bash
+```
+
+When the WSL2 workspace needs to accept remote-machine connections, start
+WaitAgent with a public endpoint that remote hosts can dial:
+
+```bash
+waitagent --public <windows-or-lan-ip>:7474
+```
+
+If WSL2 mirrored networking is not reliable in your environment, use Windows NAT
+plus a port proxy from the Windows host to the WSL2 address. Run this in an
+elevated Windows PowerShell or Command Prompt:
+
+```powershell
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=7474 connectaddress=<wsl2-ip> connectport=7474
+```
+
+Then launch WaitAgent inside WSL2 with the Windows/LAN address remote machines
+can reach:
+
+```bash
+waitagent --public <windows-or-lan-ip>:7474
+```
+
 Build from source:
 
 ```bash
@@ -175,9 +206,10 @@ Direct connection is also available:
 waitagent --connect <server-ip>:7474
 ```
 
-For WSL2, use an address reachable from remote machines. WSL mirrored networking
-works in some environments; Windows NAT plus `netsh interface portproxy` is more
-predictable in others.
+For WSL2, install and run WaitAgent inside WSL2, then pass `--public` with an
+address reachable from remote machines. If needed, expose the WSL2 listener
+through Windows NAT with `netsh interface portproxy`; see
+[Windows / WSL2](#windows--wsl2).
 
 ---
 
