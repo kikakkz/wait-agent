@@ -99,7 +99,10 @@ release artifact. It does not build from `main`.
 Manual downloads are available from the
 [GitHub releases page](https://github.com/kikakkz/wait-agent/releases).
 
-### Windows / WSL2
+<details>
+<summary><strong>Windows / WSL2</strong></summary>
+
+<br>
 
 WaitAgent does not run as a native Windows binary yet. Install and run the Linux
 build inside WSL2:
@@ -130,7 +133,12 @@ can reach:
 waitagent --public <windows-or-lan-ip>:7474
 ```
 
-Build from source:
+</details>
+
+<details>
+<summary><strong>Build from source</strong></summary>
+
+<br>
 
 ```bash
 git clone --recursive https://github.com/kikakkz/wait-agent
@@ -138,6 +146,8 @@ cd wait-agent
 ./scripts/install-build-deps.sh
 cargo build --release
 ```
+
+</details>
 
 ---
 
@@ -186,7 +196,8 @@ Task badges:
 WaitAgent can aggregate sessions from remote machines into the same local
 sidebar.
 
-Start a reachable listener on the machine with the UI:
+Start a listener on the machine with the UI. The `--public` value must be an
+address that remote machines can reach:
 
 ```bash
 waitagent --public <reachable-ip>:7474
@@ -206,9 +217,8 @@ Direct connection is also available:
 waitagent --connect <server-ip>:7474
 ```
 
-For WSL2, install and run WaitAgent inside WSL2, then pass `--public` with an
-address reachable from remote machines. If needed, expose the WSL2 listener
-through Windows NAT with `netsh interface portproxy`; see
+Windows users should install and run WaitAgent inside WSL2. If the remote host
+cannot reach WSL2 directly, expose the listener through Windows NAT; see
 [Windows / WSL2](#windows--wsl2).
 
 ---
