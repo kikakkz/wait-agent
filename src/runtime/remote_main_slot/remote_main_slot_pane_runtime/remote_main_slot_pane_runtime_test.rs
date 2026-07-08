@@ -1084,6 +1084,64 @@ mod tests {
     }
 
     #[test]
+    fn authority_target_output_for_wrong_target_is_dropped() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        runtime.ensure_local_connection("peer-a");
+        let target = remote_target();
+
+        runtime
+            .activate_target(
+                &target,
+                RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should succeed");
+
+        apply_authority_envelope(
+            &runtime,
+            &target,
+            &authority_target_output_envelope_for_target(
+                1,
+                "shell-2",
+                "remote-peer:peer-a:shell-2",
+            ),
+        )
+        .expect("mismatched authority output should be ignored, not error");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        observer.sync().expect("observer sync should succeed");
+        let snapshot = observer.snapshot();
+        assert_eq!(
+            snapshot.last_output_seq, None,
+            "output for a different session/target must not reach this observer"
+        );
+    }
+
+    #[test]
+    fn direct_raw_pty_output_for_wrong_target_is_dropped() {
+        let target = remote_target();
+        let mut last_seq = None;
+        let envelope = authority_raw_pty_output_envelope_for_target(
+            1,
+            b"wrong".to_vec(),
+            "shell-2",
+            "remote-peer:peer-a:shell-2",
+        );
+        let result = collect_direct_raw_pty_output_envelope(&target, &envelope, &mut last_seq)
+            .expect("mismatched raw PTY output should be ignored, not error");
+        assert_eq!(result, None);
+        assert_eq!(last_seq, None);
+    }
+
+    #[test]
     fn mirror_readiness_keeps_reconnecting_until_remote_output_is_rendered() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         runtime
@@ -1674,6 +1732,18 @@ mod tests {
     }
 
     fn authority_target_output_envelope(output_seq: u64) -> ProtocolEnvelope<ControlPlanePayload> {
+        authority_target_output_envelope_for_target(
+            output_seq,
+            "shell-1",
+            "remote-peer:peer-a:shell-1",
+        )
+    }
+
+    fn authority_target_output_envelope_for_target(
+        output_seq: u64,
+        session_id: &str,
+        target_id: &str,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
             message_id: format!("msg-{output_seq}"),
@@ -1681,13 +1751,13 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: None,
-            session_id: Some("shell-1".to_string()),
-            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: None,
             payload: ControlPlanePayload::TargetOutput(TargetOutputPayload {
-                session_id: "shell-1".to_string(),
-                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
                 output_seq,
                 stream: "pty",
                 output_bytes: b"a".to_vec(),
@@ -1699,6 +1769,20 @@ mod tests {
         output_seq: u64,
         output_bytes: Vec<u8>,
     ) -> ProtocolEnvelope<ControlPlanePayload> {
+        authority_raw_pty_output_envelope_for_target(
+            output_seq,
+            output_bytes,
+            "shell-1",
+            "remote-peer:peer-a:shell-1",
+        )
+    }
+
+    fn authority_raw_pty_output_envelope_for_target(
+        output_seq: u64,
+        output_bytes: Vec<u8>,
+        session_id: &str,
+        target_id: &str,
+    ) -> ProtocolEnvelope<ControlPlanePayload> {
         ProtocolEnvelope {
             protocol_version: "1.1".to_string(),
             message_id: format!("raw-msg-{output_seq}"),
@@ -1706,13 +1790,13 @@ mod tests {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             sender_id: "peer-a".to_string(),
             correlation_id: None,
-            session_id: Some("shell-1".to_string()),
-            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            session_id: Some(session_id.to_string()),
+            target_id: Some(target_id.to_string()),
             attachment_id: None,
             console_id: None,
             payload: ControlPlanePayload::RawPtyOutput(RawPtyOutputPayload {
-                session_id: "shell-1".to_string(),
-                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
                 output_seq,
                 output_bytes,
             }),

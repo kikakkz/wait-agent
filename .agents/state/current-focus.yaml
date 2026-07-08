@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-14-kimi-choice-confirm
+current_task: task.github-issue-15-remote-output-routing
 focus_statement: >
-  active task is GitHub issue #14: fix Kimi question/choice UI classified as Running instead of Confirm. The Kimi detector now recognizes structured numbered selection menus (`?` + `[1]`/`→ [` choices + `select/choose/esc cancel/arrow` hints) before the background-task Running heuristic. cargo fmt --check, cargo check, and agent_detector/agent_detector_kimi tests pass. Next step is to close #14 and move to #15 or run broader regression tests.
+  active task is GitHub issue #15: fix remote output routed into wrong pane when multiple sessions share a host. The root cause is that remote main-slot output routing is validated at authority-node level but not at session/target/attachment level before forwarding output to the pane. Need to inspect apply_authority_envelope and related pane/runtime code, add target/session/attachment validation, and ensure output mismatches are dropped instead of mixed into the wrong pane.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.github-issue-14-kimi-choice-confirm.in_progress
+  reference: task.github-issue-15-remote-output-routing.in_progress
