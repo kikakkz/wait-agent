@@ -217,7 +217,9 @@ fn kimi_has_choice_menu(lines: &[&str]) -> bool {
 
     for line in lines {
         let trimmed = line.trim_start();
-        if trimmed.starts_with('?') && trimmed.len() > 1 {
+        if (trimmed.starts_with('?') && trimmed.len() > 1)
+            || trimmed.to_ascii_lowercase() == "question"
+        {
             has_question = true;
         }
         if trimmed.starts_with("→ [") || kimi_is_numbered_choice_line(trimmed) {
@@ -317,13 +319,32 @@ K2.7 Code thinking  [1 task running]"#;
     }
 
     #[test]
-    fn background_task_without_choice_menu_is_running() {
-        let pane_text = r#"K2.7 Code thinking  [1 task running]
-│ >"#;
+    fn question_header_without_question_mark_is_confirm() {
+        // Some Kimi choice menus render a standalone "question" tag line
+        // instead of a leading '?' prompt.
+        let pane_text = r#"question
+Next    Submit
+  browser-use Ozon POC 已跑通，接下来优先做哪件事？
+→ [1] 稳定商品提取 (Recommended)
+[2] ...
+↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
+K2.7 Code thinking  [1 task running]"#;
         let detector = KimiDetector;
         assert_eq!(
             detector.infer_task_state(Some("kimi"), pane_text),
-            Some(ManagedSessionTaskState::Running)
+            Some(ManagedSessionTaskState::Confirm)
+        );
+    }
+
+    #[test]
+    fn question_header_alone_is_not_confirm() {
+        // A stray "question" line without choices/hints must not become Confirm.
+        let pane_text = r#"question
+│ >"#;
+        let detector = KimiDetector;
+        assert_ne!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Confirm)
         );
     }
 }
