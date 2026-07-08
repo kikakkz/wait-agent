@@ -1,6 +1,6 @@
 kind: state
 version: 1
-last_updated_from: GitHub issue #13 remote main-slot stale pane reuse fix validation on 2026-07-08
+last_updated_from: GitHub issue #14 Kimi choice-menu Confirm detection validation on 2026-07-08
 checks:
   - id: remote-main-slot-authority-gap-cargo-check
     command: cargo check after making remote main-slot pane keep pending resize/input while authority control-plane is unregistered
@@ -721,4 +721,16 @@ checks:
     status: pass
   - id: github-issue-13-remote-node-session-sync-runtime-test-compiles
     command: cargo test runtime_observes_catalog_change_while_reconnecting_and_publishes_latest_baseline -- --test-threads=1
+    status: pass
+  - id: github-issue-14-cargo-fmt-check
+    command: cargo fmt --check after adding Kimi choice-menu Confirm detection
+    status: pass
+  - id: github-issue-14-cargo-check
+    command: cargo check --quiet after adding Kimi choice-menu Confirm detection
+    status: pass
+  - id: github-issue-14-agent-detector-kimi-tests
+    command: cargo test agent_detector_kimi -- --test-threads=1
+    status: pass
+  - id: github-issue-14-agent-detector-tests
+    command: cargo test agent_detector -- --test-threads=1
     status: pass

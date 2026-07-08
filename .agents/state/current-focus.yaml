@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-13-remote-main-slot-stale-pane-reuse
+current_task: task.github-issue-14-kimi-choice-confirm
 focus_statement: >
-  GitHub issue #13 is done: remote main-slot no longer reuses a live stale pane after transport disconnect. The implementation adds remote-surface state tracking (starting/connected/reconnecting/exited) on tmux pane options, defers authority socket registration with retry, makes pane reuse consult that state, and disables the output bridge for local target-host sessions. cargo check, cargo fmt --check, remote_main_slot_pane_runtime, and targeted main_slot_runtime tests all pass. Next step is to select the next issue from the #13-#18 queue (likely #14) via runbook.select-next-task.
+  active task is GitHub issue #14: fix Kimi question/choice UI classified as Running instead of Confirm. The Kimi detector now recognizes structured numbered selection menus (`?` + `[1]`/`→ [` choices + `select/choose/esc cancel/arrow` hints) before the background-task Running heuristic. cargo fmt --check, cargo check, and agent_detector/agent_detector_kimi tests pass. Next step is to close #14 and move to #15 or run broader regression tests.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.github-issue-13-remote-main-slot-stale-pane-reuse.in_progress
+  reference: task.github-issue-14-kimi-choice-confirm.in_progress

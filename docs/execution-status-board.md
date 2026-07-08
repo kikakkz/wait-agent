@@ -35,8 +35,8 @@ Current phase:
 
 Current gate:
 
-- GitHub issue #13: Remote main-slot can reuse a live stale pane after transport disconnect (done)
-- last closed gate was remote exit latency plus authority transport stability batch, including remote main-slot authority-gap follow-up
+- GitHub issue #14: Kimi question/choice UI is classified as Running instead of Confirm (in progress)
+- last closed gate was GitHub issue #13: remote main-slot stale pane reuse fix
 
 Why the last gate closed:
 
@@ -211,16 +211,17 @@ Priority rule:
 
 Remaining remote queue for phase completion:
 
-1. `task.github-issue-13-remote-main-slot-stale-pane-reuse` Prevent remote main-slot reuse of live stale pane after transport disconnect (done)
-2. `task.remote-exit-latency-1` Add acknowledged local catalog notify to the remote session sync event loop (done)
-3. `task.remote-exit-latency-2` Wire WaitAgent-managed target lifecycle exits to session sync notify (done)
-4. `task.remote-exit-latency-3` Replace `TargetExited` hot-path tmux socket scan with live workspace socket registry (done)
-5. `task.remote-exit-latency-4` Validate remote session exit latency end to end and clean temporary diagnostics (done)
-6. `task.transport-stability-l4` Shorten authority transport read timeout and add ping/pong liveness (done)
-7. `task.transport-stability-l1` Replace output channel drops with blocking send plus replay cache (done)
-8. `task.transport-stability-l2` Add authority-side input ring buffer and congestion advisory frame (done)
-9. `task.transport-stability-l5` Verify shared authority reconnect indefinite jittered backoff (done)
-10. `task.transport-stability-l3` Add output gap SyncRequest/SyncResponse recovery (done)
+1. `task.github-issue-14-kimi-choice-confirm` Fix Kimi question/choice UI classified as Running instead of Confirm (in progress)
+2. `task.github-issue-13-remote-main-slot-stale-pane-reuse` Prevent remote main-slot reuse of live stale pane after transport disconnect (done)
+3. `task.remote-exit-latency-1` Add acknowledged local catalog notify to the remote session sync event loop (done)
+4. `task.remote-exit-latency-2` Wire WaitAgent-managed target lifecycle exits to session sync notify (done)
+5. `task.remote-exit-latency-3` Replace `TargetExited` hot-path tmux socket scan with live workspace socket registry (done)
+6. `task.remote-exit-latency-4` Validate remote session exit latency end to end and clean temporary diagnostics (done)
+7. `task.transport-stability-l4` Shorten authority transport read timeout and add ping/pong liveness (done)
+8. `task.transport-stability-l1` Replace output channel drops with blocking send plus replay cache (done)
+9. `task.transport-stability-l2` Add authority-side input ring buffer and congestion advisory frame (done)
+10. `task.transport-stability-l5` Verify shared authority reconnect indefinite jittered backoff (done)
+11. `task.transport-stability-l3` Add output gap SyncRequest/SyncResponse recovery (done)
 
 The exact machine ordering for that queue lives in `.agents/tasks/backlog.yaml`.
 

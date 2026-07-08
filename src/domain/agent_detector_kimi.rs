@@ -78,6 +78,10 @@ impl AgentDetector for KimiDetector {
             }
         }
 
+        if kimi_has_choice_menu(&normalized_lines) {
+            return Some(ManagedSessionTaskState::Confirm);
+        }
+
         if kimi_has_active_animation(&normalized_lines) {
             return Some(ManagedSessionTaskState::Running);
         }
@@ -194,6 +198,56 @@ fn kimi_prompt_is_empty(line: &str) -> bool {
             .is_some_and(|rest| rest.trim().is_empty())
 }
 
+/// Detect Kimi's structured question/choice menu, e.g.:
+///
+/// ```text
+/// ? browser-use Ozon POC 已跑通，接下来优先做哪件事？
+/// → [1] 稳定商品提取 (Recommended)
+/// [2] ...
+/// ↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
+/// K2.7 Code thinking  [1 task running]
+/// ```
+///
+/// This must be recognized as Confirm before the background-task / running
+/// heuristics see `[1 task running]`.
+fn kimi_has_choice_menu(lines: &[&str]) -> bool {
+    let mut has_question = false;
+    let mut has_choice = false;
+    let mut has_selection_hint = false;
+
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('?') && trimmed.len() > 1 {
+            has_question = true;
+        }
+        if trimmed.starts_with("→ [") || kimi_is_numbered_choice_line(trimmed) {
+            has_choice = true;
+        }
+        let lowered = line.to_ascii_lowercase();
+        if (lowered.contains("select") || lowered.contains("choose"))
+            && (lowered.contains("esc")
+                || lowered.contains("switch")
+                || line.contains('↑')
+                || line.contains('↓')
+                || line.contains('↵'))
+        {
+            has_selection_hint = true;
+        }
+    }
+
+    has_question && has_choice && has_selection_hint
+}
+
+fn kimi_is_numbered_choice_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('[') else {
+        return false;
+    };
+    let Some((num, _)) = rest.split_once(']') else {
+        return false;
+    };
+    num.trim().parse::<usize>().is_ok()
+}
+
 fn kimi_has_running_background_task(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         let mut rest = *line;
@@ -240,4 +294,36 @@ fn kimi_has_stable_input_prompt(pane_text: &str) -> bool {
         .iter()
         .skip(recent_start)
         .any(|line| kimi_prompt_line(line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choice_menu_is_confirm() {
+        let pane_text = r#"question
+Next    Submit
+? browser-use Ozon POC 已跑通，接下来优先做哪件事？
+→ [1] 稳定商品提取 (Recommended)
+[2] ...
+↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
+K2.7 Code thinking  [1 task running]"#;
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Confirm)
+        );
+    }
+
+    #[test]
+    fn background_task_without_choice_menu_is_running() {
+        let pane_text = r#"K2.7 Code thinking  [1 task running]
+│ >"#;
+        let detector = KimiDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("kimi"), pane_text),
+            Some(ManagedSessionTaskState::Running)
+        );
+    }
 }
