@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-17-raw-pty-output-routing
+current_task: task.github-issue-18-remote-dead-panes-accumulate
 focus_statement: >
-  active task is GitHub issue #17: RawPtyOutput routing mixes same-host remote sessions and triggers out-of-order pane failures. Need to verify whether the #15 fix (session_id/target_id validation at pane runtime event loop) already covers this case for both direct RawPtyOutput events and Envelope-wrapped RawPtyOutput payloads, and identify any remaining gap.
+  active task is GitHub issue #18: remote sessions remain visible and dead wa-hidden panes accumulate after client hosts power off. Need to analyze the root cause in the lifecycle/catalog path that should react to node offline events by hiding or removing remote targets and cleaning up dead hidden panes.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.github-issue-17-raw-pty-output-routing.in_progress
+  reference: task.github-issue-18-remote-dead-panes-accumulate.in_progress

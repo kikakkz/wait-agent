@@ -1,37 +1,36 @@
-id: task.github-issue-17-raw-pty-output-routing
+id: task.github-issue-18-remote-dead-panes-accumulate
 kind: task
 version: 1
-title: verify RawPtyOutput routing for same-host multi-session is fixed by #15 or needs additional work
+title: analyze and fix remote session visibility/pane cleanup after host power-off
 status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-network-completion-plan.md
-  issue: https://github.com/kikakkz/wait-agent/issues/17
+  issue: https://github.com/kikakkz/wait-agent/issues/18
   why:
-    - issue #17 reports that RawPtyOutput from one target on a host can be consumed by another remote-main-slot for a different target on the same host
-    - this causes output mixing and out-of-order pane failures
-    - issue #15 already added session_id/target_id validation at the pane runtime event loop for output payloads, which may cover this case
+    - issue #18 reports that remote sessions remain visible in the sidebar after client hosts power off
+    - dead wa-hidden panes/windows accumulate because lifecycle cleanup is not triggered by offline detection
+    - activation of stale remote targets can fail with unknown target
 source_of_truth:
   file: .agents/tasks/current.yaml
   reference: current
 depends_on:
-  - task.github-issue-16-hidden-windows-accumulate.done
+  - task.github-issue-17-raw-pty-output-routing.done
 done_criteria:
-  - confirm whether #15 fix covers RawPtyOutput routing in both event forms (direct RawPtyOutput event and Envelope-wrapped RawPtyOutput payload)
-  - identify any remaining gap if not fully covered
-  - add targeted test if needed, or close/comment issue #17 as fixed by #15
+  - identify the authoritative catalog/lifecycle path that should hide or remove offline remote targets
+  - identify where dead wa-hidden remote panes should be cleaned up
+  - implement the minimal native fix
+  - add or update tests to cover the offline cleanup path
   - cargo fmt --check passes
   - cargo check passes
-  - cargo test remote_main_slot_pane_runtime passes
+  - relevant test suites pass
 verification:
   - cargo fmt --check
   - cargo check
-  - cargo test remote_main_slot_pane_runtime -- --test-threads=1
   - cargo test remote_main_slot_runtime -- --test-threads=1
+  - cargo test workspace_runtime -- --test-threads=1
 touched_paths:
-  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
-  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
-  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/remote_main_slot_pane_runtime_test.rs
+  - src/runtime/remote_main_slot/
+  - src/runtime/workspace/
 notes:
-  - Issue #17 root cause candidate: RawPtyOutputPayload.target_id not validated against current target before updating last_output_seq and writing bytes.
-  - #15 fix hoisted session_id/target_id validation to pane runtime event loop for RawPtyOutput, TargetOutput, MirrorBootstrapChunk, MirrorBootstrapComplete.
+  - Previous task #17 closed as fixed by #15 (commit efc741c); regression test added in commit 50acdcc.
