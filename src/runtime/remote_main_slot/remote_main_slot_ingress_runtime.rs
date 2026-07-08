@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn server_listener_authority_transport_listener_requires_owner_registration() {
+    fn server_listener_authority_transport_listener_starts_without_immediate_owner_connection() {
         let target_registry = TargetRegistryService::new(
             DefaultTargetCatalogGateway::from_build_env()
                 .expect("build env target catalog should exist"),
@@ -419,6 +419,12 @@ mod tests {
             session_name: "workspace-1".to_string(),
             target: "remote-peer:peer-a:shell-1".to_string(),
         };
+        let socket_path = authority_transport_socket_path(
+            &command.socket_name,
+            &command.session_name,
+            &command.target,
+        );
+        let _ = std::fs::remove_file(&socket_path);
         let sink = runtime
             .pane_runtime
             .external_authority_stream_submitter()
@@ -435,15 +441,24 @@ mod tests {
                 tx,
             )
             .expect("pane runtime should start queued authority connection");
-        let error = match runtime.start_local_authority_transport_listener(&command, sink) {
-            Ok(_) => panic!("server listener should fail without owner registration ACK"),
-            Err(error) => error,
-        };
+        let guard = runtime
+            .start_local_authority_transport_listener(&command, sink)
+            .expect("server listener should bind its authority transport socket");
 
-        assert!(error
-            .to_string()
-            .contains("failed to register remote main-slot authority socket"));
-        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(
+            socket_path.exists(),
+            "authority transport socket should be bound"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "no connection event should arrive without an owner/client"
+        );
+
+        drop(guard);
+        assert!(
+            !socket_path.exists(),
+            "authority transport socket should be removed when the guard is dropped"
+        );
     }
 
     #[test]
