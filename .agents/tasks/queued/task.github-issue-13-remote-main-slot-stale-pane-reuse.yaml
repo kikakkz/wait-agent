@@ -2,7 +2,7 @@ id: task.github-issue-13-remote-main-slot-stale-pane-reuse
 kind: task
 version: 1
 title: fix remote main-slot reuse of live stale pane after transport disconnect
-status: done
+status: in_progress
 priority: high
 design_ref:
   doc: docs/remote-network-completion-plan.md
@@ -36,8 +36,8 @@ touched_paths:
   - src/runtime/workspace/main_slot_runtime.rs
   - src/runtime/workspace/workspace_layout_runtime.rs
 notes:
-  - Current focus is the first of the six open GitHub issues (#13-#18).
-  - Root cause of the failing `activating_remote_target_respawns_workspace_main_pane_not_detached_target_host` test was that `cargo test` only rebuilds the unit-test binary; the subprocess `target/debug/waitagent` used by integration tests was stale and still contained the old authority-socket registration failure path. A `cargo build` fixed it.
-  - Adjusted `remote_surface_pane_is_reusable` so that only explicitly `Exited` remote panes are treated as stale; Starting/Connected/Reconnecting panes and legacy panes without remote-surface metadata remain reusable.
-  - Fixed `configure_main_pane_output_bridge_for_active_target` to disable the output bridge when the active target is a local target-host session, preventing the main pane pipe from staying enabled after switching back from a remote target.
-  - Verification: cargo fmt --check, cargo check, cargo test remote_main_slot_pane_runtime, and targeted cargo test main_slot_runtime invocations all pass.
+  - Initial implementation tracked in GitHub issue #13 is already present as uncommitted changes in the working tree.
+  - '`remote_surface_state.rs` was added to store per-pane remote-surface metadata (target, authority, state, generation, updated-at) via tmux pane options.'
+  - '`main_slot_runtime.rs` now consults this state before reusing an existing remote session pane.'
+  - '`remote_main_slot_pane_runtime.rs` updates the state through Starting -> Connected -> Reconnecting -> Exited transitions.'
+  - '`remote_main_slot_ingress_runtime.rs` defers authority socket registration with exponential backoff instead of failing the pane on transient registration absence.'

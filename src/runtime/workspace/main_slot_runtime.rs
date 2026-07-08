@@ -15,6 +15,7 @@ use crate::infra::tmux::{
     TmuxSessionGateway, TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_main_slot::remote_surface_state::remote_surface_pane_is_reusable;
 use crate::runtime::remote_node::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
@@ -970,7 +971,7 @@ impl MainSlotRuntime {
     ) -> Result<TmuxPaneId, LifecycleError> {
         let qualified_target = target.address.qualified_target();
         if let Some(existing_pane) = self.find_session_pane(workspace, &qualified_target)? {
-            if self.prepare_existing_remote_session_pane(workspace, &existing_pane)? {
+            if self.prepare_existing_remote_session_pane(workspace, &existing_pane, target)? {
                 return Ok(existing_pane);
             }
             self.clear_session_pane(workspace, &qualified_target)?;
@@ -996,10 +997,14 @@ impl MainSlotRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
+        target: &ManagedSessionRecord,
     ) -> Result<bool, LifecycleError> {
         if !self.pane_is_recoverable_content_pane(workspace, pane.as_str())?
             || !self.pane_is_live_on_socket(workspace, pane.as_str())?
         {
+            return Ok(false);
+        }
+        if !remote_surface_pane_is_reusable(&self.backend, workspace, pane, target)? {
             return Ok(false);
         }
         match self
@@ -1794,7 +1799,7 @@ impl MainSlotRuntime {
     ) -> Result<PreparedRemoteExitMainPane, LifecycleError> {
         let qualified_target = target.address.qualified_target();
         if let Some(existing_pane) = self.find_session_pane(workspace, &qualified_target)? {
-            if self.prepare_existing_remote_session_pane(workspace, &existing_pane)? {
+            if self.prepare_existing_remote_session_pane(workspace, &existing_pane, target)? {
                 if existing_pane != *exiting_pane {
                     self.backend
                         .swap_panes(workspace, &existing_pane, exiting_pane)
@@ -2876,6 +2881,20 @@ impl MainSlotRuntime {
         if target_is_remote_for_socket(workspace.socket_name.as_str(), target)
             || self.active_target_is_remote(workspace.socket_name.as_str(), Some(target))?
         {
+            return self
+                .layout_runtime
+                .disable_main_pane_output_bridge(workspace);
+        }
+        // The output bridge is only for the workspace chrome's own persistent
+        // main shell. When the active target is a local target-host session that
+        // has been swapped into the main slot, keep the bridge disabled so the
+        // target-host pane owns its own output.
+        let is_local_target_host = self
+            .target_registry_for_socket(workspace.socket_name.as_str())?
+            .find_target(target)
+            .map_err(main_slot_error)?
+            .is_some_and(|session| session.is_target_host());
+        if is_local_target_host {
             return self
                 .layout_runtime
                 .disable_main_pane_output_bridge(workspace);

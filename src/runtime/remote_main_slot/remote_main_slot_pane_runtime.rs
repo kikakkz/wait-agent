@@ -13,6 +13,9 @@ use crate::runtime::remote_authority_connection_runtime::{
     AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
 };
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
+use crate::runtime::remote_main_slot::remote_surface_state::{
+    mark_remote_surface_state_from_env, RemoteSurfaceState,
+};
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
@@ -216,6 +219,13 @@ impl RemoteMainSlotPaneRuntime {
 
         let registry = RemoteConnectionRegistry::new();
         let remote_runtime = RemoteMainSlotRuntime::with_registry(registry.clone());
+        let _ = mark_remote_surface_state_from_env(
+            &self.backend,
+            &spec.socket_name,
+            &target,
+            None,
+            RemoteSurfaceState::Starting,
+        );
         let mailbox = remote_runtime
             .ensure_local_observer_connection(spec.console_host_id.clone())
             .ok_or_else(|| {
@@ -285,28 +295,28 @@ impl RemoteMainSlotPaneRuntime {
         let mut mirror_readiness = MirrorReadiness::Waiting;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
-        // Always attempt activation — output_log replay comes from the
-        // local mailbox; no need to wait for authority transport.
-        match activate_remote_surface_binding(
-            &remote_runtime,
-            &target,
-            &spec,
-            &initial_size,
-            &mut observer,
-            &raw_input_route,
-            &mut pending_pty_size,
-            &mut last_synced_size,
-            &mut raw_screen_initialized,
-            event_tx.clone(),
-        ) {
-            Ok(activated_binding) => {
-                binding = Some(activated_binding);
-            }
-            Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] initial remote activation deferred: {error}"
-                ));
-                authority_status = waiting_authority_status.clone();
+        if remote_runtime.has_connection(target.address.authority_id()) {
+            match activate_remote_surface_binding(
+                &remote_runtime,
+                &target,
+                &spec,
+                &initial_size,
+                &mut observer,
+                &raw_input_route,
+                &mut pending_pty_size,
+                &mut last_synced_size,
+                &mut raw_screen_initialized,
+                event_tx.clone(),
+            ) {
+                Ok(activated_binding) => {
+                    binding = Some(activated_binding);
+                }
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[diag-timing] initial remote activation deferred: {error}"
+                    ));
+                    authority_status = waiting_authority_status.clone();
+                }
             }
         }
         let run_result = (|| -> Result<(), LifecycleError> {
@@ -354,7 +364,17 @@ impl RemoteMainSlotPaneRuntime {
                         Err(RecvTimeoutError::Timeout) => {
                             let elapsed = started.elapsed();
                             if elapsed > slot_pane_helpers::INITIAL_CONNECT_TIMEOUT {
-                                return Ok(());
+                                initial_connecting_since = None;
+                                reconnecting_since = Some(Instant::now());
+                                authority_status = AuthorityTransportStatus::Disconnected;
+                                let _ = mark_remote_surface_state_from_env(
+                                    &self.backend,
+                                    &spec.socket_name,
+                                    &target,
+                                    authority_generation,
+                                    RemoteSurfaceState::Reconnecting,
+                                );
+                                continue;
                             }
                             reconnect_animation_frame = (reconnect_animation_frame + 1) % 8;
                             let _ = observer.sync();
@@ -560,12 +580,31 @@ impl RemoteMainSlotPaneRuntime {
                                         binding = Some(activated_binding);
                                         mirror_readiness = MirrorReadiness::Waiting;
                                         activated = true;
+                                        let _ = mark_remote_surface_state_from_env(
+                                            &self.backend,
+                                            &spec.socket_name,
+                                            &target,
+                                            Some(generation),
+                                            RemoteSurfaceState::Connected,
+                                        )?;
                                     }
                                     Err(error) => {
                                         authority_status =
                                             AuthorityTransportStatus::Failed(error.to_string());
                                     }
                                 }
+                            }
+                            if !activated
+                                && binding.is_some()
+                                && matches!(authority_status, AuthorityTransportStatus::Connected)
+                            {
+                                let _ = mark_remote_surface_state_from_env(
+                                    &self.backend,
+                                    &spec.socket_name,
+                                    &target,
+                                    Some(generation),
+                                    RemoteSurfaceState::Connected,
+                                )?;
                             }
                             // When activation succeeded, raw PTY output has
                             // already been written and the remote terminal
@@ -606,6 +645,13 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut reconnecting_since,
                                 &mut reconnect_animation_frame,
                             );
+                            let _ = mark_remote_surface_state_from_env(
+                                &self.backend,
+                                &spec.socket_name,
+                                &target,
+                                Some(generation),
+                                RemoteSurfaceState::Reconnecting,
+                            )?;
                             // Fall through to the reconnecting branch below.
                             // The first ~500 ms are a "verifying exit" phase
                             // that polls the catalog every 10 ms without
@@ -635,6 +681,13 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut reconnecting_since,
                                     &mut reconnect_animation_frame,
                                 );
+                                let _ = mark_remote_surface_state_from_env(
+                                    &self.backend,
+                                    &spec.socket_name,
+                                    &target,
+                                    generation,
+                                    RemoteSurfaceState::Reconnecting,
+                                )?;
                             }
                             authority_status = AuthorityTransportStatus::Failed(message);
                             draw_remote_snapshot(
@@ -731,6 +784,13 @@ impl RemoteMainSlotPaneRuntime {
                                     // state transition, not a pane-crash fallback.
                                     let pane_id = std::env::var("TMUX_PANE")
                                         .unwrap_or_else(|_| String::new());
+                                    let _ = mark_remote_surface_state_from_env(
+                                        &self.backend,
+                                        &spec.socket_name,
+                                        &target,
+                                        authority_generation,
+                                        RemoteSurfaceState::Exited,
+                                    )?;
                                     signal_clean_remote_target_exit(&spec, &pane_id)?;
                                     return Ok(());
                                 }
@@ -796,6 +856,13 @@ impl RemoteMainSlotPaneRuntime {
                                     remote_runtime.has_connection(target.address.authority_id()),
                                     reconnecting_since.is_some(),
                                 ));
+                                let _ = mark_remote_surface_state_from_env(
+                                    &self.backend,
+                                    &spec.socket_name,
+                                    &target,
+                                    authority_generation,
+                                    RemoteSurfaceState::Exited,
+                                )?;
                                 return Ok(());
                             }
                         }
@@ -814,6 +881,13 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut reconnecting_since,
                                 &mut reconnect_animation_frame,
                             );
+                            let _ = mark_remote_surface_state_from_env(
+                                &self.backend,
+                                &spec.socket_name,
+                                &target,
+                                authority_generation,
+                                RemoteSurfaceState::Reconnecting,
+                            )?;
                         }
                         // During reconnect, keep status as Disconnected so the
                         // last known content stays visible with reconnecting bar
@@ -859,6 +933,13 @@ impl RemoteMainSlotPaneRuntime {
                                     binding = Some(activated_binding);
                                     mirror_readiness = MirrorReadiness::Waiting;
                                     activated = true;
+                                    let _ = mark_remote_surface_state_from_env(
+                                        &self.backend,
+                                        &spec.socket_name,
+                                        &target,
+                                        authority_generation,
+                                        RemoteSurfaceState::Connected,
+                                    )?;
                                 }
                                 Err(error) => {
                                     authority_status =
@@ -938,6 +1019,13 @@ impl RemoteMainSlotPaneRuntime {
         if let Some(binding) = binding.as_ref() {
             let _ = remote_runtime.close_target(&target, binding);
         }
+        let _ = mark_remote_surface_state_from_env(
+            &self.backend,
+            &spec.socket_name,
+            &target,
+            authority_generation,
+            RemoteSurfaceState::Exited,
+        );
         if let Err(error) = &run_result {
             ERROR_LOG.log(format!(
                 "[diag-timing] remote pane run_result failed: {error}"

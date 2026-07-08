@@ -68,6 +68,7 @@ pub(super) struct LocalCatalogChangeRequest {
 }
 
 impl LocalCatalogChangeRequest {
+    #[cfg(test)]
     pub(super) fn notify(reason: LocalCatalogChangeReason) -> Self {
         Self {
             reason,

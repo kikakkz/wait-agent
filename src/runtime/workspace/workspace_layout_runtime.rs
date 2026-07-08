@@ -707,7 +707,7 @@ impl WorkspaceLayoutRuntime {
             t_controls.elapsed(),
             t_total.elapsed()
         ));
-        if transition_active && previous_main_pane.is_none() {
+        if transition_active {
             ERROR_LOG.log(format!(
                 "[diag] ensure_layout_topology: skipped main pane metadata while transition is active for session={:?}",
                 workspace.session_name

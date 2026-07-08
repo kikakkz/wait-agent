@@ -127,14 +127,11 @@ impl RemoteMainSlotIngressRuntime {
                 )
             })?;
         let authority_id = extract_authority_id_from_target(&command.target);
-        notify_authority_socket_ready(&self.network, &authority_id, &socket_path).map_err(
-            |error| {
-                LifecycleError::Io(
-                    "failed to register remote main-slot authority socket".to_string(),
-                    error,
-                )
-            },
-        )?;
+        spawn_authority_socket_registration_retry(
+            self.network.clone(),
+            authority_id,
+            socket_path.clone(),
+        );
         Ok(guard)
     }
 
@@ -216,6 +213,43 @@ impl RemoteMainSlotIngressRuntime {
 
         Ok(Some(GrpcAuthorityBridgeGuard))
     }
+}
+
+fn spawn_authority_socket_registration_retry(
+    network: RemoteNetworkConfig,
+    authority_id: String,
+    socket_path: std::path::PathBuf,
+) {
+    thread::Builder::new()
+        .name("authority-socket-register".into())
+        .spawn(move || {
+            let mut delay = Duration::from_millis(50);
+            const MAX_DELAY: Duration = Duration::from_secs(2);
+            loop {
+                match notify_authority_socket_ready(&network, &authority_id, &socket_path) {
+                    Ok(()) => {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] authority socket registered node={} path={}",
+                            authority_id,
+                            socket_path.display()
+                        ));
+                        break;
+                    }
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] authority socket registration pending node={} path={} error={} retrying in {:?}",
+                            authority_id,
+                            socket_path.display(),
+                            error,
+                            delay
+                        ));
+                    }
+                }
+                thread::sleep(delay);
+                delay = std::cmp::min(delay * 2, MAX_DELAY);
+            }
+        })
+        .ok();
 }
 
 struct LiveRemotePublicationSink {

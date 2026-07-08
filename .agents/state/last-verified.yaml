@@ -1,6 +1,6 @@
 kind: state
 version: 1
-last_updated_from: remote main-slot authority-gap follow-up validation on 2026-06-23
+last_updated_from: GitHub issue #13 remote main-slot stale pane reuse fix validation on 2026-07-08
 checks:
   - id: remote-main-slot-authority-gap-cargo-check
     command: cargo check after making remote main-slot pane keep pending resize/input while authority control-plane is unregistered
@@ -694,4 +694,31 @@ checks:
     status: pass
   - id: sidebar-prototype-real-pty
     command: manual PTY validation of `Ctrl-N`, `Right`, `Down`, `Enter`, and `Left` against `target/debug/waitagent __workspace-internal`
+    status: pass
+  - id: github-issue-13-cargo-fmt-check
+    command: cargo fmt --check after adjusting remote surface reuse and local target-host output bridge
+    status: pass
+  - id: github-issue-13-cargo-check
+    command: cargo check after adjusting remote surface reuse and local target-host output bridge
+    status: pass
+  - id: github-issue-13-cargo-build-debug
+    command: cargo build to refresh target/debug/waitagent used by tmux-spawned integration tests
+    status: pass
+  - id: github-issue-13-remote-main-slot-pane-runtime
+    command: cargo test remote_main_slot_pane_runtime -- --test-threads=1
+    status: pass
+  - id: github-issue-13-main-slot-runtime-targeted
+    command: cargo test main_slot_runtime -- --test-threads=1 executed as targeted per-test invocations after the stale-binary root cause was fixed
+    status: pass
+  - id: github-issue-13-repro-activating-remote-target
+    command: cargo test activating_remote_target_respawns_workspace_main_pane_not_detached_target_host -- --test-threads=1
+    status: pass
+  - id: github-issue-13-repro-switching-back-to-local
+    command: cargo test switching_from_remote_back_to_local_target_restores_local_main_pane -- --test-threads=1
+    status: pass
+  - id: github-issue-13-dead-code-warning-fix
+    command: cargo check --quiet after marking LocalCatalogChangeRequest::notify as test-only
+    status: pass
+  - id: github-issue-13-remote-node-session-sync-runtime-test-compiles
+    command: cargo test runtime_observes_catalog_change_while_reconnecting_and_publishes_latest_baseline -- --test-threads=1
     status: pass

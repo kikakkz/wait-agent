@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: null
+current_task: task.github-issue-13-remote-main-slot-stale-pane-reuse
 focus_statement: >
-  remote exit latency and transport stability batch is closed, including the follow-up fix that keeps remote main-slot panes alive when authority/control-plane registration is temporarily absent by deferring pane-owned resize and input state. Current focus is selecting the next remote-network completion task or deciding whether to un-defer workspace snapshot persistence.
+  GitHub issue #13 is done: remote main-slot no longer reuses a live stale pane after transport disconnect. The implementation adds remote-surface state tracking (starting/connected/reconnecting/exited) on tmux pane options, defers authority socket registration with retry, makes pane reuse consult that state, and disables the output bridge for local target-host sessions. cargo check, cargo fmt --check, remote_main_slot_pane_runtime, and targeted main_slot_runtime tests all pass. Next step is to select the next issue from the #13-#18 queue (likely #14) via runbook.select-next-task.
 last_updated_from:
-  file: .agents/state/task-history.yaml
-  reference: task.remote-main-slot-authority-gap-followup.done
+  file: .agents/tasks/current.yaml
+  reference: task.github-issue-13-remote-main-slot-stale-pane-reuse.in_progress
