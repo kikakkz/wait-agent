@@ -520,6 +520,25 @@ mod tests {
             "second local target content pane should remain live"
         );
 
+        let first_hidden_pane = content_pane_by_session_identity(
+            &backend,
+            &workspace.workspace_handle,
+            first_target_host.workspace_handle.session_name.as_str(),
+        )
+        .expect("first target hidden content pane should be found");
+        let remain_on_exit = backend
+            .show_pane_option_on_socket(
+                &workspace.workspace_handle.socket_name,
+                &crate::infra::tmux::TmuxPaneId::new(first_hidden_pane),
+                "remain-on-exit",
+            )
+            .expect("should read remain-on-exit option");
+        assert_ne!(
+            remain_on_exit.as_deref(),
+            Some("on"),
+            "parked hidden content pane must not keep remain-on-exit, otherwise dead hidden windows accumulate"
+        );
+
         kill_server(&backend, &workspace.workspace_handle);
         let _ = fs::remove_dir_all(workspace_dir);
     }

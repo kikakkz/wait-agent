@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-15-remote-output-routing
+current_task: task.github-issue-16-hidden-windows-accumulate
 focus_statement: >
-  active task is GitHub issue #15: fix remote output routed into wrong pane when multiple sessions share a host. The root cause is that remote main-slot output routing is validated at authority-node level but not at session/target/attachment level before forwarding output to the pane. Need to inspect apply_authority_envelope and related pane/runtime code, add target/session/attachment validation, and ensure output mismatches are dropped instead of mixed into the wrong pane.
+  active task is GitHub issue #16: wa-hidden windows accumulate after remote abnormal disconnect/reconnect. The root cause is that remote panes are created with remain-on-exit=on, and abnormal exit paths (protocol error, pane-died, recovery) do not consistently call cleanup_exited_remote_session_pane. Need to analyze the exact code paths in main_slot_runtime.rs and remote_main_slot_pane_runtime.rs before proposing a fix.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.github-issue-15-remote-output-routing.in_progress
+  reference: task.github-issue-16-hidden-windows-accumulate.in_progress

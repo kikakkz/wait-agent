@@ -1156,6 +1156,13 @@ impl MainSlotRuntime {
                 ERROR_LOG.log(
                     "[diag-bug] remote_main_pane_exit_transition: no next target, respawning with host only".to_string(),
                 );
+                if let Some(qualified_target) = active_target.as_deref() {
+                    self.cleanup_exited_remote_session_pane(
+                        workspace,
+                        qualified_target,
+                        Some(recovery_pane),
+                    )?;
+                }
                 self.backend
                     .respawn_pane(
                         workspace,
@@ -1433,6 +1440,12 @@ impl MainSlotRuntime {
             )
             .map_err(main_slot_error)?;
         let location = parse_break_pane_output(&output.stdout)?;
+        // Hidden windows are transient parking slots for inactive content
+        // panes. Once a pane is parked, let tmux remove it (and the window)
+        // when its process exits instead of keeping a dead pane around.
+        let _ = self
+            .backend
+            .set_pane_option(workspace, &location.pane_id, "remain-on-exit", "off");
         self.resize_window_to_geometry(workspace, &location.window_id, geometry)?;
         self.resize_pane_to_geometry(workspace, &location.pane_id, geometry)
     }
@@ -3070,6 +3083,7 @@ impl MainSlotRuntime {
         pane_id: &str,
     ) -> Result<bool, LifecycleError> {
         Ok(self.pane_exists_on_socket(workspace, pane_id)?
+            && self.pane_is_live_on_socket(workspace, pane_id)?
             && !self.pane_is_chrome(workspace, pane_id)?)
     }
 
