@@ -107,25 +107,6 @@ impl RemoteRuntimeOwnerRuntime {
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
-        let listener = TokioUnixListener::bind(&socket_path).map_err(remote_runtime_owner_error);
-        match listener {
-            Ok(_) => {
-                if let Err(error) =
-                    notify_remote_runtime_owner_ready(command.ready_socket.as_deref(), Ok(()))
-                {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_runtime_owner ready notification failed: {error}"
-                    ));
-                }
-            }
-            Err(error) => {
-                let _ = notify_remote_runtime_owner_ready(
-                    command.ready_socket.as_deref(),
-                    Err(error.to_string()),
-                );
-                return Err(error);
-            }
-        };
 
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
@@ -136,10 +117,30 @@ impl RemoteRuntimeOwnerRuntime {
         };
 
         let runtime = tokio::runtime::Runtime::new().map_err(remote_runtime_owner_error)?;
-        let result = runtime.block_on(run_remote_runtime_owner_event_loop(
-            listener.expect("listener bound above"),
-            state.clone(),
-        ));
+        let listener = match runtime
+            .block_on(async { TokioUnixListener::bind(&socket_path) })
+            .map_err(remote_runtime_owner_error)
+        {
+            Ok(listener) => {
+                if let Err(error) =
+                    notify_remote_runtime_owner_ready(command.ready_socket.as_deref(), Ok(()))
+                {
+                    ERROR_LOG.log(format!(
+                        "[diag-newhost] remote_runtime_owner ready notification failed: {error}"
+                    ));
+                }
+                listener
+            }
+            Err(error) => {
+                let _ = notify_remote_runtime_owner_ready(
+                    command.ready_socket.as_deref(),
+                    Err(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+
+        let result = runtime.block_on(run_remote_runtime_owner_event_loop(listener, state.clone()));
 
         state.running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&socket_path);
