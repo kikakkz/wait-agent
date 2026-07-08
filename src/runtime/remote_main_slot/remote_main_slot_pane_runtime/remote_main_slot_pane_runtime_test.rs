@@ -4,11 +4,11 @@ mod tests {
         authority_status_from_runtime, authority_transport_event_sender,
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
         flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
-        mark_mirror_ready_if_raw_arrived, placeholder_lines, render_remote_output_and_mark_ready,
-        should_draw_remote_snapshot, should_exit_surface_for_target_presence,
-        should_exit_surface_for_target_presence_loss, should_exit_surface_locally,
-        should_sync_remote_pty_resize_for_state, spawn_mailbox_watcher,
-        sync_or_defer_remote_pty_size, target_is_online,
+        mark_mirror_ready_if_raw_arrived, output_payload_matches_target, placeholder_lines,
+        render_remote_output_and_mark_ready, should_draw_remote_snapshot,
+        should_exit_surface_for_target_presence, should_exit_surface_for_target_presence_loss,
+        should_exit_surface_locally, should_sync_remote_pty_resize_for_state,
+        spawn_mailbox_watcher, sync_or_defer_remote_pty_size, target_is_online,
         write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, MirrorReadiness,
         RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
         RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
@@ -1084,61 +1084,28 @@ mod tests {
     }
 
     #[test]
-    fn authority_target_output_for_wrong_target_is_dropped() {
-        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
-        let mailbox = runtime
-            .ensure_local_observer_connection("observer-a")
-            .expect("observer loopback registration should succeed");
-        runtime.ensure_local_connection("peer-a");
+    fn output_payload_matches_target_accepts_matching_session_and_target() {
         let target = remote_target();
-
-        runtime
-            .activate_target(
-                &target,
-                RemoteConsoleDescriptor {
-                    console_id: "console-a".to_string(),
-                    console_host_id: "observer-a".to_string(),
-                    location: ConsoleLocation::LocalWorkspace,
-                },
-                12,
-                4,
-            )
-            .expect("remote activation should succeed");
-
-        apply_authority_envelope(
-            &runtime,
-            &target,
-            &authority_target_output_envelope_for_target(
-                1,
-                "shell-2",
-                "remote-peer:peer-a:shell-2",
-            ),
-        )
-        .expect("mismatched authority output should be ignored, not error");
-
-        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
-        observer.sync().expect("observer sync should succeed");
-        let snapshot = observer.snapshot();
-        assert_eq!(
-            snapshot.last_output_seq, None,
-            "output for a different session/target must not reach this observer"
-        );
+        assert!(output_payload_matches_target(
+            "shell-1",
+            "remote-peer:peer-a:shell-1",
+            &target
+        ));
     }
 
     #[test]
-    fn direct_raw_pty_output_for_wrong_target_is_dropped() {
+    fn output_payload_matches_target_rejects_mismatched_session_or_target() {
         let target = remote_target();
-        let mut last_seq = None;
-        let envelope = authority_raw_pty_output_envelope_for_target(
-            1,
-            b"wrong".to_vec(),
+        assert!(!output_payload_matches_target(
             "shell-2",
+            "remote-peer:peer-a:shell-1",
+            &target
+        ));
+        assert!(!output_payload_matches_target(
+            "shell-1",
             "remote-peer:peer-a:shell-2",
-        );
-        let result = collect_direct_raw_pty_output_envelope(&target, &envelope, &mut last_seq)
-            .expect("mismatched raw PTY output should be ignored, not error");
-        assert_eq!(result, None);
-        assert_eq!(last_seq, None);
+            &target
+        ));
     }
 
     #[test]

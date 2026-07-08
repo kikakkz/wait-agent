@@ -4,6 +4,7 @@ use crate::application::target_registry_service::{
 use crate::cli::{RemoteMainSlotCommand, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ConsoleLocation, ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::remote_protocol::ControlPlanePayload;
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::lifecycle::LifecycleError;
@@ -711,6 +712,20 @@ impl RemoteMainSlotPaneRuntime {
                             {
                                 continue;
                             }
+                            if !output_payload_matches_target(
+                                payload.session_id.as_str(),
+                                payload.target_id.as_str(),
+                                &target,
+                            ) {
+                                ERROR_LOG.log(format!(
+                                    "dropping raw PTY output for wrong target: expected {}:{}, got {}:{}",
+                                    target.address.session_id(),
+                                    target.address.id().as_str(),
+                                    payload.session_id,
+                                    payload.target_id
+                                ));
+                                continue;
+                            }
                             let raw = collect_direct_raw_pty_output_payload(
                                 &target,
                                 &authority_id,
@@ -740,6 +755,39 @@ impl RemoteMainSlotPaneRuntime {
                                 || authority_generation != Some(generation)
                             {
                                 continue;
+                            }
+                            let output_payload_target = match &envelope.payload {
+                                ControlPlanePayload::TargetOutput(p) => {
+                                    Some((p.session_id.as_str(), p.target_id.as_str()))
+                                }
+                                ControlPlanePayload::RawPtyOutput(p) => {
+                                    Some((p.session_id.as_str(), p.target_id.as_str()))
+                                }
+                                ControlPlanePayload::MirrorBootstrapChunk(p) => {
+                                    Some((p.session_id.as_str(), p.target_id.as_str()))
+                                }
+                                ControlPlanePayload::MirrorBootstrapComplete(p) => {
+                                    Some((p.session_id.as_str(), p.target_id.as_str()))
+                                }
+                                _ => None,
+                            };
+                            if let Some((payload_session_id, payload_target_id)) =
+                                output_payload_target
+                            {
+                                if !output_payload_matches_target(
+                                    payload_session_id,
+                                    payload_target_id,
+                                    &target,
+                                ) {
+                                    ERROR_LOG.log(format!(
+                                        "dropping authority output for wrong target: expected {}:{}, got {}:{}",
+                                        target.address.session_id(),
+                                        target.address.id().as_str(),
+                                        payload_session_id,
+                                        payload_target_id
+                                    ));
+                                    continue;
+                                }
                             }
                             if let Some(raw) = collect_direct_raw_pty_output_envelope(
                                 &target,

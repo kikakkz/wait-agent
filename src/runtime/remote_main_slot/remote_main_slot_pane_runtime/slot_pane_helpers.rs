@@ -180,20 +180,6 @@ pub(super) fn collect_direct_raw_pty_output_envelope(
             target.address.authority_id()
         )));
     }
-    if !output_payload_matches_target(
-        payload.session_id.as_str(),
-        payload.target_id.as_str(),
-        target,
-    ) {
-        ERROR_LOG.log(format!(
-            "dropping raw PTY output for wrong target: expected {}:{}, got {}:{}",
-            target.address.session_id(),
-            target.address.id().as_str(),
-            payload.session_id,
-            payload.target_id
-        ));
-        return Ok(None);
-    }
     if let Some(last) = *last_output_seq {
         if payload.output_seq <= last {
             return Err(RemoteSocketTransportError::new(format!(
@@ -219,20 +205,6 @@ pub(super) fn collect_direct_raw_pty_output_payload(
             target.address.authority_id()
         )));
     }
-    if !output_payload_matches_target(
-        payload.session_id.as_str(),
-        payload.target_id.as_str(),
-        target,
-    ) {
-        ERROR_LOG.log(format!(
-            "dropping raw PTY output for wrong target: expected {}:{}, got {}:{}",
-            target.address.session_id(),
-            target.address.id().as_str(),
-            payload.session_id,
-            payload.target_id
-        ));
-        return Ok(Vec::new());
-    }
     if let Some(last) = *last_output_seq {
         if payload.output_seq <= last {
             return Err(RemoteSocketTransportError::new(format!(
@@ -245,7 +217,7 @@ pub(super) fn collect_direct_raw_pty_output_payload(
     Ok(payload.output_bytes.clone())
 }
 
-fn output_payload_matches_target(
+pub(crate) fn output_payload_matches_target(
     payload_session_id: &str,
     payload_target_id: &str,
     target: &ManagedSessionRecord,
@@ -774,28 +746,6 @@ pub(crate) fn apply_authority_envelope(
     target: &ManagedSessionRecord,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<(), RemoteSocketTransportError> {
-    fn require_output_matches_target(
-        payload_session_id: &str,
-        payload_target_id: &str,
-        envelope: &ProtocolEnvelope<ControlPlanePayload>,
-        target: &ManagedSessionRecord,
-    ) -> bool {
-        if envelope.sender_id != target.address.authority_id() {
-            return false;
-        }
-        if output_payload_matches_target(payload_session_id, payload_target_id, target) {
-            return true;
-        }
-        ERROR_LOG.log(format!(
-            "dropping authority output for wrong target: expected {}:{}, got {}:{}",
-            target.address.session_id(),
-            target.address.id().as_str(),
-            payload_session_id,
-            payload_target_id
-        ));
-        false
-    }
-
     match &envelope.payload {
         ControlPlanePayload::OpenMirrorAccepted(payload) => {
             remote_runtime.record_mirror_accepted(&payload.session_id);
@@ -809,13 +759,12 @@ pub(crate) fn apply_authority_envelope(
             )))
         }
         ControlPlanePayload::TargetOutput(payload) => {
-            if !require_output_matches_target(
-                payload.session_id.as_str(),
-                payload.target_id.as_str(),
-                envelope,
-                target,
-            ) {
-                return Ok(());
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
             }
             remote_runtime
                 .send_target_output(
@@ -827,26 +776,24 @@ pub(crate) fn apply_authority_envelope(
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
         ControlPlanePayload::RawPtyOutput(payload) => {
-            if !require_output_matches_target(
-                payload.session_id.as_str(),
-                payload.target_id.as_str(),
-                envelope,
-                target,
-            ) {
-                return Ok(());
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
             }
             remote_runtime
                 .send_raw_pty_output(target, payload.output_seq, payload.output_bytes.clone())
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
         ControlPlanePayload::MirrorBootstrapChunk(payload) => {
-            if !require_output_matches_target(
-                payload.session_id.as_str(),
-                payload.target_id.as_str(),
-                envelope,
-                target,
-            ) {
-                return Ok(());
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
             }
             remote_runtime
                 .send_mirror_bootstrap_chunk(
@@ -858,13 +805,12 @@ pub(crate) fn apply_authority_envelope(
                 .map_err(|error| RemoteSocketTransportError::new(error.to_string()))
         }
         ControlPlanePayload::MirrorBootstrapComplete(payload) => {
-            if !require_output_matches_target(
-                payload.session_id.as_str(),
-                payload.target_id.as_str(),
-                envelope,
-                target,
-            ) {
-                return Ok(());
+            if envelope.sender_id != target.address.authority_id() {
+                return Err(RemoteSocketTransportError::new(format!(
+                    "authority envelope sender `{}` does not match target authority `{}`",
+                    envelope.sender_id,
+                    target.address.authority_id()
+                )));
             }
             remote_runtime
                 .send_mirror_bootstrap_complete(
