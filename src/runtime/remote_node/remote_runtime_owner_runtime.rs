@@ -4,9 +4,12 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::remote_node::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
+use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -18,8 +21,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixListener as TokioUnixListener;
+use tokio::net::UnixStream as TokioUnixStream;
+use tokio::time::{sleep_until, Instant as TokioInstant};
 
+#[cfg(not(test))]
 const OFFLINE_NODE_RETENTION: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const OFFLINE_NODE_RETENTION: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRuntimeOwnerRuntime {
@@ -64,6 +74,8 @@ struct RemoteRuntimeOwnerSharedState {
     records: Arc<Mutex<HashMap<String, OwnerStateRecord>>>,
     offline_nodes: Arc<Mutex<HashMap<String, Instant>>>,
     running: Arc<AtomicBool>,
+    network: RemoteNetworkConfig,
+    current_executable: PathBuf,
 }
 
 impl RemoteRuntimeOwnerRuntime {
@@ -92,13 +104,12 @@ impl RemoteRuntimeOwnerRuntime {
 
     pub fn run_owner(&self, command: RemoteRuntimeOwnerCommand) -> Result<(), LifecycleError> {
         let socket_path = remote_runtime_owner_socket_path(&self.network);
-        let listener = match (|| -> Result<UnixListener, LifecycleError> {
-            if socket_path.exists() {
-                let _ = fs::remove_file(&socket_path);
-            }
-            UnixListener::bind(&socket_path).map_err(remote_runtime_owner_error)
-        })() {
-            Ok(listener) => {
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = TokioUnixListener::bind(&socket_path).map_err(remote_runtime_owner_error);
+        match listener {
+            Ok(_) => {
                 if let Err(error) =
                     notify_remote_runtime_owner_ready(command.ready_socket.as_deref(), Ok(()))
                 {
@@ -106,7 +117,6 @@ impl RemoteRuntimeOwnerRuntime {
                         "[diag-newhost] remote_runtime_owner ready notification failed: {error}"
                     ));
                 }
-                listener
             }
             Err(error) => {
                 let _ = notify_remote_runtime_owner_ready(
@@ -116,60 +126,186 @@ impl RemoteRuntimeOwnerRuntime {
                 return Err(error);
             }
         };
+
         let state = RemoteRuntimeOwnerSharedState {
             records: Arc::new(Mutex::new(HashMap::new())),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
+            network: self.network.clone(),
+            current_executable: self.current_executable.clone(),
         };
-        while state.running.load(Ordering::Relaxed) {
-            let accepted = match listener.accept() {
-                Ok((stream, _)) => Ok(stream),
-                Err(error) => Err(error),
-            };
-            if !state.running.load(Ordering::Relaxed) {
-                break;
-            }
-            let Ok(mut stream) = accepted.map_err(remote_runtime_owner_error) else {
-                break;
-            };
-            let t_client = Instant::now();
-            ERROR_LOG.log("[diag-newhost] remote_owner server accepted".to_string());
-            let response = handle_remote_runtime_owner_client(&state, &mut stream);
-            match response {
-                Ok(Some(payload)) => {
-                    let t_write = Instant::now();
-                    let write_ok = stream.write_all(payload.as_bytes()).is_ok();
-                    let flush_ok = stream.flush().is_ok();
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_owner server write_response bytes={} write_ok={} flush_ok={} elapsed={:?} total={:?}",
-                        payload.len(),
-                        write_ok,
-                        flush_ok,
-                        t_write.elapsed(),
-                        t_client.elapsed()
-                    ));
-                }
-                Ok(None) => {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_owner server no_response total={:?}",
-                        t_client.elapsed()
-                    ));
-                }
-                Err(error) => {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_owner server handle_error error={} total={:?}",
-                        error,
-                        t_client.elapsed()
-                    ));
-                }
-            }
-        }
+
+        let runtime = tokio::runtime::Runtime::new().map_err(remote_runtime_owner_error)?;
+        let result = runtime.block_on(run_remote_runtime_owner_event_loop(
+            listener.expect("listener bound above"),
+            state.clone(),
+        ));
+
         state.running.store(false, Ordering::Relaxed);
         let _ = UnixStream::connect(&socket_path);
         let _ = fs::remove_file(&socket_path);
-        Ok(())
+        result
+    }
+}
+
+async fn run_remote_runtime_owner_event_loop(
+    listener: TokioUnixListener,
+    state: RemoteRuntimeOwnerSharedState,
+) -> Result<(), LifecycleError> {
+    let mut next_ttl_deadline: Option<TokioInstant> = compute_next_ttl_deadline(&state);
+
+    loop {
+        if !state.running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        tokio::select! {
+            result = listener.accept() => {
+                let (mut stream, _) = result.map_err(remote_runtime_owner_error)?;
+                let t_client = Instant::now();
+                ERROR_LOG.log("[diag-newhost] remote_owner server accepted".to_string());
+                match handle_remote_runtime_owner_client_async(&state, &mut stream).await {
+                    Ok(Some(payload)) => {
+                        let t_write = Instant::now();
+                        let write_ok = stream.write_all(payload.as_bytes()).await.is_ok();
+                        let flush_ok = stream.flush().await.is_ok();
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] remote_owner server write_response bytes={} write_ok={} flush_ok={} elapsed={:?} total={:?}",
+                            payload.len(),
+                            write_ok,
+                            flush_ok,
+                            t_write.elapsed(),
+                            t_client.elapsed()
+                        ));
+                    }
+                    Ok(None) => {
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] remote_owner server no_response total={:?}",
+                            t_client.elapsed()
+                        ));
+                    }
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] remote_owner server handle_error error={} total={:?}",
+                            error,
+                            t_client.elapsed()
+                        ));
+                    }
+                }
+                next_ttl_deadline = compute_next_ttl_deadline(&state);
+            }
+            _ = sleep_until(next_ttl_deadline.unwrap_or_else(|| TokioInstant::now() + Duration::from_secs(86400))), if next_ttl_deadline.is_some() => {
+                let pruned = prune_expired_offline_nodes(&state, Instant::now());
+                if !pruned.is_empty() {
+                    if let Err(error) = emit_remote_target_exited_cleanup(&state, &pruned) {
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] remote_owner cleanup error: {error}"
+                        ));
+                    }
+                }
+                next_ttl_deadline = compute_next_ttl_deadline(&state);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_remote_runtime_owner_client_async(
+    state: &RemoteRuntimeOwnerSharedState,
+    stream: &mut TokioUnixStream,
+) -> Result<Option<String>, LifecycleError> {
+    let t_total = Instant::now();
+    let command = read_remote_runtime_owner_command_async(stream).await?;
+    let command_label = remote_runtime_owner_command_label(&command);
+    ERROR_LOG.log(format!(
+        "[diag-newhost] remote_owner server read_command command={} elapsed={:?}",
+        command_label,
+        t_total.elapsed()
+    ));
+    let t_handle = Instant::now();
+    let response = handle_remote_runtime_owner_command(state, command);
+    ERROR_LOG.log(format!(
+        "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
+        command_label,
+        response.is_ok(),
+        t_handle.elapsed(),
+        t_total.elapsed()
+    ));
+    response
+}
+
+async fn read_remote_runtime_owner_command_async(
+    reader: &mut TokioUnixStream,
+) -> Result<RemoteRuntimeOwnerCommandEnvelope, LifecycleError> {
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(remote_runtime_owner_error)?;
+    let line = String::from_utf8(bytes).map_err(remote_runtime_owner_error)?;
+    parse_remote_runtime_owner_command(line.trim())
+}
+
+fn compute_next_ttl_deadline(state: &RemoteRuntimeOwnerSharedState) -> Option<TokioInstant> {
+    let offline_nodes = state
+        .offline_nodes
+        .lock()
+        .expect("remote runtime owner offline node mutex should not be poisoned");
+    let now = Instant::now();
+    offline_nodes
+        .values()
+        .map(|since| *since + OFFLINE_NODE_RETENTION)
+        .filter(|deadline| *deadline > now)
+        .min()
+        .map(|deadline| {
+            let until = deadline.duration_since(now);
+            TokioInstant::now() + until
+        })
+}
+
+fn emit_remote_target_exited_cleanup(
+    state: &RemoteRuntimeOwnerSharedState,
+    pruned_records: &[OwnerStateRecord],
+) -> Result<(), LifecycleError> {
+    if pruned_records.is_empty() {
+        return Ok(());
     }
 
+    let live_sockets = live_workspace_socket_names_for_network(&state.network)?;
+    if live_sockets.is_empty() {
+        return Ok(());
+    }
+
+    let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_runtime_owner_error)?;
+
+    for record in pruned_records {
+        let target = record.session.address.qualified_target();
+        for socket_name in &live_sockets {
+            let sessions = backend
+                .list_sessions_on_socket(&TmuxSocketName::new(socket_name))
+                .map_err(remote_runtime_owner_error)?;
+            for session in sessions {
+                if !session.is_workspace_chrome() {
+                    continue;
+                }
+                let args = vec![
+                    "__remote-target-exited".to_string(),
+                    "--socket-name".to_string(),
+                    socket_name.clone(),
+                    "--session-name".to_string(),
+                    session.address.session_id().to_string(),
+                    "--target".to_string(),
+                    target.clone(),
+                ];
+                spawn_waitagent_sidecar(&state.current_executable, args)
+                    .map_err(remote_runtime_owner_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl RemoteRuntimeOwnerRuntime {
     pub fn ensure_owner_running(&self) -> Result<(), LifecycleError> {
         ensure_remote_runtime_owner_process_running(&self.current_executable, &self.network)
     }
@@ -403,6 +539,8 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
         records: Arc::new(Mutex::new(HashMap::new())),
         offline_nodes: Arc::new(Mutex::new(HashMap::new())),
         running: Arc::new(AtomicBool::new(true)),
+        network: network.clone(),
+        current_executable: PathBuf::from("/tmp/waitagent-test"),
     };
     thread::spawn(move || {
         for accepted in listener.incoming() {
@@ -418,6 +556,7 @@ fn start_remote_runtime_owner_for_tests(network: &RemoteNetworkConfig) {
     });
 }
 
+#[cfg(test)]
 fn handle_remote_runtime_owner_client(
     state: &RemoteRuntimeOwnerSharedState,
     stream: &mut UnixStream,
@@ -431,7 +570,22 @@ fn handle_remote_runtime_owner_client(
         t_total.elapsed()
     ));
     let t_handle = Instant::now();
-    let response = match command {
+    let response = handle_remote_runtime_owner_command(state, command);
+    ERROR_LOG.log(format!(
+        "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
+        command_label,
+        response.is_ok(),
+        t_handle.elapsed(),
+        t_total.elapsed()
+    ));
+    response
+}
+
+fn handle_remote_runtime_owner_command(
+    state: &RemoteRuntimeOwnerSharedState,
+    command: RemoteRuntimeOwnerCommandEnvelope,
+) -> Result<Option<String>, LifecycleError> {
+    match command {
         RemoteRuntimeOwnerCommandEnvelope::UpsertSession { node_id, session } => {
             let key = owned_record_key(&node_id, session.address.id().as_str());
             state
@@ -498,7 +652,14 @@ fn handle_remote_runtime_owner_client(
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => {
-            prune_expired_offline_nodes(state, Instant::now());
+            let pruned = prune_expired_offline_nodes(state, Instant::now());
+            if !pruned.is_empty() {
+                if let Err(error) = emit_remote_target_exited_cleanup(state, &pruned) {
+                    ERROR_LOG.log(format!(
+                        "[diag-newhost] remote_owner snapshot cleanup error: {error}"
+                    ));
+                }
+            }
             let snapshot = render_remote_runtime_owner_snapshot(
                 &state
                     .records
@@ -514,15 +675,7 @@ fn handle_remote_runtime_owner_client(
             state.running.store(false, Ordering::Relaxed);
             Ok(Some("ok\n".to_string()))
         }
-    };
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
-        command_label,
-        response.is_ok(),
-        t_handle.elapsed(),
-        t_total.elapsed()
-    ));
-    response
+    }
 }
 
 fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelope) -> &'static str {
@@ -536,7 +689,10 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
     }
 }
 
-fn prune_expired_offline_nodes(state: &RemoteRuntimeOwnerSharedState, now: Instant) {
+fn prune_expired_offline_nodes(
+    state: &RemoteRuntimeOwnerSharedState,
+    now: Instant,
+) -> Vec<OwnerStateRecord> {
     let expired_nodes = {
         let offline_nodes = state
             .offline_nodes
@@ -550,16 +706,20 @@ fn prune_expired_offline_nodes(state: &RemoteRuntimeOwnerSharedState, now: Insta
             .collect::<Vec<_>>()
     };
     if expired_nodes.is_empty() {
-        return;
+        return Vec::new();
     }
 
+    let expired_set: std::collections::HashSet<_> = expired_nodes.iter().cloned().collect();
     let mut records = state
         .records
         .lock()
         .expect("remote runtime owner state mutex should not be poisoned");
-    for node_id in &expired_nodes {
-        records.retain(|_, record| &record.node_id != node_id);
-    }
+    let pruned: Vec<OwnerStateRecord> = records
+        .values()
+        .filter(|record| expired_set.contains(&record.node_id))
+        .cloned()
+        .collect();
+    records.retain(|_, record| !expired_set.contains(&record.node_id));
     drop(records);
 
     let mut offline_nodes = state
@@ -569,6 +729,8 @@ fn prune_expired_offline_nodes(state: &RemoteRuntimeOwnerSharedState, now: Insta
     for node_id in expired_nodes {
         offline_nodes.remove(&node_id);
     }
+
+    pruned
 }
 
 fn clear_offline_node_if_empty(state: &RemoteRuntimeOwnerSharedState, node_id: &str) {
@@ -931,6 +1093,7 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
     }
 }
 
+#[cfg(test)]
 fn read_remote_runtime_owner_command(
     reader: &mut impl Read,
 ) -> Result<RemoteRuntimeOwnerCommandEnvelope, LifecycleError> {
@@ -1238,8 +1401,8 @@ mod tests {
         parse_remote_runtime_owner_snapshot, prune_expired_offline_nodes,
         remote_runtime_owner_args, remote_runtime_owner_socket_path,
         render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
-        OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
-        RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
+        run_remote_runtime_owner_event_loop, OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope,
+        RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -1247,12 +1410,13 @@ mod tests {
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use std::collections::HashMap;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn remote_session(authority_id: &str, session_id: &str) -> ManagedSessionRecord {
@@ -1443,6 +1607,13 @@ mod tests {
             ]))),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
         client
@@ -1499,6 +1670,13 @@ mod tests {
             ]))),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
         client
@@ -1573,9 +1751,19 @@ mod tests {
                 Instant::now() - OFFLINE_NODE_RETENTION - Duration::from_secs(1),
             )]))),
             running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
 
-        prune_expired_offline_nodes(&state, Instant::now());
+        let pruned = prune_expired_offline_nodes(&state, Instant::now());
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].node_id, "peer-a");
 
         let records = state
             .records
@@ -1596,6 +1784,13 @@ mod tests {
             records: Arc::new(Mutex::new(HashMap::new())),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
         let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
         client
@@ -1626,5 +1821,110 @@ mod tests {
         let path = remote_runtime_owner_socket_path(&network);
 
         assert_eq!(path.parent(), Some(Path::new("/tmp")));
+    }
+
+    fn send_command_to_socket(
+        socket_path: &std::path::Path,
+        command: &RemoteRuntimeOwnerCommandEnvelope,
+    ) -> String {
+        let mut stream = UnixStream::connect(socket_path).expect("client should connect");
+        stream
+            .write_all(render_remote_runtime_owner_command(command).as_bytes())
+            .expect("command should write");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("response should read");
+        response
+    }
+
+    #[test]
+    fn remote_runtime_owner_event_loop_prunes_offline_nodes_after_ttl() {
+        let network = RemoteNetworkConfig {
+            port: 0,
+            connect: None,
+            node_id: None,
+            public_endpoint: None,
+        };
+        let socket_path = remote_runtime_owner_socket_path(&network);
+        let socket_path_for_thread = socket_path.clone();
+        let _ = std::fs::remove_file(&socket_path);
+
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::new())),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            network: network.clone(),
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
+        };
+        let state_for_thread = state.clone();
+
+        let handle = thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+            runtime
+                .block_on(async {
+                    let listener = tokio::net::UnixListener::bind(&socket_path_for_thread)
+                        .expect("event loop socket should bind");
+                    run_remote_runtime_owner_event_loop(listener, state_for_thread).await
+                })
+                .expect("event loop should run");
+        });
+
+        // Wait for the listener to be ready before sending commands.
+        thread::sleep(Duration::from_millis(20));
+
+        send_command_to_socket(
+            &socket_path,
+            &RemoteRuntimeOwnerCommandEnvelope::UpsertSession {
+                node_id: "peer-a".to_string(),
+                session: remote_session("peer-a", "pty1"),
+            },
+        );
+        send_command_to_socket(
+            &socket_path,
+            &RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline {
+                node_id: "peer-a".to_string(),
+            },
+        );
+
+        assert!(
+            state
+                .offline_nodes
+                .lock()
+                .expect("offline node mutex should not be poisoned")
+                .contains_key("peer-a"),
+            "offline node should be recorded"
+        );
+
+        // The test build uses a short retention so the TTL arm fires quickly.
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            state
+                .offline_nodes
+                .lock()
+                .expect("offline node mutex should not be poisoned")
+                .is_empty(),
+            "TTL arm should prune expired offline node"
+        );
+
+        let snapshot =
+            send_command_to_socket(&socket_path, &RemoteRuntimeOwnerCommandEnvelope::Snapshot);
+        assert!(
+            snapshot.starts_with("snapshot"),
+            "snapshot should start with header: {snapshot}"
+        );
+        assert!(
+            !snapshot.contains("peer-a"),
+            "snapshot should not contain pruned peer: {snapshot}"
+        );
+
+        send_command_to_socket(&socket_path, &RemoteRuntimeOwnerCommandEnvelope::Shutdown);
+
+        handle.join().expect("event loop thread should finish");
+        let _ = std::fs::remove_file(&socket_path);
     }
 }
