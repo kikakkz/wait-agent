@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-16-hidden-windows-accumulate
+current_task: task.github-issue-17-raw-pty-output-routing
 focus_statement: >
-  active task is GitHub issue #16: wa-hidden windows accumulate after remote abnormal disconnect/reconnect. The root cause is that remote panes are created with remain-on-exit=on, and abnormal exit paths (protocol error, pane-died, recovery) do not consistently call cleanup_exited_remote_session_pane. Need to analyze the exact code paths in main_slot_runtime.rs and remote_main_slot_pane_runtime.rs before proposing a fix.
+  active task is GitHub issue #17: RawPtyOutput routing mixes same-host remote sessions and triggers out-of-order pane failures. Need to verify whether the #15 fix (session_id/target_id validation at pane runtime event loop) already covers this case for both direct RawPtyOutput events and Envelope-wrapped RawPtyOutput payloads, and identify any remaining gap.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.github-issue-16-hidden-windows-accumulate.in_progress
+  reference: task.github-issue-17-raw-pty-output-routing.in_progress

@@ -1109,6 +1109,21 @@ mod tests {
     }
 
     #[test]
+    fn raw_pty_output_payload_for_other_target_on_same_authority_is_rejected() {
+        // Regression for issue #17: when multiple remote sessions exist on the
+        // same authority/host, a RawPtyOutput payload meant for another target
+        // must not be accepted by this pane. The pane runtime event loop uses
+        // output_payload_matches_target to drop such payloads before they can
+        // update last_output_seq or write to the pane.
+        let target = remote_target();
+        assert!(!output_payload_matches_target(
+            "shell-2",
+            "remote-peer:peer-a:shell-2",
+            &target
+        ));
+    }
+
+    #[test]
     fn mirror_readiness_keeps_reconnecting_until_remote_output_is_rendered() {
         let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
         runtime
