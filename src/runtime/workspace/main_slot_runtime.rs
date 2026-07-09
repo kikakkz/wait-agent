@@ -2842,13 +2842,17 @@ impl MainSlotRuntime {
         current_workspace: &CurrentWorkspace,
         target: &ManagedSessionRecord,
     ) -> Result<TmuxPaneId, LifecycleError> {
+        // Split below the current main pane without spanning the full window
+        // width. A full-width pane cannot be resized to the narrower main-pane
+        // geometry, so swapping it into the main slot shrinks the entire tmux
+        // window to match the parked pane's width.
         let pane = self
             .backend
             .split_pane_bottom_with_program(
                 workspace,
                 main_pane,
                 TmuxSplitSize::Cells(1),
-                true,
+                false,
                 &workspace_shell_program(&current_workspace.workspace_dir),
             )
             .map_err(main_slot_error)?;
