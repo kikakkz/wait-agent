@@ -208,6 +208,17 @@ pub trait TmuxSessionGateway: TmuxGateway {
         socket_name: &TmuxSocketName,
     ) -> Result<Vec<ManagedSessionRecord>, Self::Error>;
 
+    /// Lists target-host sessions that are backed by content panes inside a
+    /// workspace session rather than by standalone tmux sessions. This mirrors
+    /// the local target registry view so that remote session sync publishes
+    /// the same targets the local catalog already knows about.
+    fn list_local_target_content_pane_sessions(
+        &self,
+        _socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     #[allow(dead_code)]
     fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error>;
 

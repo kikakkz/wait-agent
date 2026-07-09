@@ -198,6 +198,13 @@ impl TmuxSessionGateway for EmbeddedTmuxBackend {
         EmbeddedTmuxBackend::list_sessions_on_socket(self, socket_name)
     }
 
+    fn list_local_target_content_pane_sessions(
+        &self,
+        socket_name: &TmuxSocketName,
+    ) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
+        EmbeddedTmuxBackend::list_local_target_content_pane_sessions(self, socket_name)
+    }
+
     fn find_session(&self, target: &str) -> Result<Option<ManagedSessionRecord>, Self::Error> {
         self.find_managed_session(target)
     }

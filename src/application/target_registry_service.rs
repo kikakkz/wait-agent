@@ -326,7 +326,7 @@ fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 2]) -> Vec<Mana
     merged
 }
 
-fn merge_local_targets_by_identity(
+pub(crate) fn merge_local_targets_by_identity(
     session_backed: Vec<ManagedSessionRecord>,
     pane_backed: Vec<ManagedSessionRecord>,
 ) -> Vec<ManagedSessionRecord> {

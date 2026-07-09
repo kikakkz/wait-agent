@@ -1,3 +1,4 @@
+use crate::application::target_registry_service::merge_local_targets_by_identity;
 use crate::cli::{
     prepend_global_network_args, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
     RemoteSessionSyncOwnerCommand,
@@ -82,6 +83,10 @@ where
 
     fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
         let sessions = self.gateway.list_sessions_on_socket(&self.socket_name)?;
+        let pane_backed = self
+            .gateway
+            .list_local_target_content_pane_sessions(&self.socket_name)?;
+        let sessions = merge_local_targets_by_identity(sessions, pane_backed);
         let active_targets =
             active_workspace_targets_on_socket(&self.gateway, &self.socket_name, &sessions)?;
         Ok(exportable_local_sessions_for_socket(
