@@ -109,7 +109,9 @@ main() {
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
 
-  curl -fsSL --max-time 120 "$url" -o "${tmpdir}/${tarball}"
+  # Only bound the connection setup; once data is flowing, keep reading.
+  # Abort only if the transfer stalls (<1 KB/s) for 60 seconds.
+  curl -fsSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$url" -o "${tmpdir}/${tarball}"
 
   echo ">>> Extracting..."
   tar xzf "${tmpdir}/${tarball}" -C "$tmpdir"
