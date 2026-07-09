@@ -641,12 +641,16 @@ mod tests {
             sessions[0].task_state = ManagedSessionTaskState::Running;
         }
         transport.close_session(0, "node-a", "server-session-1");
+        // Wait until the reconnect has created the new outbound session before
+        // injecting the local catalog change, so the change is definitely
+        // processed against the new session (or while the reconnect loop is
+        // waiting) rather than racing with the dying session.
+        wait_for_controlled_receiver_count(&transport.receivers, 2);
         local_catalog_tx
             .send(super::super::LocalCatalogChangeRequest::notify(
                 LocalCatalogChangeReason::LocalRuntimeChanged,
             ))
             .expect("local catalog change should send while reconnecting");
-        wait_for_controlled_receiver_count(&transport.receivers, 2);
         let second = wait_for_controlled_envelope(&transport.receivers, 1);
         drop(guard);
 
