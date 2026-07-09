@@ -1576,6 +1576,11 @@ impl MainSlotRuntime {
                 ],
             )
             .map_err(main_slot_error)?;
+        // Resizing the active workspace window would shrink the client display
+        // to match a transient content pane. Only resize windows for panes that
+        // are parked in hidden content windows; the active window is kept at its
+        // client-driven size and only its panes are adjusted.
+        let current_window = self.backend.current_window(workspace).ok();
         for line in output.stdout.lines() {
             let mut parts = line.split('\t');
             let pane_id = parts.next().unwrap_or_default();
@@ -1597,7 +1602,9 @@ impl MainSlotRuntime {
             }
             let pane = TmuxPaneId::new(pane_id);
             let window_id = self.pane_window_id(workspace, &pane)?;
-            self.resize_window_to_geometry(workspace, &window_id, geometry)?;
+            if current_window.as_ref().map(|w| w.window_id.as_str()) != Some(window_id.as_str()) {
+                self.resize_window_to_geometry(workspace, &window_id, geometry)?;
+            }
             self.resize_pane_to_geometry(workspace, &pane, geometry)?;
         }
         Ok(())
