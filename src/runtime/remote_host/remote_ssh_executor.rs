@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const SSH_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
+const SSH_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 
 type HmacSha1 = Hmac<Sha1>;
 

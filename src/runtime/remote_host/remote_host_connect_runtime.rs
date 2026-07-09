@@ -26,7 +26,9 @@ use crate::runtime::remote_host::ssh_remote_host_bootstrapper::{
 use std::io::{self, Read};
 
 const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+// First-time installs can take a while to download the release asset and
+// start the remote daemon, so give the endpoint more time to publish.
+const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};

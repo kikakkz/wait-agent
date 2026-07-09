@@ -47,7 +47,7 @@ resolve_version() {
   if [[ "$VERSION" == "latest" ]]; then
     local api_url="https://api.github.com/repos/${REPO}/releases/latest"
     local tag
-    tag="$(curl -fsSL "$api_url" 2>/dev/null \
+    tag="$(curl -fsSL --max-time 30 "$api_url" 2>/dev/null \
       | grep '"tag_name":' \
       | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
     if [[ -z "$tag" ]]; then
@@ -109,7 +109,7 @@ main() {
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
 
-  curl -fsSL "$url" -o "${tmpdir}/${tarball}"
+  curl -fsSL --max-time 120 "$url" -o "${tmpdir}/${tarball}"
 
   echo ">>> Extracting..."
   tar xzf "${tmpdir}/${tarball}" -C "$tmpdir"

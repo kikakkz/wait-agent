@@ -359,7 +359,7 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 pub fn install_or_update_command() -> String {
     let install = format!(
-        "tmp=\"$(mktemp)\" && trap 'rm -f \"$tmp\"' EXIT && curl -fsSL {} -o \"$tmp\" && bash \"$tmp\"",
+        "tmp=\"$(mktemp)\" && trap 'rm -f \"$tmp\"' EXIT && curl -fsSL --max-time 120 {} -o \"$tmp\" && bash \"$tmp\"",
         shell_single_quote(WAITAGENT_INSTALL_SCRIPT_URL)
     );
     format!(
