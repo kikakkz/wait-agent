@@ -212,7 +212,7 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
     fn clear_runtime_command_override(
         &self,
         socket_name: &str,
-        target_session_name: &str,
+        pane: &TmuxPaneId,
     ) -> Result<(), Self::Error>;
 
     fn signal_chrome_refresh_targets(&self, socket_name: &str) -> Result<(), Self::Error>;
@@ -325,12 +325,19 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
     fn clear_runtime_command_override(
         &self,
         socket_name: &str,
-        target_session_name: &str,
+        pane: &TmuxPaneId,
     ) -> Result<(), Self::Error> {
+        let session_name = self.pane_session_name_on_socket(socket_name, pane)?;
+        if session_name.is_empty() {
+            return Err(TmuxError::new(format!(
+                "pane `{}` does not belong to a session on socket `{socket_name}`",
+                pane.as_str()
+            )));
+        }
         let workspace = TmuxWorkspaceHandle {
-            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(target_session_name),
+            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(&session_name),
             socket_name: TmuxSocketName::new(socket_name),
-            session_name: TmuxSessionName::new(target_session_name),
+            session_name: TmuxSessionName::new(&session_name),
         };
         self.unset_session_option(&workspace, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION)
     }
@@ -956,7 +963,12 @@ where
                         } if active_stream_id == stream_id => raw_pty_passthrough,
                         _ => continue,
                     };
-                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    let pane = match current_binding.as_ref() {
+                        Some(binding) => &binding.pane,
+                        None => continue,
+                    };
+                    if let Err(error) =
+                        emit_runtime_change_signal(self, &command, &runtime_signal, pane)
                     {
                         break Err(error);
                     }
@@ -1089,7 +1101,12 @@ where
                         "[diag-runtime] target host output {label} refresh due socket={} session={} target={}",
                         command.socket_name, command.target_session_name, command.target_id
                     ));
-                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    let pane = match current_binding.as_ref() {
+                        Some(binding) => &binding.pane,
+                        None => continue,
+                    };
+                    if let Err(error) =
+                        emit_runtime_change_signal(self, &command, &runtime_signal, pane)
                     {
                         break Err(error);
                     }
@@ -1103,7 +1120,12 @@ where
                         command.target_session_name,
                         command.target_id
                     ));
-                    if let Err(error) = emit_runtime_change_signal(self, &command, &runtime_signal)
+                    let pane = match current_binding.as_ref() {
+                        Some(binding) => &binding.pane,
+                        None => continue,
+                    };
+                    if let Err(error) =
+                        emit_runtime_change_signal(self, &command, &runtime_signal, pane)
                     {
                         break Err(error);
                     }
@@ -1545,6 +1567,7 @@ fn emit_runtime_change_signal<G, P>(
     runtime: &RemoteAuthorityTargetHostRuntime<G, P>,
     command: &RemoteAuthorityTargetHostCommand,
     signal: &RuntimeChangeSignal,
+    pane: &TmuxPaneId,
 ) -> Result<(), LifecycleError>
 where
     G: RemoteTargetPtyGateway,
@@ -1559,7 +1582,7 @@ where
     ));
     runtime
         .gateway
-        .clear_runtime_command_override(&command.socket_name, &command.target_session_name)
+        .clear_runtime_command_override(&command.socket_name, pane)
         .map_err(remote_authority_error)?;
     match runtime
         .publication_gateway

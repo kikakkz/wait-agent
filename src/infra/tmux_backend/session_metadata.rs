@@ -331,6 +331,18 @@ impl EmbeddedTmuxBackend {
         ))
     }
 
+    pub(crate) fn target_content_pane_for_session_instance_id(
+        &self,
+        socket_name: &TmuxSocketName,
+        session_instance_id: &str,
+    ) -> Result<Option<TmuxPaneId>, TmuxError> {
+        let panes = self.local_target_content_panes(socket_name)?;
+        Ok(panes
+            .into_iter()
+            .find(|pane| pane.session_instance_id == session_instance_id)
+            .map(|pane| pane.pane.pane_id))
+    }
+
     pub(crate) fn list_local_target_content_pane_sessions(
         &self,
         socket_name: &TmuxSocketName,

@@ -1568,6 +1568,15 @@ pub(super) fn find_socket_for_session(target_session_name: &str) -> Option<Strin
         {
             return Some(socket_name.as_str().to_string());
         }
+        let pane_backed = backend
+            .list_local_target_content_pane_sessions(socket_name)
+            .ok()?;
+        if pane_backed
+            .iter()
+            .any(|s| s.address.session_id() == target_session_name)
+        {
+            return Some(socket_name.as_str().to_string());
+        }
     }
     None
 }

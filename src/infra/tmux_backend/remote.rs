@@ -28,6 +28,19 @@ impl EmbeddedTmuxBackend {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<Option<TmuxPaneId>, TmuxError> {
+        if let Some(pane) =
+            self.configured_session_presentation_pane_on_socket(socket_name, target_session_name)?
+        {
+            return Ok(Some(pane));
+        }
+        self.configured_pane_backed_presentation_pane_on_socket(socket_name, target_session_name)
+    }
+
+    fn configured_session_presentation_pane_on_socket(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<Option<TmuxPaneId>, TmuxError> {
         let socket = TmuxSocketName::new(socket_name);
         let output = match self.run_on_socket(
             &socket,
@@ -65,6 +78,15 @@ impl EmbeddedTmuxBackend {
             )));
         }
         Ok(Some(TmuxPaneId::new(pane)))
+    }
+
+    fn configured_pane_backed_presentation_pane_on_socket(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<Option<TmuxPaneId>, TmuxError> {
+        let socket = TmuxSocketName::new(socket_name);
+        self.target_content_pane_for_session_instance_id(&socket, target_session_name)
     }
 
     fn pane_target_session_name_on_socket(

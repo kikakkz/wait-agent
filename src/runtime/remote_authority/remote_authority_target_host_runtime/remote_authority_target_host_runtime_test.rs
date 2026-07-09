@@ -232,12 +232,12 @@ mod tests {
         fn clear_runtime_command_override(
             &self,
             _socket_name: &str,
-            target_session_name: &str,
+            pane: &TmuxPaneId,
         ) -> Result<(), Self::Error> {
             self.clear_runtime_override_calls
                 .lock()
                 .expect("clear runtime override calls mutex should not be poisoned")
-                .push(target_session_name.to_string());
+                .push(pane.as_str().to_string());
             Ok(())
         }
 
@@ -668,7 +668,7 @@ mod tests {
                 .lock()
                 .expect("clear runtime override calls mutex should not be poisoned")
                 .clone(),
-            vec!["target-1".to_string()]
+            vec!["%7".to_string()]
         );
         assert_eq!(
             fake_gateway
@@ -1030,7 +1030,7 @@ mod tests {
                 .lock()
                 .expect("clear runtime override calls mutex should not be poisoned")
                 .as_slice(),
-            &["target-1".to_string()]
+            &["%7".to_string()]
         );
         assert_eq!(
             fake_gateway_for_assert
@@ -1585,7 +1585,8 @@ mod tests {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         let signal = super::super::RuntimeChangeSignal::new(event_tx, std::time::Duration::ZERO);
 
-        super::super::emit_runtime_change_signal(&runtime, &command, &signal)
+        let pane = TmuxPaneId::new("%7");
+        super::super::emit_runtime_change_signal(&runtime, &command, &signal, &pane)
             .expect("chrome refresh should still be signaled");
 
         assert_eq!(
