@@ -30,8 +30,9 @@ one workflow for the agents you already use in terminals.
   </strong>
 </p>
 
-<!-- TODO: add short demo GIF here. -->
-<!-- TODO: add walkthrough video link here. -->
+<p align="center">
+  <img src="docs/demo.png" alt="WaitAgent workspace demo" width="90%" />
+</p>
 
 </div>
 
