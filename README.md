@@ -31,7 +31,7 @@ one workflow for the agents you already use in terminals.
 </p>
 
 <p align="center">
-  <img src="docs/demo.png" alt="WaitAgent workspace demo" width="90%" />
+  <img src="docs/demo.png" alt="WaitAgent workspace demo" width="100%" />
 </p>
 
 </div>
