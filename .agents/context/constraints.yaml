@@ -39,6 +39,7 @@ constraints:
   - The vendored tmux adapter is a local-session host adapter, not the universal session abstraction; do not hardwire shared session identity, metadata, or control flow to local tmux inspection in ways that would block a future server-side `interact` runtime for remote sessions.
   - Local and remote sessions must converge on one transport-agnostic target catalog and activation model so both can render through the same persistent main slot.
   - Waitagent chrome-navigation keys such as `Right`, `Left`, and sidebar hide or reveal must be implemented with tmux pane-identity and layout semantics, not with shell-prompt heuristics, pane-text probes, `capture-pane`, or nested shell probes inside key bindings.
+  - No fallback, defensive-drop, or "兜底" designs are allowed for any feature or bug fix. All code must address the root cause rather than masking it by dropping, ignoring, downgrading, or silently swallowing mismatched data, events, or outputs. Such designs are considered unacceptable dirty design in this project and will be rejected.
 source_of_truth:
   - README.md
   - docs/architecture.md

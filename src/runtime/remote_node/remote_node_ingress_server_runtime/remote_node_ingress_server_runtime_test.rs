@@ -371,7 +371,6 @@ mod tests {
                 },
             )]),
             published_fingerprints: std::collections::HashMap::new(),
-            opened_seq: 1,
         };
         let publication_runtime =
             RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
@@ -507,7 +506,6 @@ mod tests {
                 ),
             ]),
             published_fingerprints: std::collections::HashMap::new(),
-            opened_seq: 1,
         };
         let publication_runtime =
             RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
@@ -559,7 +557,6 @@ mod tests {
             session: session_handle,
             bridges: std::collections::HashMap::new(),
             published_fingerprints: std::collections::HashMap::new(),
-            opened_seq: 1,
         };
         let publication_runtime =
             RemoteTargetPublicationRuntime::new_for_route_tests_without_remote_runtime_owner()
@@ -741,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn authority_bridge_commands_follow_latest_active_session_after_reconnect() {
+    fn authority_bridge_commands_are_routed_back_to_their_bound_session() {
         let _guard = crate::test_support::integration_test_lock();
         use super::super::run_node_ingress_server_loop;
         use crate::infra::remote_grpc_transport::{
@@ -789,46 +786,85 @@ mod tests {
         internal_tx
             .send(InternalEvent::SocketDirChanged)
             .expect("authority socket event should send");
-        let mut writers = accept.join().expect("accept should join");
-        assert_eq!(writers.len(), 1, "bridge should connect once");
 
         transport_tx
             .send(RemoteNodeTransportEvent::SessionOpened {
                 session: new_session,
             })
             .expect("new session should open");
+
+        let mut writers = accept.join().expect("accept should join");
+        assert_eq!(writers.len(), 2, "each session should get its own bridge");
+
+        // Bridge order is not deterministic, so identify each bridge by writing a command
+        // and observing which outbound receiver receives it.
+        let (old_bridge_index, new_bridge_index) = {
+            write_control_plane_envelope(
+                &mut writers[0],
+                &open_mirror_request_envelope(
+                    &format!("remote-peer:{node_id}:shell-command"),
+                    "shell-command",
+                ),
+            )
+            .expect("probe command should write");
+            let probe = recv_outbound_with_deadline(&mut old_outbound_rx)
+                .or_else(|| recv_outbound_with_deadline(&mut new_outbound_rx))
+                .expect("probe command should reach exactly one session");
+            if probe.session_instance_id == "session-old" {
+                (0, 1)
+            } else {
+                (1, 0)
+            }
+        };
+
+        // Command on the old bridge routes back to the old session.
+        write_control_plane_envelope(
+            &mut writers[old_bridge_index],
+            &open_mirror_request_envelope(
+                &format!("remote-peer:{node_id}:shell-command"),
+                "shell-command",
+            ),
+        )
+        .expect("old bridge command should write");
+        let forwarded = recv_outbound_with_deadline(&mut old_outbound_rx)
+            .expect("command on old bridge should reach old session");
+        assert_eq!(forwarded.session_instance_id, "session-old");
+
+        // Command on the new bridge routes back to the new session.
+        write_control_plane_envelope(
+            &mut writers[new_bridge_index],
+            &open_mirror_request_envelope(
+                &format!("remote-peer:{node_id}:shell-command"),
+                "shell-command",
+            ),
+        )
+        .expect("new bridge command should write");
+        let forwarded = recv_outbound_with_deadline(&mut new_outbound_rx)
+            .expect("command on new bridge should reach new session");
+        assert_eq!(forwarded.session_instance_id, "session-new");
+
+        // After the old session closes, commands on its bridge are dropped.
         transport_tx
             .send(RemoteNodeTransportEvent::SessionClosed {
                 node_id: node_id.clone(),
                 session_instance_id: "session-old".to_string(),
             })
             .expect("old session should close");
-
         write_control_plane_envelope(
-            &mut writers[0],
+            &mut writers[old_bridge_index],
             &open_mirror_request_envelope(
                 &format!("remote-peer:{node_id}:shell-command"),
                 "shell-command",
             ),
         )
-        .expect("authority command should write");
-
-        let forwarded = recv_outbound_with_deadline(&mut new_outbound_rx)
-            .expect("command should be forwarded to latest active session");
-        assert_eq!(forwarded.session_instance_id, "session-new");
-        match forwarded.body {
-            Some(Body::OpenMirrorRequest(payload)) => {
-                assert_eq!(payload.session_id, "shell-command");
-                assert_eq!(
-                    payload.target_id,
-                    format!("remote-peer:{node_id}:shell-command")
-                );
-            }
-            other => panic!("unexpected forwarded body: {other:?}"),
-        }
+        .expect("post-close command should write");
         assert!(
             old_outbound_rx.try_recv().is_err(),
-            "command must not be sent through stale session"
+            "command must not be sent through closed session"
+        );
+        assert!(
+            new_outbound_rx.try_recv().is_err(),
+            "command on old bridge must not leak to new session"
         );
 
         for writer in &writers {
@@ -857,7 +893,6 @@ mod tests {
                     session: old_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
-                    opened_seq: 1,
                 },
             ),
             (
@@ -866,7 +901,6 @@ mod tests {
                     session: new_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
-                    opened_seq: 2,
                 },
             ),
         ]);
@@ -881,6 +915,7 @@ mod tests {
             &mut retry_scheduled,
             InternalEvent::AuthorityHostOutput {
                 node_id: node_id.to_string(),
+                session_instance_id: "session-new".to_string(),
                 envelope: raw_pty_output_envelope(
                     node_id,
                     &format!("remote-peer:{node_id}:shell-output"),
@@ -1028,7 +1063,6 @@ mod tests {
                     session: same_node_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
-                    opened_seq: 2,
                 },
             ),
             (
@@ -1037,7 +1071,6 @@ mod tests {
                     session: other_node_session,
                     bridges: std::collections::HashMap::new(),
                     published_fingerprints: std::collections::HashMap::new(),
-                    opened_seq: 1,
                 },
             ),
         ]);
@@ -1054,7 +1087,6 @@ mod tests {
                 session: RemoteNodeSessionHandle::new_for_tests(other_node_id, "session-other-2").0,
                 bridges: std::collections::HashMap::new(),
                 published_fingerprints: std::collections::HashMap::new(),
-                opened_seq: 1,
             },
         )]);
         assert!(!has_active_ingress_session_for_node(&sessions, node_id));

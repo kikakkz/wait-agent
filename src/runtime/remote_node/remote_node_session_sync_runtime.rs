@@ -202,6 +202,7 @@ pub(super) struct SessionSyncAuthorityHost {
     pub(super) writer: Arc<Mutex<Option<UnixStream>>>,
     pub(super) running: Arc<AtomicBool>,
     pub(super) writer_ready: Arc<Condvar>,
+    pub(super) bound_session_instance_id: String,
 }
 
 #[derive(Clone)]
@@ -865,6 +866,17 @@ impl SessionSyncAuthorityManager {
         session_handle: &RemoteNodeSessionHandle,
         target_id: &str,
     ) -> Result<(), LifecycleError> {
+        let bound_session_instance_id = session_handle.session_instance_id().to_string();
+        if let Some(existing) = self.running_hosts.get(target_id) {
+            if existing.bound_session_instance_id == bound_session_instance_id {
+                return Ok(());
+            }
+            // The target is being attached by a different client gRPC session.
+            // Stop the old host so a new one can be bound to the current session.
+            existing.running.store(false, Ordering::Relaxed);
+            self.running_hosts.remove(target_id);
+        }
+
         let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
             ERROR_LOG.log(format!(
                 "[session-sync] failed to extract session from target id `{target_id}`"
@@ -889,6 +901,7 @@ impl SessionSyncAuthorityManager {
         spawn_live_authority_listener(
             authority_socket_path.clone(),
             session_handle.node_id().to_string(),
+            bound_session_instance_id.clone(),
             self.output_route.clone(),
             running.clone(),
             writer.clone(),
@@ -915,9 +928,20 @@ impl SessionSyncAuthorityManager {
                 writer,
                 running,
                 writer_ready,
+                bound_session_instance_id,
             },
         );
         Ok(())
+    }
+
+    pub(super) fn stop_hosts_bound_to_session(&mut self, session_instance_id: &str) {
+        self.running_hosts.retain(|_target_id, host| {
+            let matches = host.bound_session_instance_id == session_instance_id;
+            if matches {
+                host.running.store(false, Ordering::Relaxed);
+            }
+            !matches
+        });
     }
 
     fn ensure_and_send_command(

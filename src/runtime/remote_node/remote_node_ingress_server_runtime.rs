@@ -89,7 +89,6 @@ struct ActiveNodeIngressSession {
     session: RemoteNodeSessionHandle,
     bridges: HashMap<PathBuf, ActiveAuthoritySocketBridge>,
     published_fingerprints: HashMap<String, String>,
-    opened_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -162,11 +161,13 @@ pub(super) enum InternalEvent {
     },
     AuthorityCommandReceived {
         node_id: String,
+        session_instance_id: String,
         socket_path: PathBuf,
         command: RemoteAuthorityCommand,
     },
     AuthorityHostOutput {
         node_id: String,
+        session_instance_id: String,
         envelope: ProtocolEnvelope<ControlPlanePayload>,
     },
     LocalCreateSession {
@@ -1307,7 +1308,6 @@ fn run_node_ingress_server_loop(
     let mut publication_revisions = ReceiverPublicationRevisionTable::default();
     let mut socket_discovery_retry_scheduled = false;
     let mut closed_session_instances = HashSet::<String>::new();
-    let mut next_session_open_seq = 0_u64;
 
     loop {
         drain_ingress_events(
@@ -1349,7 +1349,6 @@ fn run_node_ingress_server_loop(
                 internal_tx.clone(),
                 &mut socket_discovery_retry_scheduled,
                 &mut closed_session_instances,
-                &mut next_session_open_seq,
                 event,
             ),
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
@@ -1447,7 +1446,6 @@ fn handle_transport_event(
     internal_tx: mpsc::Sender<InternalEvent>,
     socket_discovery_retry_scheduled: &mut bool,
     closed_session_instances: &mut HashSet<String>,
-    next_session_open_seq: &mut u64,
     event: RemoteNodeTransportEvent,
 ) {
     match event {
@@ -1455,12 +1453,10 @@ fn handle_transport_event(
             let node_id = session.node_id().to_string();
             let session_instance_id = session.session_instance_id().to_string();
             closed_session_instances.remove(&session_instance_id);
-            *next_session_open_seq = next_session_open_seq.saturating_add(1);
             let mut active = ActiveNodeIngressSession {
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
-                opened_seq: *next_session_open_seq,
             };
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
@@ -1537,7 +1533,8 @@ fn handle_transport_event(
             ..
         } => {
             sessions.remove(&session_instance_id);
-            closed_session_instances.insert(session_instance_id);
+            closed_session_instances.insert(session_instance_id.clone());
+            authority_manager.stop_hosts_bound_to_session(&session_instance_id);
             mark_discovered_node_offline_if_last_ingress_session(
                 publication_runtime,
                 sessions,
@@ -1551,7 +1548,8 @@ fn handle_transport_event(
         } => {
             if let Some(session_instance_id) = session_instance_id {
                 sessions.remove(&session_instance_id);
-                closed_session_instances.insert(session_instance_id);
+                closed_session_instances.insert(session_instance_id.clone());
+                authority_manager.stop_hosts_bound_to_session(&session_instance_id);
             }
             if let Some(node_id) = node_id {
                 mark_discovered_node_offline_if_last_ingress_session(
@@ -1571,16 +1569,6 @@ fn has_active_ingress_session_for_node(
     sessions
         .values()
         .any(|active| active.session.node_id() == node_id)
-}
-
-fn current_active_ingress_session_for_node<'a>(
-    sessions: &'a HashMap<String, ActiveNodeIngressSession>,
-    node_id: &str,
-) -> Option<&'a ActiveNodeIngressSession> {
-    sessions
-        .values()
-        .filter(|active| active.session.node_id() == node_id)
-        .max_by_key(|active| active.opened_seq)
 }
 
 fn mark_discovered_node_offline_if_last_ingress_session(
@@ -1802,12 +1790,13 @@ fn handle_internal_event(
         }
         InternalEvent::AuthorityCommandReceived {
             node_id,
+            session_instance_id,
             socket_path,
             command,
         } => {
-            let Some(active) = current_active_ingress_session_for_node(sessions, &node_id) else {
+            let Some(active) = sessions.get(&session_instance_id) else {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] dropping authority command for node={node_id} socket={} because no active session is open",
+                    "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} socket={} because no active session is open",
                     socket_path.display()
                 ));
                 return;
@@ -1816,7 +1805,7 @@ fn handle_internal_event(
                 Ok(envelope) => envelope,
                 Err(error) => {
                     ERROR_LOG.log(format!(
-                        "[remote-node-ingress] failed to map authority command for node={node_id} socket={}: {error}",
+                        "[remote-node-ingress] failed to map authority command for node={node_id} session_instance_id={session_instance_id} socket={}: {error}",
                         socket_path.display()
                     ));
                     return;
@@ -1824,16 +1813,19 @@ fn handle_internal_event(
             };
             if let Err(error) = active.session.send(envelope) {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={} socket={}: {error}",
-                    active.session.session_instance_id(),
+                    "[remote-node-ingress] failed to send authority command for node={node_id} session_instance_id={session_instance_id} socket={}: {error}",
                     socket_path.display()
                 ));
             }
         }
-        InternalEvent::AuthorityHostOutput { node_id, envelope } => {
-            let Some(active) = current_active_ingress_session_for_node(sessions, &node_id) else {
+        InternalEvent::AuthorityHostOutput {
+            node_id,
+            session_instance_id,
+            envelope,
+        } => {
+            let Some(active) = sessions.get(&session_instance_id) else {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] dropping authority output for node={node_id} type={} because no active session is open",
+                    "[remote-node-ingress] dropping authority output for node={node_id} session_instance_id={session_instance_id} type={} because no active session is open",
                     envelope.payload.message_type()
                 ));
                 return;
@@ -1846,21 +1838,20 @@ fn handle_internal_event(
                 Ok(grpc) => grpc,
                 Err(error) => {
                     ERROR_LOG.log(format!(
-                        "[remote-node-ingress] failed to map authority output for node={node_id} type={}: {error}",
+                        "[remote-node-ingress] failed to map authority output for node={node_id} session_instance_id={session_instance_id} type={}: {error}",
                         envelope.payload.message_type()
                     ));
                     return;
                 }
             };
             ERROR_LOG.log(format!(
-                "[diag-timing] ingress authority output: forwarding envelope type={} to current session_instance_id={}",
+                "[diag-timing] ingress authority output: forwarding envelope type={} to session_instance_id={}",
                 envelope.payload.message_type(),
-                active.session.session_instance_id()
+                session_instance_id
             ));
             if let Err(error) = active.session.send(grpc) {
                 ERROR_LOG.log(format!(
-                    "[remote-node-ingress] failed to send authority output for node={node_id} session_instance_id={} type={}: {error}",
-                    active.session.session_instance_id(),
+                    "[remote-node-ingress] failed to send authority output for node={node_id} session_instance_id={session_instance_id} type={}: {error}",
                     envelope.payload.message_type()
                 ));
             }
@@ -2538,6 +2529,7 @@ fn refresh_authority_bridge_path(
     let transport = Arc::new(transport);
     spawn_authority_bridge_reader(
         node_id.to_string(),
+        session.session.session_instance_id().to_string(),
         socket_path.clone(),
         transport.clone(),
         internal_tx,
@@ -2586,6 +2578,7 @@ fn refresh_authority_bridges(
         let transport = Arc::new(transport);
         spawn_authority_bridge_reader(
             node_id.to_string(),
+            session.session.session_instance_id().to_string(),
             socket_path.clone(),
             transport.clone(),
             internal_tx.clone(),
@@ -2610,6 +2603,7 @@ fn refresh_authority_bridges(
 
 fn spawn_authority_bridge_reader(
     node_id: String,
+    session_instance_id: String,
     socket_path: PathBuf,
     reader: Arc<RemoteAuthorityTransportRuntime>,
     internal_tx: mpsc::Sender<InternalEvent>,
@@ -2623,6 +2617,7 @@ fn spawn_authority_bridge_reader(
             if internal_tx
                 .send(InternalEvent::AuthorityCommandReceived {
                     node_id: node_id.clone(),
+                    session_instance_id: session_instance_id.clone(),
                     socket_path: socket_path.clone(),
                     command,
                 })

@@ -410,6 +410,7 @@ mod tests {
             writer: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(true)),
             writer_ready: Arc::new(Condvar::new()),
+            bound_session_instance_id: "session-1".to_string(),
         };
         assert_eq!(authority_host_signal(&host), AuthorityHostSignal::Starting);
 
@@ -447,6 +448,7 @@ mod tests {
             writer: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             writer_ready: Arc::new(Condvar::new()),
+            bound_session_instance_id: "session-1".to_string(),
         };
 
         assert_eq!(authority_host_signal(&host), AuthorityHostSignal::Closed);

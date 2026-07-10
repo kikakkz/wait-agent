@@ -1621,6 +1621,7 @@ pub(super) fn spawn_in_process_authority_target_host(
 pub(super) fn spawn_live_authority_listener(
     socket_path: PathBuf,
     node_id: String,
+    session_instance_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1637,6 +1638,7 @@ pub(super) fn spawn_live_authority_listener(
                     let _ = bridge_live_authority_stream(
                         stream,
                         node_id.clone(),
+                        session_instance_id.clone(),
                         output_route.clone(),
                         running.clone(),
                         writer.clone(),
@@ -1665,6 +1667,7 @@ fn bind_live_authority_listener(socket_path: &Path) -> Result<UnixListener, io::
 fn bridge_live_authority_stream(
     mut host_stream: UnixStream,
     node_id: String,
+    session_instance_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1692,7 +1695,13 @@ fn bridge_live_authority_stream(
     }
     writer_ready.notify_all();
     ERROR_LOG.log("[diag-timing] bridge_live_authority_stream: writer set, ready signalled, starting forward_host_output_to_owner".to_string());
-    let result = forward_host_output(host_reader, node_id, output_route, running.clone());
+    let result = forward_host_output(
+        host_reader,
+        node_id,
+        session_instance_id,
+        output_route,
+        running.clone(),
+    );
     ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_owner exited, result={:?}", result));
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
@@ -1711,6 +1720,7 @@ fn bridge_live_authority_stream(
 fn forward_host_output(
     mut host_reader: UnixStream,
     node_id: String,
+    session_instance_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
@@ -1773,6 +1783,7 @@ fn forward_host_output(
                 if let Err(e) = ingress_event_tx.send(
                     crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent::AuthorityHostOutput {
                         node_id: node_id.clone(),
+                        session_instance_id: session_instance_id.clone(),
                         envelope,
                     },
                 ) {
