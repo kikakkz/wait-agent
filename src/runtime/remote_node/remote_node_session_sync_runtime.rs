@@ -893,7 +893,11 @@ impl SessionSyncAuthorityManager {
                 "no local workspace socket owns session `{session_name}` for `{target_id}`"
             ))
         })?;
-        let authority_socket_path = live_authority_session_socket_path(&socket_name, &session_name);
+        let authority_socket_path = live_authority_session_socket_path(
+            &socket_name,
+            &session_name,
+            &bound_session_instance_id,
+        );
         let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
         let running = Arc::new(AtomicBool::new(true));
         let writer = Arc::new(Mutex::new(None));
@@ -920,6 +924,7 @@ impl SessionSyncAuthorityManager {
                 authority_id: session_handle.node_id().to_string(),
                 target_id: target_id.to_string(),
                 transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+                authority_socket_path: authority_socket_path.to_string_lossy().into_owned(),
             },
         )?;
         self.running_hosts.insert(
@@ -1006,16 +1011,15 @@ impl SessionSyncAuthorityManager {
 impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
     fn ensure_live_session_registered(
         &self,
-        socket_name: &str,
-        target_session_name: &str,
+        _socket_name: &str,
+        _target_session_name: &str,
         _authority_id: &str,
         _target_id: &str,
         _transport_socket_path: &str,
-    ) -> Result<PathBuf, LifecycleError> {
-        let authority_socket_path =
-            live_authority_session_socket_path(socket_name, target_session_name);
-        wait_for_live_authority_socket(&authority_socket_path)?;
-        Ok(authority_socket_path)
+        authority_socket_path: &std::path::Path,
+    ) -> Result<(), LifecycleError> {
+        wait_for_live_authority_socket(authority_socket_path)?;
+        Ok(())
     }
 
     fn ensure_live_session_unregistered(

@@ -346,8 +346,9 @@ where
 pub(crate) fn live_authority_session_socket_path(
     socket_name: &str,
     target_session_name: &str,
+    session_instance_id: &str,
 ) -> PathBuf {
-    let hash = stable_socket_hash(&[socket_name, target_session_name]);
+    let hash = stable_socket_hash(&[socket_name, target_session_name, session_instance_id]);
     std::env::temp_dir().join(format!("waitagent-live-authority-{hash}.sock"))
 }
 
@@ -532,7 +533,11 @@ fn ensure_live_session_route_with_target_host_mode(
         target_id: target_id.to_string(),
         transport_session_id,
         transport_socket_path: transport_socket_path.to_string(),
-        socket_path: live_authority_session_socket_path(socket_name, target_session_name),
+        socket_path: live_authority_session_socket_path(
+            socket_name,
+            target_session_name,
+            target_id,
+        ),
         running: Arc::new(AtomicBool::new(true)),
         writer: Arc::new(Mutex::new(None)),
         pending_commands: Arc::new(Mutex::new(Vec::new())),
@@ -981,6 +986,7 @@ fn spawn_remote_authority_target_host(
             &route.authority_id,
             &route.target_id,
             transport_socket_path,
+            &route.socket_path.to_string_lossy(),
             network,
         ),
     )

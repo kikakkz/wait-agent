@@ -28,7 +28,6 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
-use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
@@ -1595,8 +1594,7 @@ pub(super) fn spawn_in_process_authority_target_host(
         SessionSyncAuthorityPublicationGateway::new(network),
         current_executable,
     );
-    let authority_socket_path =
-        live_authority_session_socket_path(&command.socket_name, &command.target_session_name);
+    let authority_socket_path = PathBuf::from(&command.authority_socket_path);
     thread::spawn(move || {
         let _ = runtime.run_target_host(command);
         running.store(false, Ordering::Relaxed);

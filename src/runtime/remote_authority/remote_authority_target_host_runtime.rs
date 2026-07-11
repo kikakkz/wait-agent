@@ -18,7 +18,6 @@ use crate::runtime::output_quiet_refresh_scheduler::{
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, RemoteAuthorityTransportRuntime,
 };
-use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_target_publication_runtime::{
     signal_publication_sender_live_session_registered,
     signal_publication_sender_live_session_unregistered, RemoteTargetPublicationRuntime,
@@ -366,7 +365,8 @@ pub trait RemoteAuthorityPublicationGateway: Send + Sync + Clone + 'static {
         authority_id: &str,
         target_id: &str,
         transport_socket_path: &str,
-    ) -> Result<PathBuf, LifecycleError>;
+        authority_socket_path: &Path,
+    ) -> Result<(), LifecycleError>;
 
     fn ensure_live_session_unregistered(
         &self,
@@ -391,7 +391,8 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
         authority_id: &str,
         target_id: &str,
         transport_socket_path: &str,
-    ) -> Result<PathBuf, LifecycleError> {
+        authority_socket_path: &Path,
+    ) -> Result<(), LifecycleError> {
         self.ensure_publication_sender_running(socket_name)?;
         signal_publication_sender_live_session_registered(
             socket_name,
@@ -400,10 +401,8 @@ impl RemoteAuthorityPublicationGateway for RemoteTargetPublicationRuntime {
             target_id,
             transport_socket_path,
         )?;
-        let authority_socket_path =
-            live_authority_session_socket_path(socket_name, target_session_name);
-        wait_for_ready_socket(&authority_socket_path)?;
-        Ok(authority_socket_path)
+        wait_for_ready_socket(authority_socket_path)?;
+        Ok(())
     }
 
     fn ensure_live_session_unregistered(
@@ -612,14 +611,15 @@ where
         &self,
         command: RemoteAuthorityTargetHostCommand,
     ) -> Result<(), LifecycleError> {
-        let authority_socket_path = self
-            .publication_gateway
+        let authority_socket_path = PathBuf::from(&command.authority_socket_path);
+        self.publication_gateway
             .ensure_live_session_registered(
                 &command.socket_name,
                 &command.target_session_name,
                 &command.authority_id,
                 &command.target_id,
                 &command.transport_socket_path,
+                &authority_socket_path,
             )
             .map_err(remote_authority_error)?;
         let transport = Arc::new(
@@ -1286,6 +1286,7 @@ pub(crate) fn remote_authority_target_host_args(
     authority_id: &str,
     target_id: &str,
     transport_socket_path: &str,
+    authority_socket_path: &str,
     network: &RemoteNetworkConfig,
 ) -> Vec<String> {
     prepend_global_network_args(
@@ -1303,6 +1304,8 @@ pub(crate) fn remote_authority_target_host_args(
             target_id.to_string(),
             "--transport-socket-path".to_string(),
             transport_socket_path.to_string(),
+            "--authority-socket-path".to_string(),
+            authority_socket_path.to_string(),
         ],
         network,
     )

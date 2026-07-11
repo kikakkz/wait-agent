@@ -256,6 +256,7 @@ pub struct RemoteAuthorityTargetHostCommand {
     pub authority_id: String,
     pub target_id: String,
     pub transport_socket_path: String,
+    pub authority_socket_path: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -930,6 +931,7 @@ fn parse_remote_authority_target_host(
     let mut authority_id = None;
     let mut target_id = None;
     let mut transport_socket_path = None;
+    let mut authority_socket_path = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -944,6 +946,9 @@ fn parse_remote_authority_target_host(
             "--target-id" => target_id = Some(expect_value("--target-id", &mut iter)?),
             "--transport-socket-path" => {
                 transport_socket_path = Some(expect_value("--transport-socket-path", &mut iter)?)
+            }
+            "--authority-socket-path" => {
+                authority_socket_path = Some(expect_value("--authority-socket-path", &mut iter)?)
             }
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
@@ -962,6 +967,8 @@ fn parse_remote_authority_target_host(
         target_id: target_id.ok_or_else(|| CliError::MissingValue("--target-id".to_string()))?,
         transport_socket_path: transport_socket_path
             .ok_or_else(|| CliError::MissingValue("--transport-socket-path".to_string()))?,
+        authority_socket_path: authority_socket_path
+            .ok_or_else(|| CliError::MissingValue("--authority-socket-path".to_string()))?,
     })
 }
 
@@ -2052,6 +2059,8 @@ mod tests {
             "remote-peer:peer-a:target-1",
             "--transport-socket-path",
             "/tmp/transport.sock",
+            "--authority-socket-path",
+            "/tmp/authority.sock",
         ])
         .command
         {
@@ -2062,6 +2071,7 @@ mod tests {
                 assert_eq!(command.authority_id, "peer-a");
                 assert_eq!(command.target_id, "remote-peer:peer-a:target-1");
                 assert_eq!(command.transport_socket_path, "/tmp/transport.sock");
+                assert_eq!(command.authority_socket_path, "/tmp/authority.sock");
             }
             other => panic!("unexpected command: {other:?}"),
         }

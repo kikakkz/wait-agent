@@ -273,18 +273,19 @@ mod tests {
     impl RemoteAuthorityPublicationGateway for FakePublicationGateway {
         fn ensure_live_session_registered(
             &self,
-            socket_name: &str,
-            target_session_name: &str,
+            _socket_name: &str,
+            _target_session_name: &str,
             authority_id: &str,
             _target_id: &str,
             transport_socket_path: &str,
-        ) -> Result<PathBuf, LifecycleError> {
+            authority_socket_path: &std::path::Path,
+        ) -> Result<(), LifecycleError> {
             let session = Arc::new(
                 RemoteNodeSessionRuntime::connect(transport_socket_path, authority_id, None)
                     .map_err(remote_authority_error)?,
             );
             let running = Arc::new(AtomicBool::new(true));
-            let socket_path = live_authority_session_socket_path(socket_name, target_session_name);
+            let socket_path = authority_socket_path.to_path_buf();
             let worker = spawn_live_authority_session_bridge(
                 socket_path.clone(),
                 session.clone(),
@@ -300,7 +301,7 @@ mod tests {
                 running,
                 worker,
             });
-            Ok(socket_path)
+            Ok(())
         }
 
         fn ensure_live_session_unregistered(
@@ -358,6 +359,16 @@ mod tests {
         }
     }
 
+    fn test_authority_socket_path(socket_name: &str, target_session_name: &str) -> String {
+        live_authority_session_socket_path(
+            socket_name,
+            target_session_name,
+            "test-session-instance",
+        )
+        .to_string_lossy()
+        .into_owned()
+    }
+
     #[test]
     fn authority_output_pump_shell_command_quotes_ingest_socket_path() {
         let command = remote_authority_output_pump_shell_command(
@@ -383,6 +394,7 @@ mod tests {
             "peer-a",
             "remote-peer:peer-a:target-1",
             "/tmp/transport.sock",
+            "/tmp/authority.sock",
             &RemoteNetworkConfig {
                 port: 9001,
                 connect: Some("10.0.0.8:7474".to_string()),
@@ -411,6 +423,8 @@ mod tests {
                 "remote-peer:peer-a:target-1",
                 "--transport-socket-path",
                 "/tmp/transport.sock",
+                "--authority-socket-path",
+                "/tmp/authority.sock",
             ]
         );
     }
@@ -468,6 +482,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let ingest_socket_path = authority_output_ingest_socket_path(
             command.transport_socket_path.as_str(),
@@ -719,6 +734,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let event_socket_path =
             authority_event_socket_path(command.transport_socket_path.as_str(), &command.target_id);
@@ -821,6 +837,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let (server_tx, server_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -946,6 +963,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let ingest_socket_path = authority_output_ingest_socket_path(
             command.transport_socket_path.as_str(),
@@ -1090,6 +1108,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let (server_tx, server_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -1228,6 +1247,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let (server_tx, server_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -1357,6 +1377,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id,
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let (server_tx, server_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -1450,6 +1471,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
 
         let (server_tx, server_rx) = std::sync::mpsc::channel();
@@ -1581,6 +1603,7 @@ mod tests {
             authority_id: "peer-a".to_string(),
             target_id: "remote-peer:peer-a:target-1".to_string(),
             transport_socket_path: "/tmp/transport.sock".to_string(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
         };
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         let signal = super::super::RuntimeChangeSignal::new(event_tx, std::time::Duration::ZERO);
