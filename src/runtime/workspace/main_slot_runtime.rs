@@ -2810,7 +2810,9 @@ impl MainSlotRuntime {
         let option_name = self.session_pane_option_name(qualified_target);
         self.backend
             .set_session_option(workspace, &option_name, pane.as_str())
-            .map_err(main_slot_error)
+            .map_err(main_slot_error)?;
+        self.sync_session_pane_with_remote_owner(workspace, qualified_target, Some(pane.as_str()));
+        Ok(())
     }
 
     fn clear_session_pane(
@@ -2821,7 +2823,49 @@ impl MainSlotRuntime {
         let option_name = self.session_pane_option_name(qualified_target);
         self.backend
             .set_session_option(workspace, &option_name, "")
-            .map_err(main_slot_error)
+            .map_err(main_slot_error)?;
+        self.sync_session_pane_with_remote_owner(workspace, qualified_target, None);
+        Ok(())
+    }
+
+    fn sync_session_pane_with_remote_owner(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        qualified_target: &str,
+        pane_id: Option<&str>,
+    ) {
+        // Remote authority ids use a `#` port separator (e.g. `host#7474`).
+        // Local socket names never contain `#`, so this is a reliable
+        // discriminator in this codebase.
+        let Some((authority_id, transport_session_id)) = split_qualified_target(qualified_target)
+        else {
+            return;
+        };
+        if !authority_id.contains('#') {
+            return;
+        }
+        let owner =
+            RemoteRuntimeOwnerRuntime::new(self.current_executable.clone(), self.network.clone());
+        let node_id = authority_id;
+        let socket_name = workspace.socket_name.as_str();
+        let result = match pane_id {
+            Some(pane_id) => owner.set_session_pane(
+                node_id,
+                authority_id,
+                transport_session_id,
+                socket_name,
+                pane_id,
+            ),
+            None => {
+                owner.clear_session_pane(node_id, authority_id, transport_session_id, socket_name)
+            }
+        };
+        if let Err(error) = result {
+            ERROR_LOG.log(format!(
+                "[diag-newhost] sync_session_pane_with_remote_owner failed: target={} socket={} pane={:?} error={}",
+                qualified_target, socket_name, pane_id, error
+            ));
+        }
     }
 
     fn cleanup_exited_remote_session_pane(

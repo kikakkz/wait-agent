@@ -53,6 +53,19 @@ enum RemoteRuntimeOwnerCommandEnvelope {
         authority_id: String,
         transport_session_id: String,
     },
+    SetSessionPane {
+        node_id: String,
+        authority_id: String,
+        transport_session_id: String,
+        socket_name: String,
+        pane_id: String,
+    },
+    ClearSessionPane {
+        node_id: String,
+        authority_id: String,
+        transport_session_id: String,
+        socket_name: String,
+    },
     RemoveNode {
         node_id: String,
     },
@@ -67,6 +80,33 @@ enum RemoteRuntimeOwnerCommandEnvelope {
 struct OwnerStateRecord {
     node_id: String,
     session: ManagedSessionRecord,
+    /// Maps workspace socket name to the pane id that currently hosts this
+    /// remote session on that socket. Used by TTL cleanup to emit
+    /// `__remote-target-exited` with an exact `--pane-id` instead of scanning.
+    socket_panes: HashMap<String, String>,
+}
+
+impl Default for OwnerStateRecord {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            session: ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer("", ""),
+                selector: None,
+                availability: SessionAvailability::Unknown,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 0,
+                command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Unknown,
+            },
+            socket_panes: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -86,6 +126,13 @@ impl RemoteRuntimeOwnerRuntime {
             current_executable: current_waitagent_executable()?,
             network,
         })
+    }
+
+    pub fn new(current_executable: PathBuf, network: RemoteNetworkConfig) -> Self {
+        Self {
+            current_executable,
+            network,
+        }
     }
 
     #[cfg(test)]
@@ -289,7 +336,7 @@ fn emit_remote_target_exited_cleanup(
                 if !session.is_workspace_chrome() {
                     continue;
                 }
-                let args = vec![
+                let mut args = vec![
                     "__remote-target-exited".to_string(),
                     "--socket-name".to_string(),
                     socket_name.clone(),
@@ -298,6 +345,10 @@ fn emit_remote_target_exited_cleanup(
                     "--target".to_string(),
                     target.clone(),
                 ];
+                if let Some(pane_id) = record.socket_panes.get(socket_name) {
+                    args.push("--pane-id".to_string());
+                    args.push(pane_id.clone());
+                }
                 spawn_waitagent_sidecar(&state.current_executable, args)
                     .map_err(remote_runtime_owner_error)?;
             }
@@ -341,6 +392,48 @@ impl RemoteRuntimeOwnerRuntime {
                 node_id: node_id.to_string(),
                 authority_id: authority_id.to_string(),
                 transport_session_id: transport_session_id.to_string(),
+            },
+        )
+    }
+
+    pub fn set_session_pane(
+        &self,
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+        socket_name: &str,
+        pane_id: &str,
+    ) -> Result<(), LifecycleError> {
+        self.ensure_owner_running()?;
+        signal_remote_runtime_owner_command(
+            &self.current_executable,
+            &self.network,
+            RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+                node_id: node_id.to_string(),
+                authority_id: authority_id.to_string(),
+                transport_session_id: transport_session_id.to_string(),
+                socket_name: socket_name.to_string(),
+                pane_id: pane_id.to_string(),
+            },
+        )
+    }
+
+    pub fn clear_session_pane(
+        &self,
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+        socket_name: &str,
+    ) -> Result<(), LifecycleError> {
+        self.ensure_owner_running()?;
+        signal_remote_runtime_owner_command(
+            &self.current_executable,
+            &self.network,
+            RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+                node_id: node_id.to_string(),
+                authority_id: authority_id.to_string(),
+                transport_session_id: transport_session_id.to_string(),
+                socket_name: socket_name.to_string(),
             },
         )
     }
@@ -594,11 +687,22 @@ fn handle_remote_runtime_owner_command(
                 .lock()
                 .expect("remote runtime owner offline node mutex should not be poisoned")
                 .remove(&node_id);
-            state
+            let mut records = state
                 .records
                 .lock()
-                .expect("remote runtime owner state mutex should not be poisoned")
-                .insert(key, OwnerStateRecord { node_id, session });
+                .expect("remote runtime owner state mutex should not be poisoned");
+            let socket_panes = records
+                .get(&key)
+                .map(|record| record.socket_panes.clone())
+                .unwrap_or_default();
+            records.insert(
+                key,
+                OwnerStateRecord {
+                    node_id,
+                    session,
+                    socket_panes,
+                },
+            );
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::RemoveSession {
@@ -617,6 +721,47 @@ fn handle_remote_runtime_owner_command(
                 .expect("remote runtime owner state mutex should not be poisoned")
                 .remove(&key);
             clear_offline_node_if_empty(state, &node_id);
+            Ok(Some("ok\n".to_string()))
+        }
+        RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+            node_id,
+            authority_id,
+            transport_session_id,
+            socket_name,
+            pane_id,
+        } => {
+            let target_id = ManagedSessionAddress::remote_peer(authority_id, transport_session_id)
+                .id()
+                .as_str()
+                .to_string();
+            let key = owned_record_key(&node_id, &target_id);
+            let mut records = state
+                .records
+                .lock()
+                .expect("remote runtime owner state mutex should not be poisoned");
+            if let Some(record) = records.get_mut(&key) {
+                record.socket_panes.insert(socket_name, pane_id);
+            }
+            Ok(Some("ok\n".to_string()))
+        }
+        RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+            node_id,
+            authority_id,
+            transport_session_id,
+            socket_name,
+        } => {
+            let target_id = ManagedSessionAddress::remote_peer(authority_id, transport_session_id)
+                .id()
+                .as_str()
+                .to_string();
+            let key = owned_record_key(&node_id, &target_id);
+            let mut records = state
+                .records
+                .lock()
+                .expect("remote runtime owner state mutex should not be poisoned");
+            if let Some(record) = records.get_mut(&key) {
+                record.socket_panes.remove(&socket_name);
+            }
             Ok(Some("ok\n".to_string()))
         }
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
@@ -683,6 +828,8 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
     match command {
         RemoteRuntimeOwnerCommandEnvelope::UpsertSession { .. } => "upsert_session",
         RemoteRuntimeOwnerCommandEnvelope::RemoveSession { .. } => "remove_session",
+        RemoteRuntimeOwnerCommandEnvelope::SetSessionPane { .. } => "set_session_pane",
+        RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane { .. } => "clear_session_pane",
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { .. } => "remove_node",
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { .. } => "mark_node_offline",
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot",
@@ -1083,6 +1230,32 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
             escape_field(authority_id),
             escape_field(transport_session_id)
         ),
+        RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+            node_id,
+            authority_id,
+            transport_session_id,
+            socket_name,
+            pane_id,
+        } => format!(
+            "set_session_pane\t{}\t{}\t{}\t{}\t{}\n",
+            escape_field(node_id),
+            escape_field(authority_id),
+            escape_field(transport_session_id),
+            escape_field(socket_name),
+            escape_field(pane_id)
+        ),
+        RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+            node_id,
+            authority_id,
+            transport_session_id,
+            socket_name,
+        } => format!(
+            "clear_session_pane\t{}\t{}\t{}\t{}\n",
+            escape_field(node_id),
+            escape_field(authority_id),
+            escape_field(transport_session_id),
+            escape_field(socket_name)
+        ),
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { node_id } => {
             format!("remove_node\t{}\n", escape_field(node_id))
         }
@@ -1139,6 +1312,64 @@ fn parse_remote_runtime_owner_command(
                 node_id,
                 authority_id,
                 transport_session_id,
+            })
+        }
+        "set_session_pane" => {
+            let node_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("set_session_pane is missing node id".to_string())
+            })?)?;
+            let authority_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("set_session_pane is missing authority id".to_string())
+            })?)?;
+            let transport_session_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "set_session_pane is missing transport session id".to_string(),
+                )
+            })?)?;
+            let socket_name = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("set_session_pane is missing socket name".to_string())
+            })?)?;
+            let pane_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("set_session_pane is missing pane id".to_string())
+            })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "set_session_pane contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+                node_id,
+                authority_id,
+                transport_session_id,
+                socket_name,
+                pane_id,
+            })
+        }
+        "clear_session_pane" => {
+            let node_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("clear_session_pane is missing node id".to_string())
+            })?)?;
+            let authority_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("clear_session_pane is missing authority id".to_string())
+            })?)?;
+            let transport_session_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "clear_session_pane is missing transport session id".to_string(),
+                )
+            })?)?;
+            let socket_name = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("clear_session_pane is missing socket name".to_string())
+            })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "clear_session_pane contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+                node_id,
+                authority_id,
+                transport_session_id,
+                socket_name,
             })
         }
         "remove_node" => {
@@ -1563,10 +1794,184 @@ mod tests {
     }
 
     #[test]
+    fn remote_runtime_owner_command_round_trips_set_session_pane() {
+        let rendered = render_remote_runtime_owner_command(
+            &RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+                node_id: "peer-a".to_string(),
+                authority_id: "peer-a".to_string(),
+                transport_session_id: "pty1".to_string(),
+                socket_name: "wa-socket".to_string(),
+                pane_id: "%42".to_string(),
+            },
+        );
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+                node_id,
+                authority_id,
+                transport_session_id,
+                socket_name,
+                pane_id,
+            } => {
+                assert_eq!(node_id, "peer-a");
+                assert_eq!(authority_id, "peer-a");
+                assert_eq!(transport_session_id, "pty1");
+                assert_eq!(socket_name, "wa-socket");
+                assert_eq!(pane_id, "%42");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_runtime_owner_command_round_trips_clear_session_pane() {
+        let rendered = render_remote_runtime_owner_command(
+            &RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+                node_id: "peer-a".to_string(),
+                authority_id: "peer-a".to_string(),
+                transport_session_id: "pty1".to_string(),
+                socket_name: "wa-socket".to_string(),
+            },
+        );
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+                node_id,
+                authority_id,
+                transport_session_id,
+                socket_name,
+            } => {
+                assert_eq!(node_id, "peer-a");
+                assert_eq!(authority_id, "peer-a");
+                assert_eq!(transport_session_id, "pty1");
+                assert_eq!(socket_name, "wa-socket");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_session_pane_command_records_pane_in_owner_state() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([(
+                "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                OwnerStateRecord {
+                    node_id: "peer-a".to_string(),
+                    session: remote_session("peer-a", "pty1"),
+                    socket_panes: HashMap::new(),
+                },
+            )]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::SetSessionPane {
+                        node_id: "peer-a".to_string(),
+                        authority_id: "peer-a".to_string(),
+                        transport_session_id: "pty1".to_string(),
+                        socket_name: "wa-socket".to_string(),
+                        pane_id: "%42".to_string(),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert_eq!(response.as_deref(), Some("ok\n"));
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        let record = records
+            .get("peer-a\tremote-peer:peer-a:pty1")
+            .expect("record should exist");
+        assert_eq!(
+            record.socket_panes.get("wa-socket"),
+            Some(&"%42".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_session_pane_command_removes_pane_from_owner_state() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([(
+                "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                OwnerStateRecord {
+                    node_id: "peer-a".to_string(),
+                    session: remote_session("peer-a", "pty1"),
+                    socket_panes: HashMap::from([("wa-socket".to_string(), "%42".to_string())]),
+                },
+            )]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane {
+                        node_id: "peer-a".to_string(),
+                        authority_id: "peer-a".to_string(),
+                        transport_session_id: "pty1".to_string(),
+                        socket_name: "wa-socket".to_string(),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert_eq!(response.as_deref(), Some("ok\n"));
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        let record = records
+            .get("peer-a\tremote-peer:peer-a:pty1")
+            .expect("record should exist");
+        assert!(record.socket_panes.is_empty());
+    }
+
+    #[test]
     fn remote_runtime_owner_snapshot_round_trips_sessions() {
         let payload = render_remote_runtime_owner_snapshot(&[super::OwnerStateRecord {
             node_id: "peer-a".to_string(),
             session: remote_session("peer-a", "pty1"),
+            ..Default::default()
         }]);
 
         let snapshot =
@@ -1587,6 +1992,7 @@ mod tests {
                 (
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -1594,6 +2000,7 @@ mod tests {
                 (
                     "peer-a\tremote-peer:peer-a:pty2".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty2"),
                     },
@@ -1601,6 +2008,7 @@ mod tests {
                 (
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },
@@ -1650,6 +2058,7 @@ mod tests {
                 (
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -1657,6 +2066,7 @@ mod tests {
                 (
                     "peer-a\tremote-peer:peer-a:pty2".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty2"),
                     },
@@ -1664,6 +2074,7 @@ mod tests {
                 (
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },
@@ -1735,6 +2146,7 @@ mod tests {
                 (
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -1742,6 +2154,7 @@ mod tests {
                 (
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
+                        socket_panes: HashMap::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },
