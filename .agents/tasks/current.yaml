@@ -2,7 +2,7 @@ id: task.github-issue-18-remote-dead-panes-accumulate
 kind: task
 version: 1
 title: analyze and fix remote session visibility/pane cleanup after host power-off
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-network-completion-plan.md

@@ -2,7 +2,7 @@ id: task.github-issue-16-hidden-windows-accumulate
 kind: task
 version: 1
 title: fix wa-hidden windows accumulating after remote abnormal disconnect/reconnect
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/remote-network-completion-plan.md
