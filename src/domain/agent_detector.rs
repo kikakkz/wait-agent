@@ -1,4 +1,5 @@
 use crate::domain::agent_signal::AgentStateEffect;
+use crate::domain::interpreter_command_name_resolver::InterpreterCommandNameResolver;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
 use std::fmt;
@@ -70,6 +71,9 @@ pub trait AgentDetector: Send + Sync {
 pub struct DetectorRegistry {
     /// Priority-ordered detectors. Earlier entries take precedence.
     detectors: Vec<Box<dyn AgentDetector>>,
+    /// Resolves display names for processes launched through interpreters
+    /// or wrapper scripts (e.g. `python script.py`, pip console scripts).
+    interpreter_resolver: InterpreterCommandNameResolver,
 }
 
 impl fmt::Debug for DetectorRegistry {
@@ -92,6 +96,7 @@ impl DetectorRegistry {
     pub fn new() -> Self {
         Self {
             detectors: Vec::new(),
+            interpreter_resolver: InterpreterCommandNameResolver::new(),
         }
     }
 
@@ -122,11 +127,15 @@ impl DetectorRegistry {
         argv: Option<&[String]>,
         _pane_text: &str,
     ) -> String {
-        // 1. Process-level detection
+        // 1. Process-level detection for known agents.
         if let Some(name) = self.detect_from_process(current_command, argv) {
             return name.to_string();
         }
-        // 2. Fall back to the foreground command name. Pane scrollback is
+        // 2. Interpreter/wrapper script target name extraction.
+        if let Some(name) = self.interpreter_resolver.resolve(current_command, argv) {
+            return name;
+        }
+        // 3. Fall back to the foreground command name. Pane scrollback is
         // historical output and must not define the current session identity.
         current_command.to_string()
     }
@@ -140,6 +149,12 @@ impl DetectorRegistry {
         for argv in argv_candidates {
             if let Some(name) = self.detect_from_process(current_command, Some(argv.as_slice())) {
                 return name.to_string();
+            }
+            if let Some(name) = self
+                .interpreter_resolver
+                .resolve(current_command, Some(argv.as_slice()))
+            {
+                return name;
             }
         }
         self.detect_command_name(
@@ -312,6 +327,70 @@ mod tests {
         assert_eq!(
             registry.signal_state_effect("claude", "SessionEnd", &Value::Null),
             Some(AgentStateEffect::Clear)
+        );
+    }
+
+    #[test]
+    fn registry_extracts_pip_console_script_name() {
+        let registry = DetectorRegistry::default();
+        let argv = vec!["/home/user/.local/bin/alter".to_string()];
+        assert_eq!(
+            registry.detect_command_name("python", Some(&argv), ""),
+            "alter"
+        );
+    }
+
+    #[test]
+    fn registry_extracts_python_script_name() {
+        let registry = DetectorRegistry::default();
+        let argv = vec!["python3".to_string(), "/path/to/script.py".to_string()];
+        assert_eq!(
+            registry.detect_command_name("python3", Some(&argv), ""),
+            "script.py"
+        );
+    }
+
+    #[test]
+    fn registry_extracts_python_module_name() {
+        let registry = DetectorRegistry::default();
+        let argv = vec![
+            "python".to_string(),
+            "-m".to_string(),
+            "my_module".to_string(),
+        ];
+        assert_eq!(
+            registry.detect_command_name("python", Some(&argv), ""),
+            "my_module"
+        );
+    }
+
+    #[test]
+    fn registry_extracts_node_script_name() {
+        let registry = DetectorRegistry::default();
+        let argv = vec!["node".to_string(), "/path/to/app.js".to_string()];
+        assert_eq!(
+            registry.detect_command_name("node", Some(&argv), ""),
+            "app.js"
+        );
+    }
+
+    #[test]
+    fn registry_falls_back_to_current_command_for_plain_repl() {
+        let registry = DetectorRegistry::default();
+        let argv = vec!["python3".to_string()];
+        assert_eq!(
+            registry.detect_command_name("python3", Some(&argv), ""),
+            "python3"
+        );
+    }
+
+    #[test]
+    fn registry_extracts_from_argv_candidates() {
+        let registry = DetectorRegistry::default();
+        let candidates = vec![vec!["/home/user/.local/bin/alter".to_string()]];
+        assert_eq!(
+            registry.detect_command_name_from_argv_candidates("python", &candidates, ""),
+            "alter"
         );
     }
 }

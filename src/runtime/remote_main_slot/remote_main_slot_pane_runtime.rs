@@ -303,6 +303,7 @@ impl RemoteMainSlotPaneRuntime {
                 &spec,
                 &initial_size,
                 &mut observer,
+                &mut raw_output_reader,
                 &raw_input_route,
                 &mut pending_pty_size,
                 &mut last_synced_size,
@@ -571,6 +572,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &spec,
                                     &size,
                                     &mut observer,
+                                    &mut raw_output_reader,
                                     &raw_input_route,
                                     &mut pending_pty_size,
                                     &mut last_synced_size,
@@ -971,6 +973,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &spec,
                                 &size,
                                 &mut observer,
+                                &mut raw_output_reader,
                                 &raw_input_route,
                                 &mut pending_pty_size,
                                 &mut last_synced_size,
@@ -1216,14 +1219,21 @@ fn activate_remote_surface_binding(
     spec: &RemoteInteractSurfaceSpec,
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
+    raw_output_reader: &mut RemoteRawPtyMailboxReader,
     raw_input_route: &RawPtyInputRoute,
     pending_pty_size: &mut Option<TerminalSize>,
     last_synced_size: &mut TerminalSize,
     raw_screen_initialized: &mut bool,
     event_tx: mpsc::Sender<RemotePaneEvent>,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
-    let (activated_binding, raw) =
-        activate_surface_target_with_mode(remote_runtime, target, spec, size, observer)?;
+    let (activated_binding, raw) = activate_surface_target_with_mode(
+        remote_runtime,
+        target,
+        spec,
+        size,
+        observer,
+        raw_output_reader,
+    )?;
     raw_input_route.activate(target, &activated_binding, &spec.console_host_id);
     schedule_post_activation_resize_probe(event_tx);
     sync_or_defer_remote_pty_size(

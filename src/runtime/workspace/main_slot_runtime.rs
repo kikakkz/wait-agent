@@ -269,8 +269,8 @@ impl MainSlotRuntime {
                             let result =
                                 self.activate_target_in_workspace(&current_workspace, &session);
                             if result.is_err() {
-                                let _ = self
-                                    .set_active_target(workspace, Some(active_target.as_str()));
+                                let _ =
+                                    self.set_active_target(workspace, Some(active_target.as_str()));
                             }
                             result
                         }
@@ -1867,38 +1867,58 @@ impl MainSlotRuntime {
         recovery_pane: &TmuxPaneId,
         target: &ManagedSessionRecord,
     ) -> Result<PreparedRemoteExitMainPane, LifecycleError> {
-        if !self.pane_is_recoverable_content_pane(workspace, recovery_pane.as_str())? {
-            self.clear_session_pane(workspace, target.address.qualified_target().as_str())?;
-            self.set_active_target(workspace, None)?;
-            self.backend
-                .set_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION, "")
-                .map_err(main_slot_error)?;
-            let pane = self.create_remote_session_pane_from_available_anchor(
+        if self.pane_is_recoverable_content_pane(workspace, recovery_pane.as_str())? {
+            self.ensure_pane_in_workspace_window(workspace, recovery_pane)?;
+            match self.assign_remote_target_to_content_pane(
                 current_workspace,
                 workspace,
                 recovery_pane,
                 target,
-            )?;
-            self.set_content_pane_owner(
-                workspace,
-                &pane,
-                target.session_instance_id(),
-                target.address.qualified_target().as_str(),
-            )?;
-            self.set_session_pane(workspace, target.address.qualified_target().as_str(), &pane)?;
-            return Ok(PreparedRemoteExitMainPane {
-                pane,
-                active_target: target.address.qualified_target(),
-                cleanup_exiting_pane: true,
-            });
+            ) {
+                Ok(prepared) => return Ok(prepared),
+                Err(error) => {
+                    // The recoverability check is optimistic: tmux may remove a
+                    // pane between the existence check and respawn. If the pane
+                    // has actually disappeared, recreate it explicitly from the
+                    // workspace topology rather than treating the failure as
+                    // fatal. This keeps the recovery path explicit and avoids
+                    // falling back to an arbitrary chrome anchor.
+                    if !self
+                        .pane_exists_on_socket(workspace, recovery_pane.as_str())
+                        .unwrap_or(false)
+                    {
+                        ERROR_LOG.log(format!(
+                            "[diag-bug] prepare_remote_target_in_workspace: recovery pane {} vanished during recovery, recreating from topology: {error}",
+                            recovery_pane.as_str()
+                        ));
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         }
-        self.ensure_pane_in_workspace_window(workspace, recovery_pane)?;
+
+        self.clear_session_pane(workspace, target.address.qualified_target().as_str())?;
+        self.set_active_target(workspace, None)?;
+        // The recovery pane no longer exists or is chrome. Explicitly
+        // restore the workspace topology so we have a valid main content
+        // pane, then assign the remote target directly to that pane. This
+        // avoids splitting below an arbitrary anchor or falling back to the
+        // current focus pane, which could pick chrome and corrupt layout.
+        let layout = self
+            .layout_runtime
+            .ensure_workspace_layout_topology(workspace, &current_workspace.workspace_dir)?;
         self.assign_remote_target_to_content_pane(
             current_workspace,
             workspace,
-            recovery_pane,
+            &layout.main_pane,
             target,
-        )
+        )?;
+        Ok(PreparedRemoteExitMainPane {
+            pane: layout.main_pane,
+            active_target: target.address.qualified_target(),
+            cleanup_exiting_pane: true,
+        })
     }
 
     fn prepare_remote_target_after_remote_exit(
@@ -2062,6 +2082,10 @@ impl MainSlotRuntime {
             .backend
             .list_panes(workspace, &window)
             .map_err(main_slot_error)?;
+        // Only use non-chrome content panes as the anchor for creating or
+        // joining a recovery pane. Falling back to the sidebar/footer would
+        // split or join against chrome, producing a broken layout such as a
+        // full-width content pane stacked below the sidebar.
         panes
             .iter()
             .find(|pane| {
@@ -2069,18 +2093,6 @@ impl MainSlotRuntime {
                     && pane.pane_id != *excluded_pane
                     && pane.title != SIDEBAR_PANE_TITLE
                     && pane.title != FOOTER_PANE_TITLE
-            })
-            .or_else(|| {
-                panes.iter().find(|pane| {
-                    !pane.is_dead
-                        && pane.pane_id != *excluded_pane
-                        && pane.title != FOOTER_PANE_TITLE
-                })
-            })
-            .or_else(|| {
-                panes
-                    .iter()
-                    .find(|pane| !pane.is_dead && pane.pane_id != *excluded_pane)
             })
             .map(|pane| pane.pane_id.clone())
             .ok_or_else(|| {
@@ -3016,17 +3028,6 @@ impl MainSlotRuntime {
         Ok(pane)
     }
 
-    fn create_remote_session_pane_from_available_anchor(
-        &self,
-        current_workspace: &CurrentWorkspace,
-        workspace: &TmuxWorkspaceHandle,
-        excluded_pane: &TmuxPaneId,
-        target: &ManagedSessionRecord,
-    ) -> Result<TmuxPaneId, LifecycleError> {
-        let anchor = self.workspace_window_join_destination(workspace, excluded_pane)?;
-        self.create_remote_session_pane(workspace, &anchor, current_workspace, target)
-    }
-
     fn configure_main_pane_output_bridge_for_active_target(
         &self,
         workspace: &TmuxWorkspaceHandle,
@@ -3228,8 +3229,12 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         pane_id: &str,
     ) -> Result<bool, LifecycleError> {
+        // A pane is recoverable as long as it still exists and is not chrome.
+        // Liveness is not required because `assign_remote_target_to_content_pane`
+        // respawns it with the target program. Requiring liveness forced the
+        // recovery path to create a new pane from an arbitrary anchor, which
+        // could pick the sidebar and corrupt the layout.
         Ok(self.pane_exists_on_socket(workspace, pane_id)?
-            && self.pane_is_live_on_socket(workspace, pane_id)?
             && !self.pane_is_chrome(workspace, pane_id)?)
     }
 

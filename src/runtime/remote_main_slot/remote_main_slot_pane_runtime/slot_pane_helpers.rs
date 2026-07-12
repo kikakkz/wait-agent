@@ -76,9 +76,17 @@ pub(super) fn activate_surface_target(
     spec: &RemoteInteractSurfaceSpec,
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
+    raw_output_reader: &mut RemoteRawPtyMailboxReader,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
-    activate_surface_target_with_mode(remote_runtime, target, spec, size, observer)
-        .map(|(binding, _)| binding)
+    activate_surface_target_with_mode(
+        remote_runtime,
+        target,
+        spec,
+        size,
+        observer,
+        raw_output_reader,
+    )
+    .map(|(binding, _)| binding)
 }
 
 pub(super) fn activate_surface_target_with_mode(
@@ -87,15 +95,19 @@ pub(super) fn activate_surface_target_with_mode(
     spec: &RemoteInteractSurfaceSpec,
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
+    raw_output_reader: &mut RemoteRawPtyMailboxReader,
 ) -> Result<(RemoteAttachmentBinding, Vec<u8>), LifecycleError> {
     let had_visible_output = observer.snapshot().has_visible_output;
     if had_visible_output {
         // Reconnect path: keep the last known screen visible while the
-        // new mirror is being set up. Only clear sequence tracking so
-        // incoming TargetOutput frames won't be rejected as out-of-order.
+        // new mirror is being set up. Clear sequence tracking in both the
+        // observer terminal engine and the raw PTY mailbox reader so
+        // incoming TargetOutput and RawPtyOutput frames won't be rejected
+        // as out-of-order after the remote authority restarts numbering.
         // The first BootstrapChunk or TargetOutput will overwrite the old
         // terminal state naturally via feed().
         observer.clear_output_seq();
+        raw_output_reader.clear_output_seq();
     } else {
         observer.begin_bootstrap();
     }
@@ -428,6 +440,14 @@ impl RemoteRawPtyMailboxReader {
             processed_envelopes: 0,
             last_output_seq: None,
         }
+    }
+
+    /// Reset output sequence tracking without touching processed envelope
+    /// state. Used during reconnect: the remote authority restarts output
+    /// numbering, so the next RawPtyOutput or TargetOutput must be accepted
+    /// regardless of the previous session's highest sequence.
+    pub(super) fn clear_output_seq(&mut self) {
+        self.last_output_seq = None;
     }
 
     pub(super) fn sync_and_collect_raw(&mut self) -> Result<Vec<u8>, RemoteSocketTransportError> {

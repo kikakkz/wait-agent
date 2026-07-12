@@ -691,12 +691,14 @@ mod tests {
         let content_locations =
             content_pane_locations_by_session_identity(&backend, &workspace.workspace_handle);
         assert!(
-            content_locations.iter().any(|(session, window, pane, owner)| {
-                session == workspace.workspace_handle.session_name.as_str()
-                    && pane == &restored_content_pane
-                    && window == "bash"
-                    && owner == target_host.workspace_handle.session_name.as_str()
-            }),
+            content_locations
+                .iter()
+                .any(|(session, window, pane, owner)| {
+                    session == workspace.workspace_handle.session_name.as_str()
+                        && pane == &restored_content_pane
+                        && window == "bash"
+                        && owner == target_host.workspace_handle.session_name.as_str()
+                }),
             "restored active target pane should live in the workspace main window"
         );
 

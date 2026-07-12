@@ -5,6 +5,7 @@ pub mod agent_detector_kimi;
 pub mod agent_detector_shell;
 pub mod agent_signal;
 pub mod chrome;
+pub mod interpreter_command_name_resolver;
 pub mod local_runtime;
 pub mod session_catalog;
 pub mod workspace;

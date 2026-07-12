@@ -773,7 +773,8 @@ mod tests {
         let mailbox = runtime
             .ensure_local_observer_connection("observer-a")
             .expect("observer loopback registration should succeed");
-        let mut observer = RemoteObserverRuntime::new(mailbox, 80, 24);
+        let mut observer = RemoteObserverRuntime::new(mailbox.clone(), 80, 24);
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox);
         let target = remote_target();
         let spec = RemoteInteractSurfaceSpec {
             socket_name: "wa-1".to_string(),
@@ -798,6 +799,7 @@ mod tests {
                 pixel_height: 0,
             },
             &mut observer,
+            &mut raw_output_reader,
         )
         .expect("activation should succeed via local replay even without authority connection");
     }
@@ -809,7 +811,8 @@ mod tests {
             .ensure_local_observer_connection("observer-a")
             .expect("observer loopback registration should succeed");
         runtime.ensure_local_connection("peer-a");
-        let mut observer = RemoteObserverRuntime::new(mailbox, 80, 24);
+        let mut observer = RemoteObserverRuntime::new(mailbox.clone(), 80, 24);
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox);
         let target = remote_target();
         let spec = RemoteInteractSurfaceSpec {
             socket_name: "wa-1".to_string(),
@@ -831,6 +834,7 @@ mod tests {
                 pixel_height: 0,
             },
             &mut observer,
+            &mut raw_output_reader,
         )
         .expect("activation should succeed after authority connection exists");
 
@@ -849,7 +853,8 @@ mod tests {
             .expect("observer loopback registration should succeed");
         runtime.ensure_local_connection("peer-a");
         let target = remote_target();
-        let mut observer = RemoteObserverRuntime::new(mailbox, 80, 24);
+        let mut observer = RemoteObserverRuntime::new(mailbox.clone(), 80, 24);
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox);
         let spec = RemoteInteractSurfaceSpec {
             socket_name: "wa-1".to_string(),
             surface_scope: "workspace-1".to_string(),
@@ -870,6 +875,7 @@ mod tests {
                 pixel_height: 0,
             },
             &mut observer,
+            &mut raw_output_reader,
         )
         .expect("raw activation should succeed");
 
@@ -1596,6 +1602,39 @@ mod tests {
             .expect("raw mailbox reader should collect bootstrap and raw output");
 
         assert_eq!(raw, b"prompt$ \x1b[?25hecho\r\n");
+    }
+
+    #[test]
+    fn raw_pty_mailbox_reader_clear_output_seq_allows_restart_from_one() {
+        let registry = RemoteConnectionRegistry::new();
+        let mailbox = registry.register_loopback_connection("observer-a");
+        let connection = registry
+            .connection_for("observer-a")
+            .expect("loopback connection should exist");
+        connection
+            .send(&authority_raw_pty_output_envelope(5, b"first".to_vec()))
+            .expect("first raw output should enqueue");
+
+        let mut reader = RemoteRawPtyMailboxReader::new(mailbox);
+        assert_eq!(
+            reader
+                .sync_and_collect_raw()
+                .expect("first raw output should be accepted"),
+            b"first"
+        );
+
+        // Simulate reconnect: the remote authority restarts numbering from 1.
+        reader.clear_output_seq();
+        connection
+            .send(&authority_raw_pty_output_envelope(1, b"reconnect".to_vec()))
+            .expect("reconnect raw output should enqueue");
+
+        assert_eq!(
+            reader
+                .sync_and_collect_raw()
+                .expect("reconnect raw output should not be rejected as out-of-order"),
+            b"reconnect"
+        );
     }
 
     #[test]

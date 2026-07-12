@@ -37,6 +37,7 @@ where
     pub fn ensure_workspace_layout(
         &self,
         workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
         sidebar_program: &TmuxProgram,
         footer_program: &TmuxProgram,
         focus_behavior: LayoutFocusBehavior,
@@ -44,7 +45,6 @@ where
         let window = self.tmux.current_window(workspace)?;
         let current_pane = self.tmux.current_pane(workspace)?;
         let panes = self.tmux.list_panes(workspace, &window)?;
-        let main_pane = main_pane_id(&panes).unwrap_or_else(|| current_pane.clone());
 
         let sidebar_pane = match pane_with_title(&panes, SIDEBAR_PANE_TITLE) {
             Some(pane) => {
@@ -56,7 +56,7 @@ where
             }
             None => self.tmux.split_pane_right_with_program(
                 workspace,
-                &main_pane,
+                main_pane,
                 self.sidebar_width.clone(),
                 sidebar_program,
             )?,
@@ -75,7 +75,7 @@ where
             }
             None => self.tmux.split_pane_bottom_with_program(
                 workspace,
-                &main_pane,
+                main_pane,
                 self.footer_height.clone(),
                 true,
                 footer_program,
@@ -85,14 +85,14 @@ where
             .set_pane_title(workspace, &footer_pane, FOOTER_PANE_TITLE)?;
         apply_height(&self.tmux, workspace, &footer_pane, &self.footer_height)?;
         let target_pane = match focus_behavior {
-            LayoutFocusBehavior::ReturnToMain => &main_pane,
+            LayoutFocusBehavior::ReturnToMain => main_pane,
             LayoutFocusBehavior::PreserveCurrent => &current_pane,
         };
         self.tmux.select_pane(workspace, target_pane)?;
 
         Ok(WorkspaceChromeLayout {
             window,
-            main_pane,
+            main_pane: main_pane.clone(),
             sidebar_pane,
             footer_pane,
             sidebar_width: self.sidebar_width.cells_or_default(),
@@ -150,15 +150,6 @@ where
 
 fn pane_with_title<'a>(panes: &'a [TmuxPaneInfo], title: &str) -> Option<&'a TmuxPaneInfo> {
     panes.iter().find(|pane| pane.title == title)
-}
-
-fn main_pane_id(panes: &[TmuxPaneInfo]) -> Option<TmuxPaneId> {
-    panes
-        .iter()
-        .find(|pane| {
-            !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
-        })
-        .map(|pane| pane.pane_id.clone())
 }
 
 fn apply_width<G>(
@@ -584,6 +575,7 @@ mod tests {
         let layout = service
             .ensure_workspace_layout(
                 &workspace(),
+                &TmuxPaneId::new("%1"),
                 &program,
                 &program,
                 LayoutFocusBehavior::ReturnToMain,
@@ -644,6 +636,7 @@ mod tests {
         service
             .ensure_workspace_layout(
                 &workspace(),
+                &TmuxPaneId::new("%1"),
                 &program,
                 &program,
                 LayoutFocusBehavior::ReturnToMain,
@@ -665,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_service_skips_dead_main_pane_when_returning_focus_to_main() {
+    fn layout_service_uses_explicit_main_pane_for_focus_and_splits() {
         let gateway = FakeGateway::new(vec![
             TmuxPaneInfo {
                 pane_id: TmuxPaneId::new("%1"),
@@ -692,6 +685,7 @@ mod tests {
         service
             .ensure_workspace_layout(
                 &workspace(),
+                &TmuxPaneId::new("%2"),
                 &program,
                 &program,
                 LayoutFocusBehavior::ReturnToMain,
@@ -702,7 +696,7 @@ mod tests {
             gateway
                 .calls()
                 .contains(&Call::SelectMain("%2".to_string())),
-            "focus should return to the live main pane, not a dead pane"
+            "focus should return to the explicitly provided main pane"
         );
         assert!(
             !gateway
@@ -750,6 +744,7 @@ mod tests {
         service
             .ensure_workspace_layout(
                 &workspace(),
+                &TmuxPaneId::new("%1"),
                 &program,
                 &program,
                 LayoutFocusBehavior::PreserveCurrent,

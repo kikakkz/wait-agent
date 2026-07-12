@@ -13,8 +13,8 @@ use crate::domain::workspace::WorkspaceInstanceId;
 use crate::domain::workspace_layout::WorkspaceChromeLayout;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionName,
-    TmuxSocketName, TmuxWorkspaceHandle,
+    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram,
+    TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -674,10 +674,22 @@ impl WorkspaceLayoutRuntime {
         if let Some(hook) = layout_topology_after_options_hook_for_tests() {
             hook(workspace);
         }
+
+        // Resolve the main content pane explicitly before ensuring chrome.
+        // Do not fall back to the current focus pane or to chrome panes. If
+        // every content pane has been removed, create a new one explicitly
+        // from the sidebar so the workspace topology can be restored.
+        let main_pane = self.resolve_main_content_pane(workspace, workspace_dir)?;
         let t_layout = Instant::now();
         let layout = self
             .layout_service
-            .ensure_workspace_layout(workspace, &sidebar_program, &footer_program, focus_behavior)
+            .ensure_workspace_layout(
+                workspace,
+                &main_pane,
+                &sidebar_program,
+                &footer_program,
+                focus_behavior,
+            )
             .map_err(tmux_layout_error)?;
         ERROR_LOG.log(format!(
             "[diag-newhost] layout_topology ensure_workspace_layout socket={} session={} main={} sidebar={} footer={} elapsed={:?} total={:?}",
@@ -714,20 +726,6 @@ impl WorkspaceLayoutRuntime {
             ));
             return Ok(layout);
         }
-        // Resolve the effective main pane. When the pane designated by
-        // @waitagent_main_pane_id (previous_main_pane) is still alive and
-        // is not a chrome pane, prefer it over layout.main_pane (which
-        // comes from main_pane_id() and picks the first non-chrome pane
-        // by list-panes index order). This prevents the 1-cell leftover
-        // pane created by create_remote_session_pane (which often has the
-        // lowest pane index after swap-pane) from being incorrectly
-        // designated as the main pane.
-        let main_pane = resolve_effective_main_pane(
-            &self.backend,
-            workspace,
-            previous_main_pane.as_ref(),
-            &layout.main_pane,
-        );
         if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
             ERROR_LOG.log(format!(
                 "[diag] ensure_layout_topology: skipped stale main pane metadata write while main-slot transition owns metadata for session={:?}",
@@ -778,6 +776,104 @@ impl WorkspaceLayoutRuntime {
             t_total.elapsed()
         ));
         Ok(layout)
+    }
+
+    /// Ensure the workspace has a valid chrome topology and return the layout.
+    /// The main content pane is resolved explicitly from the session option or
+    /// from the current window's live non-chrome panes. This method never falls
+    /// back to the current focus pane or to chrome panes as the main pane.
+    pub fn ensure_workspace_layout_topology(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+    ) -> Result<WorkspaceChromeLayout, LifecycleError> {
+        self.ensure_layout_topology(workspace, workspace_dir, LayoutFocusBehavior::ReturnToMain)
+    }
+
+    fn resolve_main_content_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        workspace_dir: &Path,
+    ) -> Result<TmuxPaneId, LifecycleError> {
+        let window = self
+            .backend
+            .current_window(workspace)
+            .map_err(tmux_layout_error)?;
+        let panes = self
+            .backend
+            .list_panes(workspace, &window)
+            .map_err(tmux_layout_error)?;
+
+        if let Some(configured) = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|pane| !pane.is_empty())
+        {
+            let pane = TmuxPaneId::new(configured);
+            if Self::pane_is_valid_content_pane(&panes, &pane) {
+                return Ok(pane);
+            }
+        }
+
+        if let Some(pane) = panes.iter().find(|pane| {
+            !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
+        }) {
+            return Ok(pane.pane_id.clone());
+        }
+
+        // No live content pane remains. Create one explicitly by splitting the
+        // sidebar to the left. This keeps layout recovery deterministic and
+        // avoids falling back to an arbitrary focus pane such as the sidebar
+        // itself, which would corrupt the workspace topology.
+        let sidebar = panes
+            .iter()
+            .find(|pane| pane.title == SIDEBAR_PANE_TITLE)
+            .map(|pane| pane.pane_id.clone())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "workspace `{}` has no sidebar to recreate main content pane from",
+                    workspace.session_name.as_str()
+                ))
+            })?;
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "split-window".to_string(),
+                    "-d".to_string(),
+                    "-P".to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}".to_string(),
+                    "-t".to_string(),
+                    sidebar.as_str().to_string(),
+                    "-h".to_string(),
+                    "-b".to_string(),
+                    "-l".to_string(),
+                    TmuxSplitSize::Percent(70).to_tmux_size(),
+                    "-c".to_string(),
+                    workspace_dir.to_string_lossy().to_string(),
+                ],
+            )
+            .map_err(tmux_layout_error)?;
+        let pane_id = output.stdout.trim().to_string();
+        if pane_id.is_empty() {
+            return Err(LifecycleError::Protocol(format!(
+                "workspace `{}` failed to recreate main content pane from sidebar",
+                workspace.session_name.as_str()
+            )));
+        }
+        Ok(TmuxPaneId::new(pane_id))
+    }
+
+    fn pane_is_valid_content_pane(panes: &[TmuxPaneInfo], pane_id: &TmuxPaneId) -> bool {
+        panes.iter().any(|pane| {
+            pane.pane_id == *pane_id
+                && !pane.is_dead
+                && pane.title != SIDEBAR_PANE_TITLE
+                && pane.title != FOOTER_PANE_TITLE
+        })
     }
 
     fn main_slot_transition_owns_main_pane_metadata(
@@ -1331,43 +1427,6 @@ fn connect_remote_host_display_popup_command(pane_command: &str) -> String {
     format!(
         "if -F '#{{e|>=:#{{client_width}},100}}' 'display-popup -w 100 -h 18 -E {command}' 'display-popup -w 100% -h 18 -E {command}'"
     )
-}
-
-fn resolve_effective_main_pane(
-    backend: &EmbeddedTmuxBackend,
-    workspace: &TmuxWorkspaceHandle,
-    previous: Option<&TmuxPaneId>,
-    suggested: &TmuxPaneId,
-) -> TmuxPaneId {
-    let Ok(window) = backend.current_window(workspace) else {
-        return suggested.clone();
-    };
-    let Ok(panes) = backend.list_panes(workspace, &window) else {
-        return suggested.clone();
-    };
-
-    let is_valid_content_pane = |pane_id: &TmuxPaneId| {
-        panes.iter().any(|pane| {
-            pane.pane_id == *pane_id
-                && !pane.is_dead
-                && pane.title != SIDEBAR_PANE_TITLE
-                && pane.title != FOOTER_PANE_TITLE
-        })
-    };
-
-    if previous.is_some_and(|pane| is_valid_content_pane(pane)) {
-        return previous.cloned().unwrap();
-    }
-    if is_valid_content_pane(suggested) {
-        return suggested.clone();
-    }
-    panes
-        .iter()
-        .find(|pane| {
-            !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
-        })
-        .map(|pane| pane.pane_id.clone())
-        .unwrap_or_else(|| suggested.clone())
 }
 
 fn tmux_layout_error(error: TmuxError) -> LifecycleError {
