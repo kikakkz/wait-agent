@@ -544,6 +544,167 @@ mod tests {
     }
 
     #[test]
+    fn ensure_initial_target_materialized_restores_active_local_target_after_main_pane_reset() {
+        let _guard = crate::test_support::integration_test_lock();
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace_config = unique_workspace_config("reattach-active-target");
+        let workspace_dir = workspace_config.workspace_dir.clone();
+        let waitagent_executable = waitagent_test_executable();
+        let entry_runtime = WorkspaceEntryRuntime::new(
+            WorkspaceRuntime::new(WorkspaceService::new(backend.clone())),
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+        );
+        let workspace = entry_runtime
+            .bootstrap_workspace(&workspace_dir)
+            .expect("workspace bootstrap should succeed");
+        let target_host_runtime = TargetHostRuntime::from_build_env(backend.clone())
+            .expect("target host runtime should build");
+        let target_host = target_host_runtime
+            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
+                &workspace_dir,
+                workspace.workspace_handle.socket_name.as_str(),
+                None,
+                None,
+            ))
+            .expect("target host bootstrap should succeed");
+
+        let runtime = MainSlotRuntime::new(
+            backend.clone(),
+            target_host_runtime,
+            WorkspaceLayoutRuntime::new_for_tests(
+                backend.clone(),
+                waitagent_executable.clone(),
+                RemoteNetworkConfig::default(),
+            )
+            .expect("workspace layout runtime should build"),
+            TargetRegistryService::new(
+                DefaultTargetCatalogGateway::from_build_env_with_socket_name(
+                    workspace.workspace_handle.socket_name.as_str(),
+                )
+                .expect("target catalog gateway should build"),
+            ),
+            waitagent_executable.clone(),
+            RemoteNetworkConfig::default(),
+        );
+
+        let local_target = format!(
+            "{}:{}",
+            workspace.workspace_handle.socket_name.as_str(),
+            target_host.workspace_handle.session_name.as_str()
+        );
+        runtime
+            .run_activate_target(ActivateTargetCommand {
+                current_socket_name: workspace.workspace_handle.socket_name.as_str().to_string(),
+                current_session_name: workspace.workspace_handle.session_name.as_str().to_string(),
+                target: local_target.clone(),
+            })
+            .expect("local target activation should succeed");
+
+        wait_for_condition(|| {
+            backend
+                .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+                .expect("active target should read")
+                .as_deref()
+                == Some(local_target.as_str())
+        });
+
+        let active_target_pane_before = content_pane_by_session_identity(
+            &backend,
+            &workspace.workspace_handle,
+            target_host.workspace_handle.session_name.as_str(),
+        )
+        .expect("active target content pane should exist");
+
+        // Simulate the condition after a detach where the main pane shows the
+        // workspace shell instead of the active target: swap the active target
+        // pane with the workspace shell pane that was parked in a hidden window
+        // during activation.
+        let main_pane_before = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read")
+            .expect("main pane should be set");
+        assert_eq!(
+            main_pane_before, active_target_pane_before,
+            "active target pane should start in the main slot"
+        );
+
+        let hidden_shell_pane = hidden_content_panes(&backend, &workspace.workspace_handle)
+            .into_iter()
+            .find(|(_, _, command)| command == "bash")
+            .map(|(_, pane, _)| pane)
+            .expect("workspace shell pane should be parked in a hidden window");
+
+        backend
+            .run_on_socket(
+                &workspace.workspace_handle.socket_name,
+                &[
+                    "swap-pane".to_string(),
+                    "-s".to_string(),
+                    main_pane_before.clone(),
+                    "-t".to_string(),
+                    hidden_shell_pane.clone(),
+                ],
+            )
+            .expect("active target pane should be swapped with hidden workspace shell");
+
+        let main_pane_after_swap = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read after swap")
+            .expect("main pane should still be set");
+        assert_eq!(
+            main_pane_after_swap, main_pane_before,
+            "main pane option still points at the same pane id, which now contains bash"
+        );
+
+        runtime
+            .ensure_initial_target_materialized(&workspace.workspace_handle, &workspace_dir)
+            .expect("materializing active target after main pane reset should succeed");
+
+        let active_target_after = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_ACTIVE_TARGET_OPTION)
+            .expect("active target should read after materialize")
+            .expect("active target should remain set");
+        assert_eq!(active_target_after, local_target);
+
+        let restored_content_pane = content_pane_by_session_identity(
+            &backend,
+            &workspace.workspace_handle,
+            target_host.workspace_handle.session_name.as_str(),
+        )
+        .expect("active target content pane should be restored");
+
+        let main_pane_after_restore = backend
+            .show_session_option(&workspace.workspace_handle, WAITAGENT_MAIN_PANE_OPTION)
+            .expect("main pane option should read after restore")
+            .expect("main pane should be set after restore");
+        assert_eq!(
+            main_pane_after_restore, restored_content_pane,
+            "main pane should be restored to the active target content pane"
+        );
+
+        let content_locations =
+            content_pane_locations_by_session_identity(&backend, &workspace.workspace_handle);
+        assert!(
+            content_locations.iter().any(|(session, window, pane, owner)| {
+                session == workspace.workspace_handle.session_name.as_str()
+                    && pane == &restored_content_pane
+                    && window == "bash"
+                    && owner == target_host.workspace_handle.session_name.as_str()
+            }),
+            "restored active target pane should live in the workspace main window"
+        );
+
+        kill_server(&backend, &workspace.workspace_handle);
+        let _ = fs::remove_dir_all(workspace_dir);
+    }
+
+    #[test]
     fn stale_layout_reconcile_during_main_slot_transition_must_not_rewrite_main_pane_metadata() {
         let _guard = crate::test_support::integration_test_lock();
         let backend = EmbeddedTmuxBackend::from_build_env()

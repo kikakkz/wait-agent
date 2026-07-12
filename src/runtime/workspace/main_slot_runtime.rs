@@ -217,6 +217,87 @@ impl MainSlotRuntime {
                 t_bindings.elapsed(),
                 t_total.elapsed()
             ));
+            // The active target's pane may have been moved to a hidden window
+            // or the main pane may have been reset to the workspace shell while
+            // the client was detached. Re-activate it so the main slot shows
+            // the correct content after reattach.
+            let current_workspace = CurrentWorkspace {
+                socket_name: workspace.socket_name.as_str().to_string(),
+                session_name: workspace.session_name.as_str().to_string(),
+                workspace_dir: workspace_dir.to_path_buf(),
+            };
+            if let Ok(registry) =
+                self.target_registry_for_socket_fresh(workspace.socket_name.as_str())
+            {
+                if let Ok(Some(session)) = registry.find_target(&active_target) {
+                    let t_reactivate = Instant::now();
+                    let main_pane_matches_active_target = self
+                        .find_session_pane(workspace, &active_target)
+                        .ok()
+                        .flatten()
+                        .and_then(|active_target_pane| {
+                            self.configured_main_pane_binding(workspace)
+                                .ok()
+                                .flatten()
+                                .map(|current_main_pane| current_main_pane == active_target_pane)
+                        })
+                        .unwrap_or(false);
+
+                    let reactivation_result = if main_pane_matches_active_target {
+                        // The active target is already visible in the main slot;
+                        // the same-target activation path would be a no-op, so skip it.
+                        Ok(())
+                    } else {
+                        // `activate_target_in_workspace` short-circuits when the
+                        // active target has not changed. Temporarily clear the
+                        // active target option so the full swap path runs and
+                        // restores the target pane to the main slot after a detach
+                        // that left the workspace shell there.
+                        let clear_result = self.set_active_target(workspace, None);
+                        if let Err(error) = clear_result {
+                            ERROR_LOG.log(format!(
+                                "[diag-newhost] materialize clear_active_target_failed socket={} session={} target={} error={} elapsed={:?} total={:?}",
+                                workspace.socket_name.as_str(),
+                                workspace.session_name.as_str(),
+                                active_target,
+                                error,
+                                t_reactivate.elapsed(),
+                                t_total.elapsed()
+                            ));
+                            Err(error)
+                        } else {
+                            let result =
+                                self.activate_target_in_workspace(&current_workspace, &session);
+                            if result.is_err() {
+                                let _ = self
+                                    .set_active_target(workspace, Some(active_target.as_str()));
+                            }
+                            result
+                        }
+                    };
+
+                    if let Err(error) = reactivation_result {
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] materialize reactivate_active_target failed socket={} session={} target={} error={} elapsed={:?} total={:?}",
+                            workspace.socket_name.as_str(),
+                            workspace.session_name.as_str(),
+                            active_target,
+                            error,
+                            t_reactivate.elapsed(),
+                            t_total.elapsed()
+                        ));
+                    } else {
+                        ERROR_LOG.log(format!(
+                            "[diag-newhost] materialize reactivate_active_target ok socket={} session={} target={} elapsed={:?} total={:?}",
+                            workspace.socket_name.as_str(),
+                            workspace.session_name.as_str(),
+                            active_target,
+                            t_reactivate.elapsed(),
+                            t_total.elapsed()
+                        ));
+                    }
+                }
+            }
             let t_bridge = Instant::now();
             self.configure_main_pane_output_bridge_for_active_target(
                 workspace,
@@ -227,6 +308,16 @@ impl MainSlotRuntime {
                 workspace.socket_name.as_str(),
                 workspace.session_name.as_str(),
                 t_bridge.elapsed(),
+                t_total.elapsed()
+            ));
+            let t_chrome = Instant::now();
+            self.layout_runtime
+                .refresh_workspace_chrome(workspace, workspace_dir)?;
+            ERROR_LOG.log(format!(
+                "[diag-newhost] materialize refresh_active_chrome socket={} session={} elapsed={:?} total={:?}",
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+                t_chrome.elapsed(),
                 t_total.elapsed()
             ));
             return Ok(());
