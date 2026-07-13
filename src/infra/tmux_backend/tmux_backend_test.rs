@@ -558,9 +558,9 @@ mod tests {
                     "send-keys".to_string(),
                     "-t".to_string(),
                     workspace_main.as_str().to_string(),
-                    "Welcome to Kimi Code!".to_string(),
+                    "# Welcome to Kimi Code!".to_string(),
                     "Enter".to_string(),
-                    "K2.7 Code thinking  ~".to_string(),
+                    "# K2.7 Code thinking  ~".to_string(),
                     "Enter".to_string(),
                 ],
             )

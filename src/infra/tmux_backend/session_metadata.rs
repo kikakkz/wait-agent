@@ -675,13 +675,54 @@ impl EmbeddedTmuxBackend {
     }
 
     fn detect_runtime_command_name_for_pane(&self, pane: &TmuxPaneInfo, pane_text: &str) -> String {
-        let current_command = pane.current_command.as_deref().unwrap_or_default();
         let foreground_argvs = super::foreground_process_argvs_for_pane_shell(pane.pane_pid);
+        let current_command = Self::foreground_command_name_from_argvs(
+            &self.registry,
+            &foreground_argvs,
+            pane.current_command.as_deref(),
+        );
         self.registry.detect_command_name_from_argv_candidates(
-            current_command,
+            &current_command,
             &foreground_argvs,
             pane_text,
         )
+    }
+
+    /// Derives a display command name from foreground process argv candidates.
+    ///
+    /// tmux's `pane_current_command` is read from `/proc/<pid>/comm`, which programs
+    /// like Chrome freely rewrite via `prctl(PR_SET_NAME)` to reflect the profile
+    /// name (e.g. `google-chrome-linera-market`). The first element of
+    /// `/proc/<pid>/cmdline` (argv[0]) is not rewritten, so its basename is a more
+    /// reliable and user-expected command label.
+    ///
+    /// To avoid replacing a stable shell identity with a transient foreground
+    /// process (e.g. `command-not-found`), we keep tmux's current command when it
+    /// is a shell, and only substitute argv[0] when the current command looks like
+    /// an extended version of it.
+    fn foreground_command_name_from_argvs(
+        registry: &crate::domain::agent_detector::DetectorRegistry,
+        argvs: &[Vec<String>],
+        pane_current_command: Option<&str>,
+    ) -> String {
+        let current = pane_current_command.unwrap_or_default();
+        if registry.is_shell_name(current) {
+            return current.to_string();
+        }
+
+        let candidate = argvs
+            .iter()
+            .filter_map(|argv| argv.first())
+            .map(|cmd| cmd.rsplit('/').next().unwrap_or(cmd))
+            .find(|cmd| !registry.is_shell_name(cmd))
+            .map(|cmd| cmd.to_string());
+
+        match candidate.as_deref() {
+            Some(candidate) if current != candidate && current.starts_with(candidate) => {
+                candidate.to_string()
+            }
+            _ => current.to_string(),
+        }
     }
 
     fn pane_info_on_socket(
@@ -1221,5 +1262,71 @@ mod tests {
         let sig1 = pane_content_signature_with_boundary("a\nb", 999);
         let sig2 = pane_content_signature_with_boundary("a\nb", 2);
         assert_eq!(sig1, sig2, "boundary clamped to lines.len()");
+    }
+
+    #[test]
+    fn foreground_command_name_prefers_argv_zero_basename_over_tmux_comm() {
+        let registry = DetectorRegistry::default();
+        let argvs = vec![vec![
+            "/usr/bin/google-chrome".to_string(),
+            "--user-data-dir=/home/kk/.config/google-chrome-linera-market".to_string(),
+        ]];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("google-chrome-linera-market"),
+        );
+
+        assert_eq!(command_name, "google-chrome");
+    }
+
+    #[test]
+    fn foreground_command_name_falls_back_to_pane_current_command_when_no_non_shell_argv() {
+        let registry = DetectorRegistry::default();
+        let argvs = vec![vec!["bash".to_string()]];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("bash"),
+        );
+
+        assert_eq!(command_name, "bash");
+    }
+
+    #[test]
+    fn foreground_command_name_keeps_pane_current_command_when_argv_is_unrelated() {
+        let registry = DetectorRegistry::default();
+        // A transient foreground process like `command-not-found` should not
+        // replace the stable shell identity shown by tmux.
+        let argvs = vec![
+            vec!["bash".to_string()],
+            vec!["command-not-found".to_string(), "unknown".to_string()],
+        ];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("bash"),
+        );
+
+        assert_eq!(command_name, "bash");
+    }
+
+    #[test]
+    fn foreground_command_name_does_not_replace_unrelated_non_shell_command() {
+        let registry = DetectorRegistry::default();
+        // If tmux already shows a non-shell command, an unrelated foreground argv
+        // should not override it.
+        let argvs = vec![vec!["npm".to_string(), "run".to_string(), "dev".to_string()]];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("node"),
+        );
+
+        assert_eq!(command_name, "node");
     }
 }
