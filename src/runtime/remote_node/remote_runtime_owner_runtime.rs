@@ -1584,7 +1584,9 @@ fn parse_remote_runtime_owner_command(
         }
         "mark_session_offline_by_source" => {
             let node_id = unescape_field(parts.next().ok_or_else(|| {
-                LifecycleError::Protocol("mark_session_offline_by_source is missing node id".to_string())
+                LifecycleError::Protocol(
+                    "mark_session_offline_by_source is missing node id".to_string(),
+                )
             })?)?;
             let authority_id = unescape_field(parts.next().ok_or_else(|| {
                 LifecycleError::Protocol(
@@ -1611,13 +1613,15 @@ fn parse_remote_runtime_owner_command(
                     "mark_session_offline_by_source contains unexpected extra fields".to_string(),
                 ));
             }
-            Ok(RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
-                node_id,
-                authority_id,
-                transport_session_id,
-                source_socket_name,
-                source_session_name,
-            })
+            Ok(
+                RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                    node_id,
+                    authority_id,
+                    transport_session_id,
+                    source_socket_name,
+                    source_session_name,
+                },
+            )
         }
         "list_targets_by_source_binding" => {
             let source_socket_name = unescape_field(parts.next().ok_or_else(|| {
@@ -1635,10 +1639,12 @@ fn parse_remote_runtime_owner_command(
                     "list_targets_by_source_binding contains unexpected extra fields".to_string(),
                 ));
             }
-            Ok(RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
-                source_socket_name,
-                source_session_name,
-            })
+            Ok(
+                RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+                    source_socket_name,
+                    source_session_name,
+                },
+            )
         }
         "snapshot" => {
             if parts.next().is_some() {
@@ -1902,8 +1908,8 @@ mod tests {
         remote_runtime_owner_args, remote_runtime_owner_socket_path,
         render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
         run_remote_runtime_owner_event_loop, OwnerStateRecord, PublishedTargetSourceBinding,
-        RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot,
-        OFFLINE_NODE_RETENTION,
+        RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState,
+        RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -2161,10 +2167,12 @@ mod tests {
             .get("peer-a\tremote-peer:peer-a:pty1")
             .expect("record should exist");
         assert_eq!(record.session.availability, SessionAvailability::Offline);
-        assert!(record.source_bindings.contains(&PublishedTargetSourceBinding {
-            socket_name: "wa-socket".to_string(),
-            session_name: Some("target-host".to_string()),
-        }));
+        assert!(record
+            .source_bindings
+            .contains(&PublishedTargetSourceBinding {
+                socket_name: "wa-socket".to_string(),
+                session_name: Some("target-host".to_string()),
+            }));
         assert!(state
             .offline_nodes
             .lock()
@@ -2239,7 +2247,8 @@ mod tests {
             handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
 
         let response = response.expect("response should exist");
-        let snapshot = parse_remote_runtime_owner_snapshot(&response).expect("snapshot should parse");
+        let snapshot =
+            parse_remote_runtime_owner_snapshot(&response).expect("snapshot should parse");
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(snapshot.sessions[0].address.session_id(), "pty1");
     }

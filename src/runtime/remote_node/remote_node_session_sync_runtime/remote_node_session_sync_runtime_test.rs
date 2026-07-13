@@ -1096,7 +1096,8 @@ mod tests {
             current_path: Some(PathBuf::from("/tmp/cached")),
             task_state: ManagedSessionTaskState::Running,
         };
-        let resolver = FakeResolver::default().with_target("wa-1", "shell-1", remote_target.clone());
+        let resolver =
+            FakeResolver::default().with_target("wa-1", "shell-1", remote_target.clone());
 
         let sessions = exportable_local_sessions_for_socket(vec![local_target], "wa-1", &resolver);
 
@@ -1586,7 +1587,10 @@ mod tests {
         ) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
             Ok(self
                 .targets
-                .get(&(source_socket_name.to_string(), source_session_name.to_string()))
+                .get(&(
+                    source_socket_name.to_string(),
+                    source_session_name.to_string(),
+                ))
                 .cloned()
                 .unwrap_or_default())
         }

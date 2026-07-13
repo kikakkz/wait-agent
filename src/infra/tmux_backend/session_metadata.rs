@@ -1319,7 +1319,11 @@ mod tests {
         let registry = DetectorRegistry::default();
         // If tmux already shows a non-shell command, an unrelated foreground argv
         // should not override it.
-        let argvs = vec![vec!["npm".to_string(), "run".to_string(), "dev".to_string()]];
+        let argvs = vec![vec![
+            "npm".to_string(),
+            "run".to_string(),
+            "dev".to_string(),
+        ]];
 
         let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
             &registry,
