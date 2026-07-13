@@ -472,8 +472,15 @@ impl EmbeddedTmuxBackend {
         pane_id: &TmuxPaneId,
         command_name: &str,
     ) -> Option<ManagedSessionTaskState> {
+        let socket = TmuxSocketName::new(workspace.socket_name.as_str());
+        // Agent signal state is pane-scoped so it follows the pane across
+        // sessions.
         let agent = self
-            .show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
+            .show_pane_option_on_socket(
+                &socket,
+                pane_id,
+                super::WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+            )
             .ok()
             .flatten()?;
         if !self
@@ -483,39 +490,20 @@ impl EmbeddedTmuxBackend {
             return None;
         }
         let signal_pane = self
-            .show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .show_pane_option_on_socket(&socket, pane_id, super::WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
             .ok()
             .flatten()?;
-        if signal_pane != pane_id.as_str()
-            && !self.signal_pane_is_bound_to_session(
-                workspace.socket_name.as_str(),
-                &signal_pane,
-                workspace.session_name.as_str(),
-            )
-        {
+        if signal_pane != pane_id.as_str() {
             return None;
         }
-        self.show_session_option(workspace, super::WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
-            .ok()
-            .flatten()
-            .and_then(|state| ManagedSessionTaskState::parse(&state))
-    }
-
-    fn signal_pane_is_bound_to_session(
-        &self,
-        socket_name: &str,
-        pane_id: &str,
-        session_name: &str,
-    ) -> bool {
         self.show_pane_option_on_socket(
-            &TmuxSocketName::new(socket_name),
-            &TmuxPaneId::new(pane_id.to_string()),
-            "@waitagent_target_session_name",
+            &socket,
+            pane_id,
+            super::WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
         )
         .ok()
         .flatten()
-        .as_deref()
-            == Some(session_name)
+        .and_then(|state| ManagedSessionTaskState::parse(&state))
     }
 
     fn session_main_pane_info(

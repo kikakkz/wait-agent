@@ -24,6 +24,9 @@ mod tests {
     };
     use crate::runtime::current_executable::waitagent_test_executable;
     use crate::runtime::network_state_runtime::persist_workspace_network_config;
+    use crate::runtime::remote_main_slot::remote_surface_state::{
+        mark_remote_surface_state_on_pane, RemoteSurfaceState,
+    };
     use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
     use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
     use crate::runtime::target_host_runtime::TargetHostRuntime;
@@ -3295,6 +3298,19 @@ mod tests {
         wait_for_condition(|| {
             pane_is_live(&backend, &workspace.workspace_handle, &next_pane_before)
         });
+        // respawn-pane kills the remote surface runtime, which may race to mark
+        // the pane as Exited before the exit transition checks reusability.
+        // Force the state back to Connected so the test reliably verifies pane
+        // reuse without depending on that race.
+        mark_remote_surface_state_on_pane(
+            &backend,
+            &workspace.workspace_handle.socket_name,
+            &crate::infra::tmux::TmuxPaneId::new(next_pane_before.clone()),
+            &next_target,
+            None,
+            RemoteSurfaceState::Connected,
+        )
+        .expect("next pane remote surface state should remain reusable");
 
         runtime
             .run_activate_target(ActivateTargetCommand {

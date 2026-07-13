@@ -170,8 +170,9 @@ impl TargetHostRuntime {
             WAITAGENT_MAIN_PANE_OPTION,
             pane.as_str(),
         )?;
-        self.backend.set_session_option(
+        self.backend.set_pane_option(
             &workspace.workspace_handle,
+            &pane,
             WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
             shell_program.agent_signal_token(),
         )?;

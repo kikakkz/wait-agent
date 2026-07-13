@@ -4,10 +4,10 @@ use crate::domain::agent_signal::{AgentSignalEnvelope, AgentStateEffect};
 use crate::domain::workspace::{WorkspaceInstanceConfig, WorkspaceSessionRole};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
-    WAITAGENT_AGENT_SIGNAL_AGENT_OPTION, WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
-    WAITAGENT_AGENT_SIGNAL_STATE_OPTION, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
-    WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
+    EmbeddedTmuxBackend, TmuxSocketName, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+    WAITAGENT_AGENT_SIGNAL_PANE_OPTION, WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION, WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
+    WAITAGENT_PANE_TARGET_SESSION_OPTION,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -96,18 +96,15 @@ impl AgentSignalRuntime {
         if signal.socket != self.socket_name {
             return Err("socket mismatch".to_string());
         }
-        let workspace = TmuxWorkspaceHandle {
-            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
-                signal.session.clone(),
-            ),
-            socket_name: TmuxSocketName::new(&signal.socket),
-            session_name: TmuxSessionName::new(signal.session.clone()),
-        };
+        let signal_pane = crate::infra::tmux::TmuxPaneId::new(signal.pane.clone());
+        let socket = TmuxSocketName::new(signal.socket.clone());
+        // Tokens are pane-scoped so they move with the shell when a local target
+        // pane is swapped from its creation session into the workspace session.
         let expected_token = self
             .backend
-            .show_session_option(&workspace, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION)
+            .show_pane_option_on_socket(&socket, &signal_pane, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "session has no signal token".to_string())?;
+            .ok_or_else(|| "pane has no signal token".to_string())?;
         if expected_token != signal.token {
             return Err("token mismatch".to_string());
         }
@@ -118,7 +115,7 @@ impl AgentSignalRuntime {
             .registry
             .signal_state_effect(&signal.agent, &signal.event, &signal.payload)
             .ok_or_else(|| format!("unsupported event `{}`", signal.event))?;
-        self.apply_state_update(&workspace, &signal, effect)
+        self.apply_state_update(&signal_pane, &signal, effect)
             .map_err(|error| error.to_string())?;
         self.refresh(&signal);
         Ok(())
@@ -142,7 +139,7 @@ impl AgentSignalRuntime {
             .show_pane_option_on_socket(
                 &TmuxSocketName::new(signal.socket.clone()),
                 &signal_pane,
-                "@waitagent_target_session_name",
+                WAITAGENT_PANE_TARGET_SESSION_OPTION,
             )
             .map_err(|error| error.to_string())?;
         Ok(signal_target.as_deref() == Some(signal.session.as_str()))
@@ -150,42 +147,59 @@ impl AgentSignalRuntime {
 
     fn apply_state_update(
         &self,
-        workspace: &TmuxWorkspaceHandle,
+        signal_pane: &crate::infra::tmux::TmuxPaneId,
         signal: &AgentSignalEnvelope,
         effect: AgentStateEffect,
     ) -> Result<(), crate::infra::tmux::TmuxError> {
+        let socket = TmuxSocketName::new(signal.socket.clone());
         match effect {
             AgentStateEffect::Set(state) => {
-                self.backend.set_session_option(
-                    workspace,
+                self.backend.set_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
                     WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
                     &signal.agent,
                 )?;
-                self.backend.set_session_option(
-                    workspace,
+                self.backend.set_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
                     WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
                     &signal.pane,
                 )?;
-                self.backend.set_session_option(
-                    workspace,
+                self.backend.set_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
                     WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
                     state.as_str(),
                 )?;
-                self.backend.set_session_option(
-                    workspace,
+                self.backend.set_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
                     WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
                     &now_millis().to_string(),
                 )?;
             }
             AgentStateEffect::Clear => {
-                self.backend
-                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)?;
-                self.backend
-                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)?;
-                self.backend
-                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)?;
-                self.backend
-                    .clear_session_option(workspace, WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION)?;
+                self.backend.unset_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
+                    WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+                )?;
+                self.backend.unset_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
+                    WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
+                )?;
+                self.backend.unset_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
+                    WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+                )?;
+                self.backend.unset_pane_option_on_socket(
+                    &socket,
+                    signal_pane,
+                    WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
+                )?;
             }
         }
         Ok(())
@@ -195,9 +209,35 @@ impl AgentSignalRuntime {
         let _ = self
             .layout_runtime
             .run_chrome_refresh_signal_on_socket(&signal.socket);
+        // The pane knows its target identity via @waitagent_target_session_name.
+        // Use that for publication refresh instead of the shell's static
+        // WAITAGENT_TARGET_SESSION_NAME, which may refer to a destroyed session
+        // after a local target has been swapped into the workspace.
+        let socket = TmuxSocketName::new(signal.socket.clone());
+        let target_session = match self.backend.show_pane_option_on_socket(
+            &socket,
+            &crate::infra::tmux::TmuxPaneId::new(signal.pane.clone()),
+            WAITAGENT_PANE_TARGET_SESSION_OPTION,
+        ) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                ERROR_LOG.log(format!(
+                    "[agent-signal] pane {} has no target session option, using signal.session={}",
+                    signal.pane, signal.session
+                ));
+                signal.session.clone()
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[agent-signal] failed to read target session option for pane {}: {error}, using signal.session={}",
+                    signal.pane, signal.session
+                ));
+                signal.session.clone()
+            }
+        };
         let _ = self
             .publication_runtime
-            .signal_source_session_refresh(&signal.socket, &signal.session);
+            .signal_source_session_refresh(&signal.socket, &target_session);
         let _ = self
             .publication_runtime
             .signal_local_runtime_changed(&signal.socket);
@@ -262,7 +302,9 @@ mod tests {
     use super::*;
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::ManagedSessionTaskState;
-    use crate::infra::tmux::{TmuxGateway, TmuxSessionGateway};
+    use crate::infra::tmux::{
+        TmuxGateway, TmuxLayoutGateway, TmuxSessionGateway, TmuxWorkspaceHandle,
+    };
     use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
     use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
     use serde_json::Value;
@@ -295,15 +337,27 @@ mod tests {
 
         let agent = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+            )
             .expect("agent option should read");
         let pane = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
+            )
             .expect("pane option should read");
         let state = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+            )
             .expect("state option should read");
 
         assert_eq!(agent.as_deref(), Some("codex"));
@@ -334,7 +388,11 @@ mod tests {
             .expect_err("presentation pane should be rejected");
         let state = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.content_pane,
+                WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+            )
             .expect("state option should read");
 
         assert_eq!(error, "pane mismatch");
@@ -353,11 +411,19 @@ mod tests {
 
         let pane = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.content_pane,
+                WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
+            )
             .expect("pane option should read");
         let state = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.content_pane,
+                WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+            )
             .expect("state option should read");
 
         assert_eq!(pane.as_deref(), Some(fixture.content_pane.as_str()));
@@ -395,23 +461,43 @@ mod tests {
 
         let agent = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_AGENT_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_AGENT_OPTION,
+            )
             .expect("agent option should read");
         let pane = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_PANE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
+            )
             .expect("pane option should read");
         let state = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_STATE_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_STATE_OPTION,
+            )
             .expect("state option should read");
         let updated_at = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_UPDATED_AT_OPTION,
+            )
             .expect("updated_at option should read");
         let token = fixture
             .backend
-            .show_session_option(&fixture.target, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION)
+            .show_pane_option_on_socket(
+                &fixture.target.socket_name,
+                &fixture.target_shell_pane,
+                WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+            )
             .expect("token option should read");
 
         assert_eq!(agent, None);
@@ -462,8 +548,45 @@ mod tests {
             let token = "test-token".to_string();
 
             backend
-                .set_session_option(&target, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION, &token)
-                .expect("token option should be set");
+                .set_pane_option_on_socket(
+                    &target.socket_name,
+                    &target_shell_pane,
+                    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+                    &token,
+                )
+                .expect("target shell pane token option should be set");
+            backend
+                .set_pane_option_on_socket(
+                    &workspace.socket_name,
+                    &content_pane,
+                    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+                    &token,
+                )
+                .expect("content pane token option should be set");
+            backend
+                .set_pane_option_on_socket(
+                    &target.socket_name,
+                    &target_shell_pane,
+                    "@waitagent_pane_role",
+                    "content",
+                )
+                .expect("target shell pane role should be set");
+            backend
+                .set_pane_option_on_socket(
+                    &target.socket_name,
+                    &target_shell_pane,
+                    "@waitagent_session_instance_id",
+                    target.session_name.as_str(),
+                )
+                .expect("target shell pane owner should be set");
+            backend
+                .set_pane_option_on_socket(
+                    &target.socket_name,
+                    &target_shell_pane,
+                    "@waitagent_target_session_name",
+                    target.session_name.as_str(),
+                )
+                .expect("target shell pane target should be set");
             backend
                 .set_pane_option_on_socket(
                     &workspace.socket_name,

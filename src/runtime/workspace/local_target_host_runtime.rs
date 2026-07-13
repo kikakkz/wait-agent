@@ -5,8 +5,8 @@ use crate::cli::{
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::TmuxProgram;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxPaneId, TmuxSessionGateway, TmuxSessionName,
-    TmuxSocketName, TmuxWorkspaceHandle, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+    EmbeddedTmuxBackend, TmuxPaneId, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
+    TmuxWorkspaceHandle, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::agent_signal_runtime::{agent_signal_socket_path, generate_agent_signal_token};
@@ -57,20 +57,17 @@ impl LocalTargetHostRuntime {
             None,
             &self.network,
         )?;
-        let workspace = TmuxWorkspaceHandle {
-            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
-                command.target_session_name.clone(),
-            ),
-            socket_name: TmuxSocketName::new(&command.socket_name),
-            session_name: TmuxSessionName::new(command.target_session_name.clone()),
-        };
-        self.backend
-            .set_session_option(
-                &workspace,
-                WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
-                shell_program.agent_signal_token(),
-            )
-            .map_err(local_target_host_error)?;
+        let pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
+        if !pane_id.is_empty() {
+            self.backend
+                .set_pane_option_on_socket(
+                    &TmuxSocketName::new(&command.socket_name),
+                    &TmuxPaneId::new(pane_id),
+                    WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,
+                    shell_program.agent_signal_token(),
+                )
+                .map_err(local_target_host_error)?;
+        }
         let program = shell_program.program();
         let mut child_command = Command::new(&program.program);
         child_command
