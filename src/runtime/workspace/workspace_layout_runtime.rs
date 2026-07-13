@@ -394,16 +394,12 @@ impl WorkspaceLayoutRuntime {
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(DEFAULT_SIDEBAR_WIDTH);
 
-        let output = self
-            .backend
+        self.backend
             .run_on_socket(
                 &workspace.socket_name,
                 &[
                     "join-pane".to_string(),
                     "-d".to_string(),
-                    "-P".to_string(),
-                    "-F".to_string(),
-                    "#{window_id}\t#{pane_id}".to_string(),
                     "-s".to_string(),
                     hidden_pane.as_str().to_string(),
                     "-t".to_string(),
@@ -414,10 +410,9 @@ impl WorkspaceLayoutRuntime {
                 ],
             )
             .map_err(tmux_layout_error)?;
-        let location = parse_break_pane_output(&output.stdout).map_err(tmux_layout_error)?;
 
         self.backend
-            .set_pane_title(workspace, &location.pane_id, SIDEBAR_PANE_TITLE)
+            .set_pane_title(workspace, &hidden_pane, SIDEBAR_PANE_TITLE)
             .map_err(tmux_layout_error)?;
 
         self.backend
