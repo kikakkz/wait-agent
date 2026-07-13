@@ -456,8 +456,23 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         workspace: &TmuxWorkspaceHandle,
         key: &str,
         sidebar: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_sidebar_toggle(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
         main: &TmuxPaneId,
-        collapsed_width: u16,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_waitagent_sidebar_show(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        main: &TmuxPaneId,
+        command: &str,
     ) -> Result<(), Self::Error>;
 
     fn bind_waitagent_footer_action(

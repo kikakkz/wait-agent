@@ -180,6 +180,10 @@ impl CommandDispatcher {
                 .workspace()?
                 .run_toggle_fullscreen(command)
                 .map_err(AppError::from),
+            Command::ToggleSidebar(command) => self
+                .layout()?
+                .run_toggle_sidebar(command)
+                .map_err(AppError::from),
             Command::CloseSession(command) => self
                 .layout()?
                 .run_close_session(command)

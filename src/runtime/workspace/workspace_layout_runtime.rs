@@ -1,4 +1,4 @@
-use crate::application::control_service::{ControlService, FooterMenuBindings};
+use crate::application::control_service::{ControlService, FooterMenuBindings, SidebarBindings};
 use crate::application::layout_service::{
     LayoutFocusBehavior, LayoutService, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE,
 };
@@ -7,14 +7,14 @@ use crate::application::target_registry_service::{
 };
 use crate::cli::{
     prepend_global_network_args, CloseSessionCommand, LayoutReconcileCommand, RemoteNetworkConfig,
-    UiPaneCommand,
+    SidebarFocus, ToggleSidebarCommand, UiPaneCommand,
 };
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::domain::workspace_layout::WorkspaceChromeLayout;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxError, TmuxLayoutGateway, TmuxPaneId, TmuxPaneInfo, TmuxProgram,
-    TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
+    EmbeddedTmuxBackend, TmuxError, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxPaneInfo,
+    TmuxProgram, TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -44,6 +44,12 @@ const WAITAGENT_MAIN_PANE_TRANSITION_OPTION: &str = "@waitagent_main_pane_transi
 const MAIN_PANE_OUTPUT_BRIDGE_DISABLED: &str = "disabled";
 #[allow(dead_code)]
 const MAIN_PANE_OUTPUT_BRIDGE_ENABLED: &str = "enabled";
+const WAITAGENT_SIDEBAR_HIDDEN_OPTION: &str = "@waitagent_sidebar_hidden";
+const WAITAGENT_SIDEBAR_HIDDEN_PANE_OPTION: &str = "@waitagent_sidebar_hidden_pane";
+const WAITAGENT_SIDEBAR_HIDDEN_WINDOW_OPTION: &str = "@waitagent_sidebar_hidden_window";
+const WAITAGENT_SIDEBAR_WIDTH_OPTION: &str = "@waitagent_sidebar_width";
+const HIDDEN_SIDEBAR_WINDOW_PREFIX: &str = "wa-sidebar-hidden";
+const DEFAULT_SIDEBAR_WIDTH: u16 = 32;
 
 #[derive(Clone, Copy)]
 enum InitialChromePane {
@@ -138,6 +144,13 @@ impl WorkspaceLayoutRuntime {
         if self.native_fullscreen_active(workspace)? {
             return Ok(());
         }
+        if self.sidebar_hidden(workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag] sync_main_slot_bindings: skipped while sidebar is hidden for session={:?}",
+                workspace.session_name
+            ));
+            return Ok(());
+        }
         if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
             ERROR_LOG.log(format!(
                 "[diag] sync_main_slot_bindings: skipped while main-slot transition owns main pane metadata for session={:?}",
@@ -155,9 +168,10 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
     ) -> Result<(), LifecycleError> {
         ERROR_LOG.log(format!(
-            "[diag] refresh_workspace_chrome: session={:?}, native_fullscreen_active={:?}",
+            "[diag] refresh_workspace_chrome: session={:?}, native_fullscreen_active={:?}, sidebar_hidden={:?}",
             workspace.session_name,
-            self.native_fullscreen_active(workspace)
+            self.native_fullscreen_active(workspace),
+            self.sidebar_hidden(workspace)
         ));
         if self.native_fullscreen_active(workspace)? {
             let r = self
@@ -169,6 +183,20 @@ impl WorkspaceLayoutRuntime {
                 .map_err(tmux_layout_error);
             ERROR_LOG.log(format!(
                 "[diag] refresh_workspace_chrome: native_fullscreen path, result={:?}",
+                r.is_ok()
+            ));
+            return r;
+        }
+        if self.sidebar_hidden(workspace)? {
+            let r = self
+                .backend
+                .signal_chrome_refresh_on_socket(
+                    workspace.socket_name.as_str(),
+                    workspace.session_name.as_str(),
+                )
+                .map_err(tmux_layout_error);
+            ERROR_LOG.log(format!(
+                "[diag] refresh_workspace_chrome: sidebar_hidden path, result={:?}",
                 r.is_ok()
             ));
             return r;
@@ -194,7 +222,7 @@ impl WorkspaceLayoutRuntime {
         &self,
         workspace: &TmuxWorkspaceHandle,
     ) -> Result<(), LifecycleError> {
-        if self.native_fullscreen_active(workspace)? {
+        if self.native_fullscreen_active(workspace)? || self.sidebar_hidden(workspace)? {
             return self
                 .backend
                 .signal_chrome_refresh_on_socket(
@@ -214,10 +242,245 @@ impl WorkspaceLayoutRuntime {
             return Ok(());
         }
         let layout = self.existing_workspace_chrome_layout(workspace)?;
+        let sidebar_bindings = self.sidebar_bindings(workspace);
         let footer_bindings = self.footer_menu_bindings(workspace);
         self.control_service
-            .sync_workspace_controls(workspace, &layout, Some(&footer_bindings))
+            .sync_workspace_controls(workspace, &layout, Some(&sidebar_bindings), Some(&footer_bindings))
             .map_err(tmux_layout_error)
+    }
+
+    pub fn run_toggle_sidebar(
+        &self,
+        command: ToggleSidebarCommand,
+    ) -> Result<(), LifecycleError> {
+        let workspace = TmuxWorkspaceHandle {
+            workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
+            socket_name: TmuxSocketName::new(command.socket_name.clone()),
+            session_name: TmuxSessionName::new(command.session_name),
+        };
+
+        if let Err(error) = self.toggle_sidebar(&workspace, command.focus) {
+            ERROR_LOG.log(format!(
+                "[diag-sidebar-toggle] failed socket={} session={} error={}",
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+                error
+            ));
+        }
+        Ok(())
+    }
+
+    fn toggle_sidebar(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        focus: SidebarFocus,
+    ) -> Result<(), LifecycleError> {
+        let hidden = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_OPTION)
+            .map_err(tmux_layout_error)?
+            .map(|value| value == "1")
+            .unwrap_or(false);
+
+        if hidden {
+            self.show_sidebar(workspace, focus)
+        } else {
+            self.hide_sidebar(workspace, focus)
+        }
+    }
+
+    fn hide_sidebar(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        _focus: SidebarFocus,
+    ) -> Result<(), LifecycleError> {
+        let layout = self.existing_workspace_chrome_layout(workspace)?;
+        let sidebar_width = layout.sidebar_width;
+
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "break-pane".to_string(),
+                    "-d".to_string(),
+                    "-P".to_string(),
+                    "-F".to_string(),
+                    "#{window_id}\t#{pane_id}".to_string(),
+                    "-s".to_string(),
+                    layout.sidebar_pane.as_str().to_string(),
+                    "-t".to_string(),
+                    format!("{}:", workspace.session_name.as_str()),
+                    "-n".to_string(),
+                    self.hidden_sidebar_window_name(workspace),
+                ],
+            )
+            .map_err(tmux_layout_error)?;
+        let location = parse_break_pane_output(&output.stdout).map_err(tmux_layout_error)?;
+
+        self.backend
+            .set_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_OPTION, "1")
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_SIDEBAR_HIDDEN_PANE_OPTION,
+                location.pane_id.as_str(),
+            )
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_SIDEBAR_HIDDEN_WINDOW_OPTION,
+                &location.window_id,
+            )
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(
+                workspace,
+                WAITAGENT_SIDEBAR_WIDTH_OPTION,
+                &sidebar_width.to_string(),
+            )
+            .map_err(tmux_layout_error)?;
+
+        let sidebar_bindings = self.sidebar_bindings(workspace);
+        let footer_bindings = self.footer_menu_bindings(workspace);
+        self.control_service
+            .sync_workspace_controls_sidebar_hidden(
+                workspace,
+                &layout.main_pane,
+                &layout.footer_pane,
+                &sidebar_bindings,
+                Some(&footer_bindings),
+            )
+            .map_err(tmux_layout_error)?;
+
+        self.backend
+            .select_pane(workspace, &layout.main_pane)
+            .map_err(tmux_layout_error)
+    }
+
+    fn show_sidebar(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        focus: SidebarFocus,
+    ) -> Result<(), LifecycleError> {
+        let Some(hidden_pane) = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|value| !value.is_empty())
+            .map(TmuxPaneId::new)
+        else {
+            return Err(LifecycleError::Protocol(
+                "no hidden sidebar pane recorded".to_string(),
+            ));
+        };
+
+        let main_pane = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+            .filter(|value| !value.is_empty())
+            .map(TmuxPaneId::new)
+            .ok_or_else(|| LifecycleError::Protocol("no main pane recorded".to_string()))?;
+
+        let sidebar_width = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_SIDEBAR_WIDTH_OPTION)
+            .map_err(tmux_layout_error)?
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_SIDEBAR_WIDTH);
+
+        let output = self
+            .backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "join-pane".to_string(),
+                    "-d".to_string(),
+                    "-P".to_string(),
+                    "-F".to_string(),
+                    "#{window_id}\t#{pane_id}".to_string(),
+                    "-s".to_string(),
+                    hidden_pane.as_str().to_string(),
+                    "-t".to_string(),
+                    main_pane.as_str().to_string(),
+                    "-h".to_string(),
+                    "-l".to_string(),
+                    sidebar_width.to_string(),
+                ],
+            )
+            .map_err(tmux_layout_error)?;
+        let location = parse_break_pane_output(&output.stdout).map_err(tmux_layout_error)?;
+
+        self.backend
+            .set_pane_title(workspace, &location.pane_id, SIDEBAR_PANE_TITLE)
+            .map_err(tmux_layout_error)?;
+
+        self.backend
+            .set_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_OPTION, "")
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_PANE_OPTION, "")
+            .map_err(tmux_layout_error)?;
+        self.backend
+            .set_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_WINDOW_OPTION, "")
+            .map_err(tmux_layout_error)?;
+
+        let layout = self.existing_workspace_chrome_layout(workspace)?;
+        let sidebar_bindings = self.sidebar_bindings(workspace);
+        let footer_bindings = self.footer_menu_bindings(workspace);
+        self.control_service
+            .sync_workspace_controls(
+                workspace,
+                &layout,
+                Some(&sidebar_bindings),
+                Some(&footer_bindings),
+            )
+            .map_err(tmux_layout_error)?;
+
+        let focus_pane = match focus {
+            SidebarFocus::Main => layout.main_pane,
+            SidebarFocus::Sidebar => layout.sidebar_pane,
+        };
+        self.backend
+            .select_pane(workspace, &focus_pane)
+            .map_err(tmux_layout_error)
+    }
+
+    fn hidden_sidebar_window_name(&self, workspace: &TmuxWorkspaceHandle) -> String {
+        format!(
+            "{}-{}",
+            HIDDEN_SIDEBAR_WINDOW_PREFIX,
+            workspace.session_name.as_str()
+        )
+    }
+
+    fn sidebar_bindings(&self, workspace: &TmuxWorkspaceHandle) -> SidebarBindings {
+        let toggle_command = sidebar_toggle_tmux_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &self.network,
+            SidebarFocus::Main,
+        );
+        let hide_command = sidebar_toggle_tmux_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &self.network,
+            SidebarFocus::Main,
+        );
+        let show_command = sidebar_toggle_tmux_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace,
+            &self.network,
+            SidebarFocus::Sidebar,
+        );
+        SidebarBindings {
+            toggle_command,
+            hide_command,
+            show_command,
+        }
     }
 
     pub fn suspend_main_pane_output_bridge(
@@ -463,7 +726,7 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
         focus_behavior: LayoutFocusBehavior,
     ) -> Result<(), LifecycleError> {
-        if self.native_fullscreen_active(workspace)? {
+        if self.native_fullscreen_active(workspace)? || self.sidebar_hidden(workspace)? {
             return self
                 .backend
                 .signal_chrome_refresh_on_socket(
@@ -701,6 +964,7 @@ impl WorkspaceLayoutRuntime {
             t_layout.elapsed(),
             t_total.elapsed()
         ));
+        let sidebar_bindings = self.sidebar_bindings(workspace);
         let footer_bindings = self.footer_menu_bindings(workspace);
         let fullscreen_toggle_command = self.fullscreen_toggle_command(workspace);
         let t_controls = Instant::now();
@@ -709,6 +973,7 @@ impl WorkspaceLayoutRuntime {
                 workspace,
                 &layout,
                 &fullscreen_toggle_command,
+                Some(&sidebar_bindings),
                 Some(&footer_bindings),
             )
             .map_err(tmux_layout_error)?;
@@ -1232,6 +1497,13 @@ impl WorkspaceLayoutRuntime {
             .window_zoomed_on_socket(workspace.socket_name.as_str(), main_pane.as_str())
             .map_err(tmux_layout_error)
     }
+
+    fn sidebar_hidden(&self, workspace: &TmuxWorkspaceHandle) -> Result<bool, LifecycleError> {
+        self.backend
+            .show_session_option(workspace, WAITAGENT_SIDEBAR_HIDDEN_OPTION)
+            .map_err(tmux_layout_error)
+            .map(|value| value.as_deref() == Some("1"))
+    }
 }
 
 fn create_remote_session_tmux_command(shell_command: &str) -> String {
@@ -1254,6 +1526,32 @@ fn fullscreen_toggle_tmux_command(
             workspace.socket_name.as_str().to_string(),
             "--session-name".to_string(),
             workspace.session_name.as_str().to_string(),
+        ],
+        network,
+    );
+    format!("run-shell -b {}", tmux_quote_argument(&shell_command))
+}
+
+fn sidebar_toggle_tmux_command(
+    executable: &str,
+    workspace: &TmuxWorkspaceHandle,
+    network: &RemoteNetworkConfig,
+    focus: SidebarFocus,
+) -> String {
+    let focus_arg = match focus {
+        SidebarFocus::Main => "main",
+        SidebarFocus::Sidebar => "sidebar",
+    };
+    let shell_command = shell_command_with_network(
+        executable,
+        vec![
+            "__toggle-sidebar".to_string(),
+            "--socket-name".to_string(),
+            workspace.socket_name.as_str().to_string(),
+            "--session-name".to_string(),
+            workspace.session_name.as_str().to_string(),
+            "--focus".to_string(),
+            focus_arg.to_string(),
         ],
         network,
     );
@@ -1422,6 +1720,37 @@ fn tmux_quote_argument(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrokenPaneLocation {
+    window_id: String,
+    pane_id: TmuxPaneId,
+}
+
+fn parse_break_pane_output(output: &str) -> Result<BrokenPaneLocation, TmuxError> {
+    let mut parts = output.trim().split('\t');
+    let window_id = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TmuxError::new(format!(
+                "tmux break-pane did not return a window id: `{}`",
+                output.trim()
+            ))
+        })?
+        .to_string();
+    parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TmuxError::new(format!(
+                "tmux break-pane did not return a pane id: `{}`",
+                output.trim()
+            ))
+        })
+        .map(TmuxPaneId::new)
+        .map(|pane_id| BrokenPaneLocation { window_id, pane_id })
+}
+
 fn connect_remote_host_display_popup_command(pane_command: &str) -> String {
     let command = tmux_quote_argument(pane_command);
     format!(
@@ -1453,9 +1782,10 @@ mod tests {
         create_remote_session_tmux_command, footer_menu_shell_command,
         fullscreen_toggle_tmux_command, layout_reconcile_hook_shell_command,
         main_pane_died_hook_shell_command, main_pane_output_bridge_shell_command,
-        should_refresh_workspace_chrome, tmux_quote_argument,
+        parse_break_pane_output, should_refresh_workspace_chrome, sidebar_toggle_tmux_command,
+        tmux_quote_argument,
     };
-    use crate::cli::RemoteNetworkConfig;
+    use crate::cli::{default_remote_node_port, RemoteNetworkConfig, SidebarFocus};
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState,
     };
@@ -1478,7 +1808,10 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '--port' '7474' '__footer-menu' '--socket-name' 'wa-1' '--session-name' 'session-1' '--client-tty' '#{client_tty}' '--listener-display' '192.168.1.22:7474'"
+            format!(
+                "'/tmp/wait agent' '--port' '{}' '__footer-menu' '--socket-name' 'wa-1' '--session-name' 'session-1' '--client-tty' '#{{client_tty}}' '--listener-display' '192.168.1.22:7474'",
+                default_remote_node_port()
+            )
         );
     }
 
@@ -1555,12 +1888,44 @@ mod tests {
             &workspace,
             &RemoteNetworkConfig::default(),
         );
-        let expected_shell = "'/tmp/wait agent' '--port' '7474' '__toggle-fullscreen' '--socket-name' 'wa-1' '--session-name' 'session-1'";
+        let expected_shell = format!(
+            "'/tmp/wait agent' '--port' '{}' '__toggle-fullscreen' '--socket-name' 'wa-1' '--session-name' 'session-1'",
+            default_remote_node_port()
+        );
 
         assert_eq!(
             command,
-            format!("run-shell -b {}", tmux_quote_argument(expected_shell))
+            format!("run-shell -b {}", tmux_quote_argument(&expected_shell))
         );
+    }
+
+    #[test]
+    fn sidebar_toggle_tmux_command_targets_current_workspace_and_focus() {
+        let workspace = workspace();
+
+        let command = sidebar_toggle_tmux_command(
+            "/tmp/wait agent",
+            &workspace,
+            &RemoteNetworkConfig::default(),
+            SidebarFocus::Sidebar,
+        );
+        let expected_shell = format!(
+            "'/tmp/wait agent' '--port' '{}' '__toggle-sidebar' '--socket-name' 'wa-1' '--session-name' 'session-1' '--focus' 'sidebar'",
+            default_remote_node_port()
+        );
+
+        assert_eq!(
+            command,
+            format!("run-shell -b {}", tmux_quote_argument(&expected_shell))
+        );
+    }
+
+    #[test]
+    fn parse_break_pane_output_extracts_window_and_pane_ids() {
+        let location = parse_break_pane_output("@42\t%7").expect("parse should succeed");
+
+        assert_eq!(location.window_id, "@42");
+        assert_eq!(location.pane_id.as_str(), "%7");
     }
 
     #[test]
@@ -1577,7 +1942,10 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '--port' '7474' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path' '--pane-generation' '7'"
+            format!(
+                "'/tmp/wait agent' '--port' '{}' '__layout-reconcile' '--socket-name' 'wa-1' '--session-name' 'session-1' '--workspace-dir' '/tmp/demo path' '--pane-generation' '7'",
+                default_remote_node_port()
+            )
         );
     }
 
@@ -1593,7 +1961,10 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '--port' '7474' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{hook_pane}' '--pane-generation' '7'"
+            format!(
+                "'/tmp/wait agent' '--port' '{}' '__main-pane-died' '--socket-name' 'wa-1' '--session-name' 'session-1' '--pane-id' '#{{hook_pane}}' '--pane-generation' '7'",
+                default_remote_node_port()
+            )
         );
     }
 
@@ -1610,7 +1981,10 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/wait agent' '--port' '7474' '__main-pane-output-event-bridge' '--socket-name' 'wa-1'"
+            format!(
+                "'/tmp/wait agent' '--port' '{}' '__main-pane-output-event-bridge' '--socket-name' 'wa-1'",
+                default_remote_node_port()
+            )
         );
     }
 

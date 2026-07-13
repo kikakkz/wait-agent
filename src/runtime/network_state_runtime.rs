@@ -262,6 +262,10 @@ fn recover_network_config_for_command(
             backend,
             &workspace_handle(&command.socket_name, &command.session_name),
         ),
+        Command::ToggleSidebar(command) => recover_network_config_for_workspace(
+            backend,
+            &workspace_handle(&command.socket_name, &command.session_name),
+        ),
         Command::CloseSession(command) => recover_network_config_for_workspace(
             backend,
             &workspace_handle(&command.socket_name, &command.session_name),
@@ -296,15 +300,12 @@ fn workspace_handle(socket_name: &str, session_name: &str) -> TmuxWorkspaceHandl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::DEFAULT_REMOTE_NODE_PORT;
+    use crate::cli::default_remote_node_port;
     use crate::infra::tmux::{TmuxGateway, TmuxSessionGateway};
 
     #[test]
     fn default_port_constant_matches_network_default() {
-        assert_eq!(
-            RemoteNetworkConfig::default().port,
-            DEFAULT_REMOTE_NODE_PORT
-        );
+        assert_eq!(RemoteNetworkConfig::default().port, default_remote_node_port());
     }
 
     #[test]

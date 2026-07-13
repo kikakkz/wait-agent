@@ -1,11 +1,12 @@
 use crate::domain::workspace_layout::WorkspaceChromeLayout;
-use crate::infra::tmux::{TmuxControlGateway, TmuxWorkspaceHandle};
+use crate::infra::tmux::{TmuxControlGateway, TmuxPaneId, TmuxWorkspaceHandle};
 use crate::ui::chrome::{TMUX_MENU_BORDER_STYLE, TMUX_MENU_SELECTED_STYLE, TMUX_MENU_STYLE};
 
 const HISTORY_TOGGLE_KEY: &str = "C-o";
 const HISTORY_TOGGLE_PREFIX_KEY: &str = "z";
 const SIDEBAR_FOCUS_KEY: &str = "C-Right";
 const MAIN_FOCUS_KEY: &str = "Left";
+const SIDEBAR_TOGGLE_KEY: &str = "C-h";
 const SIDEBAR_HIDE_KEY: &str = "h";
 const CREATE_SESSION_KEY: &str = "C-n";
 const CREATE_SESSION_PREFIX_KEY: &str = "c";
@@ -16,7 +17,6 @@ const ERROR_LOG_KEY: &str = "C-e";
 const ERROR_LOG_PREFIX_KEY: &str = "E";
 // Ctrl-M opens the footer sessions menu when the footer pane is focused.
 // Outside the footer pane, the key is forwarded to the active program.
-const SIDEBAR_COLLAPSED_WIDTH: u16 = 1;
 const TMUX_STATUS_OPTION: &str = "status";
 const TMUX_STATUS_ON: &str = "on";
 const TMUX_STATUS_POSITION_OPTION: &str = "status-position";
@@ -33,6 +33,12 @@ pub struct FooterMenuBindings {
     pub create_remote_session_command: String,
     pub open_sessions_menu_command: String,
     pub error_log_command: String,
+}
+
+pub struct SidebarBindings {
+    pub toggle_command: String,
+    pub hide_command: String,
+    pub show_command: String,
 }
 
 pub struct ControlService<G> {
@@ -52,11 +58,14 @@ where
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
         history_toggle_command: &str,
+        sidebar_bindings: Option<&SidebarBindings>,
         footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
         self.configure_session_chrome(workspace, layout)?;
         self.bind_main_pane_history_toggle(workspace, history_toggle_command)?;
-        self.bind_waitagent_sidebar_controls(workspace, layout)?;
+        if let Some(sidebar_bindings) = sidebar_bindings {
+            self.bind_waitagent_sidebar_controls(workspace, layout, sidebar_bindings)?;
+        }
         self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
     }
 
@@ -64,10 +73,40 @@ where
         &self,
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
+        sidebar_bindings: Option<&SidebarBindings>,
         footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
-        self.bind_waitagent_sidebar_controls(workspace, layout)?;
+        if let Some(sidebar_bindings) = sidebar_bindings {
+            self.bind_waitagent_sidebar_controls(workspace, layout, sidebar_bindings)?;
+        }
         self.bind_waitagent_footer_controls(workspace, layout, footer_bindings)
+    }
+
+    pub fn sync_workspace_controls_sidebar_hidden(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
+        footer_pane: &TmuxPaneId,
+        sidebar_bindings: &SidebarBindings,
+        footer_bindings: Option<&FooterMenuBindings>,
+    ) -> Result<(), G::Error> {
+        self.tmux.bind_waitagent_sidebar_toggle(
+            workspace,
+            SIDEBAR_TOGGLE_KEY,
+            main_pane,
+            &sidebar_bindings.toggle_command,
+        )?;
+        self.tmux.bind_waitagent_sidebar_show(
+            workspace,
+            SIDEBAR_FOCUS_KEY,
+            main_pane,
+            &sidebar_bindings.show_command,
+        )?;
+        self.bind_waitagent_footer_controls_with_panes(
+            workspace,
+            footer_pane,
+            footer_bindings,
+        )
     }
 
     fn configure_session_chrome(
@@ -127,7 +166,14 @@ where
         &self,
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
+        sidebar_bindings: &SidebarBindings,
     ) -> Result<(), G::Error> {
+        self.tmux.bind_waitagent_sidebar_toggle(
+            workspace,
+            SIDEBAR_TOGGLE_KEY,
+            &layout.main_pane,
+            &sidebar_bindings.toggle_command,
+        )?;
         self.tmux.bind_waitagent_focus_sidebar(
             workspace,
             SIDEBAR_FOCUS_KEY,
@@ -147,8 +193,7 @@ where
             workspace,
             SIDEBAR_HIDE_KEY,
             &layout.sidebar_pane,
-            &layout.main_pane,
-            SIDEBAR_COLLAPSED_WIDTH,
+            &sidebar_bindings.hide_command,
         )
     }
 
@@ -156,6 +201,19 @@ where
         &self,
         workspace: &TmuxWorkspaceHandle,
         layout: &WorkspaceChromeLayout,
+        footer_bindings: Option<&FooterMenuBindings>,
+    ) -> Result<(), G::Error> {
+        self.bind_waitagent_footer_controls_with_panes(
+            workspace,
+            &layout.footer_pane,
+            footer_bindings,
+        )
+    }
+
+    fn bind_waitagent_footer_controls_with_panes(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        footer_pane: &TmuxPaneId,
         footer_bindings: Option<&FooterMenuBindings>,
     ) -> Result<(), G::Error> {
         let Some(footer_bindings) = footer_bindings else {
@@ -185,7 +243,7 @@ where
         self.tmux.bind_waitagent_footer_action(
             workspace,
             FOOTER_SESSIONS_KEY,
-            &layout.footer_pane,
+            footer_pane,
             &footer_bindings.open_sessions_menu_command,
         )?;
         self.tmux.bind_key_without_prefix(
@@ -204,7 +262,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlService, FooterMenuBindings};
+    use super::{ControlService, FooterMenuBindings, SidebarBindings};
     use crate::domain::workspace::WorkspaceInstanceId;
     use crate::domain::workspace_layout::WorkspaceChromeLayout;
     use crate::infra::tmux::{
@@ -223,7 +281,9 @@ mod tests {
         BindWaitagentFocusSidebar(String, String, String, u16),
         BindWaitagentFocusMain(String, String),
         BindWaitagentSidebarBack(String, String, String),
-        BindWaitagentSidebarHide(String, String, String, u16),
+        BindWaitagentSidebarHide(String, String, String),
+        BindWaitagentSidebarToggle(String, String, String),
+        BindWaitagentSidebarShow(String, String, String),
         BindWaitagentFooterAction(String, String, String),
         BindCopyModeCancelKey(String, String),
     }
@@ -552,14 +612,42 @@ mod tests {
             _workspace: &TmuxWorkspaceHandle,
             key: &str,
             sidebar: &TmuxPaneId,
-            main: &TmuxPaneId,
-            collapsed_width: u16,
+            command: &str,
         ) -> Result<(), Self::Error> {
             self.calls.borrow_mut().push(Call::BindWaitagentSidebarHide(
                 key.to_string(),
                 sidebar.as_str().to_string(),
+                command.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_waitagent_sidebar_toggle(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            main: &TmuxPaneId,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentSidebarToggle(
+                key.to_string(),
                 main.as_str().to_string(),
-                collapsed_width,
+                command.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn bind_waitagent_sidebar_show(
+            &self,
+            _workspace: &TmuxWorkspaceHandle,
+            key: &str,
+            main: &TmuxPaneId,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(Call::BindWaitagentSidebarShow(
+                key.to_string(),
+                main.as_str().to_string(),
+                command.to_string(),
             ));
             Ok(())
         }
@@ -620,6 +708,14 @@ mod tests {
                 &workspace,
                 &layout,
                 "run-shell -b \"waitagent __toggle-fullscreen\"",
+                Some(&SidebarBindings {
+                    toggle_command: "run-shell -b 'waitagent __toggle-sidebar --focus main'"
+                        .to_string(),
+                    hide_command: "run-shell -b 'waitagent __toggle-sidebar --focus main'"
+                        .to_string(),
+                    show_command: "run-shell -b 'waitagent __toggle-sidebar --focus sidebar'"
+                        .to_string(),
+                }),
                 Some(&FooterMenuBindings {
                     create_session_command: "run-shell -b 'waitagent __new-target'".to_string(),
                     connect_remote_host_command: r#"display-popup -w 70% -h 70% -E '"waitagent" __connect-remote-host-pane'"#.to_string(),
@@ -660,6 +756,11 @@ mod tests {
                 Call::BindCopyModeCancelKey("copy-mode".to_string(), "Escape".to_string()),
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "C-o".to_string()),
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "Escape".to_string()),
+                Call::BindWaitagentSidebarToggle(
+                    "C-h".to_string(),
+                    "%1".to_string(),
+                    "run-shell -b 'waitagent __toggle-sidebar --focus main'".to_string(),
+                ),
                 Call::BindWaitagentFocusSidebar(
                     "C-Right".to_string(),
                     "%1".to_string(),
@@ -675,8 +776,7 @@ mod tests {
                 Call::BindWaitagentSidebarHide(
                     "h".to_string(),
                     "%2".to_string(),
-                    "%1".to_string(),
-                    1,
+                    "run-shell -b 'waitagent __toggle-sidebar --focus main'".to_string(),
                 ),
                 Call::BindWithoutPrefix(
                     "C-n".to_string(),

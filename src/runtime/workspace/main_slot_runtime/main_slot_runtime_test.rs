@@ -10,7 +10,7 @@ mod tests {
         DefaultTargetCatalogGateway, TargetRegistryService,
     };
     use crate::application::workspace_service::WorkspaceService;
-    use crate::cli::RemoteNetworkConfig;
+    use crate::cli::{default_remote_node_port, RemoteNetworkConfig};
     use crate::cli::{ActivateTargetCommand, MainPaneDiedCommand, RemoteTargetExitedCommand};
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
@@ -236,7 +236,7 @@ mod tests {
             program.args,
             vec![
                 "--port".to_string(),
-                "7474".to_string(),
+                default_remote_node_port().to_string(),
                 "__remote-main-slot".to_string(),
                 "--socket-name".to_string(),
                 "wa-1".to_string(),

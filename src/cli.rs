@@ -5,6 +5,16 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
 
+/// Reads the default port from the `WAITAGENT_DEFAULT_PORT` environment variable,
+/// falling back to [`DEFAULT_REMOTE_NODE_PORT`] if the variable is unset or invalid.
+/// This lets tests run on a non-default port without modifying source constants.
+pub fn default_remote_node_port() -> u16 {
+    std::env::var("WAITAGENT_DEFAULT_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_REMOTE_NODE_PORT)
+}
+
 #[derive(Debug, Clone)]
 pub struct Cli {
     pub network: RemoteNetworkConfig,
@@ -23,7 +33,7 @@ pub struct RemoteNetworkConfig {
 impl Default for RemoteNetworkConfig {
     fn default() -> Self {
         Self {
-            port: DEFAULT_REMOTE_NODE_PORT,
+            port: default_remote_node_port(),
             connect: None,
             node_id: None,
             public_endpoint: None,
@@ -161,6 +171,7 @@ pub enum Command {
     RemoteTargetExited(RemoteTargetExitedCommand),
     FooterMenu(FooterMenuCommand),
     ToggleFullscreen(ToggleFullscreenCommand),
+    ToggleSidebar(ToggleSidebarCommand),
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
     ChromeRefresh(LayoutReconcileCommand),
@@ -355,6 +366,20 @@ pub struct FooterMenuCommand {
 pub struct ToggleFullscreenCommand {
     pub socket_name: String,
     pub session_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarFocus {
+    #[default]
+    Main,
+    Sidebar,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToggleSidebarCommand {
+    pub socket_name: String,
+    pub session_name: String,
+    pub focus: SidebarFocus,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -592,6 +617,10 @@ impl Cli {
             "__toggle-fullscreen" => {
                 args.remove(0);
                 Command::ToggleFullscreen(parse_toggle_fullscreen(args)?)
+            }
+            "__toggle-sidebar" => {
+                args.remove(0);
+                Command::ToggleSidebar(parse_toggle_sidebar(args)?)
             }
             "__close-session" => {
                 args.remove(0);
@@ -1363,6 +1392,36 @@ fn parse_toggle_fullscreen(args: Vec<String>) -> Result<ToggleFullscreenCommand,
     })
 }
 
+fn parse_toggle_sidebar(args: Vec<String>) -> Result<ToggleSidebarCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+    let mut focus = SidebarFocus::Main;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--focus" => {
+                focus = match expect_value("--focus", &mut iter)?.as_str() {
+                    "sidebar" => SidebarFocus::Sidebar,
+                    "main" | _ => SidebarFocus::Main,
+                }
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(ToggleSidebarCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+        focus,
+    })
+}
+
 fn parse_activate_target(args: Vec<String>) -> Result<ActivateTargetCommand, CliError> {
     let mut iter = args.into_iter();
     let mut current_socket_name = None;
@@ -1732,7 +1791,10 @@ impl Error for CliError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RuntimeCommandSignal, DEFAULT_REMOTE_NODE_PORT};
+    use super::{
+        default_remote_node_port, Cli, Command, RuntimeCommandSignal, SidebarFocus,
+        DEFAULT_REMOTE_NODE_PORT,
+    };
 
     fn parse(args: &[&str]) -> Cli {
         let argv = args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>();
@@ -1743,7 +1805,7 @@ mod tests {
     fn defaults_to_workspace_command_without_subcommand() {
         let cli = parse(&["waitagent"]);
         assert!(matches!(cli.command, Command::Workspace));
-        assert_eq!(cli.network.port, DEFAULT_REMOTE_NODE_PORT);
+        assert_eq!(cli.network.port, default_remote_node_port());
         assert!(cli.network.connect.is_none());
     }
 
@@ -2494,6 +2556,29 @@ mod tests {
             Command::ToggleFullscreen(command) => {
                 assert_eq!(command.socket_name, "wa-1");
                 assert_eq!(command.session_name, "waitagent-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_toggle_sidebar_command() {
+        match parse(&[
+            "waitagent",
+            "__toggle-sidebar",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--focus",
+            "sidebar",
+        ])
+        .command
+        {
+            Command::ToggleSidebar(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.focus, SidebarFocus::Sidebar);
             }
             other => panic!("unexpected command: {other:?}"),
         }

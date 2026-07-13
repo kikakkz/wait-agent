@@ -11,7 +11,7 @@ mod tests {
         socket_lifecycle_publication_action, PublicationAgentCommand, PublicationSenderCommand,
         SocketLifecyclePublicationAction,
     };
-    use crate::cli::RemoteNetworkConfig;
+    use crate::cli::{default_remote_node_port, RemoteNetworkConfig};
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
@@ -87,11 +87,11 @@ mod tests {
         assert_eq!(
             remote_target_publication_server_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
-                "--port",
-                "7474",
-                "__remote-target-publication-server",
-                "--socket-name",
-                "wa-local",
+                "--port".to_string(),
+                default_remote_node_port().to_string(),
+                "__remote-target-publication-server".to_string(),
+                "--socket-name".to_string(),
+                "wa-local".to_string(),
             ]
         );
     }
@@ -101,11 +101,11 @@ mod tests {
         assert_eq!(
             remote_target_publication_agent_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
-                "--port",
-                "7474",
-                "__remote-target-publication-agent",
-                "--socket-name",
-                "wa-local",
+                "--port".to_string(),
+                default_remote_node_port().to_string(),
+                "__remote-target-publication-agent".to_string(),
+                "--socket-name".to_string(),
+                "wa-local".to_string(),
             ]
         );
     }
@@ -124,11 +124,11 @@ mod tests {
         assert_eq!(
             remote_target_publication_sender_args("wa-local", &RemoteNetworkConfig::default()),
             vec![
-                "--port",
-                "7474",
-                "__remote-target-publication-sender",
-                "--socket-name",
-                "wa-local",
+                "--port".to_string(),
+                default_remote_node_port().to_string(),
+                "__remote-target-publication-sender".to_string(),
+                "--socket-name".to_string(),
+                "wa-local".to_string(),
             ]
         );
     }
@@ -426,7 +426,10 @@ mod tests {
 
         assert_eq!(
             command,
-            "run-shell -b \"'/tmp/wait agent' '--port' '7474' '__socket-lifecycle-hook' '--socket-name' 'wa-local' '--hook-name' '#{hook}' '--session-name' '#{hook_session_name}' >/dev/null 2>&1\""
+            format!(
+                "run-shell -b \"'/tmp/wait agent' '--port' '{}' '__socket-lifecycle-hook' '--socket-name' 'wa-local' '--hook-name' '#{{hook}}' '--session-name' '#{{hook_session_name}}' >/dev/null 2>&1\"",
+                default_remote_node_port()
+            )
         );
     }
 

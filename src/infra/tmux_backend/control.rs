@@ -66,10 +66,33 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         workspace: &TmuxWorkspaceHandle,
         key: &str,
         sidebar: &TmuxPaneId,
-        main: &TmuxPaneId,
-        collapsed_width: u16,
+        command: &str,
     ) -> Result<(), Self::Error> {
-        let args = bind_waitagent_sidebar_hide_args(key, sidebar, main, collapsed_width);
+        let args = bind_waitagent_sidebar_hide_args(key, sidebar, command);
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
+    fn bind_waitagent_sidebar_toggle(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        main: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        let args = bind_waitagent_main_pane_command_args(key, main, command);
+        self.run_workspace_command(workspace, &args)?;
+        Ok(())
+    }
+
+    fn bind_waitagent_sidebar_show(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        key: &str,
+        main: &TmuxPaneId,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        let args = bind_waitagent_main_pane_command_args(key, main, command);
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
@@ -166,8 +189,7 @@ fn bind_waitagent_sidebar_back_args(
 fn bind_waitagent_sidebar_hide_args(
     key: &str,
     sidebar: &TmuxPaneId,
-    main: &TmuxPaneId,
-    collapsed_width: u16,
+    command: &str,
 ) -> Vec<String> {
     bind_key_args(
         key,
@@ -176,12 +198,25 @@ fn bind_waitagent_sidebar_hide_args(
             "if-shell".to_string(),
             "-F".to_string(),
             current_pane_is(sidebar),
-            format!(
-                "resize-pane -t {} -x {} ; select-pane -t {}",
-                sidebar.as_str(),
-                collapsed_width,
-                main.as_str()
-            ),
+            command.to_string(),
+            format!("send-keys {}", key),
+        ],
+    )
+}
+
+fn bind_waitagent_main_pane_command_args(
+    key: &str,
+    main: &TmuxPaneId,
+    command: &str,
+) -> Vec<String> {
+    bind_key_args(
+        key,
+        false,
+        vec![
+            "if-shell".to_string(),
+            "-F".to_string(),
+            current_pane_is(main),
+            command.to_string(),
             format!("send-keys {}", key),
         ],
     )
@@ -229,8 +264,8 @@ mod tests {
     use super::{
         bind_command_with_prefix_args, bind_copy_mode_cancel_key_args,
         bind_waitagent_focus_main_args, bind_waitagent_focus_sidebar_args,
-        bind_waitagent_footer_action_args, bind_waitagent_sidebar_back_args,
-        bind_waitagent_sidebar_hide_args,
+        bind_waitagent_footer_action_args, bind_waitagent_main_pane_command_args,
+        bind_waitagent_sidebar_back_args, bind_waitagent_sidebar_hide_args,
     };
     use crate::infra::tmux_types::TmuxPaneId;
 
@@ -317,12 +352,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_hide_binding_collapses_sidebar_and_otherwise_passes_h_through() {
+    fn sidebar_hide_binding_runs_command_in_sidebar_and_otherwise_passes_h_through() {
         let args = bind_waitagent_sidebar_hide_args(
             "h",
             &TmuxPaneId::new("%2"),
-            &TmuxPaneId::new("%1"),
-            1,
+            "run-shell 'waitagent __toggle-sidebar --focus main'",
         );
 
         assert_eq!(
@@ -334,8 +368,31 @@ mod tests {
                 "if-shell",
                 "-F",
                 "#{==:#{pane_id},%2}",
-                "resize-pane -t %2 -x 1 ; select-pane -t %1",
+                "run-shell 'waitagent __toggle-sidebar --focus main'",
                 "send-keys h",
+            ]
+        );
+    }
+
+    #[test]
+    fn main_pane_command_binding_runs_command_in_main_pane_and_otherwise_passes_key_through() {
+        let args = bind_waitagent_main_pane_command_args(
+            "C-h",
+            &TmuxPaneId::new("%1"),
+            "run-shell 'waitagent __toggle-sidebar --focus main'",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "bind-key",
+                "-n",
+                "C-h",
+                "if-shell",
+                "-F",
+                "#{==:#{pane_id},%1}",
+                "run-shell 'waitagent __toggle-sidebar --focus main'",
+                "send-keys C-h",
             ]
         );
     }
