@@ -5,7 +5,6 @@ use crate::domain::session_catalog::{
     ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, RouteContext, TargetExited, TargetPublished,
@@ -32,6 +31,7 @@ use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
+use crate::runtime::remote_runtime_owner_runtime::RemoteTargetSourceBindingResolver;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -1269,7 +1269,7 @@ where
 pub(crate) fn exportable_local_sessions_for_socket(
     sessions: Vec<ManagedSessionRecord>,
     socket_name: &str,
-    published_target_store: &PublishedTargetStore,
+    remote_target_resolver: &dyn RemoteTargetSourceBindingResolver,
 ) -> Vec<ManagedSessionRecord> {
     sessions
         .into_iter()
@@ -1280,7 +1280,7 @@ pub(crate) fn exportable_local_sessions_for_socket(
                     != crate::domain::session_catalog::SessionAvailability::Exited
         })
         .map(|session| {
-            exported_session_record_for_socket(session, socket_name, published_target_store)
+            exported_session_record_for_socket(session, socket_name, remote_target_resolver)
         })
         .collect()
 }
@@ -1288,21 +1288,21 @@ pub(crate) fn exportable_local_sessions_for_socket(
 fn exported_session_record_for_socket(
     session: ManagedSessionRecord,
     socket_name: &str,
-    published_target_store: &PublishedTargetStore,
+    remote_target_resolver: &dyn RemoteTargetSourceBindingResolver,
 ) -> ManagedSessionRecord {
     if !session.is_target_host() {
         return session;
     }
-    let Ok(records) = published_target_store
-        .list_records_for_source_binding(socket_name, session.address.session_id())
+    let Ok(remote_targets) = remote_target_resolver
+        .list_remote_targets_for_source_binding(socket_name, session.address.session_id())
     else {
         return session;
     };
-    records
+    remote_targets
         .into_iter()
-        .find(|record| record.target.is_target_host())
-        .map(|record| {
-            merge_cached_remote_identity_with_live_target_runtime(record.target, &session)
+        .find(|target| target.is_target_host())
+        .map(|cached_remote_target| {
+            merge_cached_remote_identity_with_live_target_runtime(cached_remote_target, &session)
         })
         .unwrap_or(session)
 }

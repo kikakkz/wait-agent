@@ -1,7 +1,7 @@
 mod tests {
     use super::super::{
         chrome_refresh_socket_args, is_publishable_discovered_remote_session,
-        live_workspace_socket_names_from_sessions, mark_target_offline_in_store,
+        live_workspace_socket_names_from_sessions,
         parse_publication_agent_command, parse_publication_sender_command,
         publication_socket_hook_tmux_command, published_remote_target_from_local,
         published_remote_target_record_from_payload, remote_target_exited_args,
@@ -242,55 +242,6 @@ mod tests {
                 transport_socket_path: "/tmp/waitagent-remote.sock".to_string(),
             }
         );
-    }
-
-    #[test]
-    fn mark_target_offline_in_store_keeps_record_and_updates_availability() {
-        let store_path = std::env::temp_dir().join(format!(
-            "waitagent-publication-offline-test-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after unix epoch")
-                .as_nanos()
-        ));
-        let store = crate::infra::published_target_store::PublishedTargetStore::new(&store_path);
-        let target = ManagedSessionRecord {
-            address: ManagedSessionAddress::remote_peer("peer-a", "shell-1"),
-            selector: Some("wa-local:target-host-1".to_string()),
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: Some("wk-1".to_string()),
-            session_role: Some(WorkspaceSessionRole::TargetHost),
-            opened_by: Vec::new(),
-            attached_clients: 2,
-            window_count: 1,
-            command_name: Some("codex".to_string()),
-            current_path: Some(PathBuf::from("/tmp/demo")),
-            task_state: ManagedSessionTaskState::Unknown,
-        };
-        store
-            .upsert_target_from_source("wa-local", Some("target-host-1"), &target)
-            .expect("target should store");
-
-        let changed = mark_target_offline_in_store(
-            &store,
-            "wa-local",
-            "target-host-1",
-            "remote-peer:peer-a:shell-1",
-        )
-        .expect("offline mark should succeed");
-
-        assert!(changed);
-        let record = store
-            .list_records_for_source_binding("wa-local", "target-host-1")
-            .expect("stored record should load")
-            .into_iter()
-            .next()
-            .expect("record should remain present");
-        assert_eq!(record.target.availability, SessionAvailability::Offline);
-
-        let _ = std::fs::remove_file(store_path);
     }
 
     #[test]

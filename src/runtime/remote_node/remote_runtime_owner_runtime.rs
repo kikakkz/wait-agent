@@ -10,7 +10,7 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
@@ -40,6 +40,15 @@ pub struct RemoteRuntimeOwnerRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRuntimeOwnerSnapshot {
     pub sessions: Vec<ManagedSessionRecord>,
+}
+
+/// Identifies the local workspace session that published or is hosting a
+/// remote target. Previously tracked in `PublishedTargetStore`; now kept in
+/// the remote runtime owner's memory state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PublishedTargetSourceBinding {
+    pub socket_name: String,
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +81,17 @@ enum RemoteRuntimeOwnerCommandEnvelope {
     MarkNodeOffline {
         node_id: String,
     },
+    MarkSessionOfflineBySource {
+        node_id: String,
+        authority_id: String,
+        transport_session_id: String,
+        source_socket_name: String,
+        source_session_name: Option<String>,
+    },
+    ListTargetsBySourceBinding {
+        source_socket_name: String,
+        source_session_name: String,
+    },
     Snapshot,
     Shutdown,
 }
@@ -84,6 +104,9 @@ struct OwnerStateRecord {
     /// remote session on that socket. Used by TTL cleanup to emit
     /// `__remote-target-exited` with an exact `--pane-id` instead of scanning.
     socket_panes: HashMap<String, String>,
+    /// Local workspace sessions that have published or are mirroring this
+    /// remote target. Used for source-scoped offline marking on reconnect.
+    source_bindings: BTreeSet<PublishedTargetSourceBinding>,
 }
 
 impl Default for OwnerStateRecord {
@@ -105,6 +128,7 @@ impl Default for OwnerStateRecord {
                 task_state: ManagedSessionTaskState::Unknown,
             },
             socket_panes: HashMap::new(),
+            source_bindings: BTreeSet::new(),
         }
     }
 }
@@ -461,6 +485,87 @@ impl RemoteRuntimeOwnerRuntime {
         )
     }
 
+    pub fn mark_session_offline_by_source(
+        &self,
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+        source_socket_name: &str,
+        source_session_name: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        self.ensure_owner_running()?;
+        signal_remote_runtime_owner_command(
+            &self.current_executable,
+            &self.network,
+            RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                node_id: node_id.to_string(),
+                authority_id: authority_id.to_string(),
+                transport_session_id: transport_session_id.to_string(),
+                source_socket_name: source_socket_name.to_string(),
+                source_session_name: source_session_name.map(str::to_string),
+            },
+        )
+    }
+
+    pub fn list_targets_by_source_binding(
+        &self,
+        source_socket_name: &str,
+        source_session_name: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
+        let socket_path = remote_runtime_owner_socket_path(&self.network);
+        if !socket_path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut stream = match UnixStream::connect(&socket_path) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                ) =>
+            {
+                let _ = fs::remove_file(&socket_path);
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(remote_runtime_owner_error(error)),
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+        let command = RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+            source_socket_name: source_socket_name.to_string(),
+            source_session_name: source_session_name.to_string(),
+        };
+        let write_ok = stream
+            .write_all(render_remote_runtime_owner_command(&command).as_bytes())
+            .is_ok();
+        let flush_ok = stream.flush().is_ok();
+        let shutdown_ok = stream.shutdown(Shutdown::Write).is_ok();
+        if !write_ok || !flush_ok || !shutdown_ok {
+            return Ok(Vec::new());
+        }
+        let mut response = String::new();
+        match stream.read_to_string(&mut response) {
+            Ok(_) => parse_remote_runtime_owner_snapshot(&response)
+                .map(|snapshot| snapshot.sessions)
+                .or_else(|_| {
+                    let _ = fs::remove_file(&socket_path);
+                    Ok(Vec::new())
+                }),
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] remote_owner list_targets_by_source_binding read_failed listener={} error={}",
+                    self.network.listener_addr(),
+                    error
+                ));
+                let _ = fs::remove_file(&socket_path);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     pub fn shutdown_owner_if_unused(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
         let sockets =
             crate::runtime::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network(network)?;
@@ -691,9 +796,9 @@ fn handle_remote_runtime_owner_command(
                 .records
                 .lock()
                 .expect("remote runtime owner state mutex should not be poisoned");
-            let socket_panes = records
+            let (socket_panes, source_bindings) = records
                 .get(&key)
-                .map(|record| record.socket_panes.clone())
+                .map(|record| (record.socket_panes.clone(), record.source_bindings.clone()))
                 .unwrap_or_default();
             records.insert(
                 key,
@@ -701,6 +806,7 @@ fn handle_remote_runtime_owner_command(
                     node_id,
                     session,
                     socket_panes,
+                    source_bindings,
                 },
             );
             Ok(Some("ok\n".to_string()))
@@ -797,6 +903,60 @@ fn handle_remote_runtime_owner_command(
             }
             Ok(Some("ok\n".to_string()))
         }
+        RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+            node_id,
+            authority_id,
+            transport_session_id,
+            source_socket_name,
+            source_session_name,
+        } => {
+            let target_id = ManagedSessionAddress::remote_peer(authority_id, transport_session_id)
+                .id()
+                .as_str()
+                .to_string();
+            let key = owned_record_key(&node_id, &target_id);
+            let mut records = state
+                .records
+                .lock()
+                .expect("remote runtime owner state mutex should not be poisoned");
+            if let Some(record) = records.get_mut(&key) {
+                record.source_bindings.insert(PublishedTargetSourceBinding {
+                    socket_name: source_socket_name,
+                    session_name: source_session_name,
+                });
+                record.session.availability = SessionAvailability::Offline;
+                state
+                    .offline_nodes
+                    .lock()
+                    .expect("remote runtime owner offline node mutex should not be poisoned")
+                    .entry(node_id)
+                    .or_insert_with(Instant::now);
+            }
+            Ok(Some("ok\n".to_string()))
+        }
+        RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+            source_socket_name,
+            source_session_name,
+        } => {
+            let binding = PublishedTargetSourceBinding {
+                socket_name: source_socket_name,
+                session_name: Some(source_session_name),
+            };
+            let records = state
+                .records
+                .lock()
+                .expect("remote runtime owner state mutex should not be poisoned");
+            let targets: Vec<OwnerStateRecord> = records
+                .values()
+                .filter(|record| {
+                    record.source_bindings.contains(&binding) && record.session.is_target_host()
+                })
+                .cloned()
+                .collect();
+            drop(records);
+            let snapshot = render_remote_runtime_owner_snapshot(&targets);
+            Ok(Some(snapshot))
+        }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => {
             let pruned = prune_expired_offline_nodes(state, Instant::now());
             if !pruned.is_empty() {
@@ -832,6 +992,12 @@ fn remote_runtime_owner_command_label(command: &RemoteRuntimeOwnerCommandEnvelop
         RemoteRuntimeOwnerCommandEnvelope::ClearSessionPane { .. } => "clear_session_pane",
         RemoteRuntimeOwnerCommandEnvelope::RemoveNode { .. } => "remove_node",
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { .. } => "mark_node_offline",
+        RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource { .. } => {
+            "mark_session_offline_by_source"
+        }
+        RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding { .. } => {
+            "list_targets_by_source_binding"
+        }
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot",
         RemoteRuntimeOwnerCommandEnvelope::Shutdown => "shutdown",
     }
@@ -1262,6 +1428,28 @@ fn render_remote_runtime_owner_command(command: &RemoteRuntimeOwnerCommandEnvelo
         RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id } => {
             format!("mark_node_offline\t{}\n", escape_field(node_id))
         }
+        RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+            node_id,
+            authority_id,
+            transport_session_id,
+            source_socket_name,
+            source_session_name,
+        } => format!(
+            "mark_session_offline_by_source\t{}\t{}\t{}\t{}\t{}\n",
+            escape_field(node_id),
+            escape_field(authority_id),
+            escape_field(transport_session_id),
+            escape_field(source_socket_name),
+            escape_optional_field(source_session_name.as_deref())
+        ),
+        RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+            source_socket_name,
+            source_session_name,
+        } => format!(
+            "list_targets_by_source_binding\t{}\t{}\n",
+            escape_field(source_socket_name),
+            escape_field(source_session_name)
+        ),
         RemoteRuntimeOwnerCommandEnvelope::Snapshot => "snapshot\n".to_string(),
         RemoteRuntimeOwnerCommandEnvelope::Shutdown => "shutdown\n".to_string(),
     }
@@ -1393,6 +1581,64 @@ fn parse_remote_runtime_owner_command(
                 ));
             }
             Ok(RemoteRuntimeOwnerCommandEnvelope::MarkNodeOffline { node_id })
+        }
+        "mark_session_offline_by_source" => {
+            let node_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("mark_session_offline_by_source is missing node id".to_string())
+            })?)?;
+            let authority_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "mark_session_offline_by_source is missing authority id".to_string(),
+                )
+            })?)?;
+            let transport_session_id = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "mark_session_offline_by_source is missing transport session id".to_string(),
+                )
+            })?)?;
+            let source_socket_name = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "mark_session_offline_by_source is missing source socket name".to_string(),
+                )
+            })?)?;
+            let source_session_name = unescape_optional_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "mark_session_offline_by_source is missing source session name".to_string(),
+                )
+            })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "mark_session_offline_by_source contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                node_id,
+                authority_id,
+                transport_session_id,
+                source_socket_name,
+                source_session_name,
+            })
+        }
+        "list_targets_by_source_binding" => {
+            let source_socket_name = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "list_targets_by_source_binding is missing source socket name".to_string(),
+                )
+            })?)?;
+            let source_session_name = unescape_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "list_targets_by_source_binding is missing source session name".to_string(),
+                )
+            })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "list_targets_by_source_binding contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+                source_socket_name,
+                source_session_name,
+            })
         }
         "snapshot" => {
             if parts.next().is_some() {
@@ -1615,6 +1861,28 @@ fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
+/// Resolves remote target sessions that have been published from a specific
+/// local workspace source session. Implemented by `RemoteRuntimeOwnerRuntime`
+/// so the local session sync catalog can overlay cached remote identity onto
+/// live local target hosts without a separate disk store.
+pub trait RemoteTargetSourceBindingResolver: Send + Sync + 'static {
+    fn list_remote_targets_for_source_binding(
+        &self,
+        source_socket_name: &str,
+        source_session_name: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, LifecycleError>;
+}
+
+impl RemoteTargetSourceBindingResolver for RemoteRuntimeOwnerRuntime {
+    fn list_remote_targets_for_source_binding(
+        &self,
+        source_socket_name: &str,
+        source_session_name: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
+        self.list_targets_by_source_binding(source_socket_name, source_session_name)
+    }
+}
+
 fn remote_runtime_owner_error(
     error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
 ) -> LifecycleError {
@@ -1633,15 +1901,16 @@ mod tests {
         parse_remote_runtime_owner_snapshot, prune_expired_offline_nodes,
         remote_runtime_owner_args, remote_runtime_owner_socket_path,
         render_remote_runtime_owner_command, render_remote_runtime_owner_snapshot,
-        run_remote_runtime_owner_event_loop, OwnerStateRecord, RemoteRuntimeOwnerCommandEnvelope,
-        RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot, OFFLINE_NODE_RETENTION,
+        run_remote_runtime_owner_event_loop, OwnerStateRecord, PublishedTargetSourceBinding,
+        RemoteRuntimeOwnerCommandEnvelope, RemoteRuntimeOwnerSharedState, RemoteRuntimeOwnerSnapshot,
+        OFFLINE_NODE_RETENTION,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::io::{Read, Write};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
@@ -1783,6 +2052,199 @@ mod tests {
     }
 
     #[test]
+    fn remote_runtime_owner_command_round_trips_mark_session_offline_by_source() {
+        let rendered = render_remote_runtime_owner_command(
+            &RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                node_id: "peer-a".to_string(),
+                authority_id: "peer-a".to_string(),
+                transport_session_id: "pty1".to_string(),
+                source_socket_name: "wa-socket".to_string(),
+                source_session_name: Some("target-host".to_string()),
+            },
+        );
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                node_id,
+                authority_id,
+                transport_session_id,
+                source_socket_name,
+                source_session_name,
+            } => {
+                assert_eq!(node_id, "peer-a");
+                assert_eq!(authority_id, "peer-a");
+                assert_eq!(transport_session_id, "pty1");
+                assert_eq!(source_socket_name, "wa-socket");
+                assert_eq!(source_session_name.as_deref(), Some("target-host"));
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_runtime_owner_command_round_trips_list_targets_by_source_binding() {
+        let rendered = render_remote_runtime_owner_command(
+            &RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+                source_socket_name: "wa-socket".to_string(),
+                source_session_name: "target-host".to_string(),
+            },
+        );
+
+        let parsed =
+            parse_remote_runtime_owner_command(rendered.trim()).expect("command should parse");
+
+        match parsed {
+            RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+                source_socket_name,
+                source_session_name,
+            } => {
+                assert_eq!(source_socket_name, "wa-socket");
+                assert_eq!(source_session_name, "target-host");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_session_offline_by_source_command_records_binding_and_marks_offline() {
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([(
+                "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                OwnerStateRecord {
+                    node_id: "peer-a".to_string(),
+                    session: remote_session("peer-a", "pty1"),
+                    socket_panes: HashMap::new(),
+                    source_bindings: BTreeSet::new(),
+                },
+            )]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::MarkSessionOfflineBySource {
+                        node_id: "peer-a".to_string(),
+                        authority_id: "peer-a".to_string(),
+                        transport_session_id: "pty1".to_string(),
+                        source_socket_name: "wa-socket".to_string(),
+                        source_session_name: Some("target-host".to_string()),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        assert_eq!(response.as_deref(), Some("ok\n"));
+        let records = state
+            .records
+            .lock()
+            .expect("remote runtime owner state mutex should not be poisoned");
+        let record = records
+            .get("peer-a\tremote-peer:peer-a:pty1")
+            .expect("record should exist");
+        assert_eq!(record.session.availability, SessionAvailability::Offline);
+        assert!(record.source_bindings.contains(&PublishedTargetSourceBinding {
+            socket_name: "wa-socket".to_string(),
+            session_name: Some("target-host".to_string()),
+        }));
+        assert!(state
+            .offline_nodes
+            .lock()
+            .expect("remote runtime owner offline node mutex should not be poisoned")
+            .contains_key("peer-a"));
+    }
+
+    #[test]
+    fn list_targets_by_source_binding_command_returns_matching_target_hosts() {
+        let mut source_bindings = BTreeSet::new();
+        source_bindings.insert(PublishedTargetSourceBinding {
+            socket_name: "wa-socket".to_string(),
+            session_name: Some("target-host".to_string()),
+        });
+        let mut other_bindings = BTreeSet::new();
+        other_bindings.insert(PublishedTargetSourceBinding {
+            socket_name: "wa-other".to_string(),
+            session_name: Some("target-host".to_string()),
+        });
+        let state = RemoteRuntimeOwnerSharedState {
+            records: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "peer-a\tremote-peer:peer-a:pty1".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: remote_session("peer-a", "pty1"),
+                        socket_panes: HashMap::new(),
+                        source_bindings,
+                    },
+                ),
+                (
+                    "peer-a\tremote-peer:peer-a:pty2".to_string(),
+                    OwnerStateRecord {
+                        node_id: "peer-a".to_string(),
+                        session: {
+                            let mut session = remote_session("peer-a", "pty2");
+                            session.session_role = Some(WorkspaceSessionRole::WorkspaceChrome);
+                            session
+                        },
+                        socket_panes: HashMap::new(),
+                        source_bindings: other_bindings.clone(),
+                    },
+                ),
+            ]))),
+            offline_nodes: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            network: RemoteNetworkConfig {
+                port: 0,
+                connect: None,
+                node_id: None,
+                public_endpoint: None,
+            },
+            current_executable: PathBuf::from("/tmp/waitagent-test"),
+        };
+        let (mut client, mut server) = UnixStream::pair().expect("unix stream pair should open");
+        client
+            .write_all(
+                render_remote_runtime_owner_command(
+                    &RemoteRuntimeOwnerCommandEnvelope::ListTargetsBySourceBinding {
+                        source_socket_name: "wa-socket".to_string(),
+                        source_session_name: "target-host".to_string(),
+                    },
+                )
+                .as_bytes(),
+            )
+            .expect("command should write");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client shutdown should succeed");
+
+        let response =
+            handle_remote_runtime_owner_client(&state, &mut server).expect("command should handle");
+
+        let response = response.expect("response should exist");
+        let snapshot = parse_remote_runtime_owner_snapshot(&response).expect("snapshot should parse");
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].address.session_id(), "pty1");
+    }
+
+    #[test]
     fn remote_runtime_owner_command_round_trips_shutdown() {
         let rendered =
             render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Shutdown);
@@ -1865,6 +2327,7 @@ mod tests {
                     node_id: "peer-a".to_string(),
                     session: remote_session("peer-a", "pty1"),
                     socket_panes: HashMap::new(),
+                    source_bindings: BTreeSet::new(),
                 },
             )]))),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
@@ -1922,6 +2385,7 @@ mod tests {
                     node_id: "peer-a".to_string(),
                     session: remote_session("peer-a", "pty1"),
                     socket_panes: HashMap::from([("wa-socket".to_string(), "%42".to_string())]),
+                    source_bindings: BTreeSet::new(),
                 },
             )]))),
             offline_nodes: Arc::new(Mutex::new(HashMap::new())),
@@ -1993,6 +2457,7 @@ mod tests {
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -2001,6 +2466,7 @@ mod tests {
                     "peer-a\tremote-peer:peer-a:pty2".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty2"),
                     },
@@ -2009,6 +2475,7 @@ mod tests {
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },
@@ -2059,6 +2526,7 @@ mod tests {
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -2067,6 +2535,7 @@ mod tests {
                     "peer-a\tremote-peer:peer-a:pty2".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty2"),
                     },
@@ -2075,6 +2544,7 @@ mod tests {
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },
@@ -2147,6 +2617,7 @@ mod tests {
                     "peer-a\tremote-peer:peer-a:pty1".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-a".to_string(),
                         session: remote_session("peer-a", "pty1"),
                     },
@@ -2155,6 +2626,7 @@ mod tests {
                     "peer-b\tremote-peer:peer-b:pty9".to_string(),
                     OwnerStateRecord {
                         socket_panes: HashMap::new(),
+                        source_bindings: BTreeSet::new(),
                         node_id: "peer-b".to_string(),
                         session: remote_session("peer-b", "pty9"),
                     },

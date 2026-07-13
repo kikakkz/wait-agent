@@ -4,7 +4,6 @@ use crate::domain::session_catalog::{
     SessionTransport,
 };
 use crate::domain::workspace::WorkspaceSessionRole;
-use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
 };
@@ -976,29 +975,6 @@ pub(super) fn discovered_remote_session_from_envelope(
             exited_session: None,
         }),
     }
-}
-
-pub(super) fn mark_target_offline_in_store(
-    store: &PublishedTargetStore,
-    socket_name: &str,
-    session_name: &str,
-    target_id: &str,
-) -> Result<bool, LifecycleError> {
-    let records = store
-        .list_records_for_source_binding(socket_name, session_name)
-        .map_err(remote_target_publication_error)?;
-    let mut changed = false;
-    for record in records {
-        if record.target.address.id().as_str() != target_id {
-            continue;
-        }
-        let mut offline_target = record.target.clone();
-        offline_target.availability = SessionAvailability::Offline;
-        changed |= store
-            .upsert_target_from_source(socket_name, Some(session_name), &offline_target)
-            .map_err(remote_target_publication_error)?;
-    }
-    Ok(changed)
 }
 
 pub(super) fn spawn_socket_chrome_refresh(

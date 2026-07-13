@@ -3,7 +3,6 @@ use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionAvailability;
 use crate::domain::session_catalog::SessionTransport;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::session_catalog_snapshot_store::SessionCatalogSnapshotStore;
 use crate::infra::tmux::TmuxSessionGateway;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
@@ -17,10 +16,43 @@ use std::time::{Duration, Instant};
 
 const REMOTE_OWNER_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalCatalogReadMode {
-    ProjectionFirst,
-    FreshTmux,
+/// In-memory cache for local tmux session snapshots.
+///
+/// This replaces `SessionCatalogSnapshotStore` and avoids writing session state
+/// to disk. The store is meant to be shared by cloning it across the runtimes
+/// that need a consistent view of the same local tmux socket.
+#[derive(Debug, Clone, Default)]
+pub struct SessionCatalogMemoryStore {
+    snapshots: Arc<Mutex<HashMap<String, Option<Vec<ManagedSessionRecord>>>>>,
+}
+
+impl SessionCatalogMemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn load(&self, socket_name: &str) -> Option<Vec<ManagedSessionRecord>> {
+        self.snapshots
+            .lock()
+            .expect("session catalog memory store mutex should not be poisoned")
+            .get(socket_name)
+            .cloned()
+            .flatten()
+    }
+
+    pub fn store(&self, socket_name: &str, sessions: &[ManagedSessionRecord]) {
+        self.snapshots
+            .lock()
+            .expect("session catalog memory store mutex should not be poisoned")
+            .insert(socket_name.to_string(), Some(sessions.to_vec()));
+    }
+
+    pub fn remove(&self, socket_name: &str) {
+        self.snapshots
+            .lock()
+            .expect("session catalog memory store mutex should not be poisoned")
+            .remove(socket_name);
+    }
 }
 
 pub trait TargetCatalogGateway {
@@ -46,7 +78,7 @@ pub struct DefaultTargetCatalogGateway {
     remote_runtime_owner: RemoteRuntimeOwnerRuntime,
     current_socket_name: Option<String>,
     remote_snapshot_cache: Arc<Mutex<Option<CachedRemoteRuntimeOwnerSnapshot>>>,
-    local_catalog_read_mode: LocalCatalogReadMode,
+    local_session_store: SessionCatalogMemoryStore,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +93,7 @@ impl DefaultTargetCatalogGateway {
         Self::from_build_env_with_current_socket_name_and_network(
             current_tmux_socket_name_from_env(),
             None,
+            SessionCatalogMemoryStore::new(),
         )
     }
 
@@ -68,18 +101,35 @@ impl DefaultTargetCatalogGateway {
         Self::from_build_env_with_current_socket_name_and_network(
             current_tmux_socket_name_from_env(),
             Some(network),
+            SessionCatalogMemoryStore::new(),
+        )
+    }
+
+    pub fn from_build_env_with_network_and_store(
+        network: RemoteNetworkConfig,
+        local_session_store: SessionCatalogMemoryStore,
+    ) -> Result<Self, TmuxError> {
+        Self::from_build_env_with_current_socket_name_and_network(
+            current_tmux_socket_name_from_env(),
+            Some(network),
+            local_session_store,
         )
     }
 
     pub fn from_build_env_with_socket_name(
         socket_name: impl Into<String>,
     ) -> Result<Self, TmuxError> {
-        Self::from_build_env_with_current_socket_name_and_network(Some(socket_name.into()), None)
+        Self::from_build_env_with_current_socket_name_and_network(
+            Some(socket_name.into()),
+            None,
+            SessionCatalogMemoryStore::new(),
+        )
     }
 
     fn from_build_env_with_current_socket_name_and_network(
         current_socket_name: Option<String>,
         network: Option<RemoteNetworkConfig>,
+        local_session_store: SessionCatalogMemoryStore,
     ) -> Result<Self, TmuxError> {
         let local_tmux = EmbeddedTmuxBackend::from_build_env()?;
         let network = network
@@ -100,13 +150,19 @@ impl DefaultTargetCatalogGateway {
             })?,
             current_socket_name,
             remote_snapshot_cache: Arc::new(Mutex::new(None)),
-            local_catalog_read_mode: LocalCatalogReadMode::ProjectionFirst,
+            local_session_store,
         })
     }
 
-    pub fn with_fresh_local_tmux(mut self) -> Self {
-        self.local_catalog_read_mode = LocalCatalogReadMode::FreshTmux;
+    pub fn with_fresh_local_tmux(self) -> Self {
+        if let Some(socket_name) = self.current_socket_name.as_deref() {
+            self.local_session_store.remove(socket_name);
+        }
         self
+    }
+
+    pub fn clear_local_session_store(&self, socket_name: &str) {
+        self.local_session_store.remove(socket_name);
     }
 
     pub fn list_local_targets_on_authority(
@@ -144,49 +200,26 @@ impl DefaultTargetCatalogGateway {
 
     fn local_targets_on_current_socket(&self) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         if let Some(socket_name) = self.current_socket_name.as_deref() {
-            match self.local_catalog_read_mode {
-                LocalCatalogReadMode::ProjectionFirst => {
-                    self.local_targets_from_projection_or_refresh(socket_name)
-                }
-                LocalCatalogReadMode::FreshTmux => {
-                    self.refresh_local_targets_on_socket(socket_name)
-                }
-            }
+            self.local_targets_on_socket(socket_name)
         } else {
             self.local_tmux.list_sessions()
         }
     }
 
-    fn local_targets_from_projection_or_refresh(
+    fn local_targets_on_socket(
         &self,
         socket_name: &str,
     ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
-        let store = SessionCatalogSnapshotStore::for_socket(socket_name);
-        match store.load() {
-            Ok(Some(sessions)) => {
-                let sessions = self.merge_live_local_content_panes(socket_name, sessions)?;
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] list_targets local_projection current_socket={:?} sessions={}",
-                    self.current_socket_name,
-                    sessions.len()
-                ));
-                Ok(sessions)
-            }
-            Ok(None) => self.refresh_local_targets_on_socket(socket_name),
-            Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] list_targets local_projection_failed current_socket={:?} error={}",
-                    self.current_socket_name, error
-                ));
-                self.refresh_local_targets_on_socket(socket_name)
-            }
+        if let Some(cached) = self.local_session_store.load(socket_name) {
+            let merged = self.merge_live_local_content_panes(socket_name, cached)?;
+            ERROR_LOG.log(format!(
+                "[diag-newhost] list_targets local_memory_cache current_socket={:?} sessions={}",
+                self.current_socket_name,
+                merged.len()
+            ));
+            return Ok(merged);
         }
-    }
 
-    fn refresh_local_targets_on_socket(
-        &self,
-        socket_name: &str,
-    ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         let session_backed = self
             .local_tmux
             .list_sessions_on_socket(&TmuxSocketName::new(socket_name))?;
@@ -194,12 +227,7 @@ impl DefaultTargetCatalogGateway {
             .local_tmux
             .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
         let sessions = merge_local_targets_by_identity(session_backed, pane_backed);
-        if let Err(error) = SessionCatalogSnapshotStore::for_socket(socket_name).store(&sessions) {
-            ERROR_LOG.log(format!(
-                "[diag-newhost] list_targets local_projection_store_failed current_socket={:?} error={}",
-                self.current_socket_name, error
-            ));
-        }
+        self.local_session_store.store(socket_name, &sessions);
         Ok(sessions)
     }
 
@@ -213,13 +241,7 @@ impl DefaultTargetCatalogGateway {
             .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
         let merged = merge_local_targets_by_identity(sessions.clone(), pane_backed);
         if merged != sessions {
-            if let Err(error) = SessionCatalogSnapshotStore::for_socket(socket_name).store(&merged)
-            {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] list_targets local_projection_live_pane_store_failed current_socket={:?} error={}",
-                    self.current_socket_name, error
-                ));
-            }
+            self.local_session_store.store(socket_name, &merged);
         }
         Ok(merged)
     }
@@ -502,6 +524,10 @@ impl TargetRegistryService<DefaultTargetCatalogGateway> {
     ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         self.gateway
             .list_local_workspace_chrome_targets_on_authority(authority_id)
+    }
+
+    pub fn clear_local_session_store(&self, socket_name: &str) {
+        self.gateway.clear_local_session_store(socket_name);
     }
 }
 

@@ -16,7 +16,6 @@ mod tests {
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use crate::infra::published_target_store::PublishedTargetStore;
     use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
     use crate::infra::remote_grpc_transport::{
         OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
@@ -29,6 +28,7 @@ mod tests {
     use crate::lifecycle::LifecycleError;
     use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
     use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
+    use crate::runtime::remote_runtime_owner_runtime::RemoteTargetSourceBindingResolver;
     use std::collections::HashMap;
     use std::fs;
     use std::io::{Read, Write};
@@ -37,7 +37,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[test]
     fn session_sync_delta_publishes_new_and_removed_sessions() {
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn exportable_local_sessions_for_socket_keeps_workspace_sessions_on_current_socket() {
-        let store = PublishedTargetStore::new(test_store_path("export-current-socket"));
+        let resolver = FakeResolver::default();
         let sessions = exportable_local_sessions_for_socket(
             vec![
                 session_with_role("wa-1", "workspace", WorkspaceSessionRole::WorkspaceChrome),
@@ -1059,7 +1059,7 @@ mod tests {
                 session_with_role("wa-2", "shell-2", WorkspaceSessionRole::TargetHost),
             ],
             "wa-1",
-            &store,
+            &resolver,
         );
 
         assert_eq!(sessions.len(), 2);
@@ -1073,7 +1073,6 @@ mod tests {
 
     #[test]
     fn exportable_local_target_host_keeps_cached_remote_identity_but_uses_live_runtime_metadata() {
-        let store = PublishedTargetStore::new(test_store_path("export-target-host-remote"));
         let local_target = ManagedSessionRecord {
             availability: SessionAvailability::Online,
             attached_clients: 2,
@@ -1097,11 +1096,9 @@ mod tests {
             current_path: Some(PathBuf::from("/tmp/cached")),
             task_state: ManagedSessionTaskState::Running,
         };
-        store
-            .upsert_target_from_source("wa-1", Some("shell-1"), &remote_target)
-            .expect("published target should upsert");
+        let resolver = FakeResolver::default().with_target("wa-1", "shell-1", remote_target.clone());
 
-        let sessions = exportable_local_sessions_for_socket(vec![local_target], "wa-1", &store);
+        let sessions = exportable_local_sessions_for_socket(vec![local_target], "wa-1", &resolver);
 
         assert_eq!(sessions.len(), 1);
         let exported = &sessions[0];
@@ -1561,6 +1558,40 @@ mod tests {
             .and_then(|receiver| receiver.try_recv().ok())
     }
 
+    #[derive(Clone, Default)]
+    struct FakeResolver {
+        targets: HashMap<(String, String), Vec<ManagedSessionRecord>>,
+    }
+
+    impl FakeResolver {
+        fn with_target(
+            mut self,
+            socket_name: &str,
+            session_name: &str,
+            target: ManagedSessionRecord,
+        ) -> Self {
+            self.targets
+                .entry((socket_name.to_string(), session_name.to_string()))
+                .or_default()
+                .push(target);
+            self
+        }
+    }
+
+    impl RemoteTargetSourceBindingResolver for FakeResolver {
+        fn list_remote_targets_for_source_binding(
+            &self,
+            source_socket_name: &str,
+            source_session_name: &str,
+        ) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
+            Ok(self
+                .targets
+                .get(&(source_socket_name.to_string(), source_session_name.to_string()))
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
     fn session(socket_name: &str, session_id: &str) -> ManagedSessionRecord {
         session_with_role(socket_name, session_id, WorkspaceSessionRole::TargetHost)
     }
@@ -1584,16 +1615,5 @@ mod tests {
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Running,
         }
-    }
-
-    fn test_store_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "waitagent-session-sync-{name}-{}-{nanos}.tsv",
-            std::process::id()
-        ))
     }
 }

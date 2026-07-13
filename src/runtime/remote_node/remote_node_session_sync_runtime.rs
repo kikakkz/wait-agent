@@ -6,7 +6,6 @@ use crate::cli::{
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::published_target_store::PublishedTargetStore;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
@@ -18,6 +17,9 @@ use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublica
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
 use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
+use crate::runtime::remote_runtime_owner_runtime::{
+    RemoteRuntimeOwnerRuntime, RemoteTargetSourceBindingResolver,
+};
 use crate::runtime::sidecar_process_runtime::{
     spawn_waitagent_sidecar, spawn_waitagent_sidecar_child,
 };
@@ -57,19 +59,19 @@ pub trait LocalSessionCatalog: Send + 'static {
 pub struct SocketScopedLocalSessionCatalog<G> {
     gateway: G,
     socket_name: TmuxSocketName,
-    published_target_store: PublishedTargetStore,
+    remote_target_resolver: Arc<dyn RemoteTargetSourceBindingResolver>,
 }
 
 impl<G> SocketScopedLocalSessionCatalog<G> {
     pub fn new(
         gateway: G,
         socket_name: TmuxSocketName,
-        published_target_store: PublishedTargetStore,
+        remote_target_resolver: impl RemoteTargetSourceBindingResolver + 'static,
     ) -> Self {
         Self {
             gateway,
             socket_name,
-            published_target_store,
+            remote_target_resolver: Arc::new(remote_target_resolver),
         }
     }
 }
@@ -96,7 +98,7 @@ where
                 &active_targets,
             ),
             self.socket_name.as_str(),
-            &self.published_target_store,
+            self.remote_target_resolver.as_ref(),
         ))
     }
 
@@ -236,7 +238,7 @@ impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBa
             SocketScopedLocalSessionCatalog::new(
                 EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
                 TmuxSocketName::new(socket_name),
-                PublishedTargetStore::new(std::path::PathBuf::from("/dev/null")),
+                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
             ),
             GrpcRemoteNodeTransport::new(),
             SidecarLocalTargetExitObserver::from_build_env(network.clone())?,

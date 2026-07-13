@@ -91,6 +91,27 @@ impl RemoteRuntimeOwnerClient {
             RemoteRuntimeOwnerClient::Noop => Ok(()),
         }
     }
+
+    fn mark_session_offline_by_source(
+        &self,
+        node_id: &str,
+        authority_id: &str,
+        transport_session_id: &str,
+        source_socket_name: &str,
+        source_session_name: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        match self {
+            RemoteRuntimeOwnerClient::Runtime(runtime) => runtime.mark_session_offline_by_source(
+                node_id,
+                authority_id,
+                transport_session_id,
+                source_socket_name,
+                source_session_name,
+            ),
+            #[cfg(test)]
+            RemoteRuntimeOwnerClient::Noop => Ok(()),
+        }
+    }
 }
 
 impl RemoteTargetPublicationRuntime {
@@ -359,11 +380,18 @@ impl RemoteTargetPublicationRuntime {
         session_name: &str,
         target_id: &str,
     ) -> Result<(), LifecycleError> {
-        let store = crate::infra::published_target_store::PublishedTargetStore::default();
-        if mark_target_offline_in_store(&store, socket_name, session_name, target_id)? {
-            self.refresh_live_workspace_socket(socket_name)?;
-        }
-        Ok(())
+        let Some((authority_id, transport_session_id)) = parse_remote_target_id(target_id) else {
+            return Ok(());
+        };
+        let node_id = authority_id;
+        self.remote_runtime_owner.mark_session_offline_by_source(
+            node_id,
+            authority_id,
+            transport_session_id,
+            socket_name,
+            Some(session_name),
+        )?;
+        self.refresh_live_workspace_socket(socket_name)
     }
 
     pub fn run_publication_agent(
@@ -1156,6 +1184,11 @@ impl RemoteTargetPublicationRuntime {
             }
         }
     }
+}
+
+fn parse_remote_target_id(target_id: &str) -> Option<(&str, &str)> {
+    let suffix = target_id.strip_prefix("remote-peer:")?;
+    suffix.split_once(':')
 }
 
 fn ignore_missing_publication_sidecar(error: LifecycleError) -> Result<(), LifecycleError> {

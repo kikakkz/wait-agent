@@ -6,7 +6,7 @@ use crate::application::remote_session_creation_service::{
 };
 use crate::application::session_service::SessionService;
 use crate::application::target_registry_service::{
-    DefaultTargetCatalogGateway, TargetRegistryService,
+    DefaultTargetCatalogGateway, SessionCatalogMemoryStore, TargetRegistryService,
 };
 use crate::application::workspace_path_service::WorkspacePathService;
 use crate::application::workspace_service::WorkspaceService;
@@ -19,7 +19,6 @@ use crate::cli::{
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::session_catalog_snapshot_store::SessionCatalogSnapshotStore;
 use crate::infra::tmux::TmuxLayoutGateway;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSessionName, TmuxSocketName,
@@ -137,9 +136,13 @@ impl WorkspaceCommandRuntime {
             network.clone(),
         );
         let session_service = SessionService::new(backend.clone());
+        let local_session_store = SessionCatalogMemoryStore::new();
         let target_registry = TargetRegistryService::new(
-            DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
-                .map_err(tmux_runtime_error)?,
+            DefaultTargetCatalogGateway::from_build_env_with_network_and_store(
+                network.clone(),
+                local_session_store.clone(),
+            )
+            .map_err(tmux_runtime_error)?,
         );
         let main_slot_backend = backend.clone();
         let target_host_runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
@@ -174,8 +177,11 @@ impl WorkspaceCommandRuntime {
                 target_host_runtime,
                 WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
                 TargetRegistryService::new(
-                    DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
-                        .map_err(tmux_runtime_error)?,
+                    DefaultTargetCatalogGateway::from_build_env_with_network_and_store(
+                        network.clone(),
+                        local_session_store.clone(),
+                    )
+                    .map_err(tmux_runtime_error)?,
                 ),
                 current_executable,
                 network.clone(),
@@ -184,8 +190,11 @@ impl WorkspaceCommandRuntime {
             fullscreen_runtime: NativePaneFullscreenRuntime::new(
                 backend.clone(),
                 TargetRegistryService::new(
-                    DefaultTargetCatalogGateway::from_build_env_with_network(network.clone())
-                        .map_err(tmux_runtime_error)?,
+                    DefaultTargetCatalogGateway::from_build_env_with_network_and_store(
+                        network.clone(),
+                        local_session_store.clone(),
+                    )
+                    .map_err(tmux_runtime_error)?,
                 ),
                 WorkspaceLayoutRuntime::from_build_env_with_network(network.clone())?,
             ),
@@ -626,7 +635,8 @@ impl WorkspaceCommandRuntime {
             .kill_server(&socket_name)
             .map_err(tmux_runtime_error)?;
         self.unregister_live_workspace_socket(socket_name.as_str());
-        SessionCatalogSnapshotStore::for_socket(socket_name.as_str()).remove();
+        self.target_registry
+            .clear_local_session_store(socket_name.as_str());
         println!(
             "stopped waitagent server on socket `{}`",
             socket_name.as_str()
