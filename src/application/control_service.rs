@@ -102,11 +102,7 @@ where
             main_pane,
             &sidebar_bindings.show_command,
         )?;
-        self.bind_waitagent_footer_controls_with_panes(
-            workspace,
-            footer_pane,
-            footer_bindings,
-        )
+        self.bind_waitagent_footer_controls_with_panes(workspace, footer_pane, footer_bindings)
     }
 
     fn configure_session_chrome(
@@ -629,11 +625,13 @@ mod tests {
             main: &TmuxPaneId,
             command: &str,
         ) -> Result<(), Self::Error> {
-            self.calls.borrow_mut().push(Call::BindWaitagentSidebarToggle(
-                key.to_string(),
-                main.as_str().to_string(),
-                command.to_string(),
-            ));
+            self.calls
+                .borrow_mut()
+                .push(Call::BindWaitagentSidebarToggle(
+                    key.to_string(),
+                    main.as_str().to_string(),
+                    command.to_string(),
+                ));
             Ok(())
         }
 

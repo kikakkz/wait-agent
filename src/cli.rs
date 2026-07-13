@@ -1791,10 +1791,7 @@ impl Error for CliError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        default_remote_node_port, Cli, Command, RuntimeCommandSignal, SidebarFocus,
-        DEFAULT_REMOTE_NODE_PORT,
-    };
+    use super::{default_remote_node_port, Cli, Command, RuntimeCommandSignal, SidebarFocus};
 
     fn parse(args: &[&str]) -> Cli {
         let argv = args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>();

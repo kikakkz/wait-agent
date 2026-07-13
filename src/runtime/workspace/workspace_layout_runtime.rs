@@ -245,14 +245,16 @@ impl WorkspaceLayoutRuntime {
         let sidebar_bindings = self.sidebar_bindings(workspace);
         let footer_bindings = self.footer_menu_bindings(workspace);
         self.control_service
-            .sync_workspace_controls(workspace, &layout, Some(&sidebar_bindings), Some(&footer_bindings))
+            .sync_workspace_controls(
+                workspace,
+                &layout,
+                Some(&sidebar_bindings),
+                Some(&footer_bindings),
+            )
             .map_err(tmux_layout_error)
     }
 
-    pub fn run_toggle_sidebar(
-        &self,
-        command: ToggleSidebarCommand,
-    ) -> Result<(), LifecycleError> {
+    pub fn run_toggle_sidebar(&self, command: ToggleSidebarCommand) -> Result<(), LifecycleError> {
         let workspace = TmuxWorkspaceHandle {
             workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
             socket_name: TmuxSocketName::new(command.socket_name.clone()),

@@ -186,11 +186,7 @@ fn bind_waitagent_sidebar_back_args(
     )
 }
 
-fn bind_waitagent_sidebar_hide_args(
-    key: &str,
-    sidebar: &TmuxPaneId,
-    command: &str,
-) -> Vec<String> {
+fn bind_waitagent_sidebar_hide_args(key: &str, sidebar: &TmuxPaneId, command: &str) -> Vec<String> {
     bind_key_args(
         key,
         false,

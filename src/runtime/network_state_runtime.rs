@@ -305,7 +305,10 @@ mod tests {
 
     #[test]
     fn default_port_constant_matches_network_default() {
-        assert_eq!(RemoteNetworkConfig::default().port, default_remote_node_port());
+        assert_eq!(
+            RemoteNetworkConfig::default().port,
+            default_remote_node_port()
+        );
     }
 
     #[test]
