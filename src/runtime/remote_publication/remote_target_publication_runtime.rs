@@ -843,13 +843,6 @@ impl RemoteTargetPublicationRuntime {
                 if let Some(session_name) = session_name {
                     if self.live_content_pane_for_session(&command.socket_name, session_name)? {
                         self.signal_source_session_refresh(&command.socket_name, session_name)?;
-                        return Ok(());
-                    }
-                    if publication_owner_available(&remote_target_publication_owner_socket_path(
-                        &command.socket_name,
-                        session_name,
-                    )) {
-                        return Ok(());
                     }
                     self.notify_sidebar_target_exited(&command.socket_name, session_name)?;
                 }
