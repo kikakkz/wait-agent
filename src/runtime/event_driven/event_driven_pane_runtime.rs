@@ -500,10 +500,7 @@ fn spawn_chrome_refresh_watcher(
                 }
             }
             Ok(ChromeRefreshEvent::TargetExited { session_name }) => {
-                if tx
-                    .send(PaneEvent::TargetExited { session_name })
-                    .is_err()
-                {
+                if tx.send(PaneEvent::TargetExited { session_name }).is_err() {
                     break;
                 }
             }

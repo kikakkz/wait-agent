@@ -1,5 +1,5 @@
-pub use crate::infra::tmux_backend::{EmbeddedTmuxBackend, WaitagentSessionListEntry};
 pub(crate) use crate::infra::tmux_backend::ChromeRefreshEvent;
+pub use crate::infra::tmux_backend::{EmbeddedTmuxBackend, WaitagentSessionListEntry};
 pub(crate) use crate::infra::tmux_backend::{
     WAITAGENT_AGENT_SIGNAL_AGENT_OPTION, WAITAGENT_AGENT_SIGNAL_PANE_OPTION,
     WAITAGENT_AGENT_SIGNAL_STATE_OPTION, WAITAGENT_AGENT_SIGNAL_TOKEN_OPTION,

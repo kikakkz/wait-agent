@@ -437,12 +437,10 @@ impl EmbeddedTmuxBackend {
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(override_value))
             .unwrap_or_else(|| source.command_name.clone());
-        let foreground_argvs =
-            super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid);
-        let display_command_name = self.registry.display_command_name(
-            &foreground_argvs,
-            source.pane.current_command.as_deref(),
-        );
+        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid);
+        let display_command_name = self
+            .registry
+            .display_command_name(&foreground_argvs, source.pane.current_command.as_deref());
         let observed_task_state = || {
             let mut state = self
                 .registry

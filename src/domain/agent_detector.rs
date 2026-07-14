@@ -280,7 +280,10 @@ impl DetectorRegistry {
 
         // 2. Interpreter/wrapper scripts: python script.py -> script.py.
         for argv in argv_candidates {
-            if let Some(name) = self.interpreter_resolver.resolve(current, Some(argv.as_slice())) {
+            if let Some(name) = self
+                .interpreter_resolver
+                .resolve(current, Some(argv.as_slice()))
+            {
                 return name;
             }
         }

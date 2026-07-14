@@ -1377,11 +1377,8 @@ fn signal_reliable_chrome_refresh_target_exited(
     let Some(mut stream) = connect_chrome_refresh_owner_if_available(&socket_path)? else {
         return Ok(());
     };
-    writeln!(
-        stream,
-        "TARGET_EXITED {exited_target_session_name}"
-    )
-    .map_err(chrome_refresh_tmux_error)?;
+    writeln!(stream, "TARGET_EXITED {exited_target_session_name}")
+        .map_err(chrome_refresh_tmux_error)?;
     stream.flush().map_err(chrome_refresh_tmux_error)?;
     read_chrome_refresh_ok(&mut stream)
 }

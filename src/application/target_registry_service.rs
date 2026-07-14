@@ -176,7 +176,8 @@ impl DefaultTargetCatalogGateway {
     }
 
     pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
-        self.local_session_store.remove_target(socket_name, session_name);
+        self.local_session_store
+            .remove_target(socket_name, session_name);
     }
 
     pub fn list_local_targets_on_authority(
@@ -1033,7 +1034,12 @@ mod tests {
         let store = SessionCatalogMemoryStore::new();
         let socket_name = "wa-1";
         let sessions = vec![
-            session("wa-1", "workspace", "bash", WorkspaceSessionRole::WorkspaceChrome),
+            session(
+                "wa-1",
+                "workspace",
+                "bash",
+                WorkspaceSessionRole::WorkspaceChrome,
+            ),
             session("wa-1", "target-1", "bash", WorkspaceSessionRole::TargetHost),
             session("wa-1", "target-2", "bash", WorkspaceSessionRole::TargetHost),
         ];
@@ -1041,18 +1047,26 @@ mod tests {
 
         store.remove_target(socket_name, "target-1");
 
-        let remaining = store.load(socket_name).expect("socket should still have sessions");
+        let remaining = store
+            .load(socket_name)
+            .expect("socket should still have sessions");
         assert_eq!(remaining.len(), 2);
         assert!(
-            remaining.iter().all(|s| s.address.session_id() != "target-1"),
+            remaining
+                .iter()
+                .all(|s| s.address.session_id() != "target-1"),
             "removed target should no longer be in cache"
         );
         assert!(
-            remaining.iter().any(|s| s.address.session_id() == "workspace"),
+            remaining
+                .iter()
+                .any(|s| s.address.session_id() == "workspace"),
             "workspace session should remain"
         );
         assert!(
-            remaining.iter().any(|s| s.address.session_id() == "target-2"),
+            remaining
+                .iter()
+                .any(|s| s.address.session_id() == "target-2"),
             "other target should remain"
         );
     }

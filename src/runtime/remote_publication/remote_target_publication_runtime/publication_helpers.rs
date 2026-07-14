@@ -613,11 +613,12 @@ pub(super) fn parse_publication_sender_command(
             let command_name = decode_optional_agent_field(parts.next().ok_or_else(|| {
                 LifecycleError::Protocol("publish_target is missing command name field".to_string())
             })?)?;
-            let display_command_name = decode_optional_agent_field(parts.next().ok_or_else(|| {
-                LifecycleError::Protocol(
-                    "publish_target is missing display command name field".to_string(),
-                )
-            })?)?;
+            let display_command_name =
+                decode_optional_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing display command name field".to_string(),
+                    )
+                })?)?;
             let current_path = decode_optional_agent_field(parts.next().ok_or_else(|| {
                 LifecycleError::Protocol("publish_target is missing current path field".to_string())
             })?)?;

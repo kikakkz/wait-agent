@@ -188,8 +188,7 @@ fn kimi_compacting_status_line(line: &str) -> bool {
     let lowered = line.to_ascii_lowercase();
     // Kimi renders compacting as a status bullet line that toggles on/off:
     //   "● Compacting context..."  or  "  Compacting context..."
-    (line.starts_with("● ") || line.starts_with("  "))
-        && lowered.contains("compacting")
+    (line.starts_with("● ") || line.starts_with("  ")) && lowered.contains("compacting")
 }
 
 fn kimi_moon_spinner(line: &str) -> bool {

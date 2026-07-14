@@ -285,7 +285,8 @@ where
     G::Error: ToString,
 {
     pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
-        self.target_registry.remove_local_target(socket_name, session_name);
+        self.target_registry
+            .remove_local_target(socket_name, session_name);
     }
 }
 
