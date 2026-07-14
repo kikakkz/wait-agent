@@ -221,6 +221,7 @@ pub struct ManagedSessionRecord {
     pub attached_clients: usize,
     pub window_count: usize,
     pub command_name: Option<String>,
+    pub display_command_name: Option<String>,
     pub current_path: Option<PathBuf>,
     pub task_state: ManagedSessionTaskState,
 }
@@ -277,7 +278,10 @@ impl ManagedSessionRecord {
     pub fn display_label(&self) -> String {
         format!(
             "{}@{}",
-            self.command_name.as_deref().unwrap_or("bash"),
+            self.display_command_name
+                .as_deref()
+                .or(self.command_name.as_deref())
+                .unwrap_or("bash"),
             self.display_scope()
         )
     }
@@ -349,6 +353,7 @@ mod tests {
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         };
@@ -379,6 +384,7 @@ mod tests {
             attached_clients: 2,
             window_count: 3,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Running,
         };
@@ -400,6 +406,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -420,6 +427,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -442,6 +450,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -462,6 +471,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: None,
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Unknown,
         };
@@ -476,6 +486,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: None,
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Unknown,
         };

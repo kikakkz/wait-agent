@@ -187,6 +187,7 @@ mod tests {
                 session_role,
                 workspace_key,
                 command_name,
+                display_command_name: None,
                 current_path,
                 attached_clients,
                 window_count,
@@ -275,6 +276,7 @@ mod tests {
             attached_clients: 2,
             window_count: 3,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Unknown,
         }

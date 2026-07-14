@@ -226,6 +226,7 @@ pub(super) fn dispatch_publication_sender_command(
             session_role,
             workspace_key,
             command_name,
+            display_command_name,
             current_path,
             attached_clients,
             window_count,
@@ -254,6 +255,7 @@ pub(super) fn dispatch_publication_sender_command(
                 attached_clients,
                 window_count,
                 command_name,
+                display_command_name,
                 current_path: current_path.map(PathBuf::from),
                 task_state: ManagedSessionTaskState::parse(task_state).ok_or_else(|| {
                     LifecycleError::Protocol(format!(

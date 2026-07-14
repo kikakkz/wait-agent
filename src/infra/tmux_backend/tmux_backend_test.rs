@@ -1,5 +1,5 @@
 mod tests {
-    use super::super::EmbeddedTmuxBackend;
+    use super::super::{ChromeRefreshEvent, EmbeddedTmuxBackend};
     use crate::domain::agent_detector::DetectorRegistry;
     use crate::domain::workspace::{
         WorkspaceInstanceConfig, WorkspaceInstanceId, WorkspaceSessionRole,
@@ -1200,6 +1200,50 @@ mod tests {
         assert!(
             !socket_path.exists(),
             "owner socket should be removed after the last subscriber disconnects"
+        );
+        kill_server(&backend, &workspace);
+    }
+
+    #[test]
+    fn chrome_refresh_target_exited_signal_carries_session_name() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("chrome-refresh-target-exited"))
+            .expect("workspace bootstrap should succeed");
+        let backend_for_waiter = backend.clone();
+        let socket_name = workspace.socket_name.as_str().to_string();
+        let session_name = workspace.session_name.as_str().to_string();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let event = backend_for_waiter
+                .wait_for_chrome_refresh_event_on_socket(&socket_name, &session_name)
+                .expect("wait should unblock");
+            done_tx
+                .send(event)
+                .expect("waiter should report completion");
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        backend
+            .signal_chrome_refresh_target_exited(
+                workspace.socket_name.as_str(),
+                workspace.session_name.as_str(),
+                "target-2",
+            )
+            .expect("target exited signal should succeed");
+
+        let event = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter should wake");
+        assert!(
+            matches!(
+                event,
+                ChromeRefreshEvent::TargetExited {
+                    session_name
+                } if session_name == "target-2"
+            ),
+            "subscriber should receive target exited event with session name"
         );
         kill_server(&backend, &workspace);
     }

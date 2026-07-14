@@ -124,6 +124,7 @@ impl Default for OwnerStateRecord {
                 attached_clients: 0,
                 window_count: 0,
                 command_name: None,
+                display_command_name: None,
                 current_path: None,
                 task_state: ManagedSessionTaskState::Unknown,
             },
@@ -1732,6 +1733,7 @@ fn render_session_record(session: &ManagedSessionRecord) -> String {
         ),
         escape_optional_field(session.workspace_key.as_deref()),
         escape_optional_field(session.command_name.as_deref()),
+        escape_optional_field(session.display_command_name.as_deref()),
         escape_optional_field(current_path.as_deref()),
         session.attached_clients.to_string(),
         session.window_count.to_string(),
@@ -1768,6 +1770,9 @@ fn parse_session_record<'a>(
     })?)?;
     let command_name = unescape_optional_field(parts.next().ok_or_else(|| {
         LifecycleError::Protocol("session record is missing command name".to_string())
+    })?)?;
+    let display_command_name = unescape_optional_field(parts.next().ok_or_else(|| {
+        LifecycleError::Protocol("session record is missing display command name".to_string())
     })?)?;
     let current_path = unescape_optional_field(parts.next().ok_or_else(|| {
         LifecycleError::Protocol("session record is missing current path".to_string())
@@ -1808,6 +1813,7 @@ fn parse_session_record<'a>(
         attached_clients,
         window_count,
         command_name,
+        display_command_name,
         current_path,
         task_state,
     })
@@ -1938,6 +1944,7 @@ mod tests {
             attached_clients: 1,
             window_count: 2,
             command_name: Some("codex".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }

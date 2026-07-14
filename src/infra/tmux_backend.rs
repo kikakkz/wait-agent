@@ -815,6 +815,7 @@ impl EmbeddedTmuxBackend {
                 attached_clients: attached_clients.parse::<usize>().unwrap_or(0),
                 window_count: window_count.parse::<usize>().unwrap_or(1),
                 command_name: runtime.command_name,
+                display_command_name: runtime.display_command_name,
                 current_path: runtime.current_path,
                 task_state: runtime.task_state,
             });
@@ -889,7 +890,15 @@ impl EmbeddedTmuxBackend {
         socket_name: &str,
         session_name: &str,
     ) -> Result<(), TmuxError> {
-        wait_for_reliable_chrome_refresh(socket_name, session_name)
+        wait_for_reliable_chrome_refresh_event(socket_name, session_name).map(|_| ())
+    }
+
+    pub(crate) fn wait_for_chrome_refresh_event_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+    ) -> Result<ChromeRefreshEvent, TmuxError> {
+        wait_for_reliable_chrome_refresh_event(socket_name, session_name)
     }
 
     pub(crate) fn signal_chrome_refresh_on_socket(
@@ -898,6 +907,19 @@ impl EmbeddedTmuxBackend {
         session_name: &str,
     ) -> Result<(), TmuxError> {
         signal_reliable_chrome_refresh(socket_name, session_name)
+    }
+
+    pub(crate) fn signal_chrome_refresh_target_exited(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        exited_target_session_name: &str,
+    ) -> Result<(), TmuxError> {
+        signal_reliable_chrome_refresh_target_exited(
+            socket_name,
+            session_name,
+            exited_target_session_name,
+        )
     }
 
     pub(crate) fn run_chrome_refresh_owner_on_socket(
@@ -1281,10 +1303,16 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn wait_for_reliable_chrome_refresh(
+#[derive(Debug)]
+pub(crate) enum ChromeRefreshEvent {
+    Refresh,
+    TargetExited { session_name: String },
+}
+
+fn wait_for_reliable_chrome_refresh_event(
     socket_name: &str,
     session_name: &str,
-) -> Result<(), TmuxError> {
+) -> Result<ChromeRefreshEvent, TmuxError> {
     let socket_path = chrome_refresh_owner_socket_path(socket_name, session_name);
     for attempt in 0..2 {
         let result = CHROME_REFRESH_SUBSCRIBERS.with(|subscribers| {
@@ -1297,13 +1325,28 @@ fn wait_for_reliable_chrome_refresh(
             let stream = subscribers
                 .get_mut(&socket_path)
                 .expect("chrome refresh subscriber should be inserted");
-            let mut event = [0u8; 1];
+            let mut command = [0u8; 1];
             stream
-                .read_exact(&mut event)
-                .map_err(chrome_refresh_tmux_error)
+                .read_exact(&mut command)
+                .map_err(chrome_refresh_tmux_error)?;
+            match command[0] {
+                b'R' => Ok(ChromeRefreshEvent::Refresh),
+                b'X' => {
+                    let exited_session_name = read_chrome_refresh_line(stream)
+                        .map_err(chrome_refresh_tmux_error)?
+                        .trim()
+                        .to_string();
+                    Ok(ChromeRefreshEvent::TargetExited {
+                        session_name: exited_session_name,
+                    })
+                }
+                other => Err(TmuxError::new(format!(
+                    "unexpected chrome refresh event command: {other}"
+                ))),
+            }
         });
         if result.is_ok() {
-            return Ok(());
+            return result;
         }
         CHROME_REFRESH_SUBSCRIBERS.with(|subscribers| {
             subscribers.borrow_mut().remove(&socket_path);
@@ -1321,6 +1364,24 @@ fn signal_reliable_chrome_refresh(socket_name: &str, session_name: &str) -> Resu
         return Ok(());
     };
     writeln!(stream, "SIGNAL").map_err(chrome_refresh_tmux_error)?;
+    stream.flush().map_err(chrome_refresh_tmux_error)?;
+    read_chrome_refresh_ok(&mut stream)
+}
+
+fn signal_reliable_chrome_refresh_target_exited(
+    socket_name: &str,
+    session_name: &str,
+    exited_target_session_name: &str,
+) -> Result<(), TmuxError> {
+    let socket_path = chrome_refresh_owner_socket_path(socket_name, session_name);
+    let Some(mut stream) = connect_chrome_refresh_owner_if_available(&socket_path)? else {
+        return Ok(());
+    };
+    writeln!(
+        stream,
+        "TARGET_EXITED {exited_target_session_name}"
+    )
+    .map_err(chrome_refresh_tmux_error)?;
     stream.flush().map_err(chrome_refresh_tmux_error)?;
     read_chrome_refresh_ok(&mut stream)
 }
@@ -1552,6 +1613,18 @@ fn run_chrome_refresh_owner(listener: UnixListener, socket_path: PathBuf) {
                 let mut live_subscribers = Vec::with_capacity(subscribers.len());
                 for mut subscriber in subscribers.drain(..) {
                     if subscriber.write_all(b"R").is_ok() && subscriber.flush().is_ok() {
+                        live_subscribers.push(subscriber);
+                    }
+                }
+                subscribers = live_subscribers;
+            } else if let Some(exited_session_name) = request.strip_prefix("TARGET_EXITED ") {
+                let _ = writeln!(stream, "OK");
+                let mut live_subscribers = Vec::with_capacity(subscribers.len());
+                let payload = format!("X {exited_session_name}\n");
+                for mut subscriber in subscribers.drain(..) {
+                    if subscriber.write_all(payload.as_bytes()).is_ok()
+                        && subscriber.flush().is_ok()
+                    {
                         live_subscribers.push(subscriber);
                     }
                 }

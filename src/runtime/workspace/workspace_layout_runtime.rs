@@ -671,6 +671,31 @@ impl WorkspaceLayoutRuntime {
         Ok(())
     }
 
+    pub fn run_target_exited_chrome_refresh(
+        &self,
+        socket_name: &str,
+        exited_target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        let target_registry = TargetRegistryService::new(
+            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.to_string())
+                .map_err(tmux_layout_error)?
+                .with_fresh_local_tmux(),
+        );
+        let sessions = target_registry
+            .list_local_workspace_chrome_targets_on_authority(socket_name)
+            .map_err(tmux_layout_error)?;
+        for session in sessions {
+            self.backend
+                .signal_chrome_refresh_target_exited(
+                    session.address.server_id(),
+                    session.address.session_id(),
+                    exited_target_session_name,
+                )
+                .map_err(tmux_layout_error)?;
+        }
+        Ok(())
+    }
+
     fn refresh_workspace_chrome_targets(
         &self,
         sessions: &[crate::domain::session_catalog::ManagedSessionRecord],
@@ -1998,6 +2023,7 @@ mod tests {
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         };
@@ -2012,6 +2038,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: Some("bash".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Running,
         };

@@ -2048,6 +2048,7 @@ impl MainSlotRuntime {
                 attached_clients: 0,
                 window_count: 0,
                 command_name: None,
+                display_command_name: None,
                 current_path: None,
                 task_state: crate::domain::session_catalog::ManagedSessionTaskState::Unknown,
             }));
@@ -3302,6 +3303,7 @@ impl MainSlotRuntime {
                         attached_clients: 0,
                         window_count: 0,
                         command_name: None,
+                        display_command_name: None,
                         current_path: None,
                         task_state:
                             crate::domain::session_catalog::ManagedSessionTaskState::Unknown,

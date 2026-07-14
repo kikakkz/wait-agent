@@ -1,4 +1,6 @@
-use crate::application::target_registry_service::TargetRegistryService;
+use crate::application::target_registry_service::{
+    DefaultTargetCatalogGateway, TargetRegistryService,
+};
 use crate::cli::{RemoteNetworkConfig, UiPaneCommand};
 use crate::domain::local_runtime::ChromeSurface;
 use crate::domain::session_catalog::{
@@ -274,6 +276,16 @@ where
                 socket_name, error
             ));
         }
+    }
+}
+
+impl<G> EventDrivenTmuxPaneRuntime<G, DefaultTargetCatalogGateway>
+where
+    G: TmuxChromeGateway + Clone,
+    G::Error: ToString,
+{
+    pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
+        self.target_registry.remove_local_target(socket_name, session_name);
     }
 }
 
@@ -820,6 +832,7 @@ mod tests {
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }

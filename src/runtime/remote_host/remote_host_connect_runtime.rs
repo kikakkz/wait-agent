@@ -1079,6 +1079,7 @@ mod tests {
             attached_clients: 1,
             window_count: 1,
             command_name: Some("bash".to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }

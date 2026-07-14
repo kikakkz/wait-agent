@@ -53,6 +53,16 @@ impl SessionCatalogMemoryStore {
             .expect("session catalog memory store mutex should not be poisoned")
             .remove(socket_name);
     }
+
+    pub fn remove_target(&self, socket_name: &str, session_name: &str) {
+        let mut guard = self
+            .snapshots
+            .lock()
+            .expect("session catalog memory store mutex should not be poisoned");
+        if let Some(Some(sessions)) = guard.get_mut(socket_name) {
+            sessions.retain(|session| session.address.session_id() != session_name);
+        }
+    }
 }
 
 pub trait TargetCatalogGateway {
@@ -163,6 +173,10 @@ impl DefaultTargetCatalogGateway {
 
     pub fn clear_local_session_store(&self, socket_name: &str) {
         self.local_session_store.remove(socket_name);
+    }
+
+    pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
+        self.local_session_store.remove_target(socket_name, session_name);
     }
 
     pub fn list_local_targets_on_authority(
@@ -366,6 +380,7 @@ pub(crate) fn merge_local_targets_by_identity(
                 continue;
             }
             merged[index].command_name = target.command_name;
+            merged[index].display_command_name = target.display_command_name;
             merged[index].current_path = target.current_path;
             merged[index].task_state = target.task_state;
             merged[index].availability = target.availability;
@@ -529,6 +544,10 @@ impl TargetRegistryService<DefaultTargetCatalogGateway> {
     pub fn clear_local_session_store(&self, socket_name: &str) {
         self.gateway.clear_local_session_store(socket_name);
     }
+
+    pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
+        self.gateway.remove_local_target(socket_name, session_name);
+    }
 }
 
 #[cfg(test)]
@@ -621,7 +640,7 @@ fn current_tmux_socket_name_from_env() -> Option<String> {
 mod tests {
     use super::{
         is_activation_target, project_visible_targets, DefaultTargetCatalogGateway,
-        TargetCatalogGateway, TargetRegistryService,
+        SessionCatalogMemoryStore, TargetCatalogGateway, TargetRegistryService,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
@@ -1003,9 +1022,46 @@ mod tests {
             attached_clients: 1,
             window_count: 1,
             command_name: Some(command.to_string()),
+            display_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }
+    }
+
+    #[test]
+    fn session_catalog_memory_store_removes_target_for_socket() {
+        let store = SessionCatalogMemoryStore::new();
+        let socket_name = "wa-1";
+        let sessions = vec![
+            session("wa-1", "workspace", "bash", WorkspaceSessionRole::WorkspaceChrome),
+            session("wa-1", "target-1", "bash", WorkspaceSessionRole::TargetHost),
+            session("wa-1", "target-2", "bash", WorkspaceSessionRole::TargetHost),
+        ];
+        store.store(socket_name, &sessions);
+
+        store.remove_target(socket_name, "target-1");
+
+        let remaining = store.load(socket_name).expect("socket should still have sessions");
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining.iter().all(|s| s.address.session_id() != "target-1"),
+            "removed target should no longer be in cache"
+        );
+        assert!(
+            remaining.iter().any(|s| s.address.session_id() == "workspace"),
+            "workspace session should remain"
+        );
+        assert!(
+            remaining.iter().any(|s| s.address.session_id() == "target-2"),
+            "other target should remain"
+        );
+    }
+
+    #[test]
+    fn session_catalog_memory_store_remove_target_is_noop_for_unknown_socket() {
+        let store = SessionCatalogMemoryStore::new();
+        store.remove_target("wa-unknown", "target-1");
+        assert!(store.load("wa-unknown").is_none());
     }
 
     #[test]
@@ -1063,6 +1119,7 @@ mod tests {
             attached_clients: 0,
             window_count: 1,
             command_name: Some(command.to_string()),
+            display_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         }

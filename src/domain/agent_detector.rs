@@ -257,6 +257,50 @@ impl DetectorRegistry {
             .and_then(|detector| detector.signal_state_effect(event, payload))
     }
 
+    /// Derives a human-readable display command name from foreground process
+    /// argv candidates, similar to what `ps -ef` shows for the running process.
+    ///
+    /// Unlike `detect_command_name`, this does not use tmux's
+    /// `pane_current_command` (`/proc/comm`) as the primary source, because
+    /// programs like Chrome rewrite `comm` to profile names. Instead it uses
+    /// `/proc/<pid>/cmdline` (argv[0]) as the authoritative source.
+    pub fn display_command_name(
+        &self,
+        argv_candidates: &[Vec<String>],
+        pane_current_command: Option<&str>,
+    ) -> String {
+        let current = pane_current_command.unwrap_or_default();
+
+        // 1. Known agents (codex/kimi/claude) keep their agent name.
+        for argv in argv_candidates {
+            if let Some(name) = self.detect_from_process(current, Some(argv.as_slice())) {
+                return name.to_string();
+            }
+        }
+
+        // 2. Interpreter/wrapper scripts: python script.py -> script.py.
+        for argv in argv_candidates {
+            if let Some(name) = self.interpreter_resolver.resolve(current, Some(argv.as_slice())) {
+                return name;
+            }
+        }
+
+        // 3. Foreground non-shell binary basename.
+        if let Some(argv) = argv_candidates.iter().find(|argv| {
+            argv.first()
+                .map(|cmd| cmd.rsplit('/').next().unwrap_or(cmd))
+                .map(|base| !self.is_shell_name(base))
+                .unwrap_or(false)
+        }) {
+            if let Some(argv0) = argv.first() {
+                return argv0.rsplit('/').next().unwrap_or(argv0).to_string();
+            }
+        }
+
+        // 4. Shell prompt or no foreground process.
+        current.to_string()
+    }
+
     /// Returns true if the given name is a known shell program.
     #[allow(dead_code)]
     pub fn is_shell_name(&self, name: &str) -> bool {

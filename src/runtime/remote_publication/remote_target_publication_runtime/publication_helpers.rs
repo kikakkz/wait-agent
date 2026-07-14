@@ -75,6 +75,7 @@ pub(crate) enum PublicationSenderCommand {
         session_role: Option<&'static str>,
         workspace_key: Option<String>,
         command_name: Option<String>,
+        display_command_name: Option<String>,
         current_path: Option<String>,
         attached_clients: usize,
         window_count: usize,
@@ -115,6 +116,7 @@ pub(super) struct PublicationOwnerSnapshot {
     pub(super) attached_clients: usize,
     pub(super) window_count: usize,
     pub(super) command_name: Option<String>,
+    pub(super) display_command_name: Option<String>,
     pub(super) current_path: Option<PathBuf>,
     pub(super) task_state: ManagedSessionTaskState,
 }
@@ -345,12 +347,13 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
             session_role,
             workspace_key,
             command_name,
+            display_command_name,
             current_path,
             attached_clients,
             window_count,
             task_state,
         } => format!(
-            "publish_target\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "publish_target\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             base64::engine::general_purpose::STANDARD.encode(authority_id.as_bytes()),
             base64::engine::general_purpose::STANDARD.encode(transport_session_id.as_bytes()),
             encode_optional_agent_field(source_session_name.as_deref()),
@@ -359,6 +362,7 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
             encode_optional_static_agent_field(*session_role),
             encode_optional_agent_field(workspace_key.as_deref()),
             encode_optional_agent_field(command_name.as_deref()),
+            encode_optional_agent_field(display_command_name.as_deref()),
             encode_optional_agent_field(current_path.as_deref()),
             attached_clients,
             window_count,
@@ -609,6 +613,11 @@ pub(super) fn parse_publication_sender_command(
             let command_name = decode_optional_agent_field(parts.next().ok_or_else(|| {
                 LifecycleError::Protocol("publish_target is missing command name field".to_string())
             })?)?;
+            let display_command_name = decode_optional_agent_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "publish_target is missing display command name field".to_string(),
+                )
+            })?)?;
             let current_path = decode_optional_agent_field(parts.next().ok_or_else(|| {
                 LifecycleError::Protocol("publish_target is missing current path field".to_string())
             })?)?;
@@ -653,6 +662,7 @@ pub(super) fn parse_publication_sender_command(
                 session_role,
                 workspace_key,
                 command_name,
+                display_command_name,
                 current_path,
                 attached_clients,
                 window_count,
@@ -831,6 +841,7 @@ pub(super) fn publication_owner_snapshot(
         attached_clients: local_target.attached_clients,
         window_count: local_target.window_count,
         command_name: local_target.command_name.clone(),
+        display_command_name: local_target.display_command_name.clone(),
         current_path: local_target.current_path.clone(),
         task_state: local_target.task_state,
     }
@@ -865,6 +876,7 @@ pub(super) fn published_remote_target_from_local(
         attached_clients: local_target.attached_clients,
         window_count: local_target.window_count,
         command_name: local_target.command_name.clone(),
+        display_command_name: local_target.display_command_name.clone(),
         current_path: local_target.current_path.clone(),
         task_state: local_target.task_state,
     }
@@ -1063,6 +1075,7 @@ pub(super) fn published_remote_target_record_from_payload(
         attached_clients: payload.attached_clients,
         window_count: payload.window_count,
         command_name: payload.command_name.clone(),
+        display_command_name: payload.display_command_name.clone(),
         current_path: payload.current_path.as_ref().map(PathBuf::from),
         task_state: ManagedSessionTaskState::parse(payload.task_state).ok_or_else(|| {
             LifecycleError::Protocol(format!(
@@ -1195,6 +1208,7 @@ pub(crate) fn signal_publication_target_published(
             session_role: target.session_role.map(|role| role.as_str()),
             workspace_key: target.workspace_key.clone(),
             command_name: target.command_name.clone(),
+            display_command_name: target.display_command_name.clone(),
             current_path: target
                 .current_path
                 .as_ref()

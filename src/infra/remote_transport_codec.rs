@@ -436,6 +436,7 @@ fn write_payload(
             write_optional_static_string(writer, payload.session_role)?;
             write_optional_string(writer, payload.workspace_key.as_deref())?;
             write_optional_string(writer, payload.command_name.as_deref())?;
+            write_optional_string(writer, payload.display_command_name.as_deref())?;
             write_optional_string(writer, payload.current_path.as_deref())?;
             write_usize(writer, payload.attached_clients)?;
             write_usize(writer, payload.window_count)?;
@@ -594,6 +595,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             session_role: read_optional_static_string(reader)?,
             workspace_key: read_optional_string(reader)?,
             command_name: read_optional_string(reader)?,
+            display_command_name: read_optional_string(reader)?,
             current_path: read_optional_string(reader)?,
             attached_clients: read_usize(reader)?,
             window_count: read_usize(reader)?,
@@ -1153,6 +1155,7 @@ mod tests {
                 session_role: Some("target-host"),
                 workspace_key: Some("wk-1".to_string()),
                 command_name: Some("codex".to_string()),
+                display_command_name: None,
                 current_path: Some("/tmp/demo".to_string()),
                 attached_clients: 2,
                 window_count: 3,
@@ -1301,6 +1304,7 @@ mod tests {
                     session_role: Some("target-host"),
                     workspace_key: Some("wk-1".to_string()),
                     command_name: Some("codex".to_string()),
+                    display_command_name: None,
                     current_path: Some("/tmp/demo".to_string()),
                     attached_clients: 2,
                     window_count: 1,

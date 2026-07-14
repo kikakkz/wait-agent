@@ -679,6 +679,7 @@ fn map_target_published_envelope(
                 .map(|role| role.as_str()),
             workspace_key: payload.workspace_key.clone(),
             command_name: payload.command_name.clone(),
+            display_command_name: None,
             current_path: payload.current_path.clone(),
             attached_clients: payload.attached_count.unwrap_or(0) as usize,
             window_count: payload.window_count.unwrap_or(0) as usize,

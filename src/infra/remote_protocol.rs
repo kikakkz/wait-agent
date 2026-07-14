@@ -271,6 +271,7 @@ pub struct TargetPublishedPayload {
     pub session_role: Option<&'static str>,
     pub workspace_key: Option<String>,
     pub command_name: Option<String>,
+    pub display_command_name: Option<String>,
     pub current_path: Option<String>,
     pub attached_clients: usize,
     pub window_count: usize,

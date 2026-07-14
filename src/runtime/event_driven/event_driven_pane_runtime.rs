@@ -5,7 +5,8 @@ use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, UiPaneCommand
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
+    ChromeRefreshEvent, EmbeddedTmuxBackend, TmuxLayoutGateway, TmuxSessionName, TmuxSocketName,
+    TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -158,6 +159,25 @@ impl EventDrivenPaneRuntime {
                         break;
                     }
                 },
+                PaneEvent::TargetExited { session_name } => {
+                    chrome.remove_local_target(&command.socket_name, &session_name);
+                    match chrome
+                        .refresh_sidebar_for_pane(&command, pane_target.as_deref().unwrap_or(""))
+                    {
+                        Ok(update) => {
+                            if let Err(error) = redraw_sidebar(update, &mut last_buffer) {
+                                ERROR_LOG.log(format!(
+                                    "[diag] sidebar redraw error on target exited: {error}"
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            ERROR_LOG.log(format!(
+                                "[diag] sidebar refresh error on target exited: {error}"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -207,6 +227,12 @@ impl EventDrivenPaneRuntime {
                         break;
                     }
                 },
+                PaneEvent::TargetExited { session_name } => {
+                    chrome.remove_local_target(&command.socket_name, &session_name);
+                    let update = chrome
+                        .refresh_footer_for_pane(&command, pane_target.as_deref().unwrap_or(""))?;
+                    apply_footer_update(&self.backend, &workspace, update, &mut last_buffer)?;
+                }
                 PaneEvent::Input(_) => {}
             }
         }
@@ -349,6 +375,7 @@ enum PaneEvent {
     Input(Vec<u8>),
     Resize,
     Refresh,
+    TargetExited { session_name: String },
 }
 
 struct PaneResizeWatcher {
@@ -464,16 +491,23 @@ fn spawn_chrome_refresh_watcher(
     tx: mpsc::Sender<PaneEvent>,
 ) {
     thread::spawn(move || loop {
-        if backend
-            .wait_for_chrome_refresh_on_socket(&socket_name, &session_name)
-            .is_err()
-        {
-            break;
-        }
-        if pending_refreshes.fetch_add(1, Ordering::AcqRel) == 0
-            && tx.send(PaneEvent::Refresh).is_err()
-        {
-            break;
+        match backend.wait_for_chrome_refresh_event_on_socket(&socket_name, &session_name) {
+            Ok(ChromeRefreshEvent::Refresh) => {
+                if pending_refreshes.fetch_add(1, Ordering::AcqRel) == 0
+                    && tx.send(PaneEvent::Refresh).is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ChromeRefreshEvent::TargetExited { session_name }) => {
+                if tx
+                    .send(PaneEvent::TargetExited { session_name })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     });
 }

@@ -421,6 +421,7 @@ fn exited_source_publication_state(
         attached_clients: 0,
         window_count: 0,
         command_name: None,
+        display_command_name: None,
         current_path: None,
         task_state: ManagedSessionTaskState::Unknown,
     }

@@ -158,9 +158,14 @@ fn apply_temporal_input_hysteresis(
     if state != ManagedSessionTaskState::Input {
         return state;
     }
-    if policy == InputStabilityPolicy::Immediate {
-        return state;
-    }
+
+    // Immediate means the agent has a reliable input boundary, so once the
+    // content is stable we can transition to Input right away. It does NOT
+    // mean we should ignore actively changing content above the prompt.
+    let required_stable = match policy {
+        InputStabilityPolicy::Immediate => 1,
+        InputStabilityPolicy::StableContent => STABLE_THRESHOLD,
+    };
 
     let plain_lines: Vec<&str> = pane_text.lines().map(|l| l.trim_end()).collect();
     let content_end = pane_content_boundary(&plain_lines);
@@ -171,11 +176,12 @@ fn apply_temporal_input_hysteresis(
         if let Some(prev) = cache.get(session_key) {
             if prev.hash == current_sig {
                 // Content stable — count consecutive stable polls.
-                // Only transition to Input after the content has
-                // been stable for STABLE_THRESHOLD polls, so brief
-                // pauses during streaming don't cause I/R flicker.
+                // The required count depends on the policy: Immediate agents
+                // can flip to Input as soon as the content stops changing,
+                // while StableContent agents wait for STABLE_THRESHOLD polls
+                // so brief pauses during streaming don't cause I/R flicker.
                 let new_count = prev.stable_count.saturating_add(1);
-                if new_count < STABLE_THRESHOLD {
+                if new_count < required_stable {
                     state = ManagedSessionTaskState::Running;
                 }
                 cache.insert(
@@ -270,7 +276,10 @@ fn pane_content_boundary(lines: &[&str]) -> usize {
     // at the prompt never changes the content signature.
     if let Some(pos) = lines.iter().rposition(|line| {
         let trimmed = line.trim();
-        trimmed.starts_with('›') || trimmed.starts_with('❯')
+        trimmed.starts_with('›')
+            || trimmed.starts_with('❯')
+            // Kimi draws its input prompt inside a box-drawing frame as "│ >".
+            || trimmed.starts_with("│ >")
     }) {
         return pos;
     }
@@ -291,6 +300,7 @@ fn pane_content_boundary(lines: &[&str]) -> usize {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TmuxSessionRuntimeMetadata {
     pub(super) command_name: Option<String>,
+    pub(super) display_command_name: Option<String>,
     pub(super) current_path: Option<PathBuf>,
     pub(super) task_state: ManagedSessionTaskState,
     pub(super) is_dead: bool,
@@ -385,6 +395,7 @@ impl EmbeddedTmuxBackend {
                 attached_clients: 0,
                 window_count: 1,
                 command_name: runtime.command_name,
+                display_command_name: runtime.display_command_name,
                 current_path: runtime.current_path,
                 task_state: runtime.task_state,
             });
@@ -426,6 +437,12 @@ impl EmbeddedTmuxBackend {
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(override_value))
             .unwrap_or_else(|| source.command_name.clone());
+        let foreground_argvs =
+            super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid);
+        let display_command_name = self.registry.display_command_name(
+            &foreground_argvs,
+            source.pane.current_command.as_deref(),
+        );
         let observed_task_state = || {
             let mut state = self
                 .registry
@@ -460,6 +477,7 @@ impl EmbeddedTmuxBackend {
         };
         TmuxSessionRuntimeMetadata {
             command_name: Some(command_name),
+            display_command_name: Some(display_command_name),
             current_path: source.pane.current_path,
             task_state,
             is_dead: source.pane.is_dead,
@@ -973,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_input_policy_skips_temporal_running_override() {
+    fn immediate_input_policy_overrides_to_running_while_content_changes() {
         clear_temporal_input_hysteresis_cache();
         let session_key = "test:immediate-input";
         let pane_t1 = "• Working\n\
@@ -987,6 +1005,7 @@ mod tests {
                        › \n\
                        esc to interrupt";
 
+        // First poll seeds the cache and keeps the detector's original Input.
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
@@ -996,6 +1015,18 @@ mod tests {
             ),
             ManagedSessionTaskState::Input
         );
+        // Content above the prompt changed → override to Running.
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane_t2,
+                InputStabilityPolicy::Immediate,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Running
+        );
+        // Content is now stable → Immediate flips back to Input without waiting
+        // for the full STABLE_THRESHOLD polls.
         assert_eq!(
             apply_temporal_input_hysteresis(
                 session_key,
@@ -1047,6 +1078,65 @@ mod tests {
             apply_temporal_input_hysteresis(
                 session_key,
                 pane,
+                InputStabilityPolicy::Immediate,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Input
+        );
+    }
+
+    #[test]
+    fn immediate_input_policy_detects_kimi_compaction_blink() {
+        clear_temporal_input_hysteresis_cache();
+        let session_key = "test:kimi-compaction";
+        let pane_bullet_on = "● Compacting context... · Tip: ! to run a shell command\n\
+                              ╭────────────────────────────────────────╮\n\
+                              │ >                                      │\n\
+                              ╰────────────────────────────────────────╯\n\
+                              K2.7 Code thinking  ~/wait-agent\n\
+                              context: 0.0% (0/262.1k)";
+        let pane_bullet_off = "  Compacting context... · Tip: ! to run a shell command\n\
+                               ╭────────────────────────────────────────╮\n\
+                               │ >                                      │\n\
+                               ╰────────────────────────────────────────╯\n\
+                               K2.7 Code thinking  ~/wait-agent\n\
+                               context: 0.0% (0/262.1k)";
+
+        // First poll seeds the cache.
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane_bullet_on,
+                InputStabilityPolicy::Immediate,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Input
+        );
+        // The status bullet toggled off → content above the Kimi prompt changed.
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane_bullet_off,
+                InputStabilityPolicy::Immediate,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Running
+        );
+        // Bullet toggled back on → still changing.
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane_bullet_on,
+                InputStabilityPolicy::Immediate,
+                ManagedSessionTaskState::Input,
+            ),
+            ManagedSessionTaskState::Running
+        );
+        // Stable with bullet on → Immediate flips back to Input after one poll.
+        assert_eq!(
+            apply_temporal_input_hysteresis(
+                session_key,
+                pane_bullet_on,
                 InputStabilityPolicy::Immediate,
                 ManagedSessionTaskState::Input,
             ),
