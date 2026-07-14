@@ -171,16 +171,25 @@ fn kimi_prompt_line(line: &str) -> bool {
 
 fn kimi_has_active_animation(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
-        let line = line.trim();
-        let lowered = line.to_ascii_lowercase();
-        kimi_moon_spinner(line)
+        let trimmed = line.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        kimi_moon_spinner(trimmed)
+            || kimi_compacting_status_line(line)
             || (!lowered.starts_with("k2.7 code thinking")
                 && (lowered.contains("thinking") || lowered.contains("working"))
-                && line
+                && trimmed
                     .chars()
                     .next()
                     .is_some_and(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(ch)))
     })
+}
+
+fn kimi_compacting_status_line(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    // Kimi renders compacting as a status bullet line that toggles on/off:
+    //   "● Compacting context..."  or  "  Compacting context..."
+    (line.starts_with("● ") || line.starts_with("  "))
+        && lowered.contains("compacting")
 }
 
 fn kimi_moon_spinner(line: &str) -> bool {
