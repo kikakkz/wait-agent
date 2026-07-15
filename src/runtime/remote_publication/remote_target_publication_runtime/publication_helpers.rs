@@ -1,4 +1,5 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
+use crate::runtime::session_lifecycle::session_lifecycle_hook_tmux_command;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     SessionTransport,
@@ -200,34 +201,7 @@ pub(super) fn publication_socket_hook_tmux_command(
     socket_name: &str,
     network: &RemoteNetworkConfig,
 ) -> String {
-    let hook_command = std::iter::once(executable.to_string())
-        .chain(prepend_global_network_args(
-            vec![
-                "__socket-lifecycle-hook".to_string(),
-                "--socket-name".to_string(),
-                socket_name.to_string(),
-                "--hook-name".to_string(),
-                "#{hook}".to_string(),
-                "--session-name".to_string(),
-                "#{hook_session_name}".to_string(),
-            ],
-            network,
-        ))
-        .map(|arg| shell_escape(&arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "run-shell -b {}",
-        tmux_quote_argument(&format!("{hook_command} >/dev/null 2>&1"))
-    )
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn tmux_quote_argument(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    session_lifecycle_hook_tmux_command(executable, socket_name, network)
 }
 
 pub(super) fn socket_lifecycle_publication_action(

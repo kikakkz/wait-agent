@@ -42,6 +42,8 @@ pub use workspace::workspace_entry_runtime;
 pub use workspace::workspace_layout_runtime;
 pub use workspace::workspace_runtime;
 
+pub mod session_lifecycle;
+
 // Standalone modules remaining in runtime root
 pub mod agent_signal_runtime;
 pub mod agent_signal_sender_bundle;

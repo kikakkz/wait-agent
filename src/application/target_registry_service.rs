@@ -9,7 +9,7 @@ use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_runtime_owner_runtime::{
     RemoteRuntimeOwnerRuntime, RemoteRuntimeOwnerSnapshot,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -254,7 +254,18 @@ impl DefaultTargetCatalogGateway {
         let pane_backed = self
             .local_tmux
             .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
-        let merged = merge_local_targets_by_identity(sessions.clone(), pane_backed);
+        let pane_backed_ids: HashSet<String> = pane_backed
+            .iter()
+            .map(|target| target.address.id().as_str().to_string())
+            .collect();
+        let mut merged = merge_local_targets_by_identity(sessions.clone(), pane_backed);
+        // The cache may hold target-host sessions whose content panes have
+        // already exited. Dropping them here ensures the sidebar does not keep
+        // showing stale sessions when the explicit TargetExited event is lost
+        // or delayed.
+        merged.retain(|target| {
+            !target.is_target_host() || pane_backed_ids.contains(target.address.id().as_str())
+        });
         if merged != sessions {
             self.local_session_store.store(socket_name, &merged);
         }

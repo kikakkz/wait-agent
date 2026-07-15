@@ -126,9 +126,18 @@ impl CommandDispatcher {
                 .map_err(AppError::from),
             Command::SocketLifecycleHook(command) => {
                 let socket_name = command.socket_name.clone();
+                let hook_name = command.hook_name.clone();
+                let session_name = command.session_name.clone();
                 self.remote_target_publication()?
                     .run_socket_lifecycle_hook(command)
                     .map_err(AppError::from)?;
+                if hook_name.as_deref() == Some("session-closed") {
+                    if let Some(session_name) = session_name.as_deref().filter(|s| !s.is_empty()) {
+                        self.layout()?
+                            .run_target_exited_chrome_refresh(&socket_name, session_name)
+                            .map_err(AppError::from)?;
+                    }
+                }
                 self.layout()?
                     .run_chrome_refresh_on_socket(&socket_name)
                     .map_err(AppError::from)

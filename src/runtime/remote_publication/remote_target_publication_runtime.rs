@@ -25,7 +25,6 @@ use crate::runtime::remote_workspace_socket_registry_runtime::{
     RemoteWorkspaceSocketRegistryRuntime,
 };
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
-use crate::runtime::workspace::workspace_layout_runtime::WorkspaceLayoutRuntime;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -763,15 +762,6 @@ impl RemoteTargetPublicationRuntime {
         Ok(())
     }
 
-    fn notify_sidebar_target_exited(
-        &self,
-        socket_name: &str,
-        exited_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())?
-            .run_target_exited_chrome_refresh(socket_name, exited_session_name)
-    }
-
     pub fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
         RemoteNodeSessionSyncRuntime::notify_local_catalog_changed(
             socket_name,
@@ -844,7 +834,6 @@ impl RemoteTargetPublicationRuntime {
                     if self.live_content_pane_for_session(&command.socket_name, session_name)? {
                         self.signal_source_session_refresh(&command.socket_name, session_name)?;
                     }
-                    self.notify_sidebar_target_exited(&command.socket_name, session_name)?;
                 }
                 self.ensure_configured_publications_on_socket(&command.socket_name)
             }

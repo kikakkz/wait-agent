@@ -19,6 +19,7 @@ use crate::infra::tmux::{
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::local_target_host_runtime::main_pane_output_event_bridge_command;
+use crate::runtime::session_lifecycle::session_lifecycle_hook_tmux_command;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -1053,6 +1054,18 @@ impl WorkspaceLayoutRuntime {
                 previous_main_pane.as_ref(),
                 &reconcile_command,
                 &pane_died_command,
+            )
+            .map_err(tmux_layout_error)?;
+        let session_closed_command = session_lifecycle_hook_tmux_command(
+            self.current_executable.to_string_lossy().as_ref(),
+            workspace.socket_name.as_str(),
+            &self.network,
+        );
+        self.backend
+            .set_global_hook_on_socket(
+                workspace.socket_name.as_str(),
+                "session-closed",
+                &session_closed_command,
             )
             .map_err(tmux_layout_error)?;
         ERROR_LOG.log(format!(
