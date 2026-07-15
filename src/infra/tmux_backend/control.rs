@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn main_pane_command_binding_runs_command_in_main_pane_and_otherwise_passes_key_through() {
         let args = bind_waitagent_main_pane_command_args(
-            "C-h",
+            "C-g",
             &TmuxPaneId::new("%1"),
             "run-shell 'waitagent __toggle-sidebar --focus main'",
         );
@@ -383,12 +383,12 @@ mod tests {
             vec![
                 "bind-key",
                 "-n",
-                "C-h",
+                "C-g",
                 "if-shell",
                 "-F",
                 "#{==:#{pane_id},%1}",
                 "run-shell 'waitagent __toggle-sidebar --focus main'",
-                "send-keys C-h",
+                "send-keys C-g",
             ]
         );
     }

@@ -6,7 +6,7 @@ const HISTORY_TOGGLE_KEY: &str = "C-o";
 const HISTORY_TOGGLE_PREFIX_KEY: &str = "z";
 const SIDEBAR_FOCUS_KEY: &str = "C-Right";
 const MAIN_FOCUS_KEY: &str = "Left";
-const SIDEBAR_TOGGLE_KEY: &str = "C-h";
+const SIDEBAR_TOGGLE_KEY: &str = "C-g";
 const SIDEBAR_HIDE_KEY: &str = "h";
 const CREATE_SESSION_KEY: &str = "C-n";
 const CREATE_SESSION_PREFIX_KEY: &str = "c";
@@ -755,7 +755,7 @@ mod tests {
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "C-o".to_string()),
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "Escape".to_string()),
                 Call::BindWaitagentSidebarToggle(
-                    "C-h".to_string(),
+                    "C-g".to_string(),
                     "%1".to_string(),
                     "run-shell -b 'waitagent __toggle-sidebar --focus main'".to_string(),
                 ),
