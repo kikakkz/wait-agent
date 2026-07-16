@@ -957,7 +957,9 @@ impl SessionSyncAuthorityManager {
         command: RemoteAuthorityCommand,
     ) -> Result<(), LifecycleError> {
         let target_id = authority_command_target_id(&command).to_string();
-        if !self.running_hosts.contains_key(&target_id) {
+        // Always run the authority-host binding check so a stale host bound to a dead
+        // gRPC session is replaced before we deliver the command.
+        if !target_id.is_empty() {
             self.ensure_authority_host(session_handle, &target_id)?;
         }
         self.deliver_with_host_rebuild(session_handle, &target_id, command, false)

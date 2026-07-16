@@ -2763,10 +2763,10 @@ fn map_authority_command_to_grpc(
                 session_id: payload.session_id,
             })),
         ),
-        RemoteAuthorityCommand::SyncRequest { .. } => {
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "sync request is local to authority transport and cannot be mapped to gRPC",
+                "sync request/heartbeat is local to authority transport and cannot be mapped to gRPC",
             ));
         }
     };

@@ -878,6 +878,12 @@ where
                     }
                     health.record_input(bytes_len as u64);
                 }
+                AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::HeartbeatPing) => {
+                    health.record_event();
+                    if let Err(error) = transport.send_pong() {
+                        break Err(remote_authority_error(error));
+                    }
+                }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::SyncRequest {
                     expected_seq,
                     received_seq,

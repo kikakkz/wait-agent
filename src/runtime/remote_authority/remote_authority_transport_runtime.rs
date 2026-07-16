@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
-const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
-const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const AUTHORITY_TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const AUTHORITY_TRANSPORT_SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 const AUTHORITY_TRANSPORT_SERVER_ID: &str = "waitagent-main-slot";
 pub struct RemoteAuthorityTransportRuntime {
     node_id: String,
@@ -47,6 +47,7 @@ pub enum RemoteAuthorityCommand {
         expected_seq: u64,
         received_seq: u64,
     },
+    HeartbeatPing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +95,7 @@ impl RemoteAuthorityTransportRuntime {
                     return Ok(RemoteAuthorityCommand::RawPtyInput(payload));
                 }
                 Ok(AuthorityTransportFrame::Ping) => {
-                    self.send_transport_frame(AuthorityTransportFrame::Pong)?;
+                    return Ok(RemoteAuthorityCommand::HeartbeatPing);
                 }
                 Ok(AuthorityTransportFrame::Pong) => {}
                 Ok(AuthorityTransportFrame::SyncRequest {
@@ -133,6 +134,10 @@ impl RemoteAuthorityTransportRuntime {
             .expect("authority transport writer mutex should not be poisoned");
         write_authority_transport_frame(&mut *writer, &frame)?;
         Ok(())
+    }
+
+    pub fn send_pong(&self) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_transport_frame(AuthorityTransportFrame::Pong)
     }
 
     pub fn send_target_output(
@@ -1025,6 +1030,11 @@ mod tests {
 
         let transport = RemoteAuthorityTransportRuntime::connect(&socket_path, "peer-a")
             .expect("authority runtime should connect");
+        assert_eq!(
+            transport.recv_command().expect("heartbeat should decode"),
+            RemoteAuthorityCommand::HeartbeatPing
+        );
+        transport.send_pong().expect("pong should send");
         assert_eq!(
             transport.recv_command().expect("command should decode"),
             RemoteAuthorityCommand::RawPtyInput(RawPtyInputPayload {

@@ -17,7 +17,8 @@ use crate::infra::remote_protocol::{
     TargetPublicationAckPayload, TargetPublicationAckStatus,
 };
 use crate::infra::remote_transport_codec::{
-    read_authority_transport_frame, write_control_plane_envelope, AuthorityTransportFrame,
+    read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
+    AuthorityTransportFrame,
 };
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionGateway, TmuxSessionName, TmuxSocketName,
@@ -26,7 +27,10 @@ use crate::infra::tmux::{
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
-use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
+use crate::runtime::remote_authority_transport_runtime::{
+    RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
+    AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
+};
 use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
@@ -1516,7 +1520,7 @@ pub(super) fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::SyncRequest { .. } => "",
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }
 }
 
@@ -1596,8 +1600,14 @@ pub(super) fn spawn_in_process_authority_target_host(
         current_executable,
     );
     let authority_socket_path = PathBuf::from(&command.authority_socket_path);
+    let target_id_for_log = command.target_id.clone();
     thread::spawn(move || {
-        let _ = runtime.run_target_host(command);
+        let run_result = runtime.run_target_host(command);
+        if let Err(ref error) = run_result {
+            ERROR_LOG.log(format!(
+                "[session-sync] authority target host for target={target_id_for_log} exited with error: {error}"
+            ));
+        }
         running.store(false, Ordering::Relaxed);
         let writer_val = match writer.lock() {
             Ok(mut guard) => guard.take(),
@@ -1696,12 +1706,14 @@ fn bridge_live_authority_stream(
     ERROR_LOG.log("[diag-timing] bridge_live_authority_stream: writer set, ready signalled, starting forward_host_output_to_owner".to_string());
     let result = forward_host_output(
         host_reader,
+        writer.clone(),
         node_id,
         session_instance_id,
         output_route,
         running.clone(),
     );
     ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_owner exited, result={:?}", result));
+    running.store(false, Ordering::Relaxed);
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
         Ok(mut guard) => guard.take(),
@@ -1716,30 +1728,80 @@ fn bridge_live_authority_stream(
     result
 }
 
+fn send_authority_ping(writer: &Arc<Mutex<Option<UnixStream>>>) -> Result<(), LifecycleError> {
+    let mut guard = match writer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            ERROR_LOG.log(
+                "[session-sync] authority writer mutex poisoned while sending ping, recovering"
+                    .to_string(),
+            );
+            poisoned.into_inner()
+        }
+    };
+    let Some(stream) = guard.as_mut() else {
+        return Err(remote_session_sync_error(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "authority writer closed before ping could be sent",
+        )));
+    };
+    write_authority_transport_frame(stream, &AuthorityTransportFrame::Ping)
+        .map_err(remote_session_sync_error)?;
+    stream.flush().map_err(remote_session_sync_error)?;
+    Ok(())
+}
+
 fn forward_host_output(
     mut host_reader: UnixStream,
+    writer: Arc<Mutex<Option<UnixStream>>>,
     node_id: String,
     session_instance_id: String,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
+    host_reader
+        .set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT))
+        .map_err(remote_session_sync_error)?;
+    let ping_timeout = AUTHORITY_TRANSPORT_READ_TIMEOUT;
+    let ping_interval = AUTHORITY_TRANSPORT_PING_INTERVAL;
+    let mut last_received = Instant::now();
+    let mut keepalive_sent_at: Option<Instant> = None;
+
     while running.load(Ordering::Relaxed) {
-        let envelope = match read_authority_transport_frame(&mut host_reader) {
-            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => envelope,
-            Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => ProtocolEnvelope {
-                protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
-                    .to_string(),
-                message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
-                message_type: "raw_pty_output",
-                timestamp: String::new(),
-                sender_id: node_id.clone(),
-                correlation_id: None,
-                session_id: Some(payload.session_id.clone()),
-                target_id: Some(payload.target_id.clone()),
-                attachment_id: None,
-                console_id: None,
-                payload: ControlPlanePayload::RawPtyOutput(payload),
-            },
+        match read_authority_transport_frame(&mut host_reader) {
+            Ok(AuthorityTransportFrame::Pong) => {
+                last_received = Instant::now();
+                keepalive_sent_at = None;
+            }
+            Ok(AuthorityTransportFrame::Ping) => {
+                // The host may send pings of its own on some paths; treat any frame as liveness.
+                last_received = Instant::now();
+                keepalive_sent_at = None;
+            }
+            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
+                last_received = Instant::now();
+                keepalive_sent_at = None;
+                forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
+            }
+            Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
+                last_received = Instant::now();
+                keepalive_sent_at = None;
+                let envelope = ProtocolEnvelope {
+                    protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
+                        .to_string(),
+                    message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
+                    message_type: "raw_pty_output",
+                    timestamp: String::new(),
+                    sender_id: node_id.clone(),
+                    correlation_id: None,
+                    session_id: Some(payload.session_id.clone()),
+                    target_id: Some(payload.target_id.clone()),
+                    attachment_id: None,
+                    console_id: None,
+                    payload: ControlPlanePayload::RawPtyOutput(payload),
+                };
+                forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
+            }
             Ok(other) => {
                 ERROR_LOG.log(format!(
                     "[diag-timing] forward_host_output_to_session: unexpected authority frame {other:?}, exiting"
@@ -1749,51 +1811,81 @@ fn forward_host_output(
                     format!("unexpected authority frame {other:?}"),
                 )));
             }
+            Err(ref e) if e.is_read_timeout() => {
+                if let Some(sent_at) = keepalive_sent_at {
+                    if sent_at.elapsed() >= ping_timeout {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] forward_host_output: keepalive timed out for node={node_id} session={session_instance_id}, declaring host dead"
+                        ));
+                        return Err(remote_session_sync_error(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "authority host keepalive timed out",
+                        )));
+                    }
+                    continue;
+                }
+                if last_received.elapsed() >= ping_interval {
+                    if let Err(error) = send_authority_ping(&writer) {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] forward_host_output: failed to send keepalive ping for node={node_id}: {error}"
+                        ));
+                        return Err(error);
+                    }
+                    keepalive_sent_at = Some(Instant::now());
+                }
+            }
             Err(e) => {
                 ERROR_LOG.log(format!(
                     "[diag-timing] forward_host_output_to_session: read_authority_transport_frame failed: {e}, exiting"
                 ));
                 return Err(remote_session_sync_error(e));
             }
-        };
-        match &output_route {
-            SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx) => {
+        }
+    }
+    Ok(())
+}
+
+fn forward_host_envelope(
+    output_route: &SessionSyncAuthorityOutputRoute,
+    node_id: &str,
+    session_instance_id: &str,
+    envelope: ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<(), LifecycleError> {
+    match output_route {
+        SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx) => {
+            ERROR_LOG.log(format!(
+                "[diag-timing] forward_host_output: forwarding envelope type={} to session-sync owner",
+                envelope.payload.message_type()
+            ));
+            if let Err(e) = session_event_tx.send(SessionSyncEvent::AuthorityHostOutput(envelope)) {
                 ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output: forwarding envelope type={} to session-sync owner",
-                    envelope.payload.message_type()
+                    "[diag-timing] forward_host_output: owner event send failed: {e}, exiting"
                 ));
-                if let Err(e) =
-                    session_event_tx.send(SessionSyncEvent::AuthorityHostOutput(envelope))
-                {
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] forward_host_output: owner event send failed: {e}, exiting"
-                    ));
-                    return Err(remote_session_sync_error(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        e.to_string(),
-                    )));
-                }
+                return Err(remote_session_sync_error(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    e.to_string(),
+                )));
             }
-            SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx) => {
+        }
+        SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx) => {
+            ERROR_LOG.log(format!(
+                "[diag-timing] forward_host_output: forwarding envelope type={} to ingress owner",
+                envelope.payload.message_type()
+            ));
+            if let Err(e) = ingress_event_tx.send(
+                crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent::AuthorityHostOutput {
+                    node_id: node_id.to_string(),
+                    session_instance_id: session_instance_id.to_string(),
+                    envelope,
+                },
+            ) {
                 ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output: forwarding envelope type={} to ingress owner",
-                    envelope.payload.message_type()
+                    "[diag-timing] forward_host_output: ingress event send failed: {e}, exiting"
                 ));
-                if let Err(e) = ingress_event_tx.send(
-                    crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent::AuthorityHostOutput {
-                        node_id: node_id.clone(),
-                        session_instance_id: session_instance_id.clone(),
-                        envelope,
-                    },
-                ) {
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] forward_host_output: ingress event send failed: {e}, exiting"
-                    ));
-                    return Err(remote_session_sync_error(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        e.to_string(),
-                    )));
-                }
+                return Err(remote_session_sync_error(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    e.to_string(),
+                )));
             }
         }
     }
@@ -1888,7 +1980,7 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
-        RemoteAuthorityCommand::SyncRequest { .. } => None,
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => None,
     };
     let payload = match command {
         RemoteAuthorityCommand::OpenMirror(payload) => {
@@ -1899,11 +1991,13 @@ fn authority_command_envelope(
         }
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
-        RemoteAuthorityCommand::SyncRequest { .. } => ControlPlanePayload::Error(ErrorPayload {
-            code: "local_sync_request_not_routable",
-            message: "sync request is local to authority transport".to_string(),
-            details: None,
-        }),
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
+            ControlPlanePayload::Error(ErrorPayload {
+                code: "local_sync_request_not_routable",
+                message: "sync request is local to authority transport".to_string(),
+                details: None,
+            })
+        }
     };
     ProtocolEnvelope {
         protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION.to_string(),

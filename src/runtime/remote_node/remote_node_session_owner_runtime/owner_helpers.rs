@@ -8,12 +8,8 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, CreateSessionRequestPayload, ErrorPayload, NodeSessionChannel,
     ProtocolEnvelope, REMOTE_PROTOCOL_VERSION,
 };
-#[cfg(test)]
 use crate::infra::remote_transport_codec::{
-    read_authority_transport_frame, AuthorityTransportFrame,
-};
-use crate::infra::remote_transport_codec::{
-    read_control_plane_envelope, write_control_plane_envelope,
+    read_authority_transport_frame, write_control_plane_envelope, AuthorityTransportFrame,
 };
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
@@ -1006,7 +1002,7 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::SyncRequest { .. } => "",
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }
 }
 
@@ -1250,6 +1246,10 @@ fn forward_host_output_to_session(
                     )));
                 }
             },
+            AuthorityTransportFrame::Ping | AuthorityTransportFrame::Pong => {
+                // Host-side keepalive frames are handled by the sync-owner bridge;
+                // this owner-side bridge just needs to tolerate them.
+            }
             other => {
                 return Err(RemoteNodeSessionError::new(format!(
                     "unexpected live authority host frame `{other:?}`"
@@ -1307,7 +1307,16 @@ fn forward_host_output_to_shared_session(
     running: Arc<AtomicBool>,
 ) -> Result<(), RemoteNodeSessionError> {
     while running.load(Ordering::Relaxed) {
-        let envelope = read_control_plane_envelope(&mut host_reader)?;
+        let frame = read_authority_transport_frame(&mut host_reader)?;
+        let envelope = match frame {
+            AuthorityTransportFrame::ControlPlane(envelope) => envelope,
+            AuthorityTransportFrame::Ping | AuthorityTransportFrame::Pong => continue,
+            other => {
+                return Err(RemoteNodeSessionError::new(format!(
+                    "unexpected live authority host frame `{other:?}`"
+                )));
+            }
+        };
         match envelope.payload {
             ControlPlanePayload::OpenMirrorAccepted(payload) => {
                 let Some(session) = shared_session.current_session() else {
@@ -1493,7 +1502,7 @@ pub(super) fn authority_command_envelope(
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
-        RemoteAuthorityCommand::SyncRequest { .. } => None,
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => None,
     };
     let payload = match command {
         RemoteAuthorityCommand::OpenMirror(payload) => {
@@ -1504,11 +1513,13 @@ pub(super) fn authority_command_envelope(
         }
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
-        RemoteAuthorityCommand::SyncRequest { .. } => ControlPlanePayload::Error(ErrorPayload {
-            code: "local_sync_request_not_routable",
-            message: "sync request is local to authority transport".to_string(),
-            details: None,
-        }),
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
+            ControlPlanePayload::Error(ErrorPayload {
+                code: "local_sync_request_not_routable",
+                message: "sync request is local to authority transport".to_string(),
+                details: None,
+            })
+        }
     };
     ProtocolEnvelope {
         protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
