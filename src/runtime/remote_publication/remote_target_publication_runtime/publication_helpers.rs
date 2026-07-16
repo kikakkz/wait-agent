@@ -1,5 +1,4 @@
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
-use crate::runtime::session_lifecycle::session_lifecycle_hook_tmux_command;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     SessionTransport,
@@ -10,6 +9,7 @@ use crate::infra::remote_protocol::{
 };
 use crate::infra::tmux::{RemoteTargetPublicationBinding, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use crate::runtime::session_lifecycle::session_lifecycle_hook_tmux_command;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 use base64::Engine;
 use std::collections::BTreeSet;

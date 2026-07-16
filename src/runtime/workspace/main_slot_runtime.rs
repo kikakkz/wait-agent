@@ -2334,11 +2334,10 @@ impl MainSlotRuntime {
         self.apply_pane_identity(workspace, primary_pane, &primary_identity)?;
 
         let secondary_identity = self.read_pane_identity(workspace, secondary_pane);
-        let secondary_matches_expected = expected_secondary_target
-            .is_some_and(|expected| {
-                secondary_identity.role.as_deref() == Some(WAITAGENT_PANE_ROLE_CONTENT)
-                    && secondary_identity.target_id.as_deref() == Some(expected)
-            });
+        let secondary_matches_expected = expected_secondary_target.is_some_and(|expected| {
+            secondary_identity.role.as_deref() == Some(WAITAGENT_PANE_ROLE_CONTENT)
+                && secondary_identity.target_id.as_deref() == Some(expected)
+        });
         if !secondary_matches_expected {
             self.clear_pane_content_identity(workspace, secondary_pane);
         }
@@ -2390,7 +2389,11 @@ impl MainSlotRuntime {
         pane: &TmuxPaneId,
         identity: &PaneIdentity,
     ) -> Result<(), LifecycleError> {
-        let Some(session_instance_id) = identity.session_instance.as_deref().filter(|value| !value.is_empty()) else {
+        let Some(session_instance_id) = identity
+            .session_instance
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
             self.clear_pane_content_identity(workspace, pane);
             return Ok(());
         };
@@ -3247,12 +3250,7 @@ impl MainSlotRuntime {
             self.backend
                 .swap_panes(workspace, main_pane, &isolation_id)
                 .map_err(main_slot_error)?;
-            self.reconcile_swapped_pane_identities(
-                workspace,
-                main_pane,
-                &isolation_id,
-                None,
-            )?;
+            self.reconcile_swapped_pane_identities(workspace, main_pane, &isolation_id, None)?;
         }
         Ok(())
     }
