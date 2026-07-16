@@ -56,6 +56,13 @@ struct BrokenPaneLocation {
     pane_id: TmuxPaneId,
 }
 
+#[derive(Debug, Clone)]
+struct PaneIdentity {
+    role: Option<String>,
+    session_instance: Option<String>,
+    target_id: Option<String>,
+}
+
 pub struct MainSlotRuntime {
     backend: EmbeddedTmuxBackend,
     target_host_runtime: TargetHostRuntime,
@@ -869,6 +876,12 @@ impl MainSlotRuntime {
             self.backend
                 .swap_panes(&workspace, &target_main_pane, &workspace_main_pane)
                 .map_err(main_slot_error)?;
+            self.reconcile_swapped_pane_identities(
+                &workspace,
+                &target_main_pane,
+                &workspace_main_pane,
+                active_target.as_deref(),
+            )?;
             ERROR_LOG.log(format!(
                 "[diag-newhost] activate_local swap_target socket={} session={} target_pane={} workspace_pane={} elapsed={:?} total={:?}",
                 current_workspace.socket_name,
@@ -1008,6 +1021,12 @@ impl MainSlotRuntime {
             self.backend
                 .swap_panes(&workspace, &session_pane, &workspace_main_pane)
                 .map_err(main_slot_error)?;
+            self.reconcile_swapped_pane_identities(
+                &workspace,
+                &session_pane,
+                &workspace_main_pane,
+                active_target.as_deref(),
+            )?;
 
             self.park_content_pane_in_hidden_window(
                 &workspace,
@@ -1935,6 +1954,12 @@ impl MainSlotRuntime {
                     self.backend
                         .swap_panes(workspace, &existing_pane, exiting_pane)
                         .map_err(main_slot_error)?;
+                    self.reconcile_swapped_pane_identities(
+                        workspace,
+                        &existing_pane,
+                        exiting_pane,
+                        None,
+                    )?;
                 }
                 return Ok(PreparedRemoteExitMainPane {
                     pane: existing_pane.clone(),
@@ -1972,6 +1997,12 @@ impl MainSlotRuntime {
             self.backend
                 .swap_panes(workspace, &target_main_pane, exiting_pane)
                 .map_err(main_slot_error)?;
+            self.reconcile_swapped_pane_identities(
+                workspace,
+                &target_main_pane,
+                exiting_pane,
+                None,
+            )?;
         }
         self.set_local_target_pane_identity(
             workspace,
@@ -2283,6 +2314,117 @@ impl MainSlotRuntime {
         self.backend
             .set_pane_option(workspace, pane, WAITAGENT_PANE_TARGET_ID_OPTION, target_id)
             .map_err(main_slot_error)
+    }
+
+    fn reconcile_swapped_pane_identities(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        primary_pane: &TmuxPaneId,
+        secondary_pane: &TmuxPaneId,
+        expected_secondary_target: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        // `swap-pane -d` moves a pane (its content and its options) to the
+        // target position. The active content therefore stays on its original
+        // pane id, but the pane that is pushed to the hidden/killed position may
+        // still carry stale identity options from an earlier swap. Re-apply the
+        // primary pane's identity so its session/session-pane mappings stay
+        // consistent, and strip content identity from the secondary pane unless
+        // it is the expected inactive target pane that should remain discoverable.
+        let primary_identity = self.read_pane_identity(workspace, primary_pane);
+        self.apply_pane_identity(workspace, primary_pane, &primary_identity)?;
+
+        let secondary_identity = self.read_pane_identity(workspace, secondary_pane);
+        let secondary_matches_expected = expected_secondary_target
+            .is_some_and(|expected| {
+                secondary_identity.role.as_deref() == Some(WAITAGENT_PANE_ROLE_CONTENT)
+                    && secondary_identity.target_id.as_deref() == Some(expected)
+            });
+        if !secondary_matches_expected {
+            self.clear_pane_content_identity(workspace, secondary_pane);
+        }
+        Ok(())
+    }
+
+    fn read_pane_identity(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+    ) -> PaneIdentity {
+        PaneIdentity {
+            role: self
+                .backend
+                .show_pane_option_on_socket(
+                    &workspace.socket_name,
+                    pane,
+                    WAITAGENT_PANE_ROLE_OPTION,
+                )
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty()),
+            session_instance: self
+                .backend
+                .show_pane_option_on_socket(
+                    &workspace.socket_name,
+                    pane,
+                    WAITAGENT_PANE_SESSION_INSTANCE_OPTION,
+                )
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty()),
+            target_id: self
+                .backend
+                .show_pane_option_on_socket(
+                    &workspace.socket_name,
+                    pane,
+                    WAITAGENT_PANE_TARGET_ID_OPTION,
+                )
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty()),
+        }
+    }
+
+    fn apply_pane_identity(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        identity: &PaneIdentity,
+    ) -> Result<(), LifecycleError> {
+        let Some(session_instance_id) = identity.session_instance.as_deref().filter(|value| !value.is_empty()) else {
+            self.clear_pane_content_identity(workspace, pane);
+            return Ok(());
+        };
+        if identity.role.as_deref() != Some(WAITAGENT_PANE_ROLE_CONTENT) {
+            self.clear_pane_content_identity(workspace, pane);
+            return Ok(());
+        }
+        let target_id = identity
+            .target_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(session_instance_id);
+        self.set_content_pane_owner(workspace, pane, session_instance_id, target_id)?;
+        if target_id.contains('#') {
+            let _ = self.set_session_pane(workspace, target_id, pane);
+        } else if let Some((socket_name, target_session)) = split_qualified_target(target_id) {
+            let target_workspace = workspace_handle(socket_name, target_session);
+            let _ = self.set_workspace_main_pane_if_session_exists(&target_workspace, pane);
+            self.signal_local_target_presentation_refresh(&target_workspace, target_session);
+        }
+        Ok(())
+    }
+
+    fn clear_pane_content_identity(&self, workspace: &TmuxWorkspaceHandle, pane: &TmuxPaneId) {
+        for option in [
+            WAITAGENT_PANE_ROLE_OPTION,
+            WAITAGENT_PANE_SESSION_INSTANCE_OPTION,
+            WAITAGENT_PANE_TARGET_SESSION_OPTION,
+            WAITAGENT_PANE_TARGET_ID_OPTION,
+        ] {
+            let _ = self
+                .backend
+                .unset_pane_option_on_socket(&workspace.socket_name, pane, option);
+        }
     }
 
     fn pane_matches_session_instance(
@@ -3105,6 +3247,12 @@ impl MainSlotRuntime {
             self.backend
                 .swap_panes(workspace, main_pane, &isolation_id)
                 .map_err(main_slot_error)?;
+            self.reconcile_swapped_pane_identities(
+                workspace,
+                main_pane,
+                &isolation_id,
+                None,
+            )?;
         }
         Ok(())
     }
