@@ -1348,13 +1348,11 @@ impl MainSlotRuntime {
             t_total.elapsed()
         ));
         if !exiting_main_pane {
-            let inactive_pane = self.read_session_pane(&workspace, &command.target)?;
-            let cleanup_pane = command_pane.clone().or(inactive_pane);
-            self.cleanup_exited_remote_session_pane(
-                &workspace,
-                &command.target,
-                cleanup_pane.as_ref(),
-            )?;
+            // Hidden panes are kept with remain-on-exit off, so tmux already
+            // reclaims both the pane and its hidden window when the remote
+            // main-slot process exits. The workspace only needs to drop its
+            // stale session-pane mapping and owner record here.
+            self.clear_session_pane(&workspace, &command.target)?;
             ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] workspace_remote_exit_skip_non_main target={} total={:?} stage=workspace_exit",
                 command.target,
@@ -1725,12 +1723,13 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
     ) {
+        // Hidden panes are parked with remain-on-exit off so tmux can reclaim
+        // them automatically when their process exits. Only remove the main-pane
+        // death hook here; do not flip remain-on-exit back on, or the hidden
+        // window becomes a permanent parking lot for dead panes.
         let _ = self
             .backend
             .unset_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK);
-        let _ = self
-            .backend
-            .set_pane_option(workspace, pane, "remain-on-exit", "on");
     }
 
     fn clear_stale_remote_session_pane(
@@ -2993,15 +2992,6 @@ impl MainSlotRuntime {
             WAITAGENT_SESSION_PANE_PREFIX,
             qualified_target.replace(':', ".")
         )
-    }
-
-    fn read_session_pane(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        qualified_target: &str,
-    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
-        let session_instance_id = target_session_name(qualified_target).unwrap_or(qualified_target);
-        self.find_content_pane_by_session_instance(workspace, session_instance_id)
     }
 
     fn remote_exit_pane_from_command(

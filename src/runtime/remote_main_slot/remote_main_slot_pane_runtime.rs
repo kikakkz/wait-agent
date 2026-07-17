@@ -431,6 +431,9 @@ impl RemoteMainSlotPaneRuntime {
                                     CLEAR_SCREEN_HOME_ESCAPE.as_bytes(),
                                 );
                                 let _ = std::io::Write::flush(&mut io::stdout());
+                                let pane_id = std::env::var("TMUX_PANE")
+                                    .unwrap_or_else(|_| String::new());
+                                let _ = signal_clean_remote_target_exit(&spec, &pane_id);
                                 return Ok(());
                             }
                             if elapsed >= VERIFY_EXIT_PHASE {
@@ -913,6 +916,9 @@ impl RemoteMainSlotPaneRuntime {
                                     authority_generation,
                                     RemoteSurfaceState::Exited,
                                 )?;
+                                let pane_id = std::env::var("TMUX_PANE")
+                                    .unwrap_or_else(|_| String::new());
+                                let _ = signal_clean_remote_target_exit(&spec, &pane_id);
                                 return Ok(());
                             }
                         }

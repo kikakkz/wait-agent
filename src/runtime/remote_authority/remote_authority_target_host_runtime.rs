@@ -191,13 +191,6 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         command: &str,
     ) -> Result<(), Self::Error>;
 
-    fn send_input(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        bytes: &[u8],
-    ) -> Result<(), Self::Error>;
-
     fn set_pane_died_hook(
         &self,
         socket_name: &str,
@@ -293,15 +286,6 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         command: &str,
     ) -> Result<(), Self::Error> {
         self.set_pane_pipe_on_socket_owned(socket_name, pane, owner, command)
-    }
-
-    fn send_input(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        bytes: &[u8],
-    ) -> Result<(), Self::Error> {
-        self.send_input_to_pane_on_socket(socket_name, pane, bytes)
     }
 
     fn set_pane_died_hook(
@@ -646,11 +630,6 @@ where
         let output_cache = Arc::new(Mutex::new(OutputFrameCache::default()));
         let input_buffer = Arc::new(InputRingBuffer::new());
         let input_congested = Arc::new(AtomicBool::new(false));
-        let current_input_pane = Arc::new(Mutex::new(
-            self.gateway
-                .target_pty_pane(&command.socket_name, &command.target_session_name)
-                .ok(),
-        ));
         let (output_tx, output_rx) =
             mpsc::sync_channel::<AuthorityOutputMessage>(OUTPUT_CHANNEL_BOUND);
         let reader_transport = transport.clone();
@@ -706,10 +685,7 @@ where
 
         let running = Arc::new(AtomicBool::new(true));
         let input_drain_thread = spawn_input_drain_thread(
-            self.gateway.clone(),
-            command.socket_name.clone(),
             input_buffer.clone(),
-            current_input_pane.clone(),
             input_route.writer.clone(),
             running.clone(),
         );
@@ -860,12 +836,6 @@ where
                     ) {
                         break Err(error);
                     }
-                    *current_input_pane
-                        .lock()
-                        .expect("current input pane mutex should not be poisoned") = self
-                        .gateway
-                        .target_pty_pane(&command.socket_name, &command.target_session_name)
-                        .ok();
                     let bytes_len = payload.input_bytes.len();
                     let congested =
                         enqueue_input_bytes(&input_buffer, &payload.input_bytes, &input_congested);
@@ -898,12 +868,6 @@ where
                         Ok(pane) => pane,
                         Err(error) => break Err(error),
                     };
-                    *current_input_pane
-                        .lock()
-                        .expect("current input pane mutex should not be poisoned") = self
-                        .gateway
-                        .target_pty_pane(&command.socket_name, &command.target_session_name)
-                        .ok();
                     if let Err(error) = replay_output_frames_for_sync_request(
                         self,
                         &command,
@@ -1052,10 +1016,6 @@ where
                         Ok(pane) => pane,
                         Err(error) => break Err(error),
                     };
-                    *current_input_pane
-                        .lock()
-                        .expect("current input pane mutex should not be poisoned") =
-                        Some(pane.clone());
                     if previous_pane.as_deref() == Some(pane.as_str()) {
                         continue;
                     }
@@ -1435,17 +1395,11 @@ fn enqueue_input_bytes(
     }
 }
 
-fn spawn_input_drain_thread<G>(
-    gateway: G,
-    socket_name: String,
+fn spawn_input_drain_thread(
     input_buffer: Arc<InputRingBuffer>,
-    current_pane: Arc<Mutex<Option<TmuxPaneId>>>,
     input_writer: Arc<Mutex<Option<UnixStream>>>,
     running: Arc<AtomicBool>,
-) -> thread::JoinHandle<()>
-where
-    G: RemoteTargetPtyGateway,
-{
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while running.load(Ordering::Relaxed) {
             let bytes = {
@@ -1469,22 +1423,11 @@ where
             if bytes.is_empty() {
                 continue;
             }
-            if write_input_pipe(&input_writer, &bytes) {
-                continue;
-            }
-            let pane = current_pane
-                .lock()
-                .expect("current input pane mutex should not be poisoned")
-                .clone();
-            let Some(pane) = pane else {
-                continue;
-            };
-            if let Err(error) = gateway.send_input(&socket_name, &pane, &bytes) {
+            if !write_input_pipe(&input_writer, &bytes) {
                 ERROR_LOG.log(format!(
-                    "[diag-timing] target host: input drain send error: {}",
-                    error.to_string()
+                    "[diag-timing] target host: input pipe write failed, dropping {} bytes",
+                    bytes.len()
                 ));
-                thread::sleep(Duration::from_millis(20));
             }
         }
     })
@@ -1510,6 +1453,22 @@ fn connect_input_route(input_socket_path: &Path) -> Result<UnixStream, io::Error
             input_socket_path.display()
         ),
     ))
+}
+
+fn spawn_input_route_connector(
+    input_socket_path: PathBuf,
+    input_writer: Arc<Mutex<Option<UnixStream>>>,
+) {
+    thread::spawn(move || match connect_input_route(&input_socket_path) {
+        Ok(stream) => {
+            *input_writer
+                .lock()
+                .expect("input route writer mutex should not be poisoned") = Some(stream);
+        }
+        Err(error) => ERROR_LOG.log(format!(
+            "[diag-timing] authority input pipe connect failed, input will be dropped: {error}"
+        )),
+    });
 }
 
 fn write_input_pipe(input_writer: &Arc<Mutex<Option<UnixStream>>>, bytes: &[u8]) -> bool {
@@ -1922,22 +1881,6 @@ where
         .map_err(remote_authority_error)?;
     spawn_input_route_connector(input_socket_path.to_path_buf(), input_route.writer.clone());
     Ok(())
-}
-
-fn spawn_input_route_connector(
-    input_socket_path: PathBuf,
-    input_writer: Arc<Mutex<Option<UnixStream>>>,
-) {
-    thread::spawn(move || match connect_input_route(&input_socket_path) {
-        Ok(stream) => {
-            *input_writer
-                .lock()
-                .expect("input route writer mutex should not be poisoned") = Some(stream);
-        }
-        Err(error) => ERROR_LOG.log(format!(
-            "[diag-timing] authority input pipe connect failed, using send-keys fallback: {error}"
-        )),
-    });
 }
 
 fn emit_bootstrap<G, P>(

@@ -2,7 +2,6 @@ use super::{
     exact_session_target, EmbeddedTmuxBackend, TmuxError, WAITAGENT_PANE_PIPE_OWNER_OPTION,
 };
 use crate::infra::tmux::{TmuxPaneId, TmuxSocketName};
-use std::str;
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
@@ -166,28 +165,6 @@ impl EmbeddedTmuxBackend {
             })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn send_input_to_pane_on_socket(
-        &self,
-        socket_name: &str,
-        pane: &TmuxPaneId,
-        bytes: &[u8],
-    ) -> Result<(), TmuxError> {
-        for chunk in split_tmux_input(bytes)? {
-            match chunk {
-                TmuxInputChunk::Literal(literal) => self.run_on_socket(
-                    &TmuxSocketName::new(socket_name),
-                    &send_literal_keys_args(pane, &literal),
-                )?,
-                TmuxInputChunk::HexBytes(bytes) => self.run_on_socket(
-                    &TmuxSocketName::new(socket_name),
-                    &send_hex_keys_args(pane, &bytes),
-                )?,
-            };
-        }
-        Ok(())
-    }
-
     pub(crate) fn pane_session_name_on_socket(
         &self,
         socket_name: &str,
@@ -322,100 +299,6 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 }
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TmuxInputChunk {
-    Literal(String),
-    HexBytes(Vec<u8>),
-}
-
-#[allow(dead_code)]
-fn split_tmux_input(bytes: &[u8]) -> Result<Vec<TmuxInputChunk>, TmuxError> {
-    let mut chunks = Vec::new();
-    let mut literal = String::new();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if is_tmux_hex_byte(byte) {
-            flush_literal(&mut chunks, &mut literal);
-            let start = index;
-            index += 1;
-            while index < bytes.len() && bytes[index].is_ascii() {
-                index += 1;
-            }
-            chunks.push(TmuxInputChunk::HexBytes(bytes[start..index].to_vec()));
-            continue;
-        }
-
-        if byte.is_ascii() {
-            literal.push(byte as char);
-            index += 1;
-            continue;
-        }
-
-        let width = utf8_char_width(byte).ok_or_else(|| {
-            TmuxError::new(format!(
-                "remote input contains unsupported byte 0x{byte:02x}"
-            ))
-        })?;
-        if index + width > bytes.len() {
-            return Err(TmuxError::new(
-                "remote input ended in the middle of a UTF-8 codepoint",
-            ));
-        }
-        let slice = &bytes[index..index + width];
-        let value = str::from_utf8(slice).map_err(|_| {
-            TmuxError::new("remote input contains invalid UTF-8 outside ASCII control bytes")
-        })?;
-        literal.push_str(value);
-        index += width;
-    }
-
-    flush_literal(&mut chunks, &mut literal);
-    Ok(chunks)
-}
-
-fn flush_literal(chunks: &mut Vec<TmuxInputChunk>, literal: &mut String) {
-    if !literal.is_empty() {
-        chunks.push(TmuxInputChunk::Literal(std::mem::take(literal)));
-    }
-}
-
-fn is_tmux_hex_byte(byte: u8) -> bool {
-    matches!(byte, 0x00..=0x1f | 0x7f)
-}
-
-fn utf8_char_width(byte: u8) -> Option<usize> {
-    match byte {
-        0x00..=0x7f => Some(1),
-        0xc0..=0xdf => Some(2),
-        0xe0..=0xef => Some(3),
-        0xf0..=0xf7 => Some(4),
-        _ => None,
-    }
-}
-
-pub(crate) fn send_literal_keys_args(pane: &TmuxPaneId, literal: &str) -> Vec<String> {
-    vec![
-        "send-keys".to_string(),
-        "-l".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-        literal.to_string(),
-    ]
-}
-
-fn send_hex_keys_args(pane: &TmuxPaneId, bytes: &[u8]) -> Vec<String> {
-    let mut args = vec![
-        "send-keys".to_string(),
-        "-H".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-    ];
-    args.extend(bytes.iter().map(|byte| format!("{byte:02x}")));
-    args
-}
 
 fn resize_pane_args(pane: &TmuxPaneId, cols: usize, rows: usize) -> Vec<String> {
     vec![
@@ -522,35 +405,13 @@ fn unset_session_environment_args(session_name: &str, key: &str) -> Vec<String> 
 mod tests {
     use super::{
         clear_pane_pipe_args, pane_window_id_args, resize_pane_args, resize_window_args,
-        send_hex_keys_args, send_literal_keys_args, set_pane_hook_args, set_pane_pipe_args,
-        set_session_environment_args, split_tmux_input, unset_pane_hook_args,
-        unset_session_environment_args, TmuxInputChunk,
+        set_pane_hook_args, set_pane_pipe_args, set_session_environment_args,
+        unset_pane_hook_args, unset_session_environment_args,
     };
     use crate::infra::tmux::TmuxPaneId;
 
     #[test]
-    fn split_tmux_input_preserves_ascii_controls_and_utf8_text() {
-        let chunks =
-            split_tmux_input("你a".as_bytes()).expect("valid UTF-8 should split into literals");
-        assert_eq!(chunks, vec![TmuxInputChunk::Literal("你a".to_string())]);
-
-        let chunks = split_tmux_input(&[0x1b, b'[', b'A']).expect("escape input should split");
-        assert_eq!(
-            chunks,
-            vec![TmuxInputChunk::HexBytes(vec![0x1b, b'[', b'A'])]
-        );
-    }
-
-    #[test]
     fn remote_tmux_args_use_native_send_resize_and_pipe_primitives() {
-        assert_eq!(
-            send_literal_keys_args(&TmuxPaneId::new("%4"), "你好"),
-            vec!["send-keys", "-l", "-t", "%4", "你好"]
-        );
-        assert_eq!(
-            send_hex_keys_args(&TmuxPaneId::new("%4"), &[0x1b, b'[', b'B']),
-            vec!["send-keys", "-H", "-t", "%4", "1b", "5b", "42"]
-        );
         assert_eq!(
             resize_pane_args(&TmuxPaneId::new("%4"), 120, 40),
             vec!["resize-pane", "-t", "%4", "-x", "120", "-y", "40"]

@@ -24,7 +24,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
-use std::process::{Command, Stdio};
+use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -1522,19 +1522,14 @@ fn spawn_chrome_refresh_owner_process(
     socket_path: &Path,
 ) -> Result<(), TmuxError> {
     let current_exe = std::env::current_exe().map_err(chrome_refresh_tmux_error)?;
-    Command::new(current_exe)
-        .args([
-            "__chrome-refresh-owner",
-            "--socket-name",
-            socket_name,
-            "--session-name",
-            session_name,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(chrome_refresh_tmux_error)?;
+    let args = vec![
+        "__chrome-refresh-owner".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+        "--session-name".to_string(),
+        session_name.to_string(),
+    ];
+    spawn_waitagent_sidecar(&current_exe, args).map_err(chrome_refresh_tmux_error)?;
     wait_for_chrome_refresh_owner(socket_path)
 }
 

@@ -1,8 +1,8 @@
 mod tests {
     use super::super::{
-        authority_event_socket_path, authority_output_ingest_socket_path,
-        pump_reader_to_ingest_socket, read_output_chunk_frame, read_stream_id_frame,
-        remote_authority_error, remote_authority_output_pump_shell_command,
+        authority_event_socket_path, authority_input_socket_path,
+        authority_output_ingest_socket_path, pump_reader_to_ingest_socket, read_output_chunk_frame,
+        read_stream_id_frame, remote_authority_error, remote_authority_output_pump_shell_command,
         remote_authority_target_host_args, render_bootstrap_replay, write_output_chunk_frame,
         write_stream_id_frame, LifecycleError, RemoteAuthorityPublicationGateway,
         RemoteAuthorityTargetHostRuntime, RemoteTargetPtyGateway, RemoteTargetTerminalFlags,
@@ -24,7 +24,7 @@ mod tests {
     use crate::runtime::remote_node_session_runtime::RemoteNodeSessionRuntime;
     use crate::runtime::remote_node_transport_runtime::write_server_hello;
     use std::fs;
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, Read, Write};
     use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -41,7 +41,6 @@ mod tests {
         pipe_calls: Arc<Mutex<Vec<(String, String)>>>,
         pipe_live: Arc<Mutex<bool>>,
         clear_calls: Arc<Mutex<usize>>,
-        input_calls: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
         hook_calls: Arc<Mutex<Vec<(String, String)>>>,
         clear_hook_calls: Arc<Mutex<Vec<String>>>,
         clear_runtime_override_calls: Arc<Mutex<Vec<String>>>,
@@ -60,7 +59,6 @@ mod tests {
                 pipe_calls: Arc::new(Mutex::new(Vec::new())),
                 pipe_live: Arc::new(Mutex::new(false)),
                 clear_calls: Arc::new(Mutex::new(0)),
-                input_calls: Arc::new(Mutex::new(Vec::new())),
                 hook_calls: Arc::new(Mutex::new(Vec::new())),
                 clear_hook_calls: Arc::new(Mutex::new(Vec::new())),
                 clear_runtime_override_calls: Arc::new(Mutex::new(Vec::new())),
@@ -188,19 +186,6 @@ mod tests {
                 .pipe_live
                 .lock()
                 .expect("pipe live mutex should not be poisoned") = true;
-            Ok(())
-        }
-
-        fn send_input(
-            &self,
-            _socket_name: &str,
-            pane: &TmuxPaneId,
-            bytes: &[u8],
-        ) -> Result<(), Self::Error> {
-            self.input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .push((pane.as_str().to_string(), bytes.to_vec()));
             Ok(())
         }
 
@@ -488,6 +473,13 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
+        let input_socket_path = authority_input_socket_path(
+            command.transport_socket_path.as_str(),
+            &command.target_id,
+        );
+        let _ = fs::remove_file(&input_socket_path);
+        let input_listener =
+            UnixListener::bind(&input_socket_path).expect("input socket should bind");
         let server_ingest_socket_path = ingest_socket_path.clone();
         let (server_tx, server_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -513,6 +505,12 @@ mod tests {
                 },
             )
             .expect("open mirror should encode");
+            let (mut input_stream, _) = input_listener
+                .accept()
+                .expect("input socket should accept");
+            input_stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .expect("input stream should accept read timeout");
             write_node_session_envelope(
                 &mut stream,
                 &NodeSessionEnvelope {
@@ -588,11 +586,14 @@ mod tests {
             stream
                 .shutdown(Shutdown::Both)
                 .expect("server shutdown should succeed");
+            let mut input_bytes = Vec::new();
+            input_stream.read_to_end(&mut input_bytes).ok();
             let _ = server_tx.send((
                 accepted_payload.expect("accepted payload should be collected"),
                 bootstrap_chunk_payload,
                 bootstrap_complete_payload.expect("bootstrap complete payload should be collected"),
                 output_payload.expect("output payload should be collected"),
+                input_bytes,
             ));
         });
 
@@ -601,7 +602,7 @@ mod tests {
             let _ = runtime_tx.send(runtime.run_target_host(command));
         });
 
-        let (accepted, bootstrap_chunk, bootstrap_complete, output) = server_rx
+        let (accepted, bootstrap_chunk, bootstrap_complete, output, input_bytes) = server_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("server harness should complete within timeout");
         runtime_rx
@@ -609,14 +610,7 @@ mod tests {
             .expect("runtime should complete within timeout")
             .expect("runtime should finish cleanly");
 
-        assert_eq!(
-            fake_gateway
-                .input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .clone(),
-            vec![("%7".to_string(), b"a".to_vec())]
-        );
+        assert_eq!(input_bytes, b"a");
         assert_eq!(
             fake_gateway
                 .resize_calls
@@ -1452,102 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn authority_host_runtime_resolves_current_pane_before_each_input() {
-        let socket_name = unique_test_socket_name("wa-pane-refresh");
-        let transport_socket_path = transport_socket_path("host-pane-refresh");
-        let transport_listener =
-            UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
-        let fake_gateway = FakeGateway::default();
-        let fake_gateway_for_server = fake_gateway.clone();
-        let runtime = RemoteAuthorityTargetHostRuntime::new(
-            fake_gateway.clone(),
-            FakePublicationGateway::default(),
-            PathBuf::from("/tmp/waitagent"),
-        );
-        let command = RemoteAuthorityTargetHostCommand {
-            socket_name: socket_name.clone(),
-            target_session_name: "target-1".to_string(),
-            transport_session_id: "target-1".to_string(),
-            authority_id: "peer-a".to_string(),
-            target_id: "remote-peer:peer-a:target-1".to_string(),
-            transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
-            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
-        };
-
-        let (server_tx, server_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let (mut stream, _) = transport_listener
-                .accept()
-                .expect("transport should accept");
-            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
-            match hello.payload {
-                ControlPlanePayload::ClientHello(ClientHelloPayload { .. }) => {}
-                other => panic!("unexpected hello payload: {other:?}"),
-            }
-            write_server_hello(&mut stream, "waitagent-remote-node-session")
-                .expect("server hello should encode");
-            write_node_session_envelope(
-                &mut stream,
-                &NodeSessionEnvelope {
-                    channel: NodeSessionChannel::Authority,
-                    envelope: raw_input_envelope(b"a"),
-                },
-            )
-            .expect("first input should encode");
-            wait_for_input_count(&fake_gateway_for_server, 1);
-            fake_gateway_for_server.set_current_pane("%8");
-            write_node_session_envelope(
-                &mut stream,
-                &NodeSessionEnvelope {
-                    channel: NodeSessionChannel::Authority,
-                    envelope: raw_input_envelope(b"b"),
-                },
-            )
-            .expect("second input should encode");
-            wait_for_input_count(&fake_gateway_for_server, 2);
-            stream
-                .shutdown(Shutdown::Both)
-                .expect("server shutdown should succeed");
-            server_tx.send(()).expect("server completion should send");
-        });
-
-        runtime
-            .run_target_host(command)
-            .expect("runtime should finish cleanly");
-        server_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("server harness should complete");
-
-        assert_eq!(
-            fake_gateway
-                .input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .clone(),
-            vec![
-                ("%7".to_string(), b"a".to_vec()),
-                ("%8".to_string(), b"b".to_vec()),
-            ]
-        );
-        assert_eq!(
-            fake_gateway
-                .hook_calls
-                .lock()
-                .expect("hook calls mutex should not be poisoned")
-                .iter()
-                .map(|(pane, _)| pane.clone())
-                .collect::<Vec<_>>(),
-            vec!["%7".to_string(), "%8".to_string()]
-        );
-        assert!(fake_gateway
-            .clear_hook_calls
-            .lock()
-            .expect("clear hook calls mutex should not be poisoned")
-            .contains(&"%7".to_string()));
-        let _ = fs::remove_file(&transport_socket_path);
-    }
-
-    #[test]
     fn bootstrap_replay_preserves_trailing_prompt_space_and_cursor() {
         let replay = render_bootstrap_replay("kk@lenovo:~/wait-agent$ ", 24, 0);
 
@@ -1649,22 +1547,6 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("path did not appear at {}", path.display());
-    }
-
-    fn wait_for_input_count(fake_gateway: &FakeGateway, expected: usize) {
-        for _ in 0..100 {
-            if fake_gateway
-                .input_calls
-                .lock()
-                .expect("input calls mutex should not be poisoned")
-                .len()
-                >= expected
-            {
-                return;
-            }
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("input count did not reach {expected}");
     }
 
     fn wait_for_pipe_count(fake_gateway: &FakeGateway, expected: usize) {

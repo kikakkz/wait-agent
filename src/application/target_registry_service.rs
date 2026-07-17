@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const REMOTE_OWNER_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(100);
+const LOCAL_PANE_SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// In-memory cache for local tmux session snapshots.
 ///
@@ -89,6 +90,7 @@ pub struct DefaultTargetCatalogGateway {
     current_socket_name: Option<String>,
     remote_snapshot_cache: Arc<Mutex<Option<CachedRemoteRuntimeOwnerSnapshot>>>,
     local_session_store: SessionCatalogMemoryStore,
+    last_local_pane_scan: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,18 +163,27 @@ impl DefaultTargetCatalogGateway {
             current_socket_name,
             remote_snapshot_cache: Arc::new(Mutex::new(None)),
             local_session_store,
+            last_local_pane_scan: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     pub fn with_fresh_local_tmux(self) -> Self {
         if let Some(socket_name) = self.current_socket_name.as_deref() {
             self.local_session_store.remove(socket_name);
+            self.last_local_pane_scan
+                .lock()
+                .expect("last_local_pane_scan mutex should not be poisoned")
+                .remove(socket_name);
         }
         self
     }
 
     pub fn clear_local_session_store(&self, socket_name: &str) {
         self.local_session_store.remove(socket_name);
+        self.last_local_pane_scan
+            .lock()
+            .expect("last_local_pane_scan mutex should not be poisoned")
+            .remove(socket_name);
     }
 
     pub fn remove_local_target(&self, socket_name: &str, session_name: &str) {
@@ -226,13 +237,36 @@ impl DefaultTargetCatalogGateway {
         socket_name: &str,
     ) -> Result<Vec<ManagedSessionRecord>, TmuxError> {
         if let Some(cached) = self.local_session_store.load(socket_name) {
-            let merged = self.merge_live_local_content_panes(socket_name, cached)?;
+            let should_scan = {
+                let mut guard = self
+                    .last_local_pane_scan
+                    .lock()
+                    .expect("last_local_pane_scan mutex should not be poisoned");
+                match guard.get(socket_name) {
+                    Some(instant) if instant.elapsed() < LOCAL_PANE_SCAN_INTERVAL => false,
+                    _ => {
+                        guard.insert(socket_name.to_string(), Instant::now());
+                        true
+                    }
+                }
+            };
+
+            if should_scan {
+                let merged = self.merge_live_local_content_panes(socket_name, cached)?;
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] list_targets local_memory_cache_scan current_socket={:?} sessions={}",
+                    self.current_socket_name,
+                    merged.len()
+                ));
+                return Ok(merged);
+            }
+
             ERROR_LOG.log(format!(
                 "[diag-newhost] list_targets local_memory_cache current_socket={:?} sessions={}",
                 self.current_socket_name,
-                merged.len()
+                cached.len()
             ));
-            return Ok(merged);
+            return Ok(cached);
         }
 
         let session_backed = self
@@ -243,6 +277,10 @@ impl DefaultTargetCatalogGateway {
             .list_local_target_content_pane_sessions(&TmuxSocketName::new(socket_name))?;
         let sessions = merge_local_targets_by_identity(session_backed, pane_backed);
         self.local_session_store.store(socket_name, &sessions);
+        self.last_local_pane_scan
+            .lock()
+            .expect("last_local_pane_scan mutex should not be poisoned")
+            .insert(socket_name.to_string(), Instant::now());
         Ok(sessions)
     }
 
