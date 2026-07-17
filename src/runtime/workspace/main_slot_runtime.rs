@@ -1723,13 +1723,15 @@ impl MainSlotRuntime {
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,
     ) {
-        // Hidden panes are parked with remain-on-exit off so tmux can reclaim
-        // them automatically when their process exits. Only remove the main-pane
-        // death hook here; do not flip remain-on-exit back on, or the hidden
-        // window becomes a permanent parking lot for dead panes.
+        // Keep the inactive remote session pane alive as an owned content pane
+        // so it can be restored later. Remove the workspace pane-died hook and
+        // let tmux retain the pane after its process exits.
         let _ = self
             .backend
             .unset_pane_hook(workspace, pane, MAIN_PANE_DIED_HOOK);
+        let _ = self
+            .backend
+            .set_pane_option(workspace, pane, "remain-on-exit", "on");
     }
 
     fn clear_stale_remote_session_pane(
