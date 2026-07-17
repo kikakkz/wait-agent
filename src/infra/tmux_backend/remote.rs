@@ -405,8 +405,8 @@ fn unset_session_environment_args(session_name: &str, key: &str) -> Vec<String> 
 mod tests {
     use super::{
         clear_pane_pipe_args, pane_window_id_args, resize_pane_args, resize_window_args,
-        set_pane_hook_args, set_pane_pipe_args, set_session_environment_args,
-        unset_pane_hook_args, unset_session_environment_args,
+        set_pane_hook_args, set_pane_pipe_args, set_session_environment_args, unset_pane_hook_args,
+        unset_session_environment_args,
     };
     use crate::infra::tmux::TmuxPaneId;
 

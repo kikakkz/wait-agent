@@ -473,10 +473,8 @@ mod tests {
             command.transport_socket_path.as_str(),
             &command.target_id,
         );
-        let input_socket_path = authority_input_socket_path(
-            command.transport_socket_path.as_str(),
-            &command.target_id,
-        );
+        let input_socket_path =
+            authority_input_socket_path(command.transport_socket_path.as_str(), &command.target_id);
         let _ = fs::remove_file(&input_socket_path);
         let input_listener =
             UnixListener::bind(&input_socket_path).expect("input socket should bind");
@@ -505,9 +503,8 @@ mod tests {
                 },
             )
             .expect("open mirror should encode");
-            let (mut input_stream, _) = input_listener
-                .accept()
-                .expect("input socket should accept");
+            let (mut input_stream, _) =
+                input_listener.accept().expect("input socket should accept");
             input_stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(100)))
                 .expect("input stream should accept read timeout");

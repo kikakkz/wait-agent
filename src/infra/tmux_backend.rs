@@ -15,6 +15,8 @@ use crate::infra::tmux_types::{
     TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::runtime::remote_authority_target_host_runtime::RemoteTargetTerminalFlags;
+#[cfg(not(test))]
+use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -23,8 +25,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-#[cfg(not(test))]
-use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
