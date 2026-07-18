@@ -16,12 +16,12 @@ steps:
   - Bump the version in Cargo.toml to the next patch version (e.g., `0.0.172`).
   - Run `cargo update -p waitagent` so Cargo.lock reflects the new version.
   - Run `cargo check` again to confirm the tree is clean.
-  - Commit with message `chore: bump version to <next>` (e.g., `chore: bump version to 0.0.172`).
+  - "Commit with message `chore: bump version to <next>` (e.g., `chore: bump version to 0.0.172`)."
   - Push the commit to origin main.
 verification:
   - The new tag exists on origin.
   - Cargo.toml and Cargo.lock both show the next version on main.
-  - `cargo check` passes.
+  - "`cargo check` passes."
 failure_modes:
   - Tag already exists locally or remotely.
   - Cargo.lock version drifts from Cargo.toml.
