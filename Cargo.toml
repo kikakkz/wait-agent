@@ -1,6 +1,6 @@
 [package]
 name = "waitagent"
-version = "0.0.172"
+version = "0.0.173"
 edition = "2021"
 description = "Terminal-native interaction scheduler for multi-agent workflows"
 homepage = "https://github.com/kikakkz/wait-agent"
