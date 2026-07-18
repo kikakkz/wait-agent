@@ -437,8 +437,10 @@ impl EmbeddedTmuxBackend {
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(override_value))
             .unwrap_or_else(|| source.command_name.clone());
-        let foreground_argvs =
-            Self::foreground_argvs_with_exe_basename(source.pane.pane_pid, super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid));
+        let foreground_argvs = Self::foreground_argvs_with_exe_basename(
+            source.pane.pane_pid,
+            super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid),
+        );
         let display_command_name = self
             .registry
             .display_command_name(&foreground_argvs, source.pane.current_command.as_deref());
@@ -680,8 +682,10 @@ impl EmbeddedTmuxBackend {
     }
 
     fn detect_runtime_command_name_for_pane(&self, pane: &TmuxPaneInfo, pane_text: &str) -> String {
-        let foreground_argvs =
-            Self::foreground_argvs_with_exe_basename(pane.pane_pid, super::foreground_process_argvs_for_pane_shell(pane.pane_pid));
+        let foreground_argvs = Self::foreground_argvs_with_exe_basename(
+            pane.pane_pid,
+            super::foreground_process_argvs_for_pane_shell(pane.pane_pid),
+        );
         let current_command = Self::foreground_command_name_from_argvs(
             &self.registry,
             &foreground_argvs,
@@ -1438,9 +1442,7 @@ mod tests {
         let registry = DetectorRegistry::default();
         // Chrome sometimes embeds profile name and flags in argv[0]. Only the
         // leading executable token should be considered for command-name matching.
-        let argvs = vec![vec![
-            "google-chrome-replier --disable-gpu".to_string(),
-        ]];
+        let argvs = vec![vec!["google-chrome-replier --disable-gpu".to_string()]];
 
         let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
             &registry,

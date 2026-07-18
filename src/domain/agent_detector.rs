@@ -454,8 +454,14 @@ mod tests {
 
     #[test]
     fn first_argv_token_strips_path_and_trailing_flags() {
-        assert_eq!(first_argv_token("/usr/bin/google-chrome-replier --disable-gpu"), "google-chrome-replier");
-        assert_eq!(first_argv_token("google-chrome --disable-gpu"), "google-chrome");
+        assert_eq!(
+            first_argv_token("/usr/bin/google-chrome-replier --disable-gpu"),
+            "google-chrome-replier"
+        );
+        assert_eq!(
+            first_argv_token("google-chrome --disable-gpu"),
+            "google-chrome"
+        );
         assert_eq!(first_argv_token("/bin/bash"), "bash");
     }
 
@@ -463,7 +469,7 @@ mod tests {
     fn display_command_name_uses_first_token_when_argv_zero_contains_spaces() {
         let registry = DetectorRegistry::default();
         let candidates = vec![vec![
-            "/usr/bin/google-chrome-replier --disable-gpu".to_string(),
+            "/usr/bin/google-chrome-replier --disable-gpu".to_string()
         ]];
 
         assert_eq!(

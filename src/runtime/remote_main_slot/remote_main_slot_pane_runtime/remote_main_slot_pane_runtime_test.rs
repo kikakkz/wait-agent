@@ -8,9 +8,8 @@ mod tests {
         render_remote_output_and_mark_ready, should_draw_remote_snapshot,
         should_exit_surface_for_target_presence, should_exit_surface_for_target_presence_loss,
         should_exit_surface_locally, spawn_mailbox_watcher, sync_or_defer_remote_pty_size,
-        target_is_online,
-        write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, MirrorReadiness,
-        RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
+        target_is_online, write_remote_raw_output_with_initial_clear, AuthorityTransportStatus,
+        MirrorReadiness, RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
         RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
         RemoteRawPtyMailboxReader, CLEAR_SCREEN_HOME_ESCAPE,
     };
