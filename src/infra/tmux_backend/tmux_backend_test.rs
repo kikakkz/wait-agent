@@ -8,8 +8,9 @@ mod tests {
     use crate::infra::tmux_error::tmux_socket_dir;
     use crate::infra::tmux_glue::TmuxGlueBuildStatus;
     use crate::infra::tmux_types::{
-        TmuxGateway, TmuxLayoutGateway, TmuxProgram, TmuxSessionGateway, TmuxSessionName,
-        TmuxSocketName, TmuxSplitSize, TmuxWindowHandle, TmuxWindowId, TmuxWorkspaceHandle,
+        TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxProgram, TmuxSessionGateway,
+        TmuxSessionName, TmuxSocketName, TmuxSplitSize, TmuxWindowHandle, TmuxWindowId,
+        TmuxWorkspaceHandle,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -846,6 +847,179 @@ mod tests {
         kill_server(&backend, &workspace);
 
         assert!(output.stdout.contains("history-limit 100000"));
+    }
+
+    #[test]
+    fn embedded_backend_sets_workspace_window_size_to_largest() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("window-size"))
+            .expect("workspace bootstrap should succeed");
+
+        let output = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "show-window-options".to_string(),
+                    "-t".to_string(),
+                    format!("{}:0", workspace.session_name.as_str()),
+                    "window-size".to_string(),
+                ],
+            )
+            .expect("window-size should be visible");
+        kill_server(&backend, &workspace);
+
+        assert!(output.stdout.contains("window-size largest"));
+    }
+
+    #[test]
+    fn resize_pane_on_socket_resizes_only_dedicated_windows() {
+        let backend = EmbeddedTmuxBackend::from_build_env()
+            .expect("vendored tmux backend should discover build env");
+        let workspace = backend
+            .ensure_workspace(&unique_workspace_config("resize-pane-dedicated"))
+            .expect("workspace bootstrap should succeed");
+
+        // Create a multi-pane workspace window (like the chrome window).
+        let main = backend
+            .current_pane(&workspace)
+            .expect("main pane should exist");
+        let sidebar_program =
+            TmuxProgram::new("/bin/sh").with_args(vec!["-c".to_string(), "sleep 30".to_string()]);
+        let sidebar = backend
+            .split_pane_right_with_program(
+                &workspace,
+                &main,
+                TmuxSplitSize::Cells(24),
+                &sidebar_program,
+            )
+            .expect("sidebar pane should spawn");
+
+        // Create a dedicated single-pane hidden window.
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "new-window".to_string(),
+                    "-d".to_string(),
+                    "-n".to_string(),
+                    "hidden".to_string(),
+                    "-t".to_string(),
+                    workspace.session_name.as_str().to_string(),
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 30".to_string(),
+                ],
+            )
+            .expect("hidden window should be created");
+        let hidden_pane = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "list-panes".to_string(),
+                    "-t".to_string(),
+                    format!("{}:hidden", workspace.session_name.as_str()),
+                    "-F".to_string(),
+                    "#{pane_id}".to_string(),
+                ],
+            )
+            .expect("hidden pane should resolve");
+        let hidden_pane = hidden_pane
+            .stdout
+            .lines()
+            .next()
+            .expect("hidden pane line should exist")
+            .trim();
+
+        // Force both windows to a known larger size so we can detect whether
+        // resize_pane_on_socket incorrectly shrinks the workspace window.
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "resize-window".to_string(),
+                    "-t".to_string(),
+                    format!("{}:0", workspace.session_name.as_str()),
+                    "-x".to_string(),
+                    "200".to_string(),
+                    "-y".to_string(),
+                    "50".to_string(),
+                ],
+            )
+            .expect("workspace window should be resized to known size");
+        backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "resize-window".to_string(),
+                    "-t".to_string(),
+                    format!("{}:hidden", workspace.session_name.as_str()),
+                    "-x".to_string(),
+                    "200".to_string(),
+                    "-y".to_string(),
+                    "50".to_string(),
+                ],
+            )
+            .expect("hidden window should be resized to known size");
+
+        // Resize the sidebar pane in the multi-pane workspace window: the
+        // workspace window must keep its original size.
+        backend
+            .resize_pane_on_socket(
+                workspace.socket_name.as_str(),
+                &TmuxPaneId::new(sidebar.as_str()),
+                80,
+                24,
+            )
+            .expect("resize on workspace pane should succeed");
+        let workspace_window_after = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    format!("{}:0", workspace.session_name.as_str()),
+                    "#{window_width}x#{window_height}".to_string(),
+                ],
+            )
+            .expect("workspace window size should resolve after resize");
+        let workspace_size_after = workspace_window_after.stdout.trim().to_string();
+
+        // Resize the dedicated hidden pane: the hidden window should shrink.
+        backend
+            .resize_pane_on_socket(
+                workspace.socket_name.as_str(),
+                &TmuxPaneId::new(hidden_pane),
+                80,
+                24,
+            )
+            .expect("resize on hidden pane should succeed");
+        let hidden_window_after = backend
+            .run_on_socket(
+                &workspace.socket_name,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    format!("{}:hidden", workspace.session_name.as_str()),
+                    "#{window_width}x#{window_height}".to_string(),
+                ],
+            )
+            .expect("hidden window size should resolve after resize");
+        let hidden_size_after = hidden_window_after.stdout.trim().to_string();
+
+        kill_server(&backend, &workspace);
+
+        assert_eq!(
+            workspace_size_after, "200x50",
+            "workspace chrome window should not shrink when a remote resize is applied"
+        );
+        assert_eq!(
+            hidden_size_after, "80x24",
+            "dedicated hidden window should match the requested remote size"
+        );
     }
 
     #[test]

@@ -566,6 +566,19 @@ impl EmbeddedTmuxBackend {
                 workspace.session_name.as_str()
             )));
         }
+        // Keep the workspace window sized to the largest attached client rather
+        // than the most recent resize command. This prevents remote viewers'
+        // ApplyResize requests from shrinking the local UI.
+        let _ = self.run_on_socket(
+            &workspace.socket_name,
+            &[
+                "set-window-option".to_string(),
+                "-t".to_string(),
+                format!("{}:0", workspace.session_name.as_str()),
+                "window-size".to_string(),
+                "largest".to_string(),
+            ],
+        );
         Ok(())
     }
 

@@ -24,7 +24,7 @@ impl EmbeddedTmuxBackend {
                 {
                     let role_option = super::WAITAGENT_PANE_ROLE_OPTION;
                     format!(
-                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{pane_width}}\t#{{pane_height}}\t#{{pane_window_id}}\t#{{{role_option}}}"
+                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{pane_width}}\t#{{pane_height}}\t#{{window_id}}\t#{{{role_option}}}"
                     )
                 },
             ],
@@ -40,6 +40,7 @@ impl EmbeddedTmuxBackend {
             let role = parts.next().unwrap_or_default();
             if pane_id.is_empty()
                 || pane_dead != "0"
+                || window_id.is_empty()
                 || title == super::WAITAGENT_SIDEBAR_PANE_TITLE
                 || title == super::WAITAGENT_FOOTER_PANE_TITLE
                 || role != super::WAITAGENT_PANE_ROLE_CONTENT

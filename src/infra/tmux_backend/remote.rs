@@ -206,12 +206,37 @@ impl EmbeddedTmuxBackend {
         rows: usize,
     ) -> Result<(), TmuxError> {
         let socket = TmuxSocketName::new(socket_name);
-        self.run_on_socket(&socket, &resize_pane_args(pane, cols, rows))?;
-
         let window = self.run_on_socket(&socket, &pane_window_id_args(pane))?;
         let window = window.stdout.trim();
-        if !window.is_empty() {
-            self.run_on_socket(&socket, &resize_window_args(window, cols, rows))?;
+
+        let pane_count = if window.is_empty() {
+            1
+        } else {
+            let panes = self.run_on_socket(
+                &socket,
+                &[
+                    "list-panes".to_string(),
+                    "-t".to_string(),
+                    window.to_string(),
+                    "-F".to_string(),
+                    "#{pane_id}".to_string(),
+                ],
+            )?;
+            panes.stdout.lines().filter(|l| !l.is_empty()).count()
+        };
+
+        if pane_count <= 1 {
+            // Dedicated target-host or hidden mirror window: resize both the
+            // pane and its window so the mirror matches the remote console.
+            self.run_on_socket(&socket, &resize_pane_args(pane, cols, rows))?;
+            if !window.is_empty() {
+                self.run_on_socket(&socket, &resize_window_args(window, cols, rows))?;
+            }
+        } else {
+            // Workspace chrome window: do not resize here. Resizing the pane or
+            // window would shrink the entire UI to match a remote viewer's
+            // console size. The pane keeps the local main-slot geometry, and
+            // remote-main-slot re-syncs its local size to the authority later.
         }
         Ok(())
     }
