@@ -6,8 +6,9 @@ use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, CreateSessionAccepted, CreateSessionRejected,
     CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, RawPtyInput, RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited,
-    TargetOutput as GrpcTargetOutput, TargetPublicationAck as GrpcTargetPublicationAck,
+    OpenMirrorRequest, PtyResizeApplied, RawPtyInput, RawPtyOutput, RouteContext,
+    TargetExited as GrpcTargetExited, TargetOutput as GrpcTargetOutput,
+    TargetPublicationAck as GrpcTargetPublicationAck,
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
 };
@@ -19,8 +20,8 @@ use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
     CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
     NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
-    ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+    ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload,
+    TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
     TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
@@ -301,6 +302,31 @@ impl RemoteNodeSessionRuntime {
                 revision: 0,
                 transport_session_id: transport_session_id.to_string(),
                 source_session_name: source_session_name.map(str::to_string),
+            }),
+        )
+    }
+
+    pub fn send_resize_applied(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        cols: usize,
+        rows: usize,
+        resize_epoch: u64,
+        resize_authority_console_id: String,
+    ) -> Result<(), RemoteNodeSessionError> {
+        self.send_payload(
+            NodeSessionChannel::Authority,
+            session_id,
+            target_id,
+            "authority-msg",
+            ControlPlanePayload::ResizeApplied(ResizeAppliedPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                cols,
+                rows,
+                resize_epoch,
+                resize_authority_console_id,
             }),
         )
     }
@@ -964,6 +990,16 @@ pub(crate) fn map_outbound_grpc_envelope(
                 cursor_visible: payload.cursor_visible,
             }))
         }
+        (NodeSessionChannel::Authority, ControlPlanePayload::ResizeApplied(payload)) => {
+            Some(GrpcBody::PtyResizeApplied(PtyResizeApplied {
+                target_id: payload.target_id.clone(),
+                resize_epoch: payload.resize_epoch,
+                cols: payload.cols as u32,
+                rows: payload.rows as u32,
+                session_id: payload.session_id.clone(),
+                resize_authority_console_id: payload.resize_authority_console_id.clone(),
+            }))
+        }
         (NodeSessionChannel::Publication, ControlPlanePayload::TargetPublished(payload)) => {
             Some(GrpcBody::TargetPublished(GrpcTargetPublished {
                 target_id: envelope.target_id.clone().unwrap_or_else(|| {
@@ -975,6 +1011,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                 selector: payload.selector.clone(),
                 availability: payload.availability.to_string(),
                 command_name: payload.command_name.clone(),
+                display_command_name: payload.display_command_name.clone(),
                 current_path: payload.current_path.clone(),
                 attached_count: Some(payload.attached_clients as u64),
                 session_role: payload.session_role.map(str::to_string),

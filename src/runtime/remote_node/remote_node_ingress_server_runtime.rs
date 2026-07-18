@@ -3,8 +3,9 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest,
-    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, RawPtyInput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetPublicationAck as GrpcTargetPublicationAck,
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, RawPtyInput,
+    RouteContext, TargetExited as GrpcTargetExited,
+    TargetPublicationAck as GrpcTargetPublicationAck,
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
 };
@@ -2331,6 +2332,29 @@ fn route_transport_envelope(
                 },
             )
         }
+        Some(Body::PtyResizeApplied(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_resize_applied(
+                        &session_id,
+                        &target_id,
+                        payload.cols as usize,
+                        payload.rows as usize,
+                        payload.resize_epoch,
+                        payload.resize_authority_console_id.clone(),
+                    )
+                },
+            )
+        }
         Some(Body::RawPtyInput(payload)) => {
             let Some(session) = session else {
                 return Ok(());
@@ -2812,7 +2836,7 @@ fn map_target_published_envelope(
                 .map(|role| role.as_str()),
             workspace_key: payload.workspace_key.clone(),
             command_name: payload.command_name.clone(),
-            display_command_name: None,
+            display_command_name: payload.display_command_name.clone(),
             current_path: payload.current_path.clone(),
             attached_clients: payload.attached_count.unwrap_or(0) as usize,
             window_count: payload.window_count.unwrap_or(0) as usize,

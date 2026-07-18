@@ -149,6 +149,7 @@ message TargetPublished {
   optional string task_state = 13;
   string node_instance_id = 14;
   uint64 revision = 15;
+  optional string display_command_name = 16;
 }
 
 message TargetExited {
@@ -314,6 +315,7 @@ message PtyResizeApplied {
   uint32 cols = 3;
   uint32 rows = 4;
   string session_id = 5;
+  string resize_authority_console_id = 6;
 }
 
 message TargetOutput {

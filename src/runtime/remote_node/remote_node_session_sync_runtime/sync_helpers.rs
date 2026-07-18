@@ -2053,6 +2053,7 @@ pub(crate) fn remote_session_published_envelope(
             selector: session.selector.clone(),
             availability: session.availability.as_str().to_string(),
             command_name: session.command_name.clone(),
+            display_command_name: session.display_command_name.clone(),
             current_path: session
                 .current_path
                 .as_ref()

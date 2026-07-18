@@ -1354,6 +1354,7 @@ mod tests {
                     selector: Some("shell-a".to_string()),
                     availability: "online".to_string(),
                     command_name: Some("bash".to_string()),
+                    display_command_name: None,
                     current_path: Some("/tmp".to_string()),
                     attached_count: Some(0),
                     session_role: None,

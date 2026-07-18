@@ -750,6 +750,18 @@ where
                                 {
                                     break Err(error);
                                 }
+                                if let Err(error) = transport.send_resize_applied(
+                                    &payload.session_id,
+                                    &payload.target_id,
+                                    payload.cols,
+                                    payload.rows,
+                                    0,
+                                    payload.console_id.clone(),
+                                ) {
+                                    ERROR_LOG.log(format!(
+                                        "[diag-timing] target host: send_resize_applied failed: {error}"
+                                    ));
+                                }
                                 if let Err(error) = send_mirror_accepted_and_bootstrap(
                                     self, &command, &pane, &transport, &payload,
                                 ) {
@@ -818,6 +830,18 @@ where
                         payload: payload.clone(),
                     };
                     health.mirror_active.store(true, Ordering::Relaxed);
+                    if let Err(error) = transport.send_resize_applied(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.cols,
+                        payload.rows,
+                        0,
+                        payload.console_id.clone(),
+                    ) {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] target host: send_resize_applied failed: {error}"
+                        ));
+                    }
                     if let Err(error) = send_mirror_accepted_and_bootstrap(
                         self, &command, &pane, &transport, &payload,
                     ) {
@@ -899,6 +923,18 @@ where
                         .map_err(remote_authority_error)
                     {
                         break Err(error);
+                    }
+                    if let Err(error) = transport.send_resize_applied(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.cols,
+                        payload.rows,
+                        payload.resize_epoch,
+                        payload.resize_authority_console_id.clone(),
+                    ) {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] target host: send_resize_applied failed: {error}"
+                        ));
                     }
                 }
                 AuthorityHostEvent::TransportCommand(RemoteAuthorityCommand::CloseMirror(
@@ -1054,6 +1090,18 @@ where
                             payload: payload.clone(),
                         };
                         health.mirror_active.store(true, Ordering::Relaxed);
+                        if let Err(error) = transport.send_resize_applied(
+                            &payload.session_id,
+                            &payload.target_id,
+                            payload.cols,
+                            payload.rows,
+                            0,
+                            payload.console_id.clone(),
+                        ) {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] target host: send_resize_applied failed: {error}"
+                            ));
+                        }
                         if let Err(error) = send_mirror_accepted_and_bootstrap(
                             self, &command, &pane, &transport, &payload,
                         ) {

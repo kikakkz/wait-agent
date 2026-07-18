@@ -213,23 +213,23 @@ fn remote_command_host_port_label(session: &ManagedSessionRecord) -> String {
         .split_once('#')
         .map(|(host, port)| (host, Some(port)))
         .unwrap_or((session.address.display_authority_id(), None));
+    let command = session
+        .display_command_name
+        .as_deref()
+        .or(session.command_name.as_deref())
+        .unwrap_or("bash");
     match port {
-        Some(port) => format!(
-            "{}@{}:{}",
-            session.command_name.as_deref().unwrap_or("bash"),
-            host,
-            port
-        ),
-        None => format!(
-            "{}@{}",
-            session.command_name.as_deref().unwrap_or("bash"),
-            host
-        ),
+        Some(port) => format!("{}@{}:{}", command, host, port),
+        None => format!("{}@{}", command, host),
     }
 }
 
 fn remote_row_label_candidates(session: &ManagedSessionRecord) -> Vec<String> {
-    let command = session.command_name.as_deref().unwrap_or("bash");
+    let command = session
+        .display_command_name
+        .as_deref()
+        .or(session.command_name.as_deref())
+        .unwrap_or("bash");
     let authority = session.address.authority_id();
     let host = session.address.display_authority_id();
     let command_host_port = remote_command_host_port_label(session);

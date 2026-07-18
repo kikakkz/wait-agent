@@ -8,6 +8,105 @@ use crate::infra::tmux_types::{
 };
 
 impl EmbeddedTmuxBackend {
+    pub(crate) fn sync_content_pane_geometries(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        current_window_id: Option<&str>,
+        geometry: (u16, u16),
+    ) -> Result<(), TmuxError> {
+        let (width, height) = geometry;
+        let output = self.run_on_socket(
+            &workspace.socket_name,
+            &[
+                "list-panes".to_string(),
+                "-a".to_string(),
+                "-F".to_string(),
+                {
+                    let role_option = super::WAITAGENT_PANE_ROLE_OPTION;
+                    format!(
+                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{pane_width}}\t#{{pane_height}}\t#{{pane_window_id}}\t#{{{role_option}}}"
+                    )
+                },
+            ],
+        )?;
+        for line in output.stdout.lines() {
+            let mut parts = line.split('\t');
+            let pane_id = parts.next().unwrap_or_default();
+            let pane_dead = parts.next().unwrap_or_default();
+            let title = parts.next().unwrap_or_default();
+            let pane_width = parts.next().and_then(|value| value.parse::<u16>().ok());
+            let pane_height = parts.next().and_then(|value| value.parse::<u16>().ok());
+            let window_id = parts.next().unwrap_or_default();
+            let role = parts.next().unwrap_or_default();
+            if pane_id.is_empty()
+                || pane_dead != "0"
+                || title == super::WAITAGENT_SIDEBAR_PANE_TITLE
+                || title == super::WAITAGENT_FOOTER_PANE_TITLE
+                || role != super::WAITAGENT_PANE_ROLE_CONTENT
+            {
+                continue;
+            }
+            if pane_width == Some(width) && pane_height == Some(height) {
+                continue;
+            }
+            if current_window_id == Some(window_id) {
+                continue;
+            }
+            let pane = TmuxPaneId::new(pane_id);
+            self.resize_window_to_geometry(workspace, window_id, width, height)?;
+            self.resize_pane_to_geometry(workspace, &pane, width, height)?;
+        }
+        Ok(())
+    }
+
+    fn resize_window_to_geometry(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        window_id: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(
+            workspace,
+            &[
+                "resize-window".to_string(),
+                "-t".to_string(),
+                window_id.to_string(),
+                "-x".to_string(),
+                width.to_string(),
+                "-y".to_string(),
+                height.to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn resize_pane_to_geometry(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        pane: &TmuxPaneId,
+        width: u16,
+        height: u16,
+    ) -> Result<(), TmuxError> {
+        self.run_workspace_command(
+            workspace,
+            &[
+                "resize-pane".to_string(),
+                "-t".to_string(),
+                pane.as_str().to_string(),
+                "-x".to_string(),
+                width.to_string(),
+                ";".to_string(),
+                "resize-pane".to_string(),
+                "-t".to_string(),
+                pane.as_str().to_string(),
+                "-y".to_string(),
+                height.to_string(),
+            ],
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn set_global_hook_on_socket(
         &self,
         socket_name: &str,

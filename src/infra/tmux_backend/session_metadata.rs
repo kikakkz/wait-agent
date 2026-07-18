@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::InputStabilityPolicy;
+use crate::domain::agent_detector::{first_argv_token, InputStabilityPolicy};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
@@ -437,7 +437,8 @@ impl EmbeddedTmuxBackend {
             .filter(|override_value| !runtime_command_override_is_running(override_value))
             .map(|override_value| runtime_command_override_name(override_value))
             .unwrap_or_else(|| source.command_name.clone());
-        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid);
+        let foreground_argvs =
+            Self::foreground_argvs_with_exe_basename(source.pane.pane_pid, super::foreground_process_argvs_for_pane_shell(source.pane.pane_pid));
         let display_command_name = self
             .registry
             .display_command_name(&foreground_argvs, source.pane.current_command.as_deref());
@@ -679,7 +680,8 @@ impl EmbeddedTmuxBackend {
     }
 
     fn detect_runtime_command_name_for_pane(&self, pane: &TmuxPaneInfo, pane_text: &str) -> String {
-        let foreground_argvs = super::foreground_process_argvs_for_pane_shell(pane.pane_pid);
+        let foreground_argvs =
+            Self::foreground_argvs_with_exe_basename(pane.pane_pid, super::foreground_process_argvs_for_pane_shell(pane.pane_pid));
         let current_command = Self::foreground_command_name_from_argvs(
             &self.registry,
             &foreground_argvs,
@@ -690,6 +692,27 @@ impl EmbeddedTmuxBackend {
             &foreground_argvs,
             pane_text,
         )
+    }
+
+    /// Builds foreground argv candidates, preferring the pane process's own
+    /// executable basename as the first candidate.
+    ///
+    /// Programs like Chrome rewrite both `/proc/<pid>/comm` and argv[0] to
+    /// reflect the profile name (e.g. `google-chrome-replier`), but the
+    /// `/proc/<pid>/exe` symlink still points at the real binary. Inserting the
+    /// exe basename first gives command-name resolution a stable, accurate
+    /// starting point while still falling back to argv/comm when exe is
+    /// unavailable.
+    fn foreground_argvs_with_exe_basename(
+        pane_pid: Option<u32>,
+        mut foreground_argvs: Vec<Vec<String>>,
+    ) -> Vec<Vec<String>> {
+        if let Some(pid) = pane_pid {
+            if let Some(exe) = super::process_inspector::process_exe_basename(pid) {
+                foreground_argvs.insert(0, vec![exe]);
+            }
+        }
+        foreground_argvs
     }
 
     /// Derives a display command name from foreground process argv candidates.
@@ -717,7 +740,7 @@ impl EmbeddedTmuxBackend {
         let candidate = argvs
             .iter()
             .filter_map(|argv| argv.first())
-            .map(|cmd| cmd.rsplit('/').next().unwrap_or(cmd))
+            .map(|cmd| first_argv_token(cmd))
             .find(|cmd| !registry.is_shell_name(cmd))
             .map(|cmd| cmd.to_string());
 
@@ -1408,5 +1431,40 @@ mod tests {
         );
 
         assert_eq!(command_name, "node");
+    }
+
+    #[test]
+    fn foreground_command_name_uses_only_first_token_of_spaced_argv_zero() {
+        let registry = DetectorRegistry::default();
+        // Chrome sometimes embeds profile name and flags in argv[0]. Only the
+        // leading executable token should be considered for command-name matching.
+        let argvs = vec![vec![
+            "google-chrome-replier --disable-gpu".to_string(),
+        ]];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("google-chrome-replier"),
+        );
+
+        assert_eq!(command_name, "google-chrome-replier");
+    }
+
+    #[test]
+    fn foreground_command_name_prefers_exe_basename_when_argv_zero_is_rewritten() {
+        let registry = DetectorRegistry::default();
+        let argvs = vec![
+            vec!["google-chrome".to_string()],
+            vec!["google-chrome-replier --disable-gpu".to_string()],
+        ];
+
+        let command_name = EmbeddedTmuxBackend::foreground_command_name_from_argvs(
+            &registry,
+            &argvs,
+            Some("google-chrome-replier"),
+        );
+
+        assert_eq!(command_name, "google-chrome");
     }
 }

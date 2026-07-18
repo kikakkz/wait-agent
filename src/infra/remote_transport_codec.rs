@@ -5,9 +5,9 @@ use crate::infra::remote_protocol::{
     MirrorBootstrapCompletePayload, NodeSessionChannel, NodeSessionEnvelope,
     OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
     OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-    TargetPublishedPayload,
+    RawPtyOutputPayload, ResizeAppliedPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
+    TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -405,6 +405,15 @@ fn write_payload(
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
         }
+        ControlPlanePayload::ResizeApplied(payload) => {
+            write_u8(writer, 20)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_u64(writer, payload.resize_epoch)?;
+            write_string(writer, &payload.resize_authority_console_id)?;
+            write_usize(writer, payload.cols)?;
+            write_usize(writer, payload.rows)?;
+        }
         ControlPlanePayload::CreateSessionRequest(payload) => {
             write_u8(writer, 70)?;
             write_string(writer, &payload.request_id)?;
@@ -561,6 +570,14 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
         }),
         19 => ControlPlanePayload::RawPtyOutput(read_raw_pty_output_payload(reader)?),
         8 => ControlPlanePayload::ApplyResize(ApplyResizePayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            resize_epoch: read_u64(reader)?,
+            resize_authority_console_id: read_string(reader)?,
+            cols: read_usize(reader)?,
+            rows: read_usize(reader)?,
+        }),
+        20 => ControlPlanePayload::ResizeApplied(ResizeAppliedPayload {
             session_id: read_string(reader)?,
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,

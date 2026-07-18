@@ -564,6 +564,10 @@ mod tests {
                             bootstrap_complete_payload = Some(payload);
                         }
                     }
+                    ControlPlanePayload::ResizeApplied(_) => {
+                        // Resize ack is expected after each resize_pty; the test
+                        // only verifies that the gateway received the resize calls.
+                    }
                     payload @ ControlPlanePayload::TargetOutput(_) => {
                         if output_payload.is_none() {
                             output_payload = Some(payload);
@@ -748,11 +752,14 @@ mod tests {
                 .expect("server hello should encode");
             ready_tx.send(()).expect("server readiness should send");
 
-            let envelope = read_node_session_envelope(&mut stream)
-                .expect("pane-died should produce TargetExited");
-            let payload = match envelope.envelope.payload {
-                ControlPlanePayload::TargetExited(payload) => payload,
-                other => panic!("unexpected node-session payload: {other:?}"),
+            let payload = loop {
+                let envelope = read_node_session_envelope(&mut stream)
+                    .expect("pane-died should produce TargetExited");
+                match envelope.envelope.payload {
+                    ControlPlanePayload::TargetExited(payload) => break payload,
+                    ControlPlanePayload::ResizeApplied(_) => {}
+                    other => panic!("unexpected node-session payload: {other:?}"),
+                }
             };
             server_tx.send(payload).expect("payload should send");
         });
@@ -1013,6 +1020,7 @@ mod tests {
                     }
                     ControlPlanePayload::MirrorBootstrapChunk(_)
                     | ControlPlanePayload::MirrorBootstrapComplete(_) => {}
+                    ControlPlanePayload::ResizeApplied(_) => {}
                     other => panic!("unexpected node-session payload: {other:?}"),
                 }
             }
@@ -1164,6 +1172,7 @@ mod tests {
                             .expect("close mirror should encode");
                         }
                     }
+                    ControlPlanePayload::ResizeApplied(_) => {}
                     other => panic!("unexpected node-session payload: {other:?}"),
                 }
             }
@@ -1299,6 +1308,7 @@ mod tests {
                         }
                     }
                     ControlPlanePayload::MirrorBootstrapChunk(_) => {}
+                    ControlPlanePayload::ResizeApplied(_) => {}
                     other => panic!("unexpected node-session payload: {other:?}"),
                 }
             }

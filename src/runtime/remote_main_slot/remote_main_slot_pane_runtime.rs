@@ -294,6 +294,7 @@ impl RemoteMainSlotPaneRuntime {
         let mut direct_raw_output_last_seq = None;
         let mut raw_screen_initialized = false;
         let mut mirror_readiness = MirrorReadiness::Waiting;
+        let mut resize_acked_size: Option<TerminalSize> = None;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
         if remote_runtime.has_connection(target.address.authority_id()) {
@@ -307,6 +308,7 @@ impl RemoteMainSlotPaneRuntime {
                 &raw_input_route,
                 &mut pending_pty_size,
                 &mut last_synced_size,
+                &mut resize_acked_size,
                 &mut raw_screen_initialized,
                 event_tx.clone(),
             ) {
@@ -485,12 +487,13 @@ impl RemoteMainSlotPaneRuntime {
                             &mut mirror_readiness,
                             &mut reconnecting_since,
                             &mut raw_screen_initialized,
+                            &last_synced_size,
+                            &mut resize_acked_size,
                         )?;
                     }
                     RemotePaneEvent::Resize => {
                         let size = current_remote_surface_size(&spec, &terminal);
-                        let resize_is_user_visible = should_sync_remote_pty_resize(&spec)?;
-                        if size != last_synced_size && resize_is_user_visible {
+                        if size != last_synced_size {
                             if let Some(binding) = binding.as_ref() {
                                 sync_or_defer_remote_pty_size(
                                     &remote_runtime,
@@ -500,6 +503,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut pending_pty_size,
                                 )?;
                                 last_synced_size = size;
+                                resize_acked_size = None;
                             }
                         }
                         // When raw PTY mode is active (binding.is_some()), the
@@ -544,21 +548,26 @@ impl RemoteMainSlotPaneRuntime {
                                 AuthorityTransportStatus::Disconnected
                             };
                             if let Some(binding) = binding.as_ref() {
-                                flush_pending_pty_size(
+                                let flushed = flush_pending_pty_size(
                                     &remote_runtime,
                                     &target,
                                     binding,
                                     &mut pending_pty_size,
                                 )?;
-                                if mirror_readiness == MirrorReadiness::Ready {
-                                    flush_paused_input(
-                                        &remote_runtime,
-                                        &target,
-                                        binding,
-                                        &mut paused_input_buffer,
-                                        &mut console_seq,
-                                    )?;
+                                if flushed {
+                                    resize_acked_size = None;
                                 }
+                                try_flush_ready_inputs(
+                                    &remote_runtime,
+                                    &target,
+                                    Some(binding),
+                                    &mut pending_pty_size,
+                                    &mut paused_input_buffer,
+                                    &mut console_seq,
+                                    &mirror_readiness,
+                                    &last_synced_size,
+                                    &mut resize_acked_size,
+                                )?;
                             }
                             let needs_activation = reconnecting_since.is_some()
                                 || binding.is_none()
@@ -579,6 +588,7 @@ impl RemoteMainSlotPaneRuntime {
                                     &raw_input_route,
                                     &mut pending_pty_size,
                                     &mut last_synced_size,
+                                    &mut resize_acked_size,
                                     &mut raw_screen_initialized,
                                     event_tx.clone(),
                                 ) {
@@ -749,6 +759,8 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut mirror_readiness,
                                 &mut reconnecting_since,
                                 &mut raw_screen_initialized,
+                                &last_synced_size,
+                                &mut resize_acked_size,
                             )?;
                         }
                         AuthorityTransportEvent::Envelope {
@@ -794,6 +806,34 @@ impl RemoteMainSlotPaneRuntime {
                                     continue;
                                 }
                             }
+                            if let ControlPlanePayload::ResizeApplied(payload) = &envelope.payload {
+                                if envelope.sender_id != target.address.authority_id() {
+                                    continue;
+                                }
+                                if let Some(binding) = binding.as_ref() {
+                                    if payload.resize_authority_console_id != binding.console_id {
+                                        continue;
+                                    }
+                                    resize_acked_size = Some(TerminalSize {
+                                        cols: payload.cols as u16,
+                                        rows: payload.rows as u16,
+                                        pixel_width: 0,
+                                        pixel_height: 0,
+                                    });
+                                    try_flush_ready_inputs(
+                                        &remote_runtime,
+                                        &target,
+                                        Some(binding),
+                                        &mut pending_pty_size,
+                                        &mut paused_input_buffer,
+                                        &mut console_seq,
+                                        &mirror_readiness,
+                                        &last_synced_size,
+                                        &mut resize_acked_size,
+                                    )?;
+                                }
+                                continue;
+                            }
                             if let Some(raw) = collect_direct_raw_pty_output_envelope(
                                 &target,
                                 &envelope,
@@ -812,6 +852,8 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut mirror_readiness,
                                     &mut reconnecting_since,
                                     &mut raw_screen_initialized,
+                                    &last_synced_size,
+                                    &mut resize_acked_size,
                                 )?;
                                 continue;
                             }
@@ -872,6 +914,8 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut mirror_readiness,
                                     &mut reconnecting_since,
                                     &mut raw_screen_initialized,
+                                    &last_synced_size,
+                                    &mut resize_acked_size,
                                 )?;
                             }
                         }
@@ -983,6 +1027,7 @@ impl RemoteMainSlotPaneRuntime {
                                 &raw_input_route,
                                 &mut pending_pty_size,
                                 &mut last_synced_size,
+                                &mut resize_acked_size,
                                 &mut raw_screen_initialized,
                                 event_tx.clone(),
                             ) {
@@ -1043,6 +1088,10 @@ impl RemoteMainSlotPaneRuntime {
                                 continue;
                             }
                             if mirror_readiness != MirrorReadiness::Ready {
+                                paused_input_buffer.push(bytes);
+                                continue;
+                            }
+                            if !is_resize_acked(&last_synced_size, &resize_acked_size) {
                                 paused_input_buffer.push(bytes);
                                 continue;
                             }
@@ -1150,75 +1199,6 @@ fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize>
     })
 }
 
-fn should_sync_remote_pty_resize(spec: &RemoteInteractSurfaceSpec) -> Result<bool, LifecycleError> {
-    if spec.console_location != ConsoleLocation::LocalWorkspace {
-        return Ok(true);
-    }
-    let pane_id = std::env::var("TMUX_PANE").map_err(|error| {
-        LifecycleError::Protocol(format!(
-            "workspace remote pane resize missing TMUX_PANE for target {}: {error}",
-            spec.target
-        ))
-    })?;
-    let pane_id = pane_id.trim();
-    if pane_id.is_empty() {
-        return Err(LifecycleError::Protocol(format!(
-            "workspace remote pane resize has empty TMUX_PANE for target {}",
-            spec.target
-        )));
-    }
-    let backend =
-        crate::infra::tmux::EmbeddedTmuxBackend::from_build_env().map_err(remote_pane_error)?;
-    let workspace = crate::infra::tmux::TmuxWorkspaceHandle {
-        workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
-            spec.surface_scope.clone(),
-        ),
-        socket_name: crate::infra::tmux::TmuxSocketName::new(spec.socket_name.clone()),
-        session_name: crate::infra::tmux::TmuxSessionName::new(spec.surface_scope.clone()),
-    };
-    let main_pane = backend
-        .show_session_option(&workspace, "@waitagent_main_pane_id")
-        .map_err(remote_pane_error)?;
-    let active_target = backend
-        .show_session_option(&workspace, "@waitagent_active_target")
-        .map_err(remote_pane_error)?;
-    let window_active = backend
-        .run_on_socket(
-            &workspace.socket_name,
-            &[
-                "display-message".to_string(),
-                "-p".to_string(),
-                "-t".to_string(),
-                pane_id.to_string(),
-                "#{window_active}".to_string(),
-            ],
-        )
-        .map_err(remote_pane_error)?
-        .stdout
-        .trim()
-        == "1";
-    Ok(should_sync_remote_pty_resize_for_state(
-        spec,
-        pane_id,
-        main_pane.as_deref(),
-        active_target.as_deref(),
-        window_active,
-    ))
-}
-
-fn should_sync_remote_pty_resize_for_state(
-    spec: &RemoteInteractSurfaceSpec,
-    pane_id: &str,
-    main_pane: Option<&str>,
-    active_target: Option<&str>,
-    window_active: bool,
-) -> bool {
-    if spec.console_location != ConsoleLocation::LocalWorkspace {
-        return true;
-    }
-    window_active && main_pane == Some(pane_id) && active_target == Some(spec.target.as_str())
-}
-
 fn activate_remote_surface_binding(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
@@ -1229,6 +1209,7 @@ fn activate_remote_surface_binding(
     raw_input_route: &RawPtyInputRoute,
     pending_pty_size: &mut Option<TerminalSize>,
     last_synced_size: &mut TerminalSize,
+    resize_acked_size: &mut Option<TerminalSize>,
     raw_screen_initialized: &mut bool,
     event_tx: mpsc::Sender<RemotePaneEvent>,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
@@ -1250,8 +1231,12 @@ fn activate_remote_surface_binding(
         pending_pty_size,
     )?;
     *last_synced_size = *size;
+    *resize_acked_size = None;
     write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
-    flush_pending_pty_size(remote_runtime, target, &activated_binding, pending_pty_size)?;
+    let _ = flush_pending_pty_size(remote_runtime, target, &activated_binding, pending_pty_size)?;
+    if pending_pty_size.is_none() {
+        *resize_acked_size = None;
+    }
     Ok(activated_binding)
 }
 
@@ -1266,6 +1251,8 @@ fn render_remote_output_and_mark_ready(
     mirror_readiness: &mut MirrorReadiness,
     reconnecting_since: &mut Option<Instant>,
     raw_screen_initialized: &mut bool,
+    last_synced_size: &TerminalSize,
+    resize_acked_size: &mut Option<TerminalSize>,
 ) -> Result<(), LifecycleError> {
     if raw.is_empty() {
         return Ok(());
@@ -1280,6 +1267,8 @@ fn render_remote_output_and_mark_ready(
         console_seq,
         mirror_readiness,
         reconnecting_since,
+        last_synced_size,
+        resize_acked_size,
     )
 }
 
@@ -1315,6 +1304,8 @@ fn mark_mirror_ready_if_raw_arrived(
     console_seq: &mut u64,
     mirror_readiness: &mut MirrorReadiness,
     reconnecting_since: &mut Option<Instant>,
+    last_synced_size: &TerminalSize,
+    resize_acked_size: &mut Option<TerminalSize>,
 ) -> Result<(), LifecycleError> {
     if raw.is_empty() {
         return Ok(());
@@ -1328,7 +1319,53 @@ fn mark_mirror_ready_if_raw_arrived(
         console_seq,
         mirror_readiness,
         reconnecting_since,
+        last_synced_size,
+        resize_acked_size,
     )
+}
+
+fn is_resize_acked(
+    last_synced_size: &TerminalSize,
+    resize_acked_size: &Option<TerminalSize>,
+) -> bool {
+    resize_acked_size.as_ref() == Some(last_synced_size)
+}
+
+fn try_flush_ready_inputs(
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+    binding: Option<&RemoteAttachmentBinding>,
+    pending_pty_size: &mut Option<TerminalSize>,
+    paused_input_buffer: &mut Vec<Vec<u8>>,
+    console_seq: &mut u64,
+    mirror_readiness: &MirrorReadiness,
+    last_synced_size: &TerminalSize,
+    resize_acked_size: &mut Option<TerminalSize>,
+) -> Result<(), LifecycleError> {
+    if *mirror_readiness != MirrorReadiness::Ready {
+        return Ok(());
+    }
+    if !is_resize_acked(last_synced_size, resize_acked_size) {
+        return Ok(());
+    }
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    let flushed = flush_pending_pty_size(remote_runtime, target, binding, pending_pty_size)?;
+    if flushed {
+        // A deferred resize was just sent; wait for its ack before flushing
+        // paused keystrokes.
+        *resize_acked_size = None;
+        return Ok(());
+    }
+    flush_paused_input(
+        remote_runtime,
+        target,
+        binding,
+        paused_input_buffer,
+        console_seq,
+    )?;
+    Ok(())
 }
 
 fn mark_mirror_ready(
@@ -1340,6 +1377,8 @@ fn mark_mirror_ready(
     console_seq: &mut u64,
     mirror_readiness: &mut MirrorReadiness,
     reconnecting_since: &mut Option<Instant>,
+    last_synced_size: &TerminalSize,
+    resize_acked_size: &mut Option<TerminalSize>,
 ) -> Result<(), LifecycleError> {
     if *mirror_readiness == MirrorReadiness::Ready {
         *reconnecting_since = None;
@@ -1347,17 +1386,17 @@ fn mark_mirror_ready(
     }
     *mirror_readiness = MirrorReadiness::Ready;
     *reconnecting_since = None;
-    if let Some(binding) = binding {
-        flush_pending_pty_size(remote_runtime, target, binding, pending_pty_size)?;
-        flush_paused_input(
-            remote_runtime,
-            target,
-            binding,
-            paused_input_buffer,
-            console_seq,
-        )?;
-    }
-    Ok(())
+    try_flush_ready_inputs(
+        remote_runtime,
+        target,
+        binding,
+        pending_pty_size,
+        paused_input_buffer,
+        console_seq,
+        mirror_readiness,
+        last_synced_size,
+        resize_acked_size,
+    )
 }
 
 fn sync_remote_pty_size(
@@ -1390,7 +1429,10 @@ fn sync_or_defer_remote_pty_size(
         return Ok(());
     }
     match sync_remote_pty_size(remote_runtime, target, binding, size) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            *pending_pty_size = None;
+            Ok(())
+        }
         Err(error)
             if is_remote_authority_unavailable(&error)
                 || !remote_runtime.has_connection(target.address.authority_id()) =>
@@ -1410,17 +1452,17 @@ fn flush_pending_pty_size(
     target: &ManagedSessionRecord,
     binding: &RemoteAttachmentBinding,
     pending_pty_size: &mut Option<TerminalSize>,
-) -> Result<(), LifecycleError> {
+) -> Result<bool, LifecycleError> {
     let Some(size) = *pending_pty_size else {
-        return Ok(());
+        return Ok(false);
     };
     if !remote_runtime.has_connection(target.address.authority_id()) {
-        return Ok(());
+        return Ok(false);
     }
     match sync_remote_pty_size(remote_runtime, target, binding, &size) {
         Ok(()) => {
             *pending_pty_size = None;
-            Ok(())
+            Ok(true)
         }
         Err(error)
             if is_remote_authority_unavailable(&error)
@@ -1429,7 +1471,7 @@ fn flush_pending_pty_size(
             ERROR_LOG.log(format!(
                 "[diag-timing] pending remote PTY resize kept after authority unregistered: {error}"
             ));
-            Ok(())
+            Ok(false)
         }
         Err(error) => Err(error),
     }

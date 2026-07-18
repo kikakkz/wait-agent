@@ -1,3 +1,5 @@
+use crate::domain::agent_detector::first_argv_token;
+
 /// Resolves a meaningful display name for processes launched through an
 /// interpreter or wrapper.
 ///
@@ -22,11 +24,7 @@ impl InterpreterCommandNameResolver {
             return None;
         }
 
-        let argv0 = std::path::Path::new(&argv[0]);
-        let argv0_base = argv0
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("");
+        let argv0_base = first_argv_token(&argv[0]);
 
         // Case 1: wrapper/entry-point script (e.g. pip console scripts).
         // The binary name is meaningful, but the kernel reports the interpreter
@@ -143,5 +141,14 @@ mod tests {
         let resolver = InterpreterCommandNameResolver::new();
         let argv = vec!["/bin/bash".to_string(), "script.sh".to_string()];
         assert_eq!(resolver.resolve("bash", Some(&argv)), None);
+    }
+
+    #[test]
+    fn ignores_embedded_spaces_in_argv_zero() {
+        let resolver = InterpreterCommandNameResolver::new();
+        // Chrome sometimes embeds profile name and flags in argv[0]. The
+        // resolver should only consider the leading executable token.
+        let argv = vec!["google-chrome-replier --disable-gpu".to_string()];
+        assert_eq!(resolver.resolve("google-chrome-replier", Some(&argv)), None);
     }
 }

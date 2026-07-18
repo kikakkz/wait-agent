@@ -7,8 +7,8 @@ mod tests {
         mark_mirror_ready_if_raw_arrived, output_payload_matches_target, placeholder_lines,
         render_remote_output_and_mark_ready, should_draw_remote_snapshot,
         should_exit_surface_for_target_presence, should_exit_surface_for_target_presence_loss,
-        should_exit_surface_locally, should_sync_remote_pty_resize_for_state,
-        spawn_mailbox_watcher, sync_or_defer_remote_pty_size, target_is_online,
+        should_exit_surface_locally, spawn_mailbox_watcher, sync_or_defer_remote_pty_size,
+        target_is_online,
         write_remote_raw_output_with_initial_clear, AuthorityTransportStatus, MirrorReadiness,
         RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
         RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
@@ -99,60 +99,6 @@ mod tests {
         assert!(!should_exit_surface_locally(&main_slot, &[0x1d]));
         assert!(should_exit_surface_locally(&server_console, &[0x1d]));
         assert!(!should_exit_surface_locally(&server_console, b"hello"));
-    }
-
-    #[test]
-    fn workspace_remote_resize_syncs_only_for_visible_active_content_pane() {
-        let spec = RemoteInteractSurfaceSpec {
-            socket_name: "wa-1".to_string(),
-            surface_scope: "workspace-1".to_string(),
-            target: "peer-a:shell-1".to_string(),
-            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
-            console_host_id: "wa-1".to_string(),
-            console_location: ConsoleLocation::LocalWorkspace,
-        };
-
-        assert!(should_sync_remote_pty_resize_for_state(
-            &spec,
-            "%4",
-            Some("%4"),
-            Some("peer-a:shell-1"),
-            true
-        ));
-        assert!(!should_sync_remote_pty_resize_for_state(
-            &spec,
-            "%4",
-            Some("%4"),
-            Some("peer-a:shell-1"),
-            false
-        ));
-        assert!(!should_sync_remote_pty_resize_for_state(
-            &spec,
-            "%4",
-            Some("%3"),
-            Some("peer-a:shell-1"),
-            true
-        ));
-        assert!(!should_sync_remote_pty_resize_for_state(
-            &spec,
-            "%4",
-            Some("%4"),
-            Some("wa-1:local"),
-            true
-        ));
-    }
-
-    #[test]
-    fn server_console_resize_sync_is_independent_from_workspace_visibility() {
-        let spec = server_console_surface_spec();
-
-        assert!(should_sync_remote_pty_resize_for_state(
-            &spec,
-            "%4",
-            Some("%3"),
-            Some("other"),
-            false
-        ));
     }
 
     #[test]
@@ -1160,6 +1106,13 @@ mod tests {
         let mut console_seq = 0;
         let mut readiness = MirrorReadiness::Waiting;
         let mut reconnecting_since = Some(std::time::Instant::now());
+        let last_synced_size = TerminalSize {
+            cols: 12,
+            rows: 4,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let mut resize_acked_size = None;
 
         mark_mirror_ready_if_raw_arrived(
             b"",
@@ -1171,6 +1124,8 @@ mod tests {
             &mut console_seq,
             &mut readiness,
             &mut reconnecting_since,
+            &last_synced_size,
+            &mut resize_acked_size,
         )
         .expect("empty raw should be ignored");
 
@@ -1186,6 +1141,10 @@ mod tests {
         assert!(reconnecting_since.is_some());
         assert_eq!(paused_input_buffer.len(), 1);
 
+        // The remote PTY resize must be acknowledged before the mirror is
+        // considered ready and queued input can be flushed.
+        resize_acked_size = Some(last_synced_size);
+
         let mut raw_screen_initialized = false;
         render_remote_output_and_mark_ready(
             b"\x1b[?25h",
@@ -1198,6 +1157,8 @@ mod tests {
             &mut readiness,
             &mut reconnecting_since,
             &mut raw_screen_initialized,
+            &last_synced_size,
+            &mut resize_acked_size,
         )
         .expect("rendered remote output should make mirror ready");
 

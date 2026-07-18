@@ -2,7 +2,8 @@ use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
     OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, TargetExitedPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload,
+    REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -367,6 +368,29 @@ impl RemoteAuthorityTransportRuntime {
             session_id,
             target_id,
             ControlPlanePayload::ApplyResize(ApplyResizePayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                cols,
+                rows,
+                resize_epoch,
+                resize_authority_console_id,
+            }),
+        )
+    }
+
+    pub fn send_resize_applied(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        cols: usize,
+        rows: usize,
+        resize_epoch: u64,
+        resize_authority_console_id: String,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::ResizeApplied(ResizeAppliedPayload {
                 session_id: session_id.to_string(),
                 target_id: target_id.to_string(),
                 cols,

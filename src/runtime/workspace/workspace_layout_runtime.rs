@@ -749,6 +749,16 @@ impl WorkspaceLayoutRuntime {
         workspace_dir: &Path,
         focus_behavior: LayoutFocusBehavior,
     ) -> Result<(), LifecycleError> {
+        if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
+            ERROR_LOG.log(format!(
+                "[diag] reconcile_layout: skipped while main-slot transition owns main pane metadata for session={:?}",
+                workspace.session_name
+            ));
+            return Ok(());
+        }
+        // Keep hidden content panes in sync with the current main content area
+        // so that remote PTY sizes remain correct even for inactive targets.
+        let _ = self.sync_hidden_content_pane_geometries(workspace);
         if self.native_fullscreen_active(workspace)? || self.sidebar_hidden(workspace)? {
             return self
                 .backend
@@ -758,15 +768,35 @@ impl WorkspaceLayoutRuntime {
                 )
                 .map_err(tmux_layout_error);
         }
-        if self.main_slot_transition_owns_main_pane_metadata(workspace)? {
-            ERROR_LOG.log(format!(
-                "[diag] reconcile_layout: skipped while main-slot transition owns main pane metadata for session={:?}",
-                workspace.session_name
-            ));
-            return Ok(());
-        }
         self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)
             .map(|_| ())
+    }
+
+    const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
+
+    fn sync_hidden_content_pane_geometries(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<(), LifecycleError> {
+        let Some(main_pane_id) = self
+            .backend
+            .show_session_option(workspace, Self::WAITAGENT_MAIN_PANE_OPTION)
+            .map_err(tmux_layout_error)?
+        else {
+            return Ok(());
+        };
+        let (cols, rows) = self
+            .backend
+            .pane_dimensions_on_socket(workspace.socket_name.as_str(), &main_pane_id)
+            .map_err(tmux_layout_error)?;
+        let current_window = self.backend.current_window(workspace).ok();
+        self.backend
+            .sync_content_pane_geometries(
+                workspace,
+                current_window.as_ref().map(|w| w.window_id.as_str()),
+                (cols as u16, rows as u16),
+            )
+            .map_err(tmux_layout_error)
     }
 
     fn refresh_chrome(

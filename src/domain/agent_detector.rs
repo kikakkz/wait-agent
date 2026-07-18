@@ -7,6 +7,17 @@ use std::fmt;
 /// Shared list of shell program names used across agent detection and overlay logic.
 pub const SHELL_NAMES: &[&str] = &["bash", "zsh", "fish", "sh"];
 
+/// Returns the first whitespace-delimited token of an argv[0] string, after
+/// stripping any leading directory path.
+///
+/// Some programs (notably Chrome) embed spaces in argv[0] to encode a profile
+/// name together with flags, e.g. `google-chrome-replier --disable-gpu`. For
+/// command-name purposes only the leading executable token matters.
+pub(crate) fn first_argv_token(argv0: &str) -> &str {
+    let base = argv0.rsplit('/').next().unwrap_or(argv0);
+    base.split_whitespace().next().unwrap_or(base)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputStabilityPolicy {
     Immediate,
@@ -291,12 +302,12 @@ impl DetectorRegistry {
         // 3. Foreground non-shell binary basename.
         if let Some(argv) = argv_candidates.iter().find(|argv| {
             argv.first()
-                .map(|cmd| cmd.rsplit('/').next().unwrap_or(cmd))
+                .map(|cmd| first_argv_token(cmd))
                 .map(|base| !self.is_shell_name(base))
                 .unwrap_or(false)
         }) {
             if let Some(argv0) = argv.first() {
-                return argv0.rsplit('/').next().unwrap_or(argv0).to_string();
+                return first_argv_token(argv0).to_string();
             }
         }
 
@@ -438,6 +449,40 @@ mod tests {
         assert_eq!(
             registry.detect_command_name_from_argv_candidates("python", &candidates, ""),
             "alter"
+        );
+    }
+
+    #[test]
+    fn first_argv_token_strips_path_and_trailing_flags() {
+        assert_eq!(first_argv_token("/usr/bin/google-chrome-replier --disable-gpu"), "google-chrome-replier");
+        assert_eq!(first_argv_token("google-chrome --disable-gpu"), "google-chrome");
+        assert_eq!(first_argv_token("/bin/bash"), "bash");
+    }
+
+    #[test]
+    fn display_command_name_uses_first_token_when_argv_zero_contains_spaces() {
+        let registry = DetectorRegistry::default();
+        let candidates = vec![vec![
+            "/usr/bin/google-chrome-replier --disable-gpu".to_string(),
+        ]];
+
+        assert_eq!(
+            registry.display_command_name(&candidates, Some("google-chrome-replier")),
+            "google-chrome-replier"
+        );
+    }
+
+    #[test]
+    fn display_command_name_prefers_exe_basename_over_embedded_argv_zero() {
+        let registry = DetectorRegistry::default();
+        let candidates = vec![
+            vec!["google-chrome".to_string()],
+            vec!["google-chrome-replier --disable-gpu".to_string()],
+        ];
+
+        assert_eq!(
+            registry.display_command_name(&candidates, Some("google-chrome-replier")),
+            "google-chrome"
         );
     }
 }

@@ -1223,6 +1223,16 @@ fn forward_host_output_to_session(
                         ControlPlanePayload::MirrorBootstrapComplete(payload),
                     )?;
                 }
+                ControlPlanePayload::ResizeApplied(payload) => {
+                    session.send_resize_applied(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.cols,
+                        payload.rows,
+                        payload.resize_epoch,
+                        payload.resize_authority_console_id.clone(),
+                    )?;
+                }
                 ControlPlanePayload::TargetOutput(payload) => {
                     session.send_target_output(
                         &payload.session_id,
@@ -1400,6 +1410,28 @@ fn forward_host_output_to_shared_session(
                         &target_id,
                         "authority-msg",
                         ControlPlanePayload::MirrorBootstrapComplete(payload),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::ResizeApplied(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                if session
+                    .send_resize_applied(
+                        &payload.session_id,
+                        &payload.target_id,
+                        payload.cols,
+                        payload.rows,
+                        payload.resize_epoch,
+                        payload.resize_authority_console_id.clone(),
                     )
                     .is_err()
                 {

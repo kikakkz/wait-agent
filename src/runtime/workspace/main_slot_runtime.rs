@@ -1637,85 +1637,23 @@ impl MainSlotRuntime {
             .map_err(main_slot_error)
     }
 
-    fn pane_window_id(
-        &self,
-        workspace: &TmuxWorkspaceHandle,
-        pane: &TmuxPaneId,
-    ) -> Result<String, LifecycleError> {
-        let output = self
-            .backend
-            .run_on_socket(
-                &workspace.socket_name,
-                &[
-                    "display-message".to_string(),
-                    "-p".to_string(),
-                    "-t".to_string(),
-                    pane.as_str().to_string(),
-                    "#{window_id}".to_string(),
-                ],
-            )
-            .map_err(main_slot_error)?;
-        let window_id = output.stdout.trim();
-        if window_id.is_empty() {
-            return Err(LifecycleError::Protocol(format!(
-                "tmux did not return a window id for pane `{}`",
-                pane.as_str()
-            )));
-        }
-        Ok(window_id.to_string())
-    }
-
     fn sync_local_content_pane_geometries(
         &self,
         workspace: &TmuxWorkspaceHandle,
         geometry: PaneGeometry,
     ) -> Result<(), LifecycleError> {
-        let output = self
-            .backend
-            .run_on_socket(
-                &workspace.socket_name,
-                &[
-                    "list-panes".to_string(),
-                    "-a".to_string(),
-                    "-F".to_string(),
-                    format!(
-                        "#{{pane_id}}\t#{{pane_dead}}\t#{{pane_title}}\t#{{pane_width}}\t#{{pane_height}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}"
-                    ),
-                ],
-            )
-            .map_err(main_slot_error)?;
         // Resizing the active workspace window would shrink the client display
         // to match a transient content pane. Only resize windows for panes that
         // are parked in hidden content windows; the active window is kept at its
         // client-driven size and only its panes are adjusted.
         let current_window = self.backend.current_window(workspace).ok();
-        for line in output.stdout.lines() {
-            let mut parts = line.split('\t');
-            let pane_id = parts.next().unwrap_or_default();
-            let pane_dead = parts.next().unwrap_or_default();
-            let title = parts.next().unwrap_or_default();
-            let width = parts.next().and_then(|value| value.parse::<u16>().ok());
-            let height = parts.next().and_then(|value| value.parse::<u16>().ok());
-            let role = parts.next().unwrap_or_default();
-            if pane_id.is_empty()
-                || pane_dead != "0"
-                || title == SIDEBAR_PANE_TITLE
-                || title == FOOTER_PANE_TITLE
-                || role != WAITAGENT_PANE_ROLE_CONTENT
-            {
-                continue;
-            }
-            if width == Some(geometry.width) && height == Some(geometry.height) {
-                continue;
-            }
-            let pane = TmuxPaneId::new(pane_id);
-            let window_id = self.pane_window_id(workspace, &pane)?;
-            if current_window.as_ref().map(|w| w.window_id.as_str()) != Some(window_id.as_str()) {
-                self.resize_window_to_geometry(workspace, &window_id, geometry)?;
-            }
-            self.resize_pane_to_geometry(workspace, &pane, geometry)?;
-        }
-        Ok(())
+        self.backend
+            .sync_content_pane_geometries(
+                workspace,
+                current_window.as_ref().map(|w| w.window_id.as_str()),
+                (geometry.width, geometry.height),
+            )
+            .map_err(main_slot_error)
     }
 
     fn deactivate_inactive_remote_session_pane(

@@ -63,6 +63,18 @@ fn process_argv(pid: u32) -> std::io::Result<Vec<String>> {
         .collect())
 }
 
+/// Reads the basename of the executable for a process from `/proc/<pid>/exe`.
+///
+/// Unlike `/proc/<pid>/cmdline` argv[0], the exe symlink is not rewritten by
+/// programs like Chrome that change their comm or argv[0] to reflect a profile
+/// name. The basename is therefore a stable source for the actual command name.
+pub(crate) fn process_exe_basename(pid: u32) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|name| name.to_string())
+}
+
 fn descendant_process_stats(root_pid: u32) -> Vec<ProcessStat> {
     let mut visited = BTreeSet::new();
     let mut pending = VecDeque::from(read_process_children(root_pid).unwrap_or_default());
