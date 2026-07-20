@@ -1,0 +1,45 @@
+id: task.geometry-4-main-slot-geometry-resync
+kind: task
+version: 1
+title: implement server main-slot geometry negotiation and controlled re-sync on geometry change
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - the server main slot must negotiate geometry before pipe-pane/bootstrap and re-sync cleanly when the remote geometry changes, so raw output is never replayed at the wrong size
+    - the transition window between a remote geometry change and the local resize would otherwise recreate the garble this design eliminates
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.geometry-1-truthful-geometry.done
+  - task.geometry-2-protocol-geometry-push.done
+  - task.geometry-3-authority-coordinator.done
+done_criteria:
+  - server capacity (operator main-pane display area = client size minus server chrome overhead) is computed live and sent as the desired geometry at mirror open and on local SIGWINCH
+  - negotiation completes (applied geometry acknowledged) before pipe-pane installation and bootstrap capture on the attach path
+  - on a geometry push, the main slot resizes its own remote view window to the reported T
+  - after resizing, the main slot clears the pane, re-runs the bootstrap replay at the new geometry, then resumes raw output (one controlled re-sync, no accumulated artifacts)
+  - re-syncs are debounced so terminal drag-resizes collapse into one round
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test remote_main_slot passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test remote_main_slot -- --test-threads=1
+touched_paths:
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+  - src/runtime/remote_main_slot/remote_main_slot_ingress_runtime.rs
+  - src/runtime/workspace/main_slot_runtime.rs
+notes:
+  - local pane size source: pane_size_from_tmux at remote_main_slot_pane_runtime.rs:1182-1200; capacity must subtract server chrome when the remote view sits inside the chrome layout
+  - bootstrap replay helpers already exist (render_bootstrap_replay on the authority side; CLEAR_SCREEN_HOME_ESCAPE + draw_remote_snapshot locally)
+  - 2026-07-20 done: TargetGeometryChanged and ResizeApplied both schedule a debounced (200ms) re-sync via the new RemotePaneEvent::GeometryResyncDue; the re-sync coordinates the slot's own pane/window to the reported geometry through the same coordinate_geometry_on_socket executor (dedicated windows resize, shared chrome windows get local padding panes with pinned server chrome), then re-runs mirror activation (clear + fresh bootstrap)
+  - negotiation anti-collapse: re-activation always sends the viewer CAPACITY as desired (tracked separately in viewer_capacity), never the negotiated size; resize events caused by our own coordination are suppressed via resync_applied_size until the pane settles at the expected size
+  - resize-ack gate semantics corrected for negotiation: acks are compared against the size the slot is currently rendering at (last_synced_size now always tracks the current pane size)
+  - select-layout ordering fix: stale padding panes are killed before applying a layout (tmux requires the string to reference exactly the panes present)
+  - verified e2e on one host (isolated ports, production untouched): matched baseline clean; small-client attach re-syncs the slot to 47x22 with local padding and pinned server chrome; reverse-i-search rendering is byte-identical to the remote user's own view; detach restores capacity and kills padding; no desired-poisoning feedback (system converges)
+  - verified: cargo fmt --check, cargo check, suites remote_main_slot (68), remote_authority (46), tmux_backend (82)

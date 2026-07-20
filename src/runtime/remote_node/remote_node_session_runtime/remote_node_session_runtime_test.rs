@@ -9,7 +9,7 @@ mod tests {
     use crate::infra::remote_protocol::{
         CloseMirrorRequestPayload, ControlPlanePayload, MirrorBootstrapChunkPayload,
         MirrorBootstrapCompletePayload, NodeSessionChannel, OpenMirrorRequestPayload,
-        ProtocolEnvelope, RawPtyInputPayload, TargetPublishedPayload,
+        ProtocolEnvelope, RawPtyInputPayload, TargetGeometryChangedPayload, TargetPublishedPayload,
     };
     use crate::runtime::remote_authority_connection_runtime::{
         AuthorityConnectionRequest, AuthorityConnectionStarter, AuthorityTransportEvent,
@@ -381,6 +381,45 @@ mod tests {
                 }) => {
                     assert_eq!(session_id, "shell-1");
                     assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                }
+                other => panic!("unexpected authority envelope payload: {other:?}"),
+            },
+            other => panic!("unexpected authority transport event: {other:?}"),
+        }
+
+        session
+            .send_payload(
+                NodeSessionChannel::Authority,
+                "shell-1",
+                "remote-peer:peer-a:shell-1",
+                "authority-msg",
+                ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+                    session_id: "shell-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    cols: 47,
+                    rows: 22,
+                }),
+            )
+            .expect("target geometry changed should send through grpc node session");
+        let authority_event = event_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("target geometry changed should arrive");
+        match authority_event {
+            AuthorityTransportEvent::Envelope {
+                authority_id: _,
+                generation: _,
+                envelope,
+            } => match envelope.payload {
+                ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+                    session_id,
+                    target_id,
+                    cols,
+                    rows,
+                }) => {
+                    assert_eq!(session_id, "shell-1");
+                    assert_eq!(target_id, "remote-peer:peer-a:shell-1");
+                    assert_eq!(cols, 47);
+                    assert_eq!(rows, 22);
                 }
                 other => panic!("unexpected authority envelope payload: {other:?}"),
             },

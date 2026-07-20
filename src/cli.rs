@@ -150,6 +150,7 @@ pub enum Command {
     RemoteAuthorityTargetHost(RemoteAuthorityTargetHostCommand),
     RemoteAuthorityOutputPump(RemoteAuthorityOutputPumpCommand),
     RemoteAuthorityPaneDied(RemoteAuthorityPaneDiedCommand),
+    RemoteAuthorityGeometryEvent(RemoteAuthorityGeometryEventCommand),
     RemoteTargetPublicationServer(RemoteTargetPublicationServerCommand),
     RemoteTargetPublicationAgent(RemoteTargetPublicationAgentCommand),
     RemoteTargetPublicationSender(RemoteTargetPublicationSenderCommand),
@@ -282,6 +283,11 @@ pub struct RemoteAuthorityOutputPumpCommand {
 pub struct RemoteAuthorityPaneDiedCommand {
     pub event_socket_path: String,
     pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteAuthorityGeometryEventCommand {
+    pub event_socket_path: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -525,6 +531,10 @@ impl Cli {
             "__remote-authority-pane-died" => {
                 args.remove(0);
                 Command::RemoteAuthorityPaneDied(parse_remote_authority_pane_died(args)?)
+            }
+            "__remote-authority-geometry-event" => {
+                args.remove(0);
+                Command::RemoteAuthorityGeometryEvent(parse_remote_authority_geometry_event(args)?)
             }
             "__remote-target-publication-server" => {
                 args.remove(0);
@@ -1064,6 +1074,28 @@ fn parse_remote_authority_pane_died(
         event_socket_path: event_socket_path
             .ok_or_else(|| CliError::MissingValue("--event-socket-path".to_string()))?,
         pane_id: pane_id.ok_or_else(|| CliError::MissingValue("--pane-id".to_string()))?,
+    })
+}
+
+fn parse_remote_authority_geometry_event(
+    args: Vec<String>,
+) -> Result<RemoteAuthorityGeometryEventCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut event_socket_path = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--event-socket-path" => {
+                event_socket_path = Some(expect_value("--event-socket-path", &mut iter)?)
+            }
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(RemoteAuthorityGeometryEventCommand {
+        event_socket_path: event_socket_path
+            .ok_or_else(|| CliError::MissingValue("--event-socket-path".to_string()))?,
     })
 }
 

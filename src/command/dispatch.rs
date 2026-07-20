@@ -5,7 +5,7 @@ use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_authority_target_host_runtime::{
-    run_pane_died_event, RemoteAuthorityTargetHostRuntime,
+    run_geometry_event, run_pane_died_event, RemoteAuthorityTargetHostRuntime,
 };
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crate::runtime::remote_main_slot_ingress_runtime::RemoteMainSlotIngressRuntime;
@@ -91,6 +91,9 @@ impl CommandDispatcher {
                 .map_err(AppError::from),
             Command::RemoteAuthorityPaneDied(command) => {
                 run_pane_died_event(command).map_err(AppError::from)
+            }
+            Command::RemoteAuthorityGeometryEvent(command) => {
+                run_geometry_event(command).map_err(AppError::from)
             }
             Command::RemoteTargetPublicationServer(command) => self
                 .remote_target_publication()?

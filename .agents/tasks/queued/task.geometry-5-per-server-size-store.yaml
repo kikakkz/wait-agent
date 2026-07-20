@@ -1,0 +1,41 @@
+id: task.geometry-5-per-server-size-store
+kind: task
+version: 1
+title: persist last negotiated geometry per server on managed nodes
+status: done
+priority: medium
+design_ref:
+  doc: docs/remote-geometry-coordination-design.md
+  why:
+    - different servers negotiate different geometries with the same managed node; each server needs its own persisted entry
+    - the store removes the arbitrary 80x24 headless default and avoids a large reflow jump at mirror open
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+depends_on:
+  - task.geometry-3-authority-coordinator.done
+done_criteria:
+  - managed node persists server authority id (plus node identity) to last negotiated T with timestamp; entries are independent per server
+  - headless detached session creation uses the stored T for the connecting server instead of the tmux 80x24 fallback when an entry exists
+  - mirror open uses the stored T as the initial geometry before the live negotiation round completes
+  - the key does not include per-boot session names
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test passes for the store module
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test -- --test-threads=1
+touched_paths:
+  - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+  - src/runtime/remote_runtime_owner.rs
+  - src/infra/
+notes:
+  - stored values are initial values only; runtime coordination always re-negotiates (the server may have changed terminals)
+  - 2026-07-20 done: new PerServerGeometryStore (JSON at ~/.local/share/waitagent/per-server-geometry.json, atomic write-then-rename, corrupt-tolerant load, 3 unit tests)
+  - server identity for V1: the managed node's --connect endpoint (hub model); inbound-only peers are not recorded yet (documented limitation); node identity is the authority_id stored alongside
+  - the authority target host records the applied geometry after every coordination round (open/apply-resize/hook-driven); the in-process spawn path now threads network config into the runtime via with_network
+  - headless workspace creation (workspace_entry_runtime::bootstrap_workspace) uses the stored geometry plus standard chrome overhead (sidebar 32 + border, footer 1 + border) instead of the tmux 80x24 default
+  - mirror open applies the stored geometry as the initial size before the live negotiation round with the payload's desired size
+  - verified e2e on one host (isolated ports, production untouched): store file holds 167x47 for key 127.0.0.1:17474 with node id and timestamp; restarted daemon creates its session at 200x49 with the main pane at 167x47; mirror open logs the stored-geometry initial round
+  - verified: cargo fmt --check, cargo check, suites per_server_geometry_store (3), remote_authority (46), remote_node (96), remote_main_slot (68), workspace (81)

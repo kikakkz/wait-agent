@@ -1,9 +1,10 @@
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
     OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload,
-    REMOTE_PROTOCOL_VERSION,
+    RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload, TargetGeometryChangedPayload,
+    TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -387,6 +388,9 @@ impl RemoteAuthorityTransportRuntime {
         resize_epoch: u64,
         resize_authority_console_id: String,
     ) -> Result<(), RemoteAuthorityTransportError> {
+        ERROR_LOG.log(format!(
+            "[diag-timing] target host: send_resize_applied target={target_id} cols={cols} rows={rows} epoch={resize_epoch}"
+        ));
         self.send_payload(
             session_id,
             target_id,
@@ -397,6 +401,28 @@ impl RemoteAuthorityTransportRuntime {
                 rows,
                 resize_epoch,
                 resize_authority_console_id,
+            }),
+        )
+    }
+
+    pub fn send_target_geometry_changed(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        cols: usize,
+        rows: usize,
+    ) -> Result<(), RemoteAuthorityTransportError> {
+        ERROR_LOG.log(format!(
+            "[diag-timing] target host: send_target_geometry_changed target={target_id} cols={cols} rows={rows}"
+        ));
+        self.send_payload(
+            session_id,
+            target_id,
+            ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+                session_id: session_id.to_string(),
+                target_id: target_id.to_string(),
+                cols,
+                rows,
             }),
         )
     }

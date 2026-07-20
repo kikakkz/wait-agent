@@ -1,4 +1,5 @@
 use crate::application::workspace_service::BootstrappedWorkspace;
+use crate::infra::per_server_geometry_store::{default_store_path, PerServerGeometryStore};
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::network_state_runtime::persist_workspace_network_config;
@@ -43,12 +44,31 @@ impl WorkspaceEntryRuntime {
         &self,
         workspace_dir: &Path,
     ) -> Result<BootstrappedWorkspace, LifecycleError> {
-        let terminal_size = TerminalRuntime::stdio().current_size_or_default();
-        let (rows, cols) = if terminal_size.rows > 1 && terminal_size.cols > 1 {
-            (Some(terminal_size.rows), Some(terminal_size.cols))
-        } else {
-            (None, None)
-        };
+        let terminal = TerminalRuntime::stdio();
+        let terminal_size = terminal.current_size_or_default();
+        let (rows, cols) =
+            if terminal_size.rows > 1 && terminal_size.cols > 1 && terminal.output_is_tty() {
+                (Some(terminal_size.rows), Some(terminal_size.cols))
+            } else {
+                // Headless creation (managed node daemon): prefer the last
+                // negotiated geometry stored for the connecting server over the
+                // tmux 80x24 detached default.  The stored geometry is the
+                // main pane size; add the standard chrome overhead (32-wide
+                // sidebar plus border, 1-row footer plus border) so the pane
+                // starts at the negotiated size.
+                self.network
+                    .connect
+                    .as_deref()
+                    .and_then(|server| {
+                        let store = PerServerGeometryStore::load(&default_store_path());
+                        store
+                            .lookup(server)
+                            .map(|geometry| (geometry.rows + 2, geometry.cols + 33))
+                    })
+                    .map_or((None, None), |(rows, cols)| {
+                        (Some(rows as u16), Some(cols as u16))
+                    })
+            };
         let workspace = self
             .workspace_runtime
             .ensure_workspace_for_dir_with_size(workspace_dir, rows, cols)

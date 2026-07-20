@@ -1,4 +1,13 @@
 use crate::application::layout_service::{FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE};
+
+/// Titles that mark panes as workspace chrome (not content panes).  Geometry
+/// padding panes are included so the workspace's pane bookkeeping never
+/// picks them as join destinations or recovery anchors.
+fn is_workspace_chrome_title(title: &str) -> bool {
+    title == SIDEBAR_PANE_TITLE
+        || title == FOOTER_PANE_TITLE
+        || title == crate::runtime::remote_authority::geometry_coordinator::PADDING_PANE_TITLE
+}
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
@@ -1989,8 +1998,7 @@ impl MainSlotRuntime {
             let target_id = parts.next().unwrap_or_default();
             if pane_id.is_empty()
                 || pane_dead != "0"
-                || title == SIDEBAR_PANE_TITLE
-                || title == FOOTER_PANE_TITLE
+                || is_workspace_chrome_title(title)
                 || role != WAITAGENT_PANE_ROLE_CONTENT
             {
                 continue;
@@ -2062,8 +2070,7 @@ impl MainSlotRuntime {
             .find(|pane| {
                 !pane.is_dead
                     && pane.pane_id != *excluded_pane
-                    && pane.title != SIDEBAR_PANE_TITLE
-                    && pane.title != FOOTER_PANE_TITLE
+                    && !is_workspace_chrome_title(&pane.title)
             })
             .map(|pane| pane.pane_id.clone())
             .ok_or_else(|| {
@@ -2456,8 +2463,7 @@ impl MainSlotRuntime {
             let owner = parts.next().unwrap_or_default();
             if pane_dead != "0"
                 || pane_id.is_empty()
-                || title == SIDEBAR_PANE_TITLE
-                || title == FOOTER_PANE_TITLE
+                || is_workspace_chrome_title(title)
                 || role != WAITAGENT_PANE_ROLE_CONTENT
                 || owner != session_instance_id
             {
@@ -3166,8 +3172,7 @@ impl MainSlotRuntime {
         let isolation = panes.iter().find(|p| {
             !p.is_dead
                 && p.pane_id != *main_pane
-                && p.title != SIDEBAR_PANE_TITLE
-                && p.title != FOOTER_PANE_TITLE
+                && !is_workspace_chrome_title(&p.title)
                 && p.current_command
                     .as_deref()
                     .map_or(false, |cmd| cmd.contains("sleep"))
@@ -3190,9 +3195,7 @@ impl MainSlotRuntime {
         let panes = self.backend.list_panes(workspace, &window).ok()?;
         panes
             .iter()
-            .find(|pane| {
-                !pane.is_dead && pane.title != SIDEBAR_PANE_TITLE && pane.title != FOOTER_PANE_TITLE
-            })
+            .find(|pane| !pane.is_dead && !is_workspace_chrome_title(&pane.title))
             .map(|pane| pane.pane_id.as_str().to_string())
     }
 
@@ -3336,7 +3339,7 @@ impl MainSlotRuntime {
             let mut parts = line.split('\t');
             let listed_pane_id = parts.next().unwrap_or_default();
             let title = parts.next().unwrap_or_default();
-            listed_pane_id == pane_id && (title == SIDEBAR_PANE_TITLE || title == FOOTER_PANE_TITLE)
+            listed_pane_id == pane_id && is_workspace_chrome_title(title)
         }))
     }
 

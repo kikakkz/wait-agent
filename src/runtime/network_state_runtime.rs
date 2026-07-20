@@ -189,6 +189,7 @@ fn recover_network_config_for_command(
             recover_network_config_for_socket(backend, &command.socket_name)
         }
         Command::RemoteAuthorityPaneDied(_) => None,
+        Command::RemoteAuthorityGeometryEvent(_) => None,
         Command::RemoteTargetPublicationServer(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }

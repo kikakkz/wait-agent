@@ -5,6 +5,8 @@ use crate::infra::tmux::{
 
 pub const SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 pub const FOOTER_PANE_TITLE: &str = "waitagent-footer";
+pub const SIDEBAR_WIDTH_CELLS: u16 = 32;
+pub const FOOTER_HEIGHT_CELLS: u16 = 1;
 const MAIN_PANE_REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
 const TMUX_OPTION_ON: &str = "on";
 const SESSION_LAYOUT_RECONCILE_HOOKS: [&str; 1] = ["client-resized"];
@@ -29,8 +31,8 @@ where
     pub fn new(tmux: G) -> Self {
         Self {
             tmux,
-            sidebar_width: TmuxSplitSize::Cells(32),
-            footer_height: TmuxSplitSize::Cells(1),
+            sidebar_width: TmuxSplitSize::Cells(SIDEBAR_WIDTH_CELLS),
+            footer_height: TmuxSplitSize::Cells(FOOTER_HEIGHT_CELLS),
         }
     }
 

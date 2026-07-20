@@ -7,7 +7,7 @@ use crate::infra::remote_grpc_proto::v1::{
     CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, PtyResizeApplied, RawPtyInput, RawPtyOutput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetOutput as GrpcTargetOutput,
+    TargetExited as GrpcTargetExited, TargetGeometryChanged, TargetOutput as GrpcTargetOutput,
     TargetPublicationAck as GrpcTargetPublicationAck,
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
@@ -998,6 +998,14 @@ pub(crate) fn map_outbound_grpc_envelope(
                 rows: payload.rows as u32,
                 session_id: payload.session_id.clone(),
                 resize_authority_console_id: payload.resize_authority_console_id.clone(),
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::TargetGeometryChanged(payload)) => {
+            Some(GrpcBody::TargetGeometryChanged(TargetGeometryChanged {
+                target_id: payload.target_id.clone(),
+                session_id: payload.session_id.clone(),
+                cols: payload.cols as u32,
+                rows: payload.rows as u32,
             }))
         }
         (NodeSessionChannel::Publication, ControlPlanePayload::TargetPublished(payload)) => {

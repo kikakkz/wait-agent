@@ -1233,6 +1233,17 @@ fn forward_host_output_to_session(
                         payload.resize_authority_console_id.clone(),
                     )?;
                 }
+                ControlPlanePayload::TargetGeometryChanged(payload) => {
+                    let session_id = payload.session_id.clone();
+                    let target_id = payload.target_id.clone();
+                    session.send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::TargetGeometryChanged(payload),
+                    )?;
+                }
                 ControlPlanePayload::TargetOutput(payload) => {
                     session.send_target_output(
                         &payload.session_id,
@@ -1432,6 +1443,29 @@ fn forward_host_output_to_shared_session(
                         payload.rows,
                         payload.resize_epoch,
                         payload.resize_authority_console_id.clone(),
+                    )
+                    .is_err()
+                {
+                    shared_session.disconnect_session(&session);
+                    mark_live_routes_offline(
+                        &shared_session.publication_runtime,
+                        &shared_session.routes,
+                    );
+                }
+            }
+            ControlPlanePayload::TargetGeometryChanged(payload) => {
+                let Some(session) = shared_session.current_session() else {
+                    continue;
+                };
+                let session_id = payload.session_id.clone();
+                let target_id = payload.target_id.clone();
+                if session
+                    .send_payload(
+                        NodeSessionChannel::Authority,
+                        &session_id,
+                        &target_id,
+                        "authority-msg",
+                        ControlPlanePayload::TargetGeometryChanged(payload),
                     )
                     .is_err()
                 {

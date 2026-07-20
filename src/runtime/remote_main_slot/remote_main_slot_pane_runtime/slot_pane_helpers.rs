@@ -370,6 +370,7 @@ fn is_partial_remote_submit_sequence(pending: &[u8]) -> bool {
 pub(super) enum RemotePaneEvent {
     Input { bytes: Vec<u8>, raw_forwarded: bool },
     Resize,
+    GeometryResyncDue,
     MailboxUpdated,
     AuthorityTransport(AuthorityTransportEvent),
     TargetPresenceChanged(bool),

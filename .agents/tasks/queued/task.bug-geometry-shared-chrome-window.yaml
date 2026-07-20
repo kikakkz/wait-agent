@@ -1,0 +1,34 @@
+id: task.bug-geometry-shared-chrome-window
+kind: task
+version: 1
+title: fix geometry re-sync when the remote view shares the server's workspace chrome window, and stop storm-time geometry churn
+status: ready
+priority: medium
+design_ref:
+  doc: investigation
+  why:
+    - geometry-4's slot-side coordinate runs a full-tree padded select-layout on the server's workspace chrome window when the negotiated T is smaller than the viewer capacity; the workspace layout service owns that window's chrome, and the two layout owners fight, mangling sidebar/footer sizes over repeated rounds (observed: sidebar crushed to 1 column, footer stretched, franken-tree nesting)
+    - the stabilizer in place skips local layout surgery for shared chrome windows and logs `skipping local layout surgery`, so the raw mirror can garble on multi-row redraws in that placement when the managed-node user is attached with a smaller terminal (original bug survives in this one placement)
+    - repeated resize storms can churn geometry one or two rows per round before converging (settle-mismatch reporting ratchets the settled size upstream)
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: next
+done_criteria:
+  - a remote view in the shared workspace chrome window renders correctly when the managed-node user is attached with a smaller terminal, without distorting server chrome
+  - chosen approach is one of: dedicated-window relocation of the remote view, cooperation with the workspace layout service so padding is layout-service-owned, or a slot-local viewport; the choice is documented
+  - repeated resize storms converge without multi-row ratcheting
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo test passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test -- --test-threads=1
+  - manual: shared-chrome placement with a small attached client on the managed node renders reverse-i-search cleanly and keeps server chrome pinned
+touched_paths:
+  - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+  - src/runtime/remote_authority/geometry_coordinator.rs
+  - src/runtime/workspace/
+notes:
+  - the skip stabilizer lives in RemotePaneEvent::GeometryResyncDue handling (remote_main_slot_pane_runtime.rs); the workspace layout service owns chrome via intent sizes in src/application/layout_service.rs
+  - related analysis: padding panes are now excluded from workspace recovery anchors via is_workspace_chrome_title in main_slot_runtime.rs

@@ -7,6 +7,7 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::ControlPlanePayload;
 use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::infra::tmux::TmuxLayoutGateway;
+use crate::infra::tmux::TmuxPaneId;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_connection_runtime::{
@@ -295,6 +296,11 @@ impl RemoteMainSlotPaneRuntime {
         let mut raw_screen_initialized = false;
         let mut mirror_readiness = MirrorReadiness::Waiting;
         let mut resize_acked_size: Option<TerminalSize> = None;
+        let mut remote_reported_geometry: Option<TerminalSize> = None;
+        let mut geometry_resync_pending: Option<TerminalSize> = None;
+        let mut geometry_resync_debounce_active = false;
+        let mut resync_applied_size: Option<TerminalSize> = None;
+        let mut viewer_capacity: TerminalSize = initial_size;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
         if remote_runtime.has_connection(target.address.authority_id()) {
@@ -464,6 +470,121 @@ impl RemoteMainSlotPaneRuntime {
                 };
 
                 match event {
+                    RemotePaneEvent::GeometryResyncDue => {
+                        geometry_resync_debounce_active = false;
+                        let Some(reported) = geometry_resync_pending.take() else {
+                            continue;
+                        };
+                        if reported == current_remote_surface_size(&spec, &terminal) {
+                            continue;
+                        }
+                        ERROR_LOG.log(format!(
+                            "[diag] geometry re-sync: applying remote geometry {}x{}",
+                            reported.cols, reported.rows
+                        ));
+                        let own_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+                        let mut local_coordinate_done = false;
+                        if !own_pane.is_empty() {
+                            let own_pane_id = TmuxPaneId::new(own_pane.clone());
+                            let own_window = self
+                                .backend
+                                .pane_session_name_on_socket(&spec.socket_name, &own_pane_id)
+                                .unwrap_or_default();
+                            let own_window_has_chrome = self
+                                .backend
+                                .window_has_waitagent_chrome_on_socket(
+                                    &spec.socket_name,
+                                    &own_pane_id,
+                                )
+                                .unwrap_or(false);
+                            if own_window_has_chrome {
+                                // Shared waitagent chrome window: the
+                                // workspace's own layout service owns chrome,
+                                // and full-tree padded layouts fight it,
+                                // mangling the workspace over rounds.  The
+                                // dominant product placement is the dedicated
+                                // remote window; skip local surgery here.
+                                ERROR_LOG.log(format!(
+                                    "[diag] geometry re-sync: remote view shares the workspace chrome window (session={own_window}); skipping local layout surgery (known limitation)"
+                                ));
+                            } else {
+                                resync_applied_size = Some(reported);
+                                match self.backend.coordinate_geometry_on_socket(
+                                    &spec.socket_name,
+                                    &own_pane_id,
+                                    reported.cols as usize,
+                                    reported.rows as usize,
+                                ) {
+                                    Ok(_) => {
+                                        local_coordinate_done = true;
+                                    }
+                                    Err(error) => {
+                                        resync_applied_size = None;
+                                        ERROR_LOG.log(format!(
+                                            "[diag] geometry re-sync: local coordinate failed: {error}"
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        if local_coordinate_done {
+                            let settled = current_remote_surface_size(&spec, &terminal);
+                            if settled != reported {
+                                resync_applied_size = None;
+                                ERROR_LOG.log(format!(
+                                    "[diag] geometry re-sync: pane settled at {}x{} instead of {}x{}; reporting settled size as effective capacity",
+                                    settled.cols, settled.rows, reported.cols, reported.rows
+                                ));
+                                // The pane could not hold the negotiated size
+                                // (local layout constraint).  Converge
+                                // instead of looping: report the settled size
+                                // upstream so the authority re-negotiates to
+                                // the size the pane actually has.
+                                last_synced_size = settled;
+                                viewer_capacity = settled;
+                                if let Some(binding) = binding.as_ref() {
+                                    sync_or_defer_remote_pty_size(
+                                        &remote_runtime,
+                                        &target,
+                                        binding,
+                                        &settled,
+                                        &mut pending_pty_size,
+                                    )?;
+                                    resize_acked_size = None;
+                                }
+                                continue;
+                            }
+                        }
+                        // Re-open the mirror with the viewer capacity as the
+                        // desired geometry, never the negotiated one: the
+                        // authority must keep seeing the operator's capacity
+                        // or the negotiation collapses to the smaller size.
+                        let capacity = viewer_capacity;
+                        match activate_remote_surface_binding(
+                            &remote_runtime,
+                            &target,
+                            &spec,
+                            &capacity,
+                            &mut observer,
+                            &mut raw_output_reader,
+                            &raw_input_route,
+                            &mut pending_pty_size,
+                            &mut last_synced_size,
+                            &mut resize_acked_size,
+                            &mut raw_screen_initialized,
+                            event_tx.clone(),
+                        ) {
+                            Ok(new_binding) => {
+                                binding = Some(new_binding);
+                                // The pane now renders at the negotiated size;
+                                // the gate compares acks against the current
+                                // pane size, so align the dedup baseline.
+                                last_synced_size = reported;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                     RemotePaneEvent::MailboxUpdated => {
                         let raw = raw_output_reader
                             .sync_and_collect_raw()
@@ -493,7 +614,18 @@ impl RemoteMainSlotPaneRuntime {
                     }
                     RemotePaneEvent::Resize => {
                         let size = current_remote_surface_size(&spec, &terminal);
+                        if let Some(expected) = resync_applied_size {
+                            // Suppress resize handling while our own geometry
+                            // coordination settles; intermediate reflow sizes
+                            // are not genuine capacity changes.
+                            if size == expected {
+                                resync_applied_size = None;
+                                last_synced_size = size;
+                            }
+                            continue;
+                        }
                         if size != last_synced_size {
+                            viewer_capacity = size;
                             if let Some(binding) = binding.as_ref() {
                                 sync_or_defer_remote_pty_size(
                                     &remote_runtime,
@@ -502,10 +634,13 @@ impl RemoteMainSlotPaneRuntime {
                                     &size,
                                     &mut pending_pty_size,
                                 )?;
-                                last_synced_size = size;
                                 resize_acked_size = None;
                             }
                         }
+                        // last_synced_size always tracks the size we are
+                        // currently rendering at; the resize-ack gate compares
+                        // acks against it.
+                        last_synced_size = size;
                         // When raw PTY mode is active (binding.is_some()), the
                         // remote terminal handles its own rendering. Calling
                         // draw_remote_snapshot here would overwrite the terminal
@@ -786,6 +921,9 @@ impl RemoteMainSlotPaneRuntime {
                                 ControlPlanePayload::MirrorBootstrapComplete(p) => {
                                     Some((p.session_id.as_str(), p.target_id.as_str()))
                                 }
+                                ControlPlanePayload::TargetGeometryChanged(p) => {
+                                    Some((p.session_id.as_str(), p.target_id.as_str()))
+                                }
                                 _ => None,
                             };
                             if let Some((payload_session_id, payload_target_id)) =
@@ -814,12 +952,30 @@ impl RemoteMainSlotPaneRuntime {
                                     if payload.resize_authority_console_id != binding.console_id {
                                         continue;
                                     }
-                                    resize_acked_size = Some(TerminalSize {
+                                    let acked_size = TerminalSize {
                                         cols: payload.cols as u16,
                                         rows: payload.rows as u16,
                                         pixel_width: 0,
                                         pixel_height: 0,
-                                    });
+                                    };
+                                    if acked_size != last_synced_size {
+                                        ERROR_LOG.log(format!(
+                                            "[diag] resize ack geometry mismatch: requested {}x{}, remote applied {}x{}",
+                                            last_synced_size.cols,
+                                            last_synced_size.rows,
+                                            acked_size.cols,
+                                            acked_size.rows
+                                        ));
+                                    }
+                                    resize_acked_size = Some(acked_size);
+                                    schedule_geometry_resync(
+                                        &spec,
+                                        &terminal,
+                                        acked_size,
+                                        &mut geometry_resync_pending,
+                                        &mut geometry_resync_debounce_active,
+                                        &event_tx,
+                                    );
                                     try_flush_ready_inputs(
                                         &remote_runtime,
                                         &target,
@@ -832,6 +988,39 @@ impl RemoteMainSlotPaneRuntime {
                                         &mut resize_acked_size,
                                     )?;
                                 }
+                                continue;
+                            }
+                            if let ControlPlanePayload::TargetGeometryChanged(payload) =
+                                &envelope.payload
+                            {
+                                if envelope.sender_id != target.address.authority_id() {
+                                    continue;
+                                }
+                                let reported = TerminalSize {
+                                    cols: payload.cols as u16,
+                                    rows: payload.rows as u16,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                };
+                                if remote_reported_geometry != Some(reported) {
+                                    ERROR_LOG.log(format!(
+                                        "[diag] target geometry changed: {} -> {}x{}",
+                                        remote_reported_geometry
+                                            .map(|size| format!("{}x{}", size.cols, size.rows))
+                                            .unwrap_or_else(|| "unknown".to_string()),
+                                        reported.cols,
+                                        reported.rows
+                                    ));
+                                    remote_reported_geometry = Some(reported);
+                                }
+                                schedule_geometry_resync(
+                                    &spec,
+                                    &terminal,
+                                    reported,
+                                    &mut geometry_resync_pending,
+                                    &mut geometry_resync_debounce_active,
+                                    &event_tx,
+                                );
                                 continue;
                             }
                             if let Some(raw) = collect_direct_raw_pty_output_envelope(
@@ -1169,6 +1358,36 @@ fn schedule_post_activation_resize_probe(tx: mpsc::Sender<RemotePaneEvent>) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
         let _ = tx.send(RemotePaneEvent::Resize);
+    });
+}
+
+const GEOMETRY_RESYNC_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Schedule a debounced local re-sync when the authority-reported geometry
+/// differs from the size of the pane this slot is rendering into.  The
+/// re-sync resizes the local pane/window to the reported geometry and
+/// re-runs the mirror activation (clear + fresh bootstrap), so raw output is
+/// never replayed at the wrong size for long.
+fn schedule_geometry_resync(
+    spec: &RemoteInteractSurfaceSpec,
+    terminal: &TerminalRuntime,
+    reported: TerminalSize,
+    pending: &mut Option<TerminalSize>,
+    debounce_active: &mut bool,
+    event_tx: &mpsc::Sender<RemotePaneEvent>,
+) {
+    if reported == current_remote_surface_size(spec, terminal) {
+        return;
+    }
+    *pending = Some(reported);
+    if *debounce_active {
+        return;
+    }
+    *debounce_active = true;
+    let tx = event_tx.clone();
+    thread::spawn(move || {
+        thread::sleep(GEOMETRY_RESYNC_DEBOUNCE);
+        let _ = tx.send(RemotePaneEvent::GeometryResyncDue);
     });
 }
 

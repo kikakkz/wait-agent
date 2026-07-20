@@ -6,8 +6,8 @@ use crate::infra::remote_protocol::{
     OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
     OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope, RawPtyInputPayload,
     RawPtyOutputPayload, ResizeAppliedPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
-    TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
-    TargetPublicationAckStatus, TargetPublishedPayload,
+    TargetExitedPayload, TargetGeometryChangedPayload, TargetOutputPayload,
+    TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -414,6 +414,13 @@ fn write_payload(
             write_usize(writer, payload.cols)?;
             write_usize(writer, payload.rows)?;
         }
+        ControlPlanePayload::TargetGeometryChanged(payload) => {
+            write_u8(writer, 21)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_usize(writer, payload.cols)?;
+            write_usize(writer, payload.rows)?;
+        }
         ControlPlanePayload::CreateSessionRequest(payload) => {
             write_u8(writer, 70)?;
             write_string(writer, &payload.request_id)?;
@@ -582,6 +589,12 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             target_id: read_string(reader)?,
             resize_epoch: read_u64(reader)?,
             resize_authority_console_id: read_string(reader)?,
+            cols: read_usize(reader)?,
+            rows: read_usize(reader)?,
+        }),
+        21 => ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+            session_id: read_string(reader)?,
+            target_id: read_string(reader)?,
             cols: read_usize(reader)?,
             rows: read_usize(reader)?,
         }),
@@ -967,8 +980,8 @@ mod tests {
         CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
         NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload,
         OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-        TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-        TargetPublishedPayload,
+        TargetGeometryChangedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+        TargetPublicationAckStatus, TargetPublishedPayload,
     };
 
     #[test]
@@ -1001,6 +1014,35 @@ mod tests {
                 output_seq: 7,
                 stream: "pty",
                 output_bytes: b"a".to_vec(),
+            }),
+        };
+        let mut bytes = Vec::new();
+
+        write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+        let decoded =
+            read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_target_geometry_changed() {
+        let envelope = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-geo-1".to_string(),
+            message_type: "target_geometry_changed",
+            timestamp: "2026-07-19T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                cols: 47,
+                rows: 22,
             }),
         };
         let mut bytes = Vec::new();

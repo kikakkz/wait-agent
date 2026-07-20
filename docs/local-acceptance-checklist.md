@@ -209,3 +209,47 @@ same visible-behavior standard before the network MVP is marked complete.
 - Confirm the remote workspace surface renders the TUI without obvious corruption.
 - Confirm basic navigation plus submit input still works through the remote path.
 - Confirm server-console reopen of the same remote target still shows continued output instead of a dead surface.
+
+## 8. Geometry Coordination Validation
+
+This appendix is the validation checklist for the geometry coordination batch
+(`task.geometry-1` through `task.geometry-6`, design:
+`docs/remote-geometry-coordination-design.md`).  It validates that a server
+mirroring a live workspace main pane on a managed node always renders
+correctly, on both hosts, without touching either host's chrome layout.
+
+### 8.1 Recommended Environment
+
+- the accepted environment is the cross-host pair: server `192.168.31.178` and managed node `192.168.31.182` (run it when both are online)
+- while only one host is online, run the same matrix as a one-host simulation with two isolated waitagent instances on different loopback ports; that is what the 2026-07-20 run used
+
+### 8.2 Baseline Render Correctness
+
+- Mirror a workspace main pane; both panes report the same negotiated geometry.
+- Run a long single-line command and `ls`; both panes show byte-identical content.
+- Start reverse-i-search with a long history line and type a query; both panes are byte-identical (this is the original garbling scenario).
+- Open `vim` and `htop`; both panes render identically once settled.
+- Result 2026-07-20 (one-host simulation): PASS on all four checks.
+
+### 8.3 Local User Attach/Detach/Resize On The Managed Node
+
+- With the mirror open, attach a small (80x24) client on the managed node: the node's window and main pane shrink to the negotiated size with sidebar pinned at the right edge and footer pinned at the bottom; mirror content stays identical on both panes.
+- Resize that client larger than the viewer capacity: the negotiated size stays at the viewer capacity; the node gets blank padding panes beside/below the main pane while sidebar stays pinned at the right edge and footer at the bottom; the viewer side is unchanged.
+- Detach the client: the node restores to the viewer geometry and padding panes are removed.
+- Result 2026-07-20: PASS (sidebar x=205 and footer at the bottom row verified on a 237x60 client).
+
+### 8.4 Operator Resize On The Server
+
+- Resize the server operator terminal smaller and back; both panes follow each resize and settle at the same geometry on both hosts; server input keeps working.
+- Result 2026-07-20: PASS (sizes followed in both directions).
+
+### 8.5 Sequential Remote Sessions
+
+- Attach a second remote session and confirm it renders identically and accepts server input; switch back to the first session and confirm identical behavior.
+- Result 2026-07-20: PASS.
+
+### 8.6 Known Limitations (as of 2026-07-20)
+
+- When the remote view is placed inside the server's workspace chrome window (instead of a dedicated remote window) and the managed node's user is attached with a smaller terminal, the viewer pane stays at its own capacity and the raw mirror can garble on multi-row redraws. The authority-side coordination still works; the slot logs `skipping local layout surgery` instead of fighting the workspace layout service. Dedicated remote windows are unaffected.
+- Under rapid repeated resize storms, geometry can churn one or two rows before converging; it settles within seconds in the verified scenarios.
+- The literal cross-host acceptance on the `178 <-> 182` pair is still owed once `182` is back online; the one-host simulation is the current evidence.

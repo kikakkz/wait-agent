@@ -2354,6 +2354,27 @@ fn route_transport_envelope(
                 },
             )
         }
+        Some(Body::TargetGeometryChanged(payload)) => {
+            let Some(session) = session else {
+                return Ok(());
+            };
+            bridge_output_to_authority_transports(
+                node_id,
+                session,
+                route_session_id(&envelope)
+                    .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+                    .unwrap_or_else(|| payload.target_id.clone()),
+                route_target_id(&envelope).unwrap_or_else(|| payload.target_id.clone()),
+                |transport, session_id, target_id| {
+                    transport.send_target_geometry_changed(
+                        &session_id,
+                        &target_id,
+                        payload.cols as usize,
+                        payload.rows as usize,
+                    )
+                },
+            )
+        }
         Some(Body::RawPtyInput(payload)) => {
             let Some(session) = session else {
                 return Ok(());

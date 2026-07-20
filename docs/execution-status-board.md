@@ -1,8 +1,8 @@
 # WaitAgent Execution Status Board
 
-Version: `v1.37`
+Version: `v1.38`
 Status: `Active`
-Date: `2026-07-08`
+Date: `2026-07-20`
 
 ## 1. Purpose
 
@@ -36,7 +36,18 @@ Current phase:
 Current gate:
 
 - GitHub issue #14: Kimi question/choice UI is classified as Running instead of Confirm (in progress)
-- last closed gate was GitHub issue #13: remote main-slot stale pane reuse fix
+- last closed gate was the geometry coordination batch: remote mirror rendering is now coordinated so a server mirroring a managed node's live workspace main pane always renders correctly on both hosts
+
+Why the last gate closed:
+
+- root cause of the remote-mirror garbling (reverse-i-search fragments over old output) was proven by live A/B evidence: the multi-pane resize skip plus a requested-value `ResizeApplied` echo left panes at mismatched geometry while raw PTY replay requires identical sizes
+- `task.geometry-1` truthful geometry: every resize acknowledgement now reports the read-back applied geometry instead of the requested one
+- `task.geometry-2` protocol: a backward-compatible `TargetGeometryChanged` push rides the same rails as `ResizeApplied` end to end, validated with the same sender/session/target checks as `RawPtyOutput`
+- `task.geometry-3` authority coordinator: negotiated per-dimension-minimum geometry, chrome pinned via intent sizes, blank padding panes absorb slack, layouts applied atomically with one computed `select-layout`, geometry hooks with debounce drive every round; the multi-pane skip branch is replaced by negotiated resize
+- `task.geometry-4` server re-sync: the main slot resizes its own pane/window to the reported geometry and re-runs a clean bootstrap, with anti-collapse negotiation (viewer capacity is always reported, never the negotiated size) and gate semantics corrected to compare against the current render size
+- `task.geometry-5` per-server store: managed nodes persist the last negotiated geometry per server; headless session creation starts from it instead of the tmux 80x24 default, and mirror open applies it as the initial size
+- `task.geometry-6` acceptance: reverse-i-search, vim, and htop render byte-identical to the remote user's own view; managed-node attach/detach/resize keeps both sides complete with chrome pinned; operator resizes propagate; sequential remote sessions behave identically; remaining limitations are recorded in `docs/local-acceptance-checklist.md` section 8.6
+- the literal `178 <-> 182` cross-host rerun is still owed once `182` is back online; current evidence is the one-host simulation recorded in the checklist
 
 Why the last gate closed:
 

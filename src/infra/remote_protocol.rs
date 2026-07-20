@@ -57,6 +57,7 @@ pub enum ControlPlanePayload {
     RawPtyOutput(RawPtyOutputPayload),
     ApplyResize(ApplyResizePayload),
     ResizeApplied(ResizeAppliedPayload),
+    TargetGeometryChanged(TargetGeometryChangedPayload),
     CreateSessionRequest(CreateSessionRequestPayload),
     CreateSessionAccepted(CreateSessionAcceptedPayload),
     CreateSessionRejected(CreateSessionRejectedPayload),
@@ -85,6 +86,7 @@ impl ControlPlanePayload {
             Self::RawPtyOutput(_) => "raw_pty_output",
             Self::ApplyResize(_) => "apply_resize",
             Self::ResizeApplied(_) => "resize_applied",
+            Self::TargetGeometryChanged(_) => "target_geometry_changed",
             Self::CreateSessionRequest(_) => "create_session_request",
             Self::CreateSessionAccepted(_) => "create_session_accepted",
             Self::CreateSessionRejected(_) => "create_session_rejected",
@@ -245,6 +247,14 @@ pub struct ResizeAppliedPayload {
     pub target_id: String,
     pub resize_epoch: u64,
     pub resize_authority_console_id: String,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetGeometryChangedPayload {
+    pub session_id: String,
+    pub target_id: String,
     pub cols: usize,
     pub rows: usize,
 }

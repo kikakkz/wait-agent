@@ -501,6 +501,33 @@ next:
   - id: task.transport-stability-l3
     title: add output sequence numbering and SyncRequest gap recovery
     status: done
+  - id: task.geometry-1-truthful-geometry
+    title: report actual applied pane geometry in resize and attach acknowledgements
+    status: done
+  - id: task.geometry-2-protocol-geometry-push
+    title: add authority-to-server target geometry change push to the control plane
+    status: done
+  - id: task.geometry-3-authority-coordinator
+    title: implement authority-side geometry coordinator with chrome-preserving resize and padding panes
+    status: done
+  - id: task.geometry-4-main-slot-geometry-resync
+    title: implement server main-slot geometry negotiation and controlled re-sync on geometry change
+    status: done
+  - id: task.geometry-5-per-server-size-store
+    title: persist last negotiated geometry per server on managed nodes
+    status: done
+  - id: task.geometry-6-docs-and-cross-host-acceptance
+    title: refresh docs and run cross-host geometry coordination acceptance
+    status: done
+  - id: task.bug-geometry-shared-chrome-window
+    title: fix geometry re-sync when the remote view shares the server's workspace chrome window, and stop storm-time geometry churn
+    status: ready
+  - id: task.bug-remote-main-slot-reconnect-seq-fatal
+    title: fix direct raw output seq tracker never reset on reconnect, gap recovery re-delivers old seqs and kills the pane process
+    status: ready
+  - id: task.bug-remote-main-slot-snapshot-clobber
+    title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
+    status: ready
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice
@@ -546,3 +573,10 @@ notes:
   - 2026-05-12 bug update: `task.bug-sidebar-switch-lag` and `task.bug-local-session-freeze-after-connect` fixed and committed. `task.bug-remote-session-lost-after-idle` marked wontfix (cannot reproduce). `task.bug-status-recognition-inaccurate` converted to feature and deferred to before workspace snapshot.
   - 2026-05-12 new bug: `task.bug-fullscreen-scrollback-truncated` recorded. Zoom fullscreen 后 PgUp 只显示当前屏，看不到更早 scrollback。可能在 workspace 布局时 history-limit 设置不足。在 feature-agent-status-recognition 之后处理。
   - 2026-05-18 transport stability batch: comprehensive 5-layer design documented in `docs/remote-transport-stability-design.md` after root-cause analysis of output freeze, input loss, and "authority host already stopped" errors. Implementation order: l4 (read timeout + ping/pong) → l1 (output blocking send) → l2 (input ring buffer) → l5 (reconnect backoff) → l3 (seq gap detection). Each layer has its own queued task file in `.agents/tasks/queued/`. Active task: `task.transport-stability-l4`.
+  - 2026-07-19 geometry coordination batch: root cause of garbled remote mirror (Ctrl+R/reverse-i-search) on shared workspace main panes confirmed by live cross-host A/B evidence (server 192.168.31.178, client node 192.168.31.182): the multi-pane resize skip in `resize_pane_on_socket` plus a requested-value `ResizeApplied` echo left panes at mismatched geometry while raw PTY replay requires identical sizes. Accepted design in `docs/remote-geometry-coordination-design.md`: network-wide smallest semantics with per-dimension min, chrome-preserving resize with padding panes, truthful geometry reporting, geometry-change push, per-server persisted sizes, and controlled re-sync. VT-model rendering and read-only degraded modes were evaluated and rejected. Implementation order: `task.geometry-1-truthful-geometry` → `task.geometry-2-protocol-geometry-push` → `task.geometry-3-authority-coordinator` → `task.geometry-4-main-slot-geometry-resync`; `task.geometry-5-per-server-size-store` after geometry-3; `task.geometry-6-docs-and-cross-host-acceptance` closes the batch. Related defects recorded separately: `task.bug-remote-main-slot-reconnect-seq-fatal`, `task.bug-remote-main-slot-snapshot-clobber`.
+  - 2026-07-19 geometry-1 done: `task.geometry-1-truthful-geometry` landed. Authority now reads back actual pane geometry before every ResizeApplied (new `RemoteTargetPtyGateway::pane_geometry`), viewer logs geometry mismatches, and a wire-level send_resize_applied diag line reports values. Verified by unit tests plus a one-host two-instance e2e (ports 17474/17475, production untouched): mismatched mirror now reports 47x22 instead of the requested size. Noted for geometry-4: raw fast-path input bypasses the resize-ack gate, and open-time ResizeApplied can be dropped by the slot handler before binding exists. Next: `task.geometry-2-protocol-geometry-push`.
+  - 2026-07-19 geometry-2 done: `task.geometry-2-protocol-geometry-push` landed. TargetGeometryChanged now rides the same rails as ResizeApplied end to end (proto oneof 62, codec tag 21, authority transport send helper, owner_helpers forwarding, grpc outbound mapping, both ingress bridge runtimes); the pane runtime validates sender/session/target the same way as RawPtyOutput and records remote_reported_geometry for geometry-4. Verified by codec round-trip plus a full gRPC loopback leg in the ingress-boundary bridge test. Next: `task.geometry-3-authority-coordinator`.
+  - 2026-07-20 geometry-3 done: `task.geometry-3-authority-coordinator` landed. Authority-side geometry coordinator: tmux layout-string parser/rewriter (vendored checksum algorithm), pure planner (per-dimension min, chrome pinned, padding panes for slack, atomic select-layout), and `coordinate_geometry` replacing resize_pty on all mirror paths — the multi-pane skip branch is now bypassed by negotiated resize. Geometry hooks (client-attached/detached/resized, window-layout-changed, `set-hook -a`) drive debounced rounds that report via TargetGeometryChanged. Empirical fixes: hooks target the pane's real tmux session; control clients report empty client_height (80x24 fallback); waitagent windows run window-size=manual so the attached case resizes the window to the smallest attached client explicitly (design doc amended). One-host e2e verified all four scenarios (detached resize, small-client shrink, big-client padding panes with pinned chrome, detach restore). Next: `task.geometry-4-main-slot-geometry-resync`.
+  - 2026-07-20 geometry-4 done: `task.geometry-4-main-slot-geometry-resync` landed. Server main slot re-syncs on geometry reports: debounced GeometryResyncDue resizes the slot's own pane/window through the shared geometry executor (with local padding panes when the remote view shares the server chrome window), then re-opens the mirror for a clean clear + bootstrap at the new size. Key correctness fixes found by e2e: re-activation must send viewer capacity (never the negotiated size) or the negotiation collapses; own-coordination resize events are suppressed until the pane settles; the resize-ack gate now compares acks against the current render size; stale padding panes must be killed before select-layout. Verified end to end on one host: Ctrl+R rendering is byte-identical to the remote user's own view, chrome pinned on both hosts, detach restores capacity. Next: `task.geometry-5-per-server-size-store`.
+  - 2026-07-20 geometry-5 done: `task.geometry-5-per-server-size-store` landed. Managed nodes persist the last negotiated geometry per server (JSON store keyed by the --connect endpoint, with node identity and timestamp) after every coordination round. Headless session creation now starts from the stored geometry plus chrome overhead instead of the tmux 80x24 default, and mirror open applies the stored geometry as the initial size before live negotiation. V1 limitation documented: inbound-only peers are not recorded yet. Verified end to end on one host: store written on negotiation, daemon restart recreates at negotiated size, mirror open replays the stored size first. Next: `task.geometry-6-docs-and-cross-host-acceptance`.
+  - 2026-07-20 geometry-6 done: `task.geometry-6-docs-and-cross-host-acceptance` closed the geometry coordination batch. Acceptance (one-host simulation; literal 178<->182 rerun deferred while 182 is offline) verifies byte-identical mirror rendering for reverse-i-search, vim, and htop, complete views with pinned chrome on both hosts through managed-node attach/detach/resize, operator-resize propagation, sequential remote sessions, and uninterrupted server input. Acceptance also landed hardening fixes: window-size option restored after coordinator resize-window (authority keeps manual deliberately), chrome sizes from layout intent, padding panes excluded from workspace recovery anchors. Remaining work is tracked as `task.bug-geometry-shared-chrome-window` (shared chrome placement limitation + storm churn). Docs refreshed: execution-status-board and local-acceptance-checklist section 8.

@@ -38,6 +38,9 @@ mod tests {
     struct FakeGateway {
         current_pane: Arc<Mutex<String>>,
         resize_calls: Arc<Mutex<Vec<(String, usize, usize)>>>,
+        pane_geometry: Arc<Mutex<(usize, usize)>>,
+        resize_clamp: Arc<Mutex<Option<(usize, usize)>>>,
+        coordinate_calls: Arc<Mutex<Vec<(String, usize, usize)>>>,
         pipe_calls: Arc<Mutex<Vec<(String, String)>>>,
         pipe_live: Arc<Mutex<bool>>,
         clear_calls: Arc<Mutex<usize>>,
@@ -56,6 +59,9 @@ mod tests {
             Self {
                 current_pane: Arc::new(Mutex::new("%7".to_string())),
                 resize_calls: Arc::new(Mutex::new(Vec::new())),
+                pane_geometry: Arc::new(Mutex::new((0, 0))),
+                resize_clamp: Arc::new(Mutex::new(None)),
+                coordinate_calls: Arc::new(Mutex::new(Vec::new())),
                 pipe_calls: Arc::new(Mutex::new(Vec::new())),
                 pipe_live: Arc::new(Mutex::new(false)),
                 clear_calls: Arc::new(Mutex::new(0)),
@@ -77,6 +83,20 @@ mod tests {
                 .current_pane
                 .lock()
                 .expect("current pane mutex should not be poisoned") = pane.to_string();
+        }
+
+        fn set_pane_geometry(&self, cols: usize, rows: usize) {
+            *self
+                .pane_geometry
+                .lock()
+                .expect("pane geometry mutex should not be poisoned") = (cols, rows);
+        }
+
+        fn set_resize_clamp(&self, cols: usize, rows: usize) {
+            *self
+                .resize_clamp
+                .lock()
+                .expect("resize clamp mutex should not be poisoned") = Some((cols, rows));
         }
     }
 
@@ -107,7 +127,75 @@ mod tests {
                 .lock()
                 .expect("resize calls mutex should not be poisoned")
                 .push((pane.as_str().to_string(), cols, rows));
+            // Simulate a successful resize: subsequent geometry read-backs
+            // report the requested size unless a test installs a clamp.
+            let applied = self
+                .resize_clamp
+                .lock()
+                .expect("resize clamp mutex should not be poisoned")
+                .unwrap_or((cols, rows));
+            self.set_pane_geometry(applied.0, applied.1);
             Ok(())
+        }
+
+        fn pane_geometry(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<(usize, usize), Self::Error> {
+            Ok(*self
+                .pane_geometry
+                .lock()
+                .expect("pane geometry mutex should not be poisoned"))
+        }
+
+        fn coordinate_geometry(
+            &self,
+            _socket_name: &str,
+            pane: &TmuxPaneId,
+            cols: usize,
+            rows: usize,
+        ) -> Result<(usize, usize), Self::Error> {
+            self.coordinate_calls
+                .lock()
+                .expect("coordinate calls mutex should not be poisoned")
+                .push((pane.as_str().to_string(), cols, rows));
+            // Record into resize_calls as well: coordination replaced direct
+            // resize_pty calls on the mirror paths, and existing assertions
+            // track the requested sizes through that vector.
+            self.resize_calls
+                .lock()
+                .expect("resize calls mutex should not be poisoned")
+                .push((pane.as_str().to_string(), cols, rows));
+            let applied = self
+                .resize_clamp
+                .lock()
+                .expect("resize clamp mutex should not be poisoned")
+                .unwrap_or((cols, rows));
+            self.set_pane_geometry(applied.0, applied.1);
+            Ok(applied)
+        }
+
+        fn set_session_hook(
+            &self,
+            _socket_name: &str,
+            _session_name: &str,
+            hook_name: &str,
+            command: &str,
+        ) -> Result<(), Self::Error> {
+            self.hook_calls
+                .lock()
+                .expect("hook calls mutex should not be poisoned")
+                .push((hook_name.to_string(), command.to_string()));
+            Ok(())
+        }
+
+        fn pane_session_name(
+            &self,
+            _socket_name: &str,
+            _pane: &TmuxPaneId,
+        ) -> Result<String, Self::Error> {
+            Ok("target-1".to_string())
         }
 
         fn clear_output_pipe_if_owner(
@@ -1570,6 +1658,125 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("pipe count did not reach {expected}");
+    }
+
+    #[test]
+    fn authority_host_runtime_reports_applied_geometry_when_resize_is_clamped() {
+        let socket_name = unique_test_socket_name("wa-clamped-geometry");
+        let transport_socket_path = transport_socket_path("host-clamped-geometry");
+        let transport_listener =
+            UnixListener::bind(&transport_socket_path).expect("transport listener should bind");
+        let fake_gateway = FakeGateway {
+            capture_bootstrap_screen: Arc::new(Mutex::new("\u{1b}[32mbash\u{1b}[0m".to_string())),
+            cursor_position: Arc::new(Mutex::new((4, 0))),
+            terminal_flags: Arc::new(Mutex::new(RemoteTargetTerminalFlags::default())),
+            ..FakeGateway::default()
+        };
+        // Simulate a resize that tmux cannot honor (multi-pane chrome window
+        // skip or clamp): the pane stays at 47x22 regardless of the request.
+        fake_gateway.set_resize_clamp(47, 22);
+        let runtime = RemoteAuthorityTargetHostRuntime::new(
+            fake_gateway.clone(),
+            FakePublicationGateway::default(),
+            PathBuf::from("/tmp/waitagent"),
+        );
+        let command = RemoteAuthorityTargetHostCommand {
+            socket_name: socket_name.clone(),
+            target_session_name: "target-1".to_string(),
+            transport_session_id: "target-1".to_string(),
+            authority_id: "peer-a".to_string(),
+            target_id: "remote-peer:peer-a:target-1".to_string(),
+            transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
+            authority_socket_path: test_authority_socket_path(&socket_name, "target-1"),
+        };
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = transport_listener
+                .accept()
+                .expect("transport should accept");
+            let hello = read_control_plane_envelope(&mut stream).expect("hello should decode");
+            match hello.payload {
+                ControlPlanePayload::ClientHello(ClientHelloPayload { .. }) => {}
+                other => panic!("unexpected hello payload: {other:?}"),
+            }
+            write_server_hello(&mut stream, "waitagent-remote-node-session")
+                .expect("server hello should encode");
+
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: open_mirror_envelope(),
+                },
+            )
+            .expect("open mirror should encode");
+            write_node_session_envelope(
+                &mut stream,
+                &NodeSessionEnvelope {
+                    channel: NodeSessionChannel::Authority,
+                    envelope: apply_resize_envelope(),
+                },
+            )
+            .expect("apply resize should encode");
+
+            let mut resize_applied_payloads = Vec::new();
+            while resize_applied_payloads.len() < 2 {
+                let envelope =
+                    read_node_session_envelope(&mut stream).expect("node session should decode");
+                match envelope.envelope.payload {
+                    ControlPlanePayload::OpenMirrorAccepted(_) => {}
+                    ControlPlanePayload::MirrorBootstrapChunk(_) => {}
+                    ControlPlanePayload::MirrorBootstrapComplete(_) => {}
+                    ControlPlanePayload::ResizeApplied(payload) => {
+                        resize_applied_payloads.push(payload);
+                        if resize_applied_payloads.len() == 2 {
+                            write_node_session_envelope(
+                                &mut stream,
+                                &NodeSessionEnvelope {
+                                    channel: NodeSessionChannel::Authority,
+                                    envelope: close_mirror_envelope(),
+                                },
+                            )
+                            .expect("close mirror should encode");
+                        }
+                    }
+                    other => panic!("unexpected node-session payload: {other:?}"),
+                }
+            }
+            stream
+                .shutdown(Shutdown::Both)
+                .expect("server shutdown should succeed");
+            server_tx
+                .send(resize_applied_payloads)
+                .expect("payloads should send");
+        });
+
+        runtime
+            .run_target_host(command)
+            .expect("runtime should finish cleanly");
+
+        let resize_applied_payloads = server_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("server harness should complete");
+
+        assert_eq!(resize_applied_payloads.len(), 2);
+        for payload in &resize_applied_payloads {
+            assert_eq!(
+                (payload.cols, payload.rows),
+                (47, 22),
+                "ResizeApplied must report the applied geometry, not the requested geometry"
+            );
+        }
+        assert_eq!(
+            fake_gateway
+                .resize_calls
+                .lock()
+                .expect("resize calls mutex should not be poisoned")
+                .clone(),
+            vec![("%7".to_string(), 80, 24), ("%7".to_string(), 160, 50)],
+            "the gateway should still receive the requested sizes"
+        );
+        let _ = fs::remove_file(&transport_socket_path);
     }
 
     fn transport_socket_path(name: &str) -> PathBuf {

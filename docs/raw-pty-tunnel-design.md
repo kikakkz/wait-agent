@@ -78,6 +78,18 @@ Bootstrap screen replay is optional for the raw path. If retained, it must be a
 one-time byte write before live output starts and must not install a local
 observer as the source of truth for ongoing interaction.
 
+## Geometry Coordination
+
+The raw data plane is only correct when both panes share identical geometry.
+For shared live-pane mirroring (a server viewing a client node's workspace
+main pane), geometry cannot be imposed unilaterally, so it is coordinated as
+a control-plane concern: negotiated target size, truthful applied-geometry
+reporting, geometry-change events, and chrome-preserving resize execution.
+The accepted contract is defined in
+[remote-geometry-coordination-design.md](remote-geometry-coordination-design.md).
+The interactive data plane itself remains raw bytes with no terminal-model
+replay.
+
 ## Remaining Cleanup
 
 Observer/mirror behavior remains only for non-interactive uses that still need a

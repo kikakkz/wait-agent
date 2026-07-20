@@ -6,6 +6,9 @@ use crate::cli::{
     RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
 };
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::per_server_geometry_store::{
+    default_store_path, store_now, PerServerGeometryStore,
+};
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSessionName, TmuxSocketName,
     TmuxWorkspaceHandle, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
@@ -150,6 +153,34 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         rows: usize,
     ) -> Result<(), Self::Error>;
 
+    fn pane_geometry(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(usize, usize), Self::Error>;
+
+    fn coordinate_geometry(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        cols: usize,
+        rows: usize,
+    ) -> Result<(usize, usize), Self::Error>;
+
+    fn set_session_hook(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error>;
+
+    fn pane_session_name(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<String, Self::Error>;
+
     fn capture_bootstrap_screen(
         &self,
         socket_name: &str,
@@ -229,6 +260,45 @@ impl RemoteTargetPtyGateway for EmbeddedTmuxBackend {
         rows: usize,
     ) -> Result<(), Self::Error> {
         self.resize_pane_on_socket(socket_name, pane, cols, rows)
+    }
+
+    fn pane_geometry(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<(usize, usize), Self::Error> {
+        self.pane_dimensions_on_socket(socket_name, pane.as_str())
+    }
+
+    fn coordinate_geometry(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+        cols: usize,
+        rows: usize,
+    ) -> Result<(usize, usize), Self::Error> {
+        // Authority side: keep the target window in manual sizing mode so the
+        // coordinator remains the only resizer (see
+        // coordinate_geometry_manual_on_socket).
+        self.coordinate_geometry_manual_on_socket(socket_name, pane, cols, rows)
+    }
+
+    fn set_session_hook(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        hook_name: &str,
+        command: &str,
+    ) -> Result<(), Self::Error> {
+        self.set_session_hook_on_socket(socket_name, session_name, hook_name, command)
+    }
+
+    fn pane_session_name(
+        &self,
+        socket_name: &str,
+        pane: &TmuxPaneId,
+    ) -> Result<String, Self::Error> {
+        self.pane_session_name_on_socket(socket_name, pane)
     }
 
     fn capture_bootstrap_screen(
@@ -417,6 +487,7 @@ pub struct RemoteAuthorityTargetHostRuntime<
     gateway: G,
     publication_gateway: P,
     current_executable: PathBuf,
+    network: RemoteNetworkConfig,
 }
 
 enum AuthorityHostEvent {
@@ -424,6 +495,7 @@ enum AuthorityHostEvent {
     OutputChunk { stream_id: u64, bytes: Vec<u8> },
     OutputClosed { stream_id: u64 },
     PaneDied { pane_id: String },
+    GeometryChanged,
     BindingRefresh,
     RuntimeRefreshDue { label: &'static str },
     OutputQuietRefreshDue(OutputQuietRefreshKind),
@@ -438,6 +510,14 @@ const INPUT_CONGESTION_LOW_WATERMARK: usize = INPUT_RING_BUFFER_CAP / 4;
 const INPUT_DRAIN_CHUNK_MAX: usize = 4096;
 const REMOTE_AUTHORITY_PANE_DIED_HOOK: &str = "pane-died[20]";
 const RUNTIME_CHANGE_SIGNAL_MIN_INTERVAL: Duration = Duration::from_millis(150);
+const GEOMETRY_EVENT_HOOKS: [&str; 4] = [
+    "client-attached",
+    "client-detached",
+    "client-resized",
+    "window-layout-changed",
+];
+const GEOMETRY_DEBOUNCE: Duration = Duration::from_millis(200);
+const GEOMETRY_REFRESH_LABEL: &str = "geometry";
 
 #[derive(Clone)]
 enum AuthorityOutputMessage {
@@ -572,9 +652,9 @@ impl RemoteAuthorityTargetHostRuntime<EmbeddedTmuxBackend, RemoteTargetPublicati
     pub fn from_build_env(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
         let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_authority_error)?;
         let publication_gateway =
-            RemoteTargetPublicationRuntime::from_build_env_with_network(network)?;
+            RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?;
         let current_executable = current_waitagent_executable()?;
-        Ok(Self::new(gateway, publication_gateway, current_executable))
+        Ok(Self::new(gateway, publication_gateway, current_executable).with_network(network))
     }
 }
 
@@ -588,6 +668,41 @@ where
             gateway,
             publication_gateway,
             current_executable,
+            network: RemoteNetworkConfig::default(),
+        }
+    }
+
+    pub fn with_network(mut self, network: RemoteNetworkConfig) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Identity of the server this node's geometry store entries are keyed
+    /// by.  V1 covers the hub model: managed nodes that connect out to their
+    /// server; inbound-only peers are not recorded yet.
+    fn geometry_server_key(&self) -> Option<String> {
+        self.network.connect.clone()
+    }
+
+    fn record_geometry_store(
+        &self,
+        command: &RemoteAuthorityTargetHostCommand,
+        applied: (usize, usize),
+    ) {
+        let Some(server) = self.geometry_server_key() else {
+            return;
+        };
+        let path = default_store_path();
+        let mut store = PerServerGeometryStore::load(&path);
+        store.record(
+            &server,
+            command.authority_id.clone(),
+            applied.0 as u32,
+            applied.1 as u32,
+            store_now(),
+        );
+        if let Err(error) = store.save(&path) {
+            ERROR_LOG.log(format!("[diag] geometry store save failed: {error}"));
         }
     }
 
@@ -625,6 +740,12 @@ where
             bind_output_ingest_listener(&event_socket_path).map_err(remote_authority_error)?;
         let mut current_binding = None;
         ensure_authority_pane_binding(self, &command, &mut current_binding, &event_socket_path)?;
+
+        let mut geometry_desired: Option<(usize, usize)> = None;
+        let mut geometry_session_id: Option<String> = None;
+        let mut geometry_hooks_registered = false;
+        let mut geometry_last_event: Option<std::time::Instant> = None;
+        let mut geometry_debounce_pending = false;
 
         let (event_tx, event_rx) = mpsc::channel();
         let output_cache = Arc::new(Mutex::new(OutputFrameCache::default()));
@@ -727,6 +848,66 @@ where
                         Ok(pane) => pane,
                         Err(error) => break Err(error),
                     };
+                    if !geometry_hooks_registered {
+                        geometry_hooks_registered = true;
+                        let hook_command = remote_authority_geometry_event_hook_command(
+                            self.current_executable.to_string_lossy().as_ref(),
+                            &event_socket_path,
+                        );
+                        // The hook target must be the pane's real tmux
+                        // session; the published target session name is a
+                        // logical id that may not exist as a tmux session.
+                        let hook_session = self
+                            .gateway
+                            .pane_session_name(&command.socket_name, &pane)
+                            .unwrap_or_else(|_| command.target_session_name.clone());
+                        for hook_name in GEOMETRY_EVENT_HOOKS {
+                            if let Err(error) = self
+                                .gateway
+                                .set_session_hook(
+                                    &command.socket_name,
+                                    &hook_session,
+                                    hook_name,
+                                    &hook_command,
+                                )
+                                .map_err(remote_authority_error)
+                            {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] target host: geometry hook registration failed hook={hook_name}: {error}"
+                                ));
+                            }
+                        }
+                    }
+                    geometry_desired = Some((payload.cols, payload.rows));
+                    geometry_session_id = Some(payload.session_id.clone());
+                    // Apply the stored last-negotiated geometry for this
+                    // server as the initial size before the live round with
+                    // the payload's desired size settles (design doc section
+                    // 8: stored values are initial values only).
+                    if let Some(server) = self.geometry_server_key() {
+                        let path = default_store_path();
+                        let store = PerServerGeometryStore::load(&path);
+                        if let Some(stored) = store.lookup(&server) {
+                            ERROR_LOG.log(format!(
+                                "[diag-timing] target host: applying stored geometry {}x{} for server={server}",
+                                stored.cols, stored.rows
+                            ));
+                            if let Err(error) = self
+                                .gateway
+                                .coordinate_geometry(
+                                    &command.socket_name,
+                                    &pane,
+                                    stored.cols as usize,
+                                    stored.rows as usize,
+                                )
+                                .map_err(remote_authority_error)
+                            {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] target host: stored geometry apply failed: {error}"
+                                ));
+                            }
+                        }
+                    }
                     if matches!(mirror_state, MirrorState::Active { .. }) {
                         match self
                             .gateway
@@ -738,9 +919,9 @@ where
                             .map_err(remote_authority_error)
                         {
                             Ok(true) => {
-                                if let Err(error) = self
+                                let applied = match self
                                     .gateway
-                                    .resize_pty(
+                                    .coordinate_geometry(
                                         &command.socket_name,
                                         &pane,
                                         payload.cols,
@@ -748,13 +929,23 @@ where
                                     )
                                     .map_err(remote_authority_error)
                                 {
-                                    break Err(error);
-                                }
+                                    Ok(applied) => applied,
+                                    Err(error) => break Err(error),
+                                };
+                                self.record_geometry_store(&command, applied);
+                                let (applied_cols, applied_rows) = match self
+                                    .gateway
+                                    .pane_geometry(&command.socket_name, &pane)
+                                    .map_err(remote_authority_error)
+                                {
+                                    Ok(geometry) => geometry,
+                                    Err(error) => break Err(error),
+                                };
                                 if let Err(error) = transport.send_resize_applied(
                                     &payload.session_id,
                                     &payload.target_id,
-                                    payload.cols,
-                                    payload.rows,
+                                    applied_cols,
+                                    applied_rows,
                                     0,
                                     payload.console_id.clone(),
                                 ) {
@@ -830,11 +1021,19 @@ where
                         payload: payload.clone(),
                     };
                     health.mirror_active.store(true, Ordering::Relaxed);
+                    let (applied_cols, applied_rows) = match self
+                        .gateway
+                        .pane_geometry(&command.socket_name, &pane)
+                        .map_err(remote_authority_error)
+                    {
+                        Ok(geometry) => geometry,
+                        Err(error) => break Err(error),
+                    };
                     if let Err(error) = transport.send_resize_applied(
                         &payload.session_id,
                         &payload.target_id,
-                        payload.cols,
-                        payload.rows,
+                        applied_cols,
+                        applied_rows,
                         0,
                         payload.console_id.clone(),
                     ) {
@@ -917,18 +1116,34 @@ where
                         Ok(pane) => pane,
                         Err(error) => break Err(error),
                     };
-                    if let Err(error) = self
+                    geometry_desired = Some((payload.cols, payload.rows));
+                    let applied = match self
                         .gateway
-                        .resize_pty(&command.socket_name, &pane, payload.cols, payload.rows)
+                        .coordinate_geometry(
+                            &command.socket_name,
+                            &pane,
+                            payload.cols,
+                            payload.rows,
+                        )
                         .map_err(remote_authority_error)
                     {
-                        break Err(error);
-                    }
+                        Ok(applied) => applied,
+                        Err(error) => break Err(error),
+                    };
+                    self.record_geometry_store(&command, applied);
+                    let (applied_cols, applied_rows) = match self
+                        .gateway
+                        .pane_geometry(&command.socket_name, &pane)
+                        .map_err(remote_authority_error)
+                    {
+                        Ok(geometry) => geometry,
+                        Err(error) => break Err(error),
+                    };
                     if let Err(error) = transport.send_resize_applied(
                         &payload.session_id,
                         &payload.target_id,
-                        payload.cols,
-                        payload.rows,
+                        applied_cols,
+                        applied_rows,
                         payload.resize_epoch,
                         payload.resize_authority_console_id.clone(),
                     ) {
@@ -1038,6 +1253,20 @@ where
                         break Ok(());
                     }
                 }
+                AuthorityHostEvent::GeometryChanged => {
+                    health.record_event();
+                    geometry_last_event = Some(std::time::Instant::now());
+                    if !geometry_debounce_pending {
+                        geometry_debounce_pending = true;
+                        let tx = event_tx.clone();
+                        thread::spawn(move || {
+                            thread::sleep(GEOMETRY_DEBOUNCE);
+                            let _ = tx.send(AuthorityHostEvent::RuntimeRefreshDue {
+                                label: GEOMETRY_REFRESH_LABEL,
+                            });
+                        });
+                    }
+                }
                 AuthorityHostEvent::BindingRefresh => {
                     health.record_event();
                     let previous_pane = current_binding
@@ -1090,11 +1319,19 @@ where
                             payload: payload.clone(),
                         };
                         health.mirror_active.store(true, Ordering::Relaxed);
+                        let (applied_cols, applied_rows) = match self
+                            .gateway
+                            .pane_geometry(&command.socket_name, &pane)
+                            .map_err(remote_authority_error)
+                        {
+                            Ok(geometry) => geometry,
+                            Err(error) => break Err(error),
+                        };
                         if let Err(error) = transport.send_resize_applied(
                             &payload.session_id,
                             &payload.target_id,
-                            payload.cols,
-                            payload.rows,
+                            applied_cols,
+                            applied_rows,
                             0,
                             payload.console_id.clone(),
                         ) {
@@ -1107,6 +1344,58 @@ where
                         ) {
                             break Err(error);
                         }
+                    }
+                }
+                AuthorityHostEvent::RuntimeRefreshDue { label }
+                    if label == GEOMETRY_REFRESH_LABEL =>
+                {
+                    health.record_event();
+                    let quiet = geometry_last_event
+                        .map(|instant| instant.elapsed() >= GEOMETRY_DEBOUNCE)
+                        .unwrap_or(true);
+                    if !quiet {
+                        let tx = event_tx.clone();
+                        thread::spawn(move || {
+                            thread::sleep(GEOMETRY_DEBOUNCE);
+                            let _ = tx.send(AuthorityHostEvent::RuntimeRefreshDue {
+                                label: GEOMETRY_REFRESH_LABEL,
+                            });
+                        });
+                        continue;
+                    }
+                    geometry_debounce_pending = false;
+                    if !matches!(mirror_state, MirrorState::Active { .. }) {
+                        continue;
+                    }
+                    let Some(desired) = geometry_desired else {
+                        continue;
+                    };
+                    let Some(session_id) = geometry_session_id.clone() else {
+                        continue;
+                    };
+                    let Some(pane) = current_binding.as_ref().map(|binding| binding.pane.clone())
+                    else {
+                        continue;
+                    };
+                    match self
+                        .gateway
+                        .coordinate_geometry(&command.socket_name, &pane, desired.0, desired.1)
+                        .map_err(remote_authority_error)
+                    {
+                        Ok((applied_cols, applied_rows)) => {
+                            self.record_geometry_store(&command, (applied_cols, applied_rows));
+                            if let Err(error) = transport.send_target_geometry_changed(
+                                &session_id,
+                                &command.target_id,
+                                applied_cols,
+                                applied_rows,
+                            ) {
+                                ERROR_LOG.log(format!(
+                                    "[diag-timing] target host: send_target_geometry_changed failed: {error}"
+                                ));
+                            }
+                        }
+                        Err(error) => break Err(error),
                     }
                 }
                 AuthorityHostEvent::RuntimeRefreshDue { label } => {
@@ -1218,6 +1507,20 @@ where
 pub fn run_pane_died_event(command: RemoteAuthorityPaneDiedCommand) -> Result<(), LifecycleError> {
     send_pane_died_event(&command.event_socket_path, &command.pane_id);
     Ok(())
+}
+
+pub fn run_geometry_event(
+    command: crate::cli::RemoteAuthorityGeometryEventCommand,
+) -> Result<(), LifecycleError> {
+    send_geometry_changed_event(&command.event_socket_path);
+    Ok(())
+}
+
+fn send_geometry_changed_event(event_socket_path: &str) {
+    if let Ok(mut stream) = UnixStream::connect(event_socket_path) {
+        let _ = stream.write_all(b"__geometry_changed\n");
+        let _ = stream.flush();
+    }
 }
 
 fn ensure_authority_pane_binding<G, P>(
@@ -1692,6 +1995,12 @@ fn spawn_pane_event_thread(
                         }
                         continue;
                     }
+                    if pane_id == "__geometry_changed" {
+                        if tx.send(AuthorityHostEvent::GeometryChanged).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     if pane_id.is_empty() {
                         continue;
                     }
@@ -1859,6 +2168,23 @@ fn remote_authority_pane_died_hook_command(
     )
 }
 
+fn remote_authority_geometry_event_hook_command(
+    executable: &str,
+    event_socket_path: &Path,
+) -> String {
+    let shell_command = [
+        shell_escape(executable),
+        shell_escape("__remote-authority-geometry-event"),
+        shell_escape("--event-socket-path"),
+        shell_escape(&event_socket_path.display().to_string()),
+    ]
+    .join(" ");
+    format!(
+        "run-shell -b {}",
+        tmux_quote_argument(&format!("{shell_command} >/dev/null 2>&1"))
+    )
+}
+
 fn tmux_quote_argument(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1917,12 +2243,14 @@ where
         stream_id,
     );
     let owner = remote_mirror_pipe_owner(&command.target_id);
-    // Resize BEFORE setting up pipe-pane.  pipe-pane -I -O triggers a
-    // layout recalculation in tmux that can override a subsequent resize.
-    runtime
+    // Coordinate geometry BEFORE setting up pipe-pane.  pipe-pane -I -O
+    // triggers a layout recalculation in tmux that can override a subsequent
+    // resize.
+    let applied = runtime
         .gateway
-        .resize_pty(&command.socket_name, pane, payload.cols, payload.rows)
+        .coordinate_geometry(&command.socket_name, pane, payload.cols, payload.rows)
         .map_err(remote_authority_error)?;
+    runtime.record_geometry_store(command, applied);
     runtime
         .gateway
         .set_output_pipe_owned(&command.socket_name, pane, &owner, &pipe_command)

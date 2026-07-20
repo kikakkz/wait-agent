@@ -1596,9 +1596,10 @@ pub(super) fn spawn_in_process_authority_target_host(
     let current_executable = current_waitagent_executable()?;
     let runtime = RemoteAuthorityTargetHostRuntime::new(
         gateway,
-        SessionSyncAuthorityPublicationGateway::new(network),
+        SessionSyncAuthorityPublicationGateway::new(network.clone()),
         current_executable,
-    );
+    )
+    .with_network(network);
     let authority_socket_path = PathBuf::from(&command.authority_socket_path);
     let target_id_for_log = command.target_id.clone();
     thread::spawn(move || {

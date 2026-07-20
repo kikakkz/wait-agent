@@ -45,6 +45,7 @@ message NodeSessionEnvelope {
 
     TargetOutput target_output = 60;
     RawPtyOutput raw_pty_output = 61;
+    TargetGeometryChanged target_geometry_changed = 62;
 
     CreateSessionRequest create_session_request = 70;
     CreateSessionAccepted create_session_accepted = 71;
@@ -331,4 +332,11 @@ message RawPtyOutput {
   uint64 output_seq = 2;
   bytes output_bytes = 3;
   string session_id = 4;
+}
+
+message TargetGeometryChanged {
+  string target_id = 1;
+  string session_id = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
 }

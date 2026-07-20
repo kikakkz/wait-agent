@@ -18,8 +18,8 @@ use crate::infra::remote_protocol::{
     CreateSessionRejectedPayload, CreateSessionRequestPayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
     OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyOutputPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    TargetGeometryChangedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -405,6 +405,34 @@ pub(crate) fn route_grpc_envelope(
             session.write_authority_envelope(&map_mirror_bootstrap_chunk_envelope(
                 node_id, &envelope, payload,
             )?)
+        }
+        Some(Body::TargetGeometryChanged(payload)) => {
+            let session = session.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("grpc authority session `{node_id}` is not registered"),
+                )
+            })?;
+            session.write_authority_envelope(&ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: envelope.message_id.clone(),
+                message_type: "target_geometry_changed",
+                timestamp: timestamp_string(&envelope),
+                sender_id: node_id.to_string(),
+                correlation_id: envelope.correlation_id.clone(),
+                session_id: route_session_id(&envelope)
+                    .or_else(|| grpc_payload_session_id(&payload.session_id, &payload.target_id)),
+                target_id: route_target_id(&envelope).or_else(|| Some(payload.target_id.clone())),
+                attachment_id: route_attachment_id(&envelope),
+                console_id: route_console_id(&envelope),
+                payload: ControlPlanePayload::TargetGeometryChanged(TargetGeometryChangedPayload {
+                    session_id: grpc_payload_session_id(&payload.session_id, &payload.target_id)
+                        .unwrap_or_else(|| payload.target_id.clone()),
+                    target_id: payload.target_id.clone(),
+                    cols: payload.cols as usize,
+                    rows: payload.rows as usize,
+                }),
+            })
         }
         Some(Body::MirrorBootstrapComplete(payload)) => {
             let session = session.ok_or_else(|| {
