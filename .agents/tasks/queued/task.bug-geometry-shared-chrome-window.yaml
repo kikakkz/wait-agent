@@ -2,10 +2,10 @@ id: task.bug-geometry-shared-chrome-window
 kind: task
 version: 1
 title: fix geometry re-sync when the remote view shares the server's workspace chrome window, and stop storm-time geometry churn
-status: ready
+status: in_progress
 priority: medium
 design_ref:
-  doc: investigation
+  doc: docs/remote-geometry-coordination-design.md
   why:
     - geometry-4's slot-side coordinate runs a full-tree padded select-layout on the server's workspace chrome window when the negotiated T is smaller than the viewer capacity; the workspace layout service owns that window's chrome, and the two layout owners fight, mangling sidebar/footer sizes over repeated rounds (observed: sidebar crushed to 1 column, footer stretched, franken-tree nesting)
     - the stabilizer in place skips local layout surgery for shared chrome windows and logs `skipping local layout surgery`, so the raw mirror can garble on multi-row redraws in that placement when the managed-node user is attached with a smaller terminal (original bug survives in this one placement)
@@ -32,3 +32,6 @@ touched_paths:
 notes:
   - the skip stabilizer lives in RemotePaneEvent::GeometryResyncDue handling (remote_main_slot_pane_runtime.rs); the workspace layout service owns chrome via intent sizes in src/application/layout_service.rs
   - related analysis: padding panes are now excluded from workspace recovery anchors via is_workspace_chrome_title in main_slot_runtime.rs
+  - 2026-07-21 implemented (approach: layout-service-owned intent, option 2): the slot publishes `@waitagent_main_slot_geometry` = `<pane_id> <pane_pid> <cols>x<rows>` via the new hidden command `__layout-main-slot-geometry`; apply_main_slot_geometry_intent (workspace_layout_runtime.rs) is the single writer for the chrome window and runs the same coordinate_geometry_on_socket executor (chrome pinned, padding absorbs slack); reconcile_layout re-asserts the intent after every client-resized; the intent self-invalidates on pane pid mismatch and is cleared by a slot-exit guard; while active the slot derives viewer capacity from the window minus pinned chrome (window_main_area_capacity) instead of the coordinated pane size to avoid capacity poisoning; the old `skipping local layout surgery` stabilizer is removed; sidebar-hidden / native-fullscreen placements still skip intent application (follow-up)
+  - 2026-07-21 verified: cargo fmt --check, cargo check, full cargo test --test-threads=1 (793+1 passed, 0 failed) incl. 4 new tests (cli parse for `__layout-main-slot-geometry`, intent value round-trip/garbage rejection)
+  - pending: manual cross-host acceptance (shared-chrome placement with a small attached client on the managed node)

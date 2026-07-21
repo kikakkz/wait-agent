@@ -1,3 +1,6 @@
+use crate::application::layout_service::{
+    FOOTER_HEIGHT_CELLS, FOOTER_PANE_TITLE, SIDEBAR_PANE_TITLE, SIDEBAR_WIDTH_CELLS,
+};
 use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
@@ -300,6 +303,8 @@ impl RemoteMainSlotPaneRuntime {
         let mut geometry_resync_pending: Option<TerminalSize> = None;
         let mut geometry_resync_debounce_active = false;
         let mut resync_applied_size: Option<TerminalSize> = None;
+        let mut main_slot_intent_active = false;
+        let mut intent_guard = MainSlotGeometryIntentGuard::new(&spec);
         let mut viewer_capacity: TerminalSize = initial_size;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
@@ -498,15 +503,36 @@ impl RemoteMainSlotPaneRuntime {
                                 )
                                 .unwrap_or(false);
                             if own_window_has_chrome {
-                                // Shared waitagent chrome window: the
-                                // workspace's own layout service owns chrome,
-                                // and full-tree padded layouts fight it,
-                                // mangling the workspace over rounds.  The
-                                // dominant product placement is the dedicated
-                                // remote window; skip local surgery here.
-                                ERROR_LOG.log(format!(
-                                    "[diag] geometry re-sync: remote view shares the workspace chrome window (session={own_window}); skipping local layout surgery (known limitation)"
-                                ));
+                                // Shared waitagent chrome window: publish the
+                                // negotiated geometry as an intent and let the
+                                // workspace layout runtime apply it (padding
+                                // included). The slot never does window
+                                // surgery here, so the layout runtime stays
+                                // the single writer for the chrome window.
+                                match publish_main_slot_geometry_intent(
+                                    &spec,
+                                    &own_window,
+                                    &own_pane,
+                                    reported,
+                                ) {
+                                    Ok(()) => {
+                                        ERROR_LOG.log(format!(
+                                            "[diag] geometry re-sync: published main-slot geometry intent {}x{} (session={own_window})",
+                                            reported.cols, reported.rows
+                                        ));
+                                        resync_applied_size = Some(reported);
+                                        main_slot_intent_active = true;
+                                        intent_guard.arm();
+                                        local_coordinate_done = true;
+                                    }
+                                    Err(error) => {
+                                        resync_applied_size = None;
+                                        ERROR_LOG.log(format!(
+                                            "[diag] geometry re-sync: main-slot geometry intent publish failed: {error}"
+                                        ));
+                                        continue;
+                                    }
+                                }
                             } else {
                                 resync_applied_size = Some(reported);
                                 match self.backend.coordinate_geometry_on_socket(
@@ -625,13 +651,22 @@ impl RemoteMainSlotPaneRuntime {
                             continue;
                         }
                         if size != last_synced_size {
-                            viewer_capacity = size;
+                            // With the geometry intent active the pane is
+                            // pinned to the negotiated size, so its live size
+                            // is no longer the viewer capacity. Derive
+                            // capacity from the window minus pinned chrome.
+                            let capacity = if main_slot_intent_active {
+                                window_main_area_capacity(&spec).unwrap_or(size)
+                            } else {
+                                size
+                            };
+                            viewer_capacity = capacity;
                             if let Some(binding) = binding.as_ref() {
                                 sync_or_defer_remote_pty_size(
                                     &remote_runtime,
                                     &target,
                                     binding,
-                                    &size,
+                                    &capacity,
                                     &mut pending_pty_size,
                                 )?;
                                 resize_acked_size = None;
@@ -1763,6 +1798,156 @@ fn signal_clean_remote_target_exit(
 
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// Publish the negotiated geometry as the workspace's main-slot geometry
+/// intent via the hidden layout command. The command applies the intent
+/// synchronously (padding included) through the workspace layout runtime, so
+/// on success this pane already renders at `size`.
+fn publish_main_slot_geometry_intent(
+    spec: &RemoteInteractSurfaceSpec,
+    session_name: &str,
+    pane_id: &str,
+    size: TerminalSize,
+) -> Result<(), LifecycleError> {
+    let waitagent = current_waitagent_executable()?;
+    let status = std::process::Command::new(waitagent)
+        .arg("__layout-main-slot-geometry")
+        .arg("--socket-name")
+        .arg(&spec.socket_name)
+        .arg("--session-name")
+        .arg(session_name)
+        .arg("--pane-id")
+        .arg(pane_id)
+        .arg("--pane-pid")
+        .arg(std::process::id().to_string())
+        .arg("--cols")
+        .arg(size.cols.to_string())
+        .arg("--rows")
+        .arg(size.rows.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(remote_pane_error)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(remote_pane_error(io::Error::new(
+            io::ErrorKind::Other,
+            format!("main-slot geometry intent command exited with {status}"),
+        )))
+    }
+}
+
+/// Viewer capacity while the geometry intent is active: the pane is pinned to
+/// the negotiated size by padding, so capacity is derived from the window
+/// size minus the pinned chrome instead of the coordinated pane size.
+fn window_main_area_capacity(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize> {
+    let pane_id = std::env::var("TMUX_PANE").ok()?.trim().to_string();
+    if pane_id.is_empty() {
+        return None;
+    }
+    let backend = crate::infra::tmux::EmbeddedTmuxBackend::from_build_env().ok()?;
+    let output = backend
+        .run_on_socket(
+            &crate::infra::tmux::TmuxSocketName::new(spec.socket_name.clone()),
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane_id,
+                "#{window_id}\t#{window_width}\t#{window_height}".to_string(),
+            ],
+        )
+        .ok()?;
+    let mut parts = output.stdout.trim().split('\t');
+    let window_id = parts.next()?;
+    let window_cols = parts.next()?.parse::<usize>().ok()?;
+    let window_rows = parts.next()?.parse::<usize>().ok()?;
+    let panes = backend
+        .list_panes_detailed_on_socket(&spec.socket_name, window_id)
+        .ok()?;
+    let has_sidebar = panes
+        .iter()
+        .any(|(_, title, _, _)| title.as_str() == SIDEBAR_PANE_TITLE);
+    let has_footer = panes
+        .iter()
+        .any(|(_, title, _, _)| title.as_str() == FOOTER_PANE_TITLE);
+    let chrome_cols = if has_sidebar {
+        usize::from(SIDEBAR_WIDTH_CELLS) + 1
+    } else {
+        0
+    };
+    let chrome_rows = if has_footer {
+        usize::from(FOOTER_HEIGHT_CELLS) + 1
+    } else {
+        0
+    };
+    let cols = window_cols.saturating_sub(chrome_cols);
+    let rows = window_rows.saturating_sub(chrome_rows);
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some(TerminalSize {
+        rows: rows.min(u16::MAX as usize) as u16,
+        cols: cols.min(u16::MAX as usize) as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+}
+
+/// Best-effort cleanup for the main-slot geometry intent: when the
+/// remote-main-slot process exits, clear the intent so the workspace layout
+/// reverts to filling the main slot. The layout runtime also self-heals stale
+/// intents via the pane-pid check; this only avoids waiting for the next
+/// reconcile round.
+struct MainSlotGeometryIntentGuard {
+    socket_name: String,
+    session_name: String,
+    armed: bool,
+}
+
+impl MainSlotGeometryIntentGuard {
+    fn new(spec: &RemoteInteractSurfaceSpec) -> Self {
+        Self {
+            socket_name: spec.socket_name.clone(),
+            session_name: spec.surface_scope.clone(),
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+}
+
+impl Drop for MainSlotGeometryIntentGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(waitagent) = current_waitagent_executable() else {
+            return;
+        };
+        let Ok(backend) = crate::infra::tmux::EmbeddedTmuxBackend::from_build_env() else {
+            return;
+        };
+        let shell_command = [
+            shell_escape(&waitagent.display().to_string()),
+            shell_escape("__layout-main-slot-geometry"),
+            shell_escape("--socket-name"),
+            shell_escape(&self.socket_name),
+            shell_escape("--session-name"),
+            shell_escape(&self.session_name),
+            shell_escape("--clear"),
+        ]
+        .join(" ");
+        let _ = backend.run_socket_command(
+            &crate::infra::tmux::TmuxSocketName::new(self.socket_name.clone()),
+            &["run-shell".to_string(), "-b".to_string(), shell_command],
+        );
+    }
 }
 
 /// Flush any input that was buffered during a reconnection period.

@@ -6,8 +6,8 @@ use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::{
-    prepend_global_network_args, CloseSessionCommand, LayoutReconcileCommand, RemoteNetworkConfig,
-    SidebarFocus, ToggleSidebarCommand, UiPaneCommand,
+    prepend_global_network_args, CloseSessionCommand, LayoutMainSlotGeometryCommand,
+    LayoutReconcileCommand, RemoteNetworkConfig, SidebarFocus, ToggleSidebarCommand, UiPaneCommand,
 };
 use crate::domain::workspace::WorkspaceInstanceId;
 use crate::domain::workspace_layout::WorkspaceChromeLayout;
@@ -768,8 +768,16 @@ impl WorkspaceLayoutRuntime {
                 )
                 .map_err(tmux_layout_error);
         }
-        self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)
-            .map(|_| ())
+        self.ensure_layout_topology(workspace, workspace_dir, focus_behavior)?;
+        // Re-assert the remote-view geometry intent after every topology
+        // reconciliation so client resizes cannot drift the main pane away
+        // from the negotiated size (single writer for the chrome window).
+        if let Err(error) = apply_main_slot_geometry_intent(&self.backend, workspace) {
+            ERROR_LOG.log(format!(
+                "[diag] reconcile_layout: main-slot geometry intent apply failed: {error}"
+            ));
+        }
+        Ok(())
     }
 
     const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
@@ -810,6 +818,13 @@ impl WorkspaceLayoutRuntime {
             workspace_dir,
             LayoutFocusBehavior::PreserveCurrent,
         )?;
+        // Same single-writer intent re-assertion as reconcile_layout: chrome
+        // refreshes must not leave a stale remote-view geometry behind.
+        if let Err(error) = apply_main_slot_geometry_intent(&self.backend, workspace) {
+            ERROR_LOG.log(format!(
+                "[diag] refresh_chrome: main-slot geometry intent apply failed: {error}"
+            ));
+        }
         ERROR_LOG.log(format!(
             "[diag-newhost] refresh_chrome ensure_layout_topology socket={} session={} elapsed={:?}",
             workspace.socket_name.as_str(),
@@ -1830,6 +1845,205 @@ fn tmux_layout_error(error: TmuxError) -> LifecycleError {
     )
 }
 
+const WAITAGENT_MAIN_SLOT_GEOMETRY_OPTION: &str = "@waitagent_main_slot_geometry";
+
+/// Geometry intent published by a remote-main-slot viewer whose pane lives in
+/// the shared workspace chrome window. While set, the workspace layout owner
+/// keeps that pane at exactly this size and absorbs any slack with blank
+/// padding panes, so the raw PTY tunnel always replays at the negotiated
+/// geometry. Stored as "<pane_id> <pane_pid> <cols>x<rows>"; the pid makes
+/// the intent self-invalidating once the publishing pane process is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MainSlotGeometryIntent {
+    pub pane_id: String,
+    pub pane_pid: u32,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+fn format_main_slot_geometry_intent(pane_id: &str, pane_pid: u32, cols: u16, rows: u16) -> String {
+    format!("{pane_id} {pane_pid} {cols}x{rows}")
+}
+
+pub(crate) fn parse_main_slot_geometry_intent(value: &str) -> Option<MainSlotGeometryIntent> {
+    let mut parts = value.split_whitespace();
+    let pane_id = parts.next()?;
+    if !pane_id.starts_with('%') {
+        return None;
+    }
+    let pane_pid = parts.next()?.parse::<u32>().ok()?;
+    let (cols, rows) = parts.next()?.split_once('x')?;
+    let cols = cols.parse::<u16>().ok()?;
+    let rows = rows.parse::<u16>().ok()?;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some(MainSlotGeometryIntent {
+        pane_id: pane_id.to_string(),
+        pane_pid,
+        cols,
+        rows,
+    })
+}
+
+/// Entry point for the hidden `__layout-main-slot-geometry` command: publish
+/// (or clear) the main-slot geometry intent for a workspace, then apply it.
+/// The apply runs the same single-writer path as layout reconciliation, so
+/// the remote-main-slot process never performs window surgery itself.
+pub fn run_main_slot_geometry_command(
+    command: LayoutMainSlotGeometryCommand,
+) -> Result<(), LifecycleError> {
+    let backend = EmbeddedTmuxBackend::from_build_env().map_err(tmux_layout_error)?;
+    let workspace = TmuxWorkspaceHandle {
+        workspace_id: WorkspaceInstanceId::new(command.session_name.clone()),
+        socket_name: TmuxSocketName::new(command.socket_name.clone()),
+        session_name: TmuxSessionName::new(command.session_name),
+    };
+    if command.clear {
+        clear_main_slot_geometry_intent(&backend, &workspace).map_err(tmux_layout_error)
+    } else {
+        let intent = format_main_slot_geometry_intent(
+            command.pane_id.as_deref().unwrap_or_default(),
+            command.pane_pid.unwrap_or_default(),
+            command.cols.unwrap_or_default(),
+            command.rows.unwrap_or_default(),
+        );
+        backend
+            .set_session_option(&workspace, WAITAGENT_MAIN_SLOT_GEOMETRY_OPTION, &intent)
+            .map_err(tmux_layout_error)?;
+        apply_main_slot_geometry_intent(&backend, &workspace).map_err(tmux_layout_error)
+    }
+}
+
+/// Apply the workspace's main-slot geometry intent, if any. This is the only
+/// writer allowed to reshape the shared workspace chrome window for remote
+/// geometry: it is called both from layout reconciliation and from the
+/// intent-publish command, so all layout writes for the window flow through
+/// one code path owned by the layout runtime.
+///
+/// A valid intent (pane alive in the current window and still owned by the
+/// publishing process) sizes the pane to exactly the intent geometry via the
+/// geometry coordinator, padding the slack. A stale intent (pane gone, dead,
+/// or owned by another process) is cleared and its padding removed. With no
+/// intent set this is a no-op; leftover padding is cleaned up by the
+/// stale/clear paths that owned it.
+pub(crate) fn apply_main_slot_geometry_intent(
+    backend: &EmbeddedTmuxBackend,
+    workspace: &TmuxWorkspaceHandle,
+) -> Result<(), TmuxError> {
+    let Some(intent) = backend
+        .show_session_option(workspace, WAITAGENT_MAIN_SLOT_GEOMETRY_OPTION)?
+        .and_then(|value| parse_main_slot_geometry_intent(&value))
+    else {
+        return Ok(());
+    };
+    let window = backend.current_window(workspace)?;
+    let panes = list_window_pane_states(backend, workspace, window.window_id.as_str())?;
+    let live = panes
+        .iter()
+        .any(|pane| pane.id == intent.pane_id && !pane.dead && pane.pid == intent.pane_pid);
+    if live {
+        let applied = backend.coordinate_geometry_on_socket(
+            workspace.socket_name.as_str(),
+            &TmuxPaneId::new(intent.pane_id.clone()),
+            usize::from(intent.cols),
+            usize::from(intent.rows),
+        )?;
+        ERROR_LOG.log(format!(
+            "[diag] main-slot geometry intent applied: pane={} intent={}x{} read-back={}x{}",
+            intent.pane_id, intent.cols, intent.rows, applied.0, applied.1
+        ));
+    } else {
+        ERROR_LOG.log(format!(
+            "[diag] main-slot geometry intent stale (pane={} pid={}); clearing",
+            intent.pane_id, intent.pane_pid
+        ));
+        backend.unset_session_option(workspace, WAITAGENT_MAIN_SLOT_GEOMETRY_OPTION)?;
+        kill_padding_panes(backend, workspace, &padding_pane_ids(&panes));
+    }
+    Ok(())
+}
+
+/// Clear the main-slot geometry intent and remove any padding panes it left
+/// in the workspace's current window, restoring the plain chrome layout.
+fn clear_main_slot_geometry_intent(
+    backend: &EmbeddedTmuxBackend,
+    workspace: &TmuxWorkspaceHandle,
+) -> Result<(), TmuxError> {
+    backend.unset_session_option(workspace, WAITAGENT_MAIN_SLOT_GEOMETRY_OPTION)?;
+    let window = backend.current_window(workspace)?;
+    let panes = list_window_pane_states(backend, workspace, window.window_id.as_str())?;
+    kill_padding_panes(backend, workspace, &padding_pane_ids(&panes));
+    Ok(())
+}
+
+fn padding_pane_ids(panes: &[WindowPaneState]) -> Vec<String> {
+    panes
+        .iter()
+        .filter(|pane| {
+            pane.title == crate::runtime::remote_authority::geometry_coordinator::PADDING_PANE_TITLE
+        })
+        .map(|pane| pane.id.clone())
+        .collect()
+}
+
+struct WindowPaneState {
+    id: String,
+    title: String,
+    dead: bool,
+    pid: u32,
+}
+
+fn list_window_pane_states(
+    backend: &EmbeddedTmuxBackend,
+    workspace: &TmuxWorkspaceHandle,
+    window_id: &str,
+) -> Result<Vec<WindowPaneState>, TmuxError> {
+    let output = backend.run_on_socket(
+        &workspace.socket_name,
+        &[
+            "list-panes".to_string(),
+            "-t".to_string(),
+            window_id.to_string(),
+            "-F".to_string(),
+            "#{pane_id}\t#{pane_title}\t#{pane_dead}\t#{pane_pid}".to_string(),
+        ],
+    )?;
+    Ok(output
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let id = parts.next()?.to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let title = parts.next().unwrap_or("").to_string();
+            let dead = parts.next().unwrap_or("0") == "1";
+            let pid = parts.next()?.parse::<u32>().ok()?;
+            Some(WindowPaneState {
+                id,
+                title,
+                dead,
+                pid,
+            })
+        })
+        .collect())
+}
+
+fn kill_padding_panes(
+    backend: &EmbeddedTmuxBackend,
+    workspace: &TmuxWorkspaceHandle,
+    padding_ids: &[String],
+) {
+    for pane_id in padding_ids {
+        let _ = backend.kill_pane_on_socket(
+            workspace.socket_name.as_str(),
+            &TmuxPaneId::new(pane_id.clone()),
+        );
+    }
+}
+
 #[cfg(test)]
 fn should_refresh_workspace_chrome(
     session: &crate::domain::session_catalog::ManagedSessionRecord,
@@ -1845,10 +2059,11 @@ mod tests {
     use super::{
         connect_remote_host_popup_command, create_remote_session_shell_command,
         create_remote_session_tmux_command, footer_menu_shell_command,
-        fullscreen_toggle_tmux_command, layout_reconcile_hook_shell_command,
-        main_pane_died_hook_shell_command, main_pane_output_bridge_shell_command,
-        parse_break_pane_output, should_refresh_workspace_chrome, sidebar_toggle_tmux_command,
-        tmux_quote_argument,
+        format_main_slot_geometry_intent, fullscreen_toggle_tmux_command,
+        layout_reconcile_hook_shell_command, main_pane_died_hook_shell_command,
+        main_pane_output_bridge_shell_command, parse_break_pane_output,
+        parse_main_slot_geometry_intent, should_refresh_workspace_chrome,
+        sidebar_toggle_tmux_command, tmux_quote_argument, MainSlotGeometryIntent,
     };
     use crate::cli::{default_remote_node_port, RemoteNetworkConfig, SidebarFocus};
     use crate::domain::session_catalog::{
@@ -2088,6 +2303,29 @@ mod tests {
 
         assert!(should_refresh_workspace_chrome(&chrome));
         assert!(!should_refresh_workspace_chrome(&target));
+    }
+
+    #[test]
+    fn main_slot_geometry_intent_round_trips() {
+        let value = format_main_slot_geometry_intent("%12", 4242, 47, 22);
+        assert_eq!(
+            parse_main_slot_geometry_intent(&value),
+            Some(MainSlotGeometryIntent {
+                pane_id: "%12".to_string(),
+                pane_pid: 4242,
+                cols: 47,
+                rows: 22,
+            })
+        );
+    }
+
+    #[test]
+    fn main_slot_geometry_intent_rejects_garbage() {
+        assert_eq!(parse_main_slot_geometry_intent(""), None);
+        assert_eq!(parse_main_slot_geometry_intent("12 4242 47x22"), None);
+        assert_eq!(parse_main_slot_geometry_intent("%12 4242 0x22"), None);
+        assert_eq!(parse_main_slot_geometry_intent("%12 abc 47x22"), None);
+        assert_eq!(parse_main_slot_geometry_intent("%12 4242"), None);
     }
 
     fn workspace() -> TmuxWorkspaceHandle {

@@ -472,7 +472,6 @@ impl EmbeddedTmuxBackend {
             .collect())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn unset_session_option(
         &self,
         workspace: &TmuxWorkspaceHandle,

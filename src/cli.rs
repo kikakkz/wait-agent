@@ -175,6 +175,7 @@ pub enum Command {
     ToggleSidebar(ToggleSidebarCommand),
     CloseSession(CloseSessionCommand),
     LayoutReconcile(LayoutReconcileCommand),
+    LayoutMainSlotGeometry(LayoutMainSlotGeometryCommand),
     ChromeRefresh(LayoutReconcileCommand),
     ChromeRefreshSignal(UiPaneCommand),
     MainPaneOutputEventBridge(SocketNameCommand),
@@ -357,6 +358,17 @@ pub struct LayoutReconcileCommand {
     pub session_name: String,
     pub workspace_dir: String,
     pub pane_generation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LayoutMainSlotGeometryCommand {
+    pub socket_name: String,
+    pub session_name: String,
+    pub pane_id: Option<String>,
+    pub pane_pid: Option<u32>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub clear: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -639,6 +651,10 @@ impl Cli {
             "__layout-reconcile" => {
                 args.remove(0);
                 Command::LayoutReconcile(parse_layout_reconcile(args)?)
+            }
+            "__layout-main-slot-geometry" => {
+                args.remove(0);
+                Command::LayoutMainSlotGeometry(parse_layout_main_slot_geometry(args)?)
             }
             "__chrome-refresh" => {
                 args.remove(0);
@@ -1365,6 +1381,77 @@ fn parse_layout_reconcile(args: Vec<String>) -> Result<LayoutReconcileCommand, C
             .ok_or_else(|| CliError::MissingValue("--workspace-dir".to_string()))?,
         pane_generation,
     })
+}
+
+fn parse_layout_main_slot_geometry(
+    args: Vec<String>,
+) -> Result<LayoutMainSlotGeometryCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut socket_name = None;
+    let mut session_name = None;
+    let mut pane_id = None;
+    let mut pane_pid = None;
+    let mut cols = None;
+    let mut rows = None;
+    let mut clear = false;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-name" => socket_name = Some(expect_value("--socket-name", &mut iter)?),
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--pane-id" => pane_id = Some(expect_value("--pane-id", &mut iter)?),
+            "--pane-pid" => {
+                let value = expect_value("--pane-pid", &mut iter)?;
+                pane_pid = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| CliError::InvalidValue("--pane-pid".to_string(), value))?,
+                )
+            }
+            "--cols" => {
+                let value = expect_value("--cols", &mut iter)?;
+                cols = Some(
+                    value
+                        .parse::<u16>()
+                        .map_err(|_| CliError::InvalidValue("--cols".to_string(), value))?,
+                )
+            }
+            "--rows" => {
+                let value = expect_value("--rows", &mut iter)?;
+                rows = Some(
+                    value
+                        .parse::<u16>()
+                        .map_err(|_| CliError::InvalidValue("--rows".to_string(), value))?,
+                )
+            }
+            "--clear" => clear = true,
+            "--help" | "-h" => {}
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    let command = LayoutMainSlotGeometryCommand {
+        socket_name: socket_name
+            .ok_or_else(|| CliError::MissingValue("--socket-name".to_string()))?,
+        session_name: session_name
+            .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?,
+        pane_id,
+        pane_pid,
+        cols,
+        rows,
+        clear,
+    };
+    if !command.clear
+        && (command.pane_id.is_none()
+            || command.pane_pid.is_none()
+            || command.cols.is_none()
+            || command.rows.is_none())
+    {
+        return Err(CliError::MissingValue(
+            "--pane-id/--pane-pid/--cols/--rows (or --clear)".to_string(),
+        ));
+    }
+    Ok(command)
 }
 
 fn parse_footer_menu(args: Vec<String>) -> Result<FooterMenuCommand, CliError> {
@@ -2296,6 +2383,60 @@ mod tests {
                 assert_eq!(command.session_name, "waitagent-1");
                 assert_eq!(command.workspace_dir, "/tmp/workspace");
                 assert_eq!(command.pane_generation, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_layout_main_slot_geometry_command() {
+        match parse(&[
+            "waitagent",
+            "__layout-main-slot-geometry",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--pane-id",
+            "%12",
+            "--pane-pid",
+            "4242",
+            "--cols",
+            "47",
+            "--rows",
+            "22",
+        ])
+        .command
+        {
+            Command::LayoutMainSlotGeometry(command) => {
+                assert_eq!(command.socket_name, "wa-1");
+                assert_eq!(command.session_name, "waitagent-1");
+                assert_eq!(command.pane_id.as_deref(), Some("%12"));
+                assert_eq!(command.pane_pid, Some(4242));
+                assert_eq!(command.cols, Some(47));
+                assert_eq!(command.rows, Some(22));
+                assert!(!command.clear);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_layout_main_slot_geometry_clear_command() {
+        match parse(&[
+            "waitagent",
+            "__layout-main-slot-geometry",
+            "--socket-name",
+            "wa-1",
+            "--session-name",
+            "waitagent-1",
+            "--clear",
+        ])
+        .command
+        {
+            Command::LayoutMainSlotGeometry(command) => {
+                assert!(command.clear);
+                assert_eq!(command.pane_id, None);
             }
             other => panic!("unexpected command: {other:?}"),
         }

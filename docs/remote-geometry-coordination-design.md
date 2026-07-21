@@ -131,6 +131,18 @@ When applying a negotiated `T` to a target pane:
 - the server capacity is recomputed whenever the operator's terminal changes
   (existing SIGWINCH path), producing a fresh desired geometry for the next
   coordination round.
+- when the remote view shares the server's workspace chrome window, the
+  remote-main-slot never performs window surgery. It publishes a **main-slot
+  geometry intent** (session option `@waitagent_main_slot_geometry` =
+  `<pane_id> <pane_pid> <cols>x<rows>`) via `__layout-main-slot-geometry`,
+  and the workspace layout runtime — the single writer for that window —
+  applies it through the same geometry coordinator (chrome pinned, slack
+  absorbed by padding panes). Layout reconciliation re-asserts the intent
+  after every `client-resized`, so chrome reconciliation and remote geometry
+  no longer fight. The intent self-invalidates on pane pid mismatch and is
+  cleared on viewer exit; while it is active the viewer derives its capacity
+  from the window size minus pinned chrome, never from the coordinated pane
+  size.
 
 ## 8. Protocol
 

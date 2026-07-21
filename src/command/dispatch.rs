@@ -204,6 +204,10 @@ impl CommandDispatcher {
                 .layout()?
                 .run_reconcile(command)
                 .map_err(AppError::from),
+            Command::LayoutMainSlotGeometry(command) => {
+                crate::runtime::workspace_layout_runtime::run_main_slot_geometry_command(command)
+                    .map_err(AppError::from)
+            }
             Command::ChromeRefresh(command) => self
                 .layout()?
                 .run_chrome_refresh(command)

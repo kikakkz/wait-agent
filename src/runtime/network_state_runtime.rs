@@ -277,6 +277,10 @@ fn recover_network_config_for_command(
                 &workspace_handle(&command.socket_name, &command.session_name),
             )
         }
+        Command::LayoutMainSlotGeometry(command) => recover_network_config_for_workspace(
+            backend,
+            &workspace_handle(&command.socket_name, &command.session_name),
+        ),
         Command::Workspace
         | Command::ChromeRefreshAll
         | Command::ShowErrorLog
