@@ -8,7 +8,7 @@ use super::remote_main_slot_pane_runtime::{next_ansi_escape_len, terminal_char_d
 use crate::terminal::{MouseEncoding, MouseReportingMode, ScreenSnapshot, TerminalSize};
 
 /// Display mode for the remote main-slot viewer, selected once at startup via
-/// `WAITAGENT_REMOTE_RENDER` (`engine`|`raw`, default `raw`).
+/// `WAITAGENT_REMOTE_RENDER` (`engine`|`raw`, default `engine`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteRenderMode {
     Raw,
@@ -18,8 +18,8 @@ pub(crate) enum RemoteRenderMode {
 impl RemoteRenderMode {
     pub(crate) fn from_env() -> Self {
         match std::env::var("WAITAGENT_REMOTE_RENDER").as_deref() {
-            Ok("engine") => Self::Engine,
-            _ => Self::Raw,
+            Ok("raw") => Self::Raw,
+            _ => Self::Engine,
         }
     }
 
