@@ -88,9 +88,12 @@ pub(crate) struct ScreenCell {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TextStyle {
     pub(crate) bold: bool,
+    pub(crate) dim: bool,
     pub(crate) italic: bool,
     pub(crate) underline: bool,
+    pub(crate) blink: bool,
     pub(crate) inverse: bool,
+    pub(crate) strikethrough: bool,
     pub(crate) foreground: Option<ColorValue>,
     pub(crate) background: Option<ColorValue>,
 }
@@ -105,14 +108,23 @@ impl TextStyle {
         if self.bold {
             params.push("1".to_string());
         }
+        if self.dim {
+            params.push("2".to_string());
+        }
         if self.italic {
             params.push("3".to_string());
         }
         if self.underline {
             params.push("4".to_string());
         }
+        if self.blink {
+            params.push("5".to_string());
+        }
         if self.inverse {
             params.push("7".to_string());
+        }
+        if self.strikethrough {
+            params.push("9".to_string());
         }
         if let Some(foreground) = self.foreground {
             foreground.push_ansi_params(&mut params, true);

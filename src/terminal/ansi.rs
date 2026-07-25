@@ -96,6 +96,72 @@ pub(crate) fn parse_csi_numbers(params: &str) -> Vec<u16> {
         .collect()
 }
 
+/// One `;`-separated SGR parameter with any `:`-separated subparameters kept
+/// intact so forms like `4:3` or `38:2:r:g:b` are not flattened into
+/// independent attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SgrSegment {
+    pub(crate) code: u16,
+    pub(crate) subparams: Vec<u16>,
+}
+
+pub(crate) fn parse_sgr_segments(params: &str) -> Vec<SgrSegment> {
+    if params.is_empty() {
+        return Vec::new();
+    }
+
+    params
+        .split(';')
+        .map(|segment| {
+            let mut parts = segment.split(':');
+            let code = parts
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(0);
+            let subparams = parts
+                .map(|value| value.parse::<u16>().unwrap_or(0))
+                .collect();
+            SgrSegment { code, subparams }
+        })
+        .collect()
+}
+
+/// Translates a character through the DEC special graphics charset (designated
+/// with `ESC ( 0`). Bytes without a graphics mapping pass through unchanged.
+pub(crate) fn translate_dec_graphics(ch: char) -> char {
+    match ch {
+        '`' => '◆',
+        'a' => '▒',
+        // Control pictures for HT/FF/CR/LF/NL/VT render as blanks.
+        'b'..='e' | 'h' | 'i' => ' ',
+        'f' => '°',
+        'g' => '±',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        '_' => '\u{a0}',
+        _ => ch,
+    }
+}
+
 pub(crate) fn first_or(values: &[u16], default: u16) -> u16 {
     values.first().copied().unwrap_or(default)
 }

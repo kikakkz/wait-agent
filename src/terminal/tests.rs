@@ -716,3 +716,631 @@ fn engine_resize_preserves_visible_prefix() {
     assert_eq!(snapshot.size.cols, 4);
     assert_eq!(snapshot.size.rows, 3);
 }
+
+#[test]
+fn engine_translates_dec_graphics_charset_line_drawing() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b(0lqk\x1b(Bx");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "┌─┐x    ");
+    assert_eq!(snapshot.cursor_col, 4);
+}
+
+#[test]
+fn engine_translates_full_dec_special_graphics_map() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 32,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b(0jklmnqtuvwx");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0].trim_end(), "┘┐┌└┼─├┤┴┬│");
+
+    engine.feed(b"\rafgoprsyz{|}~_`");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0].trim_end(), "▒°±⎺⎻⎼⎽≤≥π≠£·\u{a0}◆");
+}
+
+#[test]
+fn engine_dec_graphics_control_pictures_render_as_spaces() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 32,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b(0bcdehi");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], " ".repeat(32));
+}
+
+#[test]
+fn engine_shifts_charsets_with_si_and_so() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b)0q\x0eq\x0fq");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "q─q     ");
+}
+
+#[test]
+fn engine_save_restore_cursor_preserves_charset() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b(0\x1b7\x1b(B\x1b8q");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "─       ");
+}
+
+#[test]
+fn engine_insert_lines_preserves_content_outside_scroll_region() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"row1\r\nrow2\r\nrow3\r\nrow4\r\nrow5");
+    engine.feed(b"\x1b[2;4r\x1b[2;1H\x1b[L");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "row1    ");
+    assert_eq!(snapshot.lines[1], "        ");
+    assert_eq!(snapshot.lines[2], "row2    ");
+    assert_eq!(snapshot.lines[3], "row3    ");
+    assert_eq!(snapshot.lines[4], "row5    ");
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 0);
+}
+
+#[test]
+fn engine_delete_lines_pulls_up_rows_inside_scroll_region() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"row1\r\nrow2\r\nrow3\r\nrow4\r\nrow5");
+    engine.feed(b"\x1b[2;4r\x1b[2;1H\x1b[2M");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "row1    ");
+    assert_eq!(snapshot.lines[1], "row4    ");
+    assert_eq!(snapshot.lines[2], "        ");
+    assert_eq!(snapshot.lines[3], "        ");
+    assert_eq!(snapshot.lines[4], "row5    ");
+}
+
+#[test]
+fn engine_handles_insert_characters() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"abcdef\r\x1b[2C\x1b[2@");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "ab  cdef");
+    assert_eq!(snapshot.cursor_col, 2);
+}
+
+#[test]
+fn engine_handles_erase_characters() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"abcdef\r\x1b[2C\x1b[2X");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "ab  ef  ");
+    assert_eq!(snapshot.cursor_col, 2);
+}
+
+#[test]
+fn engine_repeats_last_printed_character() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"x\x1b[5b");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "xxxxxx  ");
+    assert_eq!(snapshot.cursor_col, 6);
+}
+
+#[test]
+fn engine_repeats_wide_character_respecting_width() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed("你\x1b[2b".as_bytes());
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "你你你  ");
+    assert_eq!(snapshot.cursor_col, 6);
+}
+
+#[test]
+fn engine_handles_cha_and_hpa_cursor_column() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"abcdef\r\x1b[3G!");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "ab!def  ");
+    assert_eq!(snapshot.cursor_col, 3);
+
+    engine.feed(b"\x1b[6`@");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "ab!de@  ");
+    assert_eq!(snapshot.cursor_col, 6);
+}
+
+#[test]
+fn engine_handles_vpa_cnl_cpl_cursor_positioning() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 4,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"a\r\nb");
+    engine.feed(b"\x1b[1d");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 1);
+
+    engine.feed(b"\x1b[2E");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 2);
+    assert_eq!(snapshot.cursor_col, 0);
+
+    engine.feed(b"\x1b[1F");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 0);
+}
+
+#[test]
+fn engine_sgr_colon_underline_does_not_set_italic() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[4:3mX");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.active_style_ansi, "\x1b[0;4m");
+    assert!(
+        snapshot.styled_lines[0].starts_with("\x1b[0;4mX"),
+        "styled line should use underline only: {:?}",
+        snapshot.styled_lines[0]
+    );
+}
+
+#[test]
+fn engine_sgr_colon_underline_variants() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[4:1m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;4m");
+
+    engine.feed(b"\x1b[4:0m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0m");
+}
+
+#[test]
+fn engine_sgr_colon_truecolor_and_indexed_colors() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[38:2:10:20:30m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;38;2;10;20;30m");
+
+    engine.feed(b"\x1b[0m\x1b[48:2:0:10:20:30m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;48;2;10;20;30m");
+
+    engine.feed(b"\x1b[0m\x1b[38:5:196m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;38;5;196m");
+}
+
+#[test]
+fn engine_sgr_semicolon_truecolor_still_works() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[38;2;10;20;30m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;38;2;10;20;30m");
+}
+
+#[test]
+fn engine_sgr_dim_blink_strikethrough_and_resets() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[2;5;9m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;2;5;9m");
+
+    engine.feed(b"\x1b[1m\x1b[22m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;5;9m");
+
+    engine.feed(b"\x1b[25m\x1b[29m");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0m");
+}
+
+#[test]
+fn engine_sgr_ignores_underline_color_operands() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[58:5:2mX");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0m");
+
+    engine.feed(b"\x1b[58;2;10;20;30;31mX");
+    assert_eq!(engine.snapshot().active_style_ansi, "\x1b[0;38;5;1m");
+}
+
+#[test]
+fn engine_autowrap_off_overwrites_last_column() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 3,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[?7labcde");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "abe");
+    assert_eq!(snapshot.lines[1], "   ");
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 2);
+
+    engine.feed(b"\x1b[?7hf");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "abf");
+
+    engine.feed(b"g");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "abf");
+    assert_eq!(snapshot.lines[1], "g  ");
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 1);
+}
+
+#[test]
+fn engine_origin_mode_addresses_relative_to_scroll_region() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[2;4r\x1b[?6h\x1b[1;1H");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 0);
+
+    engine.feed(b"\x1b[9;9H");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 3);
+    assert_eq!(snapshot.cursor_col, 7);
+
+    engine.feed(b"\x1b[?6l\x1b[1;1H");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 0);
+}
+
+#[test]
+fn engine_decstbm_homes_cursor_origin_aware() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[3;4H\x1b[2;4r");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 0);
+
+    let mut origin_engine = TerminalEngine::new(TerminalSize {
+        rows: 5,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    origin_engine.feed(b"\x1b[?6h\x1b[2;4r");
+    let snapshot = origin_engine.snapshot();
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 0);
+}
+
+#[test]
+fn engine_insert_mode_shifts_cells_right() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"abc\r\x1b[4hXY");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "XYabc   ");
+    assert_eq!(snapshot.cursor_col, 2);
+
+    engine.feed(b"\x1b[4lZ");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "XYZbc   ");
+    assert_eq!(snapshot.cursor_col, 3);
+}
+
+#[test]
+fn engine_ris_resets_terminal_state() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 3,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
+    engine.feed(b"\x1b[1m\x1b(0\x1b[?7l\x1b[?1049h\x1b[2;3H\x1b7");
+    engine.feed(b"\x1bc");
+    let snapshot = engine.snapshot();
+
+    assert!(!snapshot.alternate_screen);
+    assert_eq!(
+        snapshot.lines,
+        vec![
+            "        ".to_string(),
+            "        ".to_string(),
+            "        ".to_string()
+        ]
+    );
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 0);
+    assert_eq!(snapshot.active_style_ansi, "\x1b[0m");
+    assert_eq!(snapshot.scroll_top, 0);
+    assert_eq!(snapshot.scroll_bottom, 2);
+    assert_eq!(snapshot.scrollback, vec!["one     ".to_string()]);
+
+    engine.feed(b"q\x1b8Z");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "qZ      ");
+}
+
+#[test]
+fn engine_bounds_scrollback_to_ten_thousand_lines() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    let mut input = String::new();
+    for n in 0..10_002 {
+        if n > 0 {
+            input.push_str("\r\n");
+        }
+        input.push_str(&format!("L{n}"));
+    }
+    input.push_str("\r\n");
+    engine.feed(input.as_bytes());
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.scrollback.len(), 10_000);
+    assert_eq!(snapshot.styled_scrollback.len(), 10_000);
+    assert_eq!(snapshot.scrollback[0], format!("{:<8}", "L1"));
+    assert_eq!(snapshot.scrollback[9_999], format!("{:<8}", "L10000"));
+}
+
+#[test]
+fn engine_scrolls_down_in_region_with_csi_t() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 3,
+        cols: 4,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"a\r\nb\r\nc");
+    engine.feed(b"\x1b[T");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "    ");
+    assert_eq!(snapshot.lines[1], "a   ");
+    assert_eq!(snapshot.lines[2], "b   ");
+
+    engine.feed(b"\x1b[2T");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "    ");
+    assert_eq!(snapshot.lines[1], "    ");
+    assert_eq!(snapshot.lines[2], "    ");
+}
+
+#[test]
+fn engine_ignores_csi_gt_t_title_mode_queries() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 3,
+        cols: 4,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"a\r\nb\r\nc");
+    engine.feed(b"\x1b[>1T");
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.lines[0], "a   ");
+    assert_eq!(snapshot.lines[1], "b   ");
+    assert_eq!(snapshot.lines[2], "c   ");
+}
+
+#[test]
+fn engine_alt_screen_1049_saves_and_restores_cursor() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 6,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"main\x1b[?1049halt\x1b[?1049l");
+    let snapshot = engine.snapshot();
+    assert!(!snapshot.alternate_screen);
+    assert_eq!(snapshot.lines[0], "main  ");
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 4);
+
+    engine.feed(b"Z");
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.lines[0], "mainZ ");
+}
+
+#[test]
+fn engine_alt_screen_1047_clears_alternate_on_exit() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 6,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[?1047halt\x1b[?1047l\x1b[?47h");
+    let snapshot = engine.snapshot();
+
+    assert!(snapshot.alternate_screen);
+    assert_eq!(snapshot.lines[0], "      ");
+}
+
+#[test]
+fn engine_alt_screen_47_keeps_content_across_switches() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 6,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[?47hx\x1b[?47l\x1b[?47h");
+    let snapshot = engine.snapshot();
+
+    assert!(snapshot.alternate_screen);
+    assert_eq!(snapshot.lines[0], "x     ");
+}
+
+#[test]
+fn engine_alt_screen_1048_switches_and_restores_cursor() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 6,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"ab\x1b[?1048hcd\x1b[?1048l");
+    let snapshot = engine.snapshot();
+
+    assert!(!snapshot.alternate_screen);
+    assert_eq!(snapshot.lines[0], "ab    ");
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 2);
+}
+
+#[test]
+fn engine_snapshot_visible_omits_scrollback() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 5,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"one\r\ntwo\r\nthree");
+    let visible = engine.snapshot_visible();
+
+    assert_eq!(visible.lines[0], "two  ");
+    assert_eq!(visible.lines[1], "three");
+    assert!(visible.scrollback.is_empty());
+    assert!(visible.styled_scrollback.is_empty());
+
+    let full = engine.snapshot();
+    assert_eq!(full.scrollback, vec!["one  ".to_string()]);
+    assert_eq!(full.styled_scrollback, vec!["one  ".to_string()]);
+}
