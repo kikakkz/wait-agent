@@ -18,13 +18,16 @@ use crate::runtime::remote_authority_connection_runtime::{
     AuthorityTransportEvent, QueuedAuthorityStreamSink, QueuedAuthorityStreamStarter,
 };
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
+use crate::runtime::remote_main_slot::engine_frame_renderer::{
+    EngineFrameRenderer, ProxiedModes, RemoteRenderMode,
+};
 use crate::runtime::remote_main_slot::remote_surface_state::{
     mark_remote_surface_state_from_env, RemoteSurfaceState,
 };
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_transport_runtime::RemoteConnectionRegistry;
-use crate::terminal::{TerminalRuntime, TerminalSize};
+use crate::terminal::{MouseReportingMode, TerminalRuntime, TerminalSize};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -241,11 +244,17 @@ impl RemoteMainSlotPaneRuntime {
 
         let raw_input_route = Arc::new(RawPtyInputRoute::default());
         let (event_tx, event_rx) = mpsc::channel();
+        // Display mode is selected once at startup; raw mode keeps the
+        // byte-for-byte passthrough behavior.
+        let render_mode = RemoteRenderMode::from_env();
+        let engine_input = Arc::new(Mutex::new(EngineInputSnapshot::default()));
         spawn_input_thread(
             event_tx.clone(),
             RawInputMode {
                 route: raw_input_route.clone(),
                 registry: registry.clone(),
+                engine_input: engine_input.clone(),
+                render_mode,
             },
         );
         let resize_watcher = spawn_resize_watcher(event_tx.clone()).map_err(remote_pane_error)?;
@@ -308,6 +317,7 @@ impl RemoteMainSlotPaneRuntime {
         let mut viewer_capacity: TerminalSize = initial_size;
         let mut authority_status = waiting_authority_status.clone();
         let mut authority_generation: Option<u64> = None;
+        let mut engine_render = EngineRenderState::new();
         if remote_runtime.has_connection(target.address.authority_id()) {
             match activate_remote_surface_binding(
                 &remote_runtime,
@@ -321,6 +331,8 @@ impl RemoteMainSlotPaneRuntime {
                 &mut last_synced_size,
                 &mut resize_acked_size,
                 &mut raw_screen_initialized,
+                render_mode,
+                &mut engine_render,
                 event_tx.clone(),
             ) {
                 Ok(activated_binding) => {
@@ -480,6 +492,60 @@ impl RemoteMainSlotPaneRuntime {
                         let Some(reported) = geometry_resync_pending.take() else {
                             continue;
                         };
+                        if render_mode.is_engine() {
+                            // Engine mode: the local pane is a dumb canvas, but
+                            // the engine must never model a screen larger than
+                            // the pane, otherwise content is clipped. Clamp to
+                            // the live pane size and, if the authority's
+                            // reported geometry is larger, push the clamped
+                            // size back as the new viewer capacity so
+                            // negotiation converges instead of clipping.
+                            let pane_size = current_remote_surface_size(&spec, &terminal);
+                            let effective = TerminalSize {
+                                cols: reported.cols.min(pane_size.cols),
+                                rows: reported.rows.min(pane_size.rows),
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            };
+                            if effective != observer.terminal_size() {
+                                ERROR_LOG.log(format!(
+                                    "[diag] geometry re-sync (engine): resizing engine to {}x{} (reported {}x{}, pane {}x{})",
+                                    effective.cols,
+                                    effective.rows,
+                                    reported.cols,
+                                    reported.rows,
+                                    pane_size.cols,
+                                    pane_size.rows
+                                ));
+                                observer.resize_terminal(effective);
+                            }
+                            if effective != reported {
+                                // The authority thinks we have more room than
+                                // the local pane actually provides. Report the
+                                // clamped size as our capacity so the next
+                                // negotiation round does not ask us to clip.
+                                ERROR_LOG.log(format!(
+                                    "[diag] geometry re-sync (engine): reporting clamped capacity {}x{} back to authority",
+                                    effective.cols, effective.rows
+                                ));
+                                if let Some(binding) = binding.as_ref() {
+                                    sync_or_defer_remote_pty_size(
+                                        &remote_runtime,
+                                        &target,
+                                        binding,
+                                        &effective,
+                                        &mut pending_pty_size,
+                                    )?;
+                                    resize_acked_size = None;
+                                }
+                            }
+                            // Track the size we are actually rendering at so
+                            // downstream state stays consistent.
+                            last_synced_size = effective;
+                            engine_render.request_full_redraw();
+                            engine_render.mark_dirty_and_schedule(&event_tx);
+                            continue;
+                        }
                         if reported == current_remote_surface_size(&spec, &terminal) {
                             continue;
                         }
@@ -599,6 +665,8 @@ impl RemoteMainSlotPaneRuntime {
                             &mut last_synced_size,
                             &mut resize_acked_size,
                             &mut raw_screen_initialized,
+                            render_mode,
+                            &mut engine_render,
                             event_tx.clone(),
                         ) {
                             Ok(new_binding) => {
@@ -610,6 +678,51 @@ impl RemoteMainSlotPaneRuntime {
                             }
                             Err(error) => return Err(error),
                         }
+                    }
+                    RemotePaneEvent::RenderFrameDue => {
+                        engine_render.frame_timer_active = false;
+                        if !engine_render.dirty {
+                            continue;
+                        }
+                        engine_render.dirty = false;
+                        // Without a binding the placeholder machinery owns the
+                        // screen (connecting/reconnecting draws).
+                        if binding.is_none() {
+                            continue;
+                        }
+                        // Publish the engine's tracked modes for the stdin
+                        // thread (cursor-key translation, mouse gating).
+                        let engine_size = observer.terminal_size();
+                        *engine_input
+                            .lock()
+                            .expect("engine input snapshot mutex should not be poisoned") =
+                            EngineInputSnapshot {
+                                application_cursor_keys: observer.application_cursor_keys(),
+                                mouse_reporting: observer.mouse_reporting()
+                                    != MouseReportingMode::None,
+                                screen_cols: engine_size.cols,
+                                screen_rows: engine_size.rows,
+                            };
+                        // Terminal query replies (DA/CPR/OSC) go back to the
+                        // remote PTY so probing TUIs do not hang.
+                        forward_engine_replies(&mut observer, &raw_input_route, &registry);
+                        let pane_size = current_remote_surface_size(&spec, &terminal);
+                        let proxied_modes = ProxiedModes {
+                            bracketed_paste: observer.bracketed_paste(),
+                            mouse_reporting: observer.mouse_reporting(),
+                            mouse_encoding: observer.mouse_encoding(),
+                        };
+                        let mut frame = engine_render.renderer.render_frame(
+                            observer.visible_screen(),
+                            pane_size,
+                            proxied_modes,
+                        );
+                        // Remote clipboard writes are re-emitted verbatim; the
+                        // waitagent tmux server allows passthrough.
+                        for payload in observer.drain_osc52() {
+                            frame.extend_from_slice(format!("\x1b]{payload}\x07").as_bytes());
+                        }
+                        write_remote_raw_output(&frame)?;
                     }
                     RemotePaneEvent::MailboxUpdated => {
                         let raw = raw_output_reader
@@ -625,6 +738,11 @@ impl RemoteMainSlotPaneRuntime {
                         }
                         render_remote_output_and_mark_ready(
                             &raw,
+                            None,
+                            render_mode,
+                            &mut observer,
+                            &mut engine_render,
+                            &event_tx,
                             &remote_runtime,
                             &target,
                             binding.as_ref(),
@@ -692,6 +810,13 @@ impl RemoteMainSlotPaneRuntime {
                                 reconnecting_since.map(|s| s.elapsed()),
                                 reconnect_animation_frame,
                             )?;
+                        } else if render_mode.is_engine() {
+                            // The pane is a dumb canvas; a resize only means
+                            // the letterbox must be re-cleared against the new
+                            // pane bounds. Capacity reporting above already
+                            // fed the authority min-negotiation.
+                            engine_render.request_full_redraw();
+                            engine_render.mark_dirty_and_schedule(&event_tx);
                         }
                     }
                     RemotePaneEvent::AuthorityTransport(event) => match event {
@@ -728,6 +853,7 @@ impl RemoteMainSlotPaneRuntime {
                                     resize_acked_size = None;
                                 }
                                 try_flush_ready_inputs(
+                                    render_mode,
                                     &remote_runtime,
                                     &target,
                                     Some(binding),
@@ -760,6 +886,8 @@ impl RemoteMainSlotPaneRuntime {
                                     &mut last_synced_size,
                                     &mut resize_acked_size,
                                     &mut raw_screen_initialized,
+                                    render_mode,
+                                    &mut engine_render,
                                     event_tx.clone(),
                                 ) {
                                     Ok(activated_binding) => {
@@ -911,6 +1039,7 @@ impl RemoteMainSlotPaneRuntime {
                                 ));
                                 continue;
                             }
+                            let raw_output_seq = payload.output_seq;
                             let raw = collect_direct_raw_pty_output_payload(
                                 &target,
                                 &authority_id,
@@ -920,6 +1049,11 @@ impl RemoteMainSlotPaneRuntime {
                             .map_err(remote_protocol_error)?;
                             render_remote_output_and_mark_ready(
                                 &raw,
+                                Some(raw_output_seq),
+                                render_mode,
+                                &mut observer,
+                                &mut engine_render,
+                                &event_tx,
                                 &remote_runtime,
                                 &target,
                                 binding.as_ref(),
@@ -1004,14 +1138,19 @@ impl RemoteMainSlotPaneRuntime {
                                     }
                                     resize_acked_size = Some(acked_size);
                                     schedule_geometry_resync(
-                                        &spec,
-                                        &terminal,
+                                        geometry_resync_reference(
+                                            render_mode,
+                                            &spec,
+                                            &terminal,
+                                            &observer,
+                                        ),
                                         acked_size,
                                         &mut geometry_resync_pending,
                                         &mut geometry_resync_debounce_active,
                                         &event_tx,
                                     );
                                     try_flush_ready_inputs(
+                                        render_mode,
                                         &remote_runtime,
                                         &target,
                                         Some(binding),
@@ -1049,8 +1188,12 @@ impl RemoteMainSlotPaneRuntime {
                                     remote_reported_geometry = Some(reported);
                                 }
                                 schedule_geometry_resync(
-                                    &spec,
-                                    &terminal,
+                                    geometry_resync_reference(
+                                        render_mode,
+                                        &spec,
+                                        &terminal,
+                                        &observer,
+                                    ),
                                     reported,
                                     &mut geometry_resync_pending,
                                     &mut geometry_resync_debounce_active,
@@ -1058,6 +1201,13 @@ impl RemoteMainSlotPaneRuntime {
                                 );
                                 continue;
                             }
+                            let raw_output_seq = if let ControlPlanePayload::RawPtyOutput(payload) =
+                                &envelope.payload
+                            {
+                                Some(payload.output_seq)
+                            } else {
+                                None
+                            };
                             if let Some(raw) = collect_direct_raw_pty_output_envelope(
                                 &target,
                                 &envelope,
@@ -1067,6 +1217,11 @@ impl RemoteMainSlotPaneRuntime {
                             {
                                 render_remote_output_and_mark_ready(
                                     &raw,
+                                    raw_output_seq,
+                                    render_mode,
+                                    &mut observer,
+                                    &mut engine_render,
+                                    &event_tx,
                                     &remote_runtime,
                                     &target,
                                     binding.as_ref(),
@@ -1129,6 +1284,11 @@ impl RemoteMainSlotPaneRuntime {
                                 ));
                                 render_remote_output_and_mark_ready(
                                     &output,
+                                    None,
+                                    render_mode,
+                                    &mut observer,
+                                    &mut engine_render,
+                                    &event_tx,
                                     &remote_runtime,
                                     &target,
                                     binding.as_ref(),
@@ -1253,6 +1413,8 @@ impl RemoteMainSlotPaneRuntime {
                                 &mut last_synced_size,
                                 &mut resize_acked_size,
                                 &mut raw_screen_initialized,
+                                render_mode,
+                                &mut engine_render,
                                 event_tx.clone(),
                             ) {
                                 Ok(activated_binding) => {
@@ -1315,7 +1477,12 @@ impl RemoteMainSlotPaneRuntime {
                                 paused_input_buffer.push(bytes);
                                 continue;
                             }
-                            if !is_resize_acked(&last_synced_size, &resize_acked_size) {
+                            // Engine mode gates input only on mirror
+                            // readiness; resize acks and local geometry never
+                            // hold back keystrokes.
+                            if !render_mode.is_engine()
+                                && !is_resize_acked(&last_synced_size, &resize_acked_size)
+                            {
                                 paused_input_buffer.push(bytes);
                                 continue;
                             }
@@ -1389,6 +1556,22 @@ impl RemoteMainSlotPaneRuntime {
     }
 }
 
+/// Forward terminal query replies (DA/CPR/OSC) collected by the observer
+/// engine to the remote PTY as input, so probing applications do not hang.
+fn forward_engine_replies(
+    observer: &mut RemoteObserverRuntime,
+    raw_input_route: &RawPtyInputRoute,
+    registry: &RemoteConnectionRegistry,
+) {
+    let replies = observer.drain_replies();
+    if replies.is_empty() {
+        return;
+    }
+    if let Err(error) = raw_input_route.send(registry, replies) {
+        ERROR_LOG.log(format!("[diag] engine reply forward failed: {error}"));
+    }
+}
+
 fn schedule_post_activation_resize_probe(tx: mpsc::Sender<RemotePaneEvent>) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
@@ -1399,19 +1582,20 @@ fn schedule_post_activation_resize_probe(tx: mpsc::Sender<RemotePaneEvent>) {
 const GEOMETRY_RESYNC_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Schedule a debounced local re-sync when the authority-reported geometry
-/// differs from the size of the pane this slot is rendering into.  The
-/// re-sync resizes the local pane/window to the reported geometry and
-/// re-runs the mirror activation (clear + fresh bootstrap), so raw output is
-/// never replayed at the wrong size for long.
+/// differs from `reference_size`. In raw mode the reference is the size of
+/// the pane this slot renders into, and the re-sync resizes the local
+/// pane/window to the reported geometry and re-runs the mirror activation
+/// (clear + fresh bootstrap), so raw output is never replayed at the wrong
+/// size for long. In engine mode the reference is the engine's modeled size
+/// and the re-sync only resizes the engine and repaints.
 fn schedule_geometry_resync(
-    spec: &RemoteInteractSurfaceSpec,
-    terminal: &TerminalRuntime,
+    reference_size: TerminalSize,
     reported: TerminalSize,
     pending: &mut Option<TerminalSize>,
     debounce_active: &mut bool,
     event_tx: &mpsc::Sender<RemotePaneEvent>,
 ) {
-    if reported == current_remote_surface_size(spec, terminal) {
+    if reported == reference_size {
         return;
     }
     *pending = Some(reported);
@@ -1431,6 +1615,59 @@ fn current_remote_surface_size(
     terminal: &TerminalRuntime,
 ) -> TerminalSize {
     pane_size_from_tmux(spec).unwrap_or_else(|| terminal.current_size_or_default())
+}
+
+/// Reference geometry for resync dedup: the local pane size in raw mode, the
+/// engine's modeled size in engine mode.
+fn geometry_resync_reference(
+    render_mode: RemoteRenderMode,
+    spec: &RemoteInteractSurfaceSpec,
+    terminal: &TerminalRuntime,
+    observer: &RemoteObserverRuntime,
+) -> TerminalSize {
+    if render_mode.is_engine() {
+        observer.terminal_size()
+    } else {
+        current_remote_surface_size(spec, terminal)
+    }
+}
+
+/// Frames are coalesced at roughly 60fps; output arrival only marks the
+/// engine screen dirty and schedules the timer (the 4b95f85 lesson: never
+/// render per output chunk on the single-threaded event loop).
+const RENDER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+struct EngineRenderState {
+    renderer: EngineFrameRenderer,
+    dirty: bool,
+    frame_timer_active: bool,
+}
+
+impl EngineRenderState {
+    fn new() -> Self {
+        Self {
+            renderer: EngineFrameRenderer::new(),
+            dirty: false,
+            frame_timer_active: false,
+        }
+    }
+
+    fn request_full_redraw(&mut self) {
+        self.renderer.request_full_redraw();
+    }
+
+    fn mark_dirty_and_schedule(&mut self, event_tx: &mpsc::Sender<RemotePaneEvent>) {
+        self.dirty = true;
+        if self.frame_timer_active {
+            return;
+        }
+        self.frame_timer_active = true;
+        let tx = event_tx.clone();
+        thread::spawn(move || {
+            thread::sleep(RENDER_FRAME_INTERVAL);
+            let _ = tx.send(RemotePaneEvent::RenderFrameDue);
+        });
+    }
 }
 
 fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize> {
@@ -1453,6 +1690,7 @@ fn pane_size_from_tmux(spec: &RemoteInteractSurfaceSpec) -> Option<TerminalSize>
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn activate_remote_surface_binding(
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
@@ -1465,6 +1703,8 @@ fn activate_remote_surface_binding(
     last_synced_size: &mut TerminalSize,
     resize_acked_size: &mut Option<TerminalSize>,
     raw_screen_initialized: &mut bool,
+    render_mode: RemoteRenderMode,
+    engine_render: &mut EngineRenderState,
     event_tx: mpsc::Sender<RemotePaneEvent>,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
     let (activated_binding, raw) = activate_surface_target_with_mode(
@@ -1476,7 +1716,7 @@ fn activate_remote_surface_binding(
         raw_output_reader,
     )?;
     raw_input_route.activate(target, &activated_binding, &spec.console_host_id);
-    schedule_post_activation_resize_probe(event_tx);
+    schedule_post_activation_resize_probe(event_tx.clone());
     sync_or_defer_remote_pty_size(
         remote_runtime,
         target,
@@ -1486,7 +1726,17 @@ fn activate_remote_surface_binding(
     )?;
     *last_synced_size = *size;
     *resize_acked_size = None;
-    write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
+    if render_mode.is_engine() {
+        // Bootstrap bytes already fed the observer engine inside
+        // activate_surface_target_with_mode; the mirror replay replaces the
+        // whole screen, so the next frame must be a full redraw.
+        engine_render.request_full_redraw();
+        if !raw.is_empty() {
+            engine_render.mark_dirty_and_schedule(&event_tx);
+        }
+    } else {
+        write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
+    }
     let _ = flush_pending_pty_size(remote_runtime, target, &activated_binding, pending_pty_size)?;
     if pending_pty_size.is_none() {
         *resize_acked_size = None;
@@ -1494,8 +1744,14 @@ fn activate_remote_surface_binding(
     Ok(activated_binding)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_remote_output_and_mark_ready(
     raw: &[u8],
+    raw_output_seq: Option<u64>,
+    render_mode: RemoteRenderMode,
+    observer: &mut RemoteObserverRuntime,
+    engine_render: &mut EngineRenderState,
+    event_tx: &mpsc::Sender<RemotePaneEvent>,
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
     binding: Option<&RemoteAttachmentBinding>,
@@ -1511,8 +1767,20 @@ fn render_remote_output_and_mark_ready(
     if raw.is_empty() {
         return Ok(());
     }
-    write_remote_raw_output_with_initial_clear(raw, raw_screen_initialized)?;
+    if render_mode.is_engine() {
+        // Mailbox-origin bytes already reached the engine via observer.sync();
+        // make sure nothing is pending, then feed only direct-transport
+        // frames (seq-tagged) that bypassed the mailbox.
+        let _ = observer.sync();
+        if let Some(output_seq) = raw_output_seq {
+            observer.feed_raw_output(output_seq, raw);
+        }
+        engine_render.mark_dirty_and_schedule(event_tx);
+    } else {
+        write_remote_raw_output_with_initial_clear(raw, raw_screen_initialized)?;
+    }
     mark_mirror_ready(
+        render_mode,
         remote_runtime,
         target,
         binding,
@@ -1565,6 +1833,7 @@ fn mark_mirror_ready_if_raw_arrived(
         return Ok(());
     }
     mark_mirror_ready(
+        RemoteRenderMode::Raw,
         remote_runtime,
         target,
         binding,
@@ -1585,7 +1854,9 @@ fn is_resize_acked(
     resize_acked_size.as_ref() == Some(last_synced_size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_flush_ready_inputs(
+    render_mode: RemoteRenderMode,
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
     binding: Option<&RemoteAttachmentBinding>,
@@ -1599,14 +1870,16 @@ fn try_flush_ready_inputs(
     if *mirror_readiness != MirrorReadiness::Ready {
         return Ok(());
     }
-    if !is_resize_acked(last_synced_size, resize_acked_size) {
+    // Engine mode gates input only on mirror readiness; local geometry never
+    // participates, so no resize ack is required.
+    if !render_mode.is_engine() && !is_resize_acked(last_synced_size, resize_acked_size) {
         return Ok(());
     }
     let Some(binding) = binding else {
         return Ok(());
     };
     let flushed = flush_pending_pty_size(remote_runtime, target, binding, pending_pty_size)?;
-    if flushed {
+    if flushed && !render_mode.is_engine() {
         // A deferred resize was just sent; wait for its ack before flushing
         // paused keystrokes.
         *resize_acked_size = None;
@@ -1622,7 +1895,9 @@ fn try_flush_ready_inputs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mark_mirror_ready(
+    render_mode: RemoteRenderMode,
     remote_runtime: &RemoteMainSlotRuntime,
     target: &ManagedSessionRecord,
     binding: Option<&RemoteAttachmentBinding>,
@@ -1641,6 +1916,7 @@ fn mark_mirror_ready(
     *mirror_readiness = MirrorReadiness::Ready;
     *reconnecting_since = None;
     try_flush_ready_inputs(
+        render_mode,
         remote_runtime,
         target,
         binding,

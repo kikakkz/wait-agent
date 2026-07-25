@@ -371,6 +371,7 @@ pub(super) enum RemotePaneEvent {
     Input { bytes: Vec<u8>, raw_forwarded: bool },
     Resize,
     GeometryResyncDue,
+    RenderFrameDue,
     MailboxUpdated,
     AuthorityTransport(AuthorityTransportEvent),
     TargetPresenceChanged(bool),
@@ -389,6 +390,193 @@ pub(super) struct RemoteRawPtyMailboxReader {
 pub(super) struct RawInputMode {
     pub(super) route: Arc<RawPtyInputRoute>,
     pub(super) registry: RemoteConnectionRegistry,
+    pub(super) engine_input: Arc<Mutex<EngineInputSnapshot>>,
+    pub(super) render_mode:
+        crate::runtime::remote_main_slot::engine_frame_renderer::RemoteRenderMode,
+}
+
+/// Mode snapshot the event loop publishes for the stdin thread in engine
+/// mode: how to translate cursor keys, whether the remote requested mouse
+/// reports, and the engine screen size for clipping them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct EngineInputSnapshot {
+    pub application_cursor_keys: bool,
+    pub mouse_reporting: bool,
+    pub screen_cols: u16,
+    pub screen_rows: u16,
+}
+
+/// Engine-mode input filter: translates cursor keys between CSI and SS3
+/// forms according to the remote's `?1` mode, extracts mouse reports
+/// (forwarded verbatim inside the engine screen region, dropped outside),
+/// and passes everything else through byte-identical. Escape sequences may
+/// straddle stdin reads, so incomplete tails are held until they resolve.
+pub(super) struct EngineInputFilter {
+    pending: Vec<u8>,
+}
+
+enum EscapeMatch {
+    Complete(usize, EscapeKind),
+    Incomplete,
+    Unknown,
+}
+
+enum EscapeKind {
+    CsiKey(u8),
+    Ss3Key(u8),
+    SgrMouse { x: u16, y: u16 },
+    X10Mouse { x: u16, y: u16 },
+}
+
+const MAX_PENDING_INPUT: usize = 32;
+
+impl EngineInputFilter {
+    pub(super) fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub(super) fn translate(&mut self, bytes: &[u8], snapshot: EngineInputSnapshot) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.pending);
+        input.extend_from_slice(bytes);
+
+        let mut output = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            if input[index] != 0x1b {
+                let start = index;
+                while index < input.len() && input[index] != 0x1b {
+                    index += 1;
+                }
+                output.extend_from_slice(&input[start..index]);
+                continue;
+            }
+
+            let remaining = &input[index..];
+            match classify_escape(remaining) {
+                EscapeMatch::Complete(len, EscapeKind::CsiKey(code)) => {
+                    if snapshot.application_cursor_keys {
+                        output.extend_from_slice(b"\x1bO");
+                        output.push(code);
+                    } else {
+                        output.extend_from_slice(&remaining[..len]);
+                    }
+                    index += len;
+                }
+                EscapeMatch::Complete(len, EscapeKind::Ss3Key(code)) => {
+                    if snapshot.application_cursor_keys {
+                        output.extend_from_slice(&remaining[..len]);
+                    } else {
+                        output.extend_from_slice(b"\x1b[");
+                        output.push(code);
+                    }
+                    index += len;
+                }
+                EscapeMatch::Complete(len, EscapeKind::SgrMouse { x, y, .. })
+                | EscapeMatch::Complete(len, EscapeKind::X10Mouse { x, y }) => {
+                    // Reports are always consumed (never leak into the input
+                    // stream as text); forward only when the remote asked for
+                    // mouse and the event lands inside the engine screen.
+                    let inside = snapshot.mouse_reporting
+                        && x >= 1
+                        && y >= 1
+                        && x <= snapshot.screen_cols
+                        && y <= snapshot.screen_rows;
+                    if inside {
+                        output.extend_from_slice(&remaining[..len]);
+                    }
+                    index += len;
+                }
+                EscapeMatch::Incomplete => break,
+                EscapeMatch::Unknown => {
+                    output.push(0x1b);
+                    index += 1;
+                }
+            }
+        }
+
+        let tail = &input[index..];
+        if tail.len() > MAX_PENDING_INPUT {
+            output.extend_from_slice(tail);
+        } else {
+            self.pending = tail.to_vec();
+        }
+        output
+    }
+}
+
+fn classify_escape(bytes: &[u8]) -> EscapeMatch {
+    debug_assert!(bytes[0] == 0x1b);
+    let Some(&second) = bytes.get(1) else {
+        return EscapeMatch::Incomplete;
+    };
+    match second {
+        b'[' => {
+            let Some(&third) = bytes.get(2) else {
+                return EscapeMatch::Incomplete;
+            };
+            match third {
+                b'A'..=b'D' | b'H' | b'F' => EscapeMatch::Complete(3, EscapeKind::CsiKey(third)),
+                b'M' => {
+                    // X10/UTF-8 mouse report: ESC [ M cb cx cy.
+                    if bytes.len() < 6 {
+                        return EscapeMatch::Incomplete;
+                    }
+                    EscapeMatch::Complete(
+                        6,
+                        EscapeKind::X10Mouse {
+                            x: bytes[4].saturating_sub(32) as u16,
+                            y: bytes[5].saturating_sub(32) as u16,
+                        },
+                    )
+                }
+                b'<' => {
+                    // SGR mouse report: ESC [ < cb ; cx ; cy (M|m).
+                    for (offset, byte) in bytes.iter().enumerate().skip(3) {
+                        match byte {
+                            b'M' | b'm' => {
+                                let Some(report) = parse_sgr_mouse(&bytes[3..offset]) else {
+                                    return EscapeMatch::Unknown;
+                                };
+                                return EscapeMatch::Complete(offset + 1, report);
+                            }
+                            b'0'..=b'9' | b';' => {
+                                if offset > 3 + MAX_PENDING_INPUT {
+                                    return EscapeMatch::Unknown;
+                                }
+                            }
+                            _ => return EscapeMatch::Unknown,
+                        }
+                    }
+                    EscapeMatch::Incomplete
+                }
+                _ => EscapeMatch::Unknown,
+            }
+        }
+        b'O' => {
+            let Some(&third) = bytes.get(2) else {
+                return EscapeMatch::Incomplete;
+            };
+            match third {
+                b'A'..=b'D' | b'H' | b'F' => EscapeMatch::Complete(3, EscapeKind::Ss3Key(third)),
+                _ => EscapeMatch::Unknown,
+            }
+        }
+        _ => EscapeMatch::Unknown,
+    }
+}
+
+fn parse_sgr_mouse(params: &[u8]) -> Option<EscapeKind> {
+    let text = std::str::from_utf8(params).ok()?;
+    let mut parts = text.split(';');
+    let _buttons = parts.next()?.parse::<u16>().ok()?;
+    let x = parts.next()?.parse::<u16>().ok()?;
+    let y = parts.next()?.parse::<u16>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(EscapeKind::SgrMouse { x, y })
 }
 
 #[derive(Default)]
@@ -606,11 +794,26 @@ pub(super) fn spawn_input_thread(tx: mpsc::Sender<RemotePaneEvent>, raw_input: R
     thread::spawn(move || {
         let mut stdin = io::stdin().lock();
         let mut buffer = [0u8; 64];
+        let mut input_filter = EngineInputFilter::new();
         loop {
             match stdin.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    let bytes = buffer[..read].to_vec();
+                    // Engine mode translates cursor keys and filters mouse
+                    // reports against the shared snapshot; raw mode forwards
+                    // stdin bytes verbatim.
+                    let bytes = if raw_input.render_mode.is_engine() {
+                        let snapshot = *raw_input
+                            .engine_input
+                            .lock()
+                            .expect("engine input snapshot mutex should not be poisoned");
+                        input_filter.translate(&buffer[..read], snapshot)
+                    } else {
+                        buffer[..read].to_vec()
+                    };
+                    if bytes.is_empty() {
+                        continue;
+                    }
                     let raw_forwarded = match raw_input
                         .route
                         .send(&raw_input.registry, bytes.clone())
@@ -1110,7 +1313,7 @@ pub(super) fn render_terminal_safe_remote_line(styled_line: &str, plain_line: &s
     rendered
 }
 
-pub(super) fn next_ansi_escape_len(input: &str) -> usize {
+pub(crate) fn next_ansi_escape_len(input: &str) -> usize {
     let bytes = input.as_bytes();
     if bytes.len() < 2 || bytes[0] != 0x1b {
         return input.chars().next().map(char::len_utf8).unwrap_or(0);
@@ -1150,7 +1353,7 @@ fn trimmed_display_width(line: &str) -> usize {
         .sum()
 }
 
-fn terminal_char_display_width(ch: char) -> usize {
+pub(crate) fn terminal_char_display_width(ch: char) -> usize {
     if ch.is_control() {
         0
     } else if matches!(

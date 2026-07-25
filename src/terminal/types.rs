@@ -52,6 +52,27 @@ pub struct ScreenState {
     pub application_cursor_keys: bool,
 }
 
+/// Mouse reporting level requested by the application (DEC private modes
+/// 1000/1002/1003). Setting one level replaces the previous.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseReportingMode {
+    #[default]
+    None,
+    Click,
+    Drag,
+    AnyMotion,
+}
+
+/// Mouse report encoding requested by the application (DEC private modes
+/// 1006 SGR / 1015 UTF-8; default is X10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseEncoding {
+    #[default]
+    X10,
+    Utf8,
+    Sgr,
+}
+
 impl ScreenState {
     pub fn active_snapshot(&self) -> &ScreenSnapshot {
         if self.alternate_screen_active {

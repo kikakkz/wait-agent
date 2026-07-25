@@ -8,7 +8,9 @@ mod types;
 
 pub use engine::TerminalEngine;
 pub use runtime::TerminalRuntime;
-pub use types::{ScreenSnapshot, ScreenState, TerminalError, TerminalSize};
+pub use types::{
+    MouseEncoding, MouseReportingMode, ScreenSnapshot, ScreenState, TerminalError, TerminalSize,
+};
 
 #[cfg(test)]
 mod tests;

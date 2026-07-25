@@ -1232,40 +1232,34 @@ fn wait_for_remote_runtime_owner_ready(
         let _ = event_tx.send(RemoteRuntimeOwnerReadyEvent::Exited(status));
     });
 
-    loop {
-        match event_rx.recv() {
-            Ok(RemoteRuntimeOwnerReadyEvent::Ready(Ok(response))) => {
-                let response = response.trim();
-                if response == "ok" {
-                    return Ok(());
-                }
-                if let Some(error) = response.strip_prefix("err\t") {
-                    return Err(LifecycleError::Protocol(format!(
-                        "remote runtime owner failed to start: {error}"
-                    )));
-                }
+    match event_rx.recv() {
+        Ok(RemoteRuntimeOwnerReadyEvent::Ready(Ok(response))) => {
+            let response = response.trim();
+            if response == "ok" {
+                return Ok(());
+            }
+            if let Some(error) = response.strip_prefix("err\t") {
                 return Err(LifecycleError::Protocol(format!(
-                    "remote runtime owner sent invalid ready response `{response}`"
+                    "remote runtime owner failed to start: {error}"
                 )));
             }
-            Ok(RemoteRuntimeOwnerReadyEvent::Ready(Err(error))) => {
-                return Err(remote_runtime_owner_error(error));
-            }
-            Ok(RemoteRuntimeOwnerReadyEvent::Exited(Ok(status))) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote runtime owner exited before reporting ready: {status}"
-                )));
-            }
-            Ok(RemoteRuntimeOwnerReadyEvent::Exited(Err(error))) => {
-                return Err(remote_runtime_owner_error(error));
-            }
-            Err(_) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote runtime owner ready socket `{}` closed before reporting ready",
-                    ready_socket.display()
-                )));
-            }
+            Err(LifecycleError::Protocol(format!(
+                "remote runtime owner sent invalid ready response `{response}`"
+            )))
         }
+        Ok(RemoteRuntimeOwnerReadyEvent::Ready(Err(error))) => {
+            Err(remote_runtime_owner_error(error))
+        }
+        Ok(RemoteRuntimeOwnerReadyEvent::Exited(Ok(status))) => Err(LifecycleError::Protocol(
+            format!("remote runtime owner exited before reporting ready: {status}"),
+        )),
+        Ok(RemoteRuntimeOwnerReadyEvent::Exited(Err(error))) => {
+            Err(remote_runtime_owner_error(error))
+        }
+        Err(_) => Err(LifecycleError::Protocol(format!(
+            "remote runtime owner ready socket `{}` closed before reporting ready",
+            ready_socket.display()
+        ))),
     }
 }
 

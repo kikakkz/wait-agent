@@ -1344,3 +1344,69 @@ fn engine_snapshot_visible_omits_scrollback() {
     assert_eq!(full.scrollback, vec!["one  ".to_string()]);
     assert_eq!(full.styled_scrollback, vec!["one  ".to_string()]);
 }
+
+#[test]
+fn engine_tracks_bracketed_paste_and_mouse_modes() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    assert!(!engine.bracketed_paste());
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::None);
+    assert_eq!(engine.mouse_encoding(), MouseEncoding::X10);
+
+    engine.feed(b"\x1b[?2004h\x1b[?1006h\x1b[?1000h");
+    assert!(engine.bracketed_paste());
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::Click);
+    assert_eq!(engine.mouse_encoding(), MouseEncoding::Sgr);
+
+    engine.feed(b"\x1b[?1002h");
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::Drag);
+
+    engine.feed(b"\x1b[?1003h\x1b[?1015h");
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::AnyMotion);
+    assert_eq!(engine.mouse_encoding(), MouseEncoding::Utf8);
+
+    engine.feed(b"\x1b[?1003l\x1b[?1015l\x1b[?2004l");
+    assert!(!engine.bracketed_paste());
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::None);
+    assert_eq!(engine.mouse_encoding(), MouseEncoding::X10);
+}
+
+#[test]
+fn engine_ris_resets_bracketed_paste_and_mouse_modes() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b[?2004h\x1b[?1006h\x1b[?1000h\x1bc");
+    assert!(!engine.bracketed_paste());
+    assert_eq!(engine.mouse_reporting(), MouseReportingMode::None);
+    assert_eq!(engine.mouse_encoding(), MouseEncoding::X10);
+}
+
+#[test]
+fn engine_collects_osc52_and_swallows_other_osc() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 8,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"\x1b]52;c;aGVsbG8=\x07\x1b]0;title\x07\x1b]52;p;d29ybGQ=\x1b\\");
+    let collected = engine.drain_osc52();
+
+    assert_eq!(
+        collected,
+        vec!["52;c;aGVsbG8=".to_string(), "52;p;d29ybGQ=".to_string()]
+    );
+    assert!(engine.drain_osc52().is_empty());
+    assert_eq!(engine.snapshot().window_title.as_deref(), Some("title"));
+}

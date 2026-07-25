@@ -572,40 +572,30 @@ fn wait_for_owner_ready(
         let _ = event_tx.send(OwnerReadyEvent::Exited(status));
     });
 
-    loop {
-        match event_rx.recv() {
-            Ok(OwnerReadyEvent::Ready(Ok(response))) => {
-                let response = response.trim();
-                if response == "ok" {
-                    return Ok(());
-                }
-                if let Some(error) = response.strip_prefix("err\t") {
-                    return Err(LifecycleError::Protocol(format!(
-                        "remote node ingress owner failed to start: {error}"
-                    )));
-                }
+    match event_rx.recv() {
+        Ok(OwnerReadyEvent::Ready(Ok(response))) => {
+            let response = response.trim();
+            if response == "ok" {
+                return Ok(());
+            }
+            if let Some(error) = response.strip_prefix("err\t") {
                 return Err(LifecycleError::Protocol(format!(
-                    "remote node ingress owner sent invalid ready response `{response}`"
+                    "remote node ingress owner failed to start: {error}"
                 )));
             }
-            Ok(OwnerReadyEvent::Ready(Err(error))) => {
-                return Err(remote_node_ingress_error(error));
-            }
-            Ok(OwnerReadyEvent::Exited(Ok(status))) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote node ingress owner exited before reporting ready: {status}"
-                )));
-            }
-            Ok(OwnerReadyEvent::Exited(Err(error))) => {
-                return Err(remote_node_ingress_error(error))
-            }
-            Err(_) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote node ingress owner ready socket `{}` closed before reporting ready",
-                    ready_socket.display()
-                )));
-            }
+            Err(LifecycleError::Protocol(format!(
+                "remote node ingress owner sent invalid ready response `{response}`"
+            )))
         }
+        Ok(OwnerReadyEvent::Ready(Err(error))) => Err(remote_node_ingress_error(error)),
+        Ok(OwnerReadyEvent::Exited(Ok(status))) => Err(LifecycleError::Protocol(format!(
+            "remote node ingress owner exited before reporting ready: {status}"
+        ))),
+        Ok(OwnerReadyEvent::Exited(Err(error))) => Err(remote_node_ingress_error(error)),
+        Err(_) => Err(LifecycleError::Protocol(format!(
+            "remote node ingress owner ready socket `{}` closed before reporting ready",
+            ready_socket.display()
+        ))),
     }
 }
 

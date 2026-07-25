@@ -41,9 +41,13 @@ pub struct TerminalEngine {
     autowrap: bool,
     origin_mode: bool,
     insert_mode: bool,
+    bracketed_paste: bool,
+    mouse_reporting: MouseReportingMode,
+    mouse_encoding: MouseEncoding,
     charset: CharsetState,
     saved_charset: Option<CharsetState>,
     window_title: Option<String>,
+    osc52_queue: Vec<String>,
     pending_escape: Vec<u8>,
     pending_utf8: Vec<u8>,
 }
@@ -59,9 +63,13 @@ impl TerminalEngine {
             autowrap: true,
             origin_mode: false,
             insert_mode: false,
+            bracketed_paste: false,
+            mouse_reporting: MouseReportingMode::None,
+            mouse_encoding: MouseEncoding::X10,
             charset: CharsetState::default(),
             saved_charset: None,
             window_title: None,
+            osc52_queue: Vec::new(),
             pending_escape: Vec::new(),
             pending_utf8: Vec::new(),
         }
@@ -70,6 +78,10 @@ impl TerminalEngine {
     pub fn resize(&mut self, size: TerminalSize) {
         self.normal.resize(size);
         self.alternate.resize(size);
+    }
+
+    pub fn size(&self) -> TerminalSize {
+        self.normal.size
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -233,6 +245,24 @@ impl TerminalEngine {
         self.application_cursor_keys
     }
 
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
+    }
+
+    pub fn mouse_reporting(&self) -> MouseReportingMode {
+        self.mouse_reporting
+    }
+
+    pub fn mouse_encoding(&self) -> MouseEncoding {
+        self.mouse_encoding
+    }
+
+    /// OSC 52 clipboard payloads observed since the last drain, each the full
+    /// `52;...` sequence body ready to be re-emitted to the local terminal.
+    pub fn drain_osc52(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.osc52_queue)
+    }
+
     fn active_buffer(&self) -> &ScreenBuffer {
         if self.alternate_screen_active {
             &self.alternate
@@ -322,6 +352,9 @@ impl TerminalEngine {
         self.autowrap = true;
         self.origin_mode = false;
         self.insert_mode = false;
+        self.bracketed_paste = false;
+        self.mouse_reporting = MouseReportingMode::None;
+        self.mouse_encoding = MouseEncoding::X10;
         self.charset = CharsetState::default();
         self.saved_charset = None;
     }
@@ -396,7 +429,11 @@ impl TerminalEngine {
         let Some((kind, value)) = text.split_once(';') else {
             return;
         };
-        if matches!(kind, "0" | "2") && !value.trim().is_empty() {
+        if kind == "52" {
+            // Clipboard payload is queued verbatim for the viewer to re-emit
+            // to the local terminal (base64 content untouched).
+            self.osc52_queue.push(text.into_owned());
+        } else if matches!(kind, "0" | "2") && !value.trim().is_empty() {
             self.window_title = Some(value.to_string());
         } else if value == "?" {
             match kind {
@@ -517,7 +554,7 @@ impl TerminalEngine {
         }
     }
 
-    fn handle_private_mode(&mut self, params: &str, final_byte: char, _replies: &mut Vec<u8>) {
+    fn handle_private_mode(&mut self, params: &str, final_byte: char, _replies: &mut [u8]) {
         let enabled = match final_byte {
             'h' => true,
             'l' => false,
@@ -530,6 +567,42 @@ impl TerminalEngine {
                 7 => self.autowrap = enabled,
                 25 => self.cursor_visible = enabled,
                 47 | 1047 | 1048 | 1049 => self.set_alternate_screen(enabled, mode),
+                1000 => {
+                    self.mouse_reporting = if enabled {
+                        MouseReportingMode::Click
+                    } else {
+                        MouseReportingMode::None
+                    };
+                }
+                1002 => {
+                    self.mouse_reporting = if enabled {
+                        MouseReportingMode::Drag
+                    } else {
+                        MouseReportingMode::None
+                    };
+                }
+                1003 => {
+                    self.mouse_reporting = if enabled {
+                        MouseReportingMode::AnyMotion
+                    } else {
+                        MouseReportingMode::None
+                    };
+                }
+                1006 => {
+                    self.mouse_encoding = if enabled {
+                        MouseEncoding::Sgr
+                    } else {
+                        MouseEncoding::X10
+                    };
+                }
+                1015 => {
+                    self.mouse_encoding = if enabled {
+                        MouseEncoding::Utf8
+                    } else {
+                        MouseEncoding::X10
+                    };
+                }
+                2004 => self.bracketed_paste = enabled,
                 _ => {}
             }
         }

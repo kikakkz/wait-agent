@@ -3,12 +3,13 @@ mod tests {
         activate_surface_target, activate_surface_target_with_mode, apply_authority_envelope,
         authority_status_from_runtime, authority_transport_event_sender,
         collect_direct_raw_pty_output_envelope, collect_direct_raw_pty_output_payload,
-        flush_paused_input, flush_pending_pty_size, main_slot_console_id, main_slot_surface_spec,
-        mark_mirror_ready_if_raw_arrived, output_payload_matches_target, placeholder_lines,
-        render_remote_output_and_mark_ready, should_draw_remote_snapshot,
+        flush_paused_input, flush_pending_pty_size, forward_engine_replies, main_slot_console_id,
+        main_slot_surface_spec, mark_mirror_ready_if_raw_arrived, output_payload_matches_target,
+        placeholder_lines, render_remote_output_and_mark_ready, should_draw_remote_snapshot,
         should_exit_surface_for_target_presence, should_exit_surface_for_target_presence_loss,
         should_exit_surface_locally, spawn_mailbox_watcher, sync_or_defer_remote_pty_size,
-        target_is_online, write_remote_raw_output_with_initial_clear, AuthorityTransportStatus,
+        target_is_online, try_flush_ready_inputs, write_remote_raw_output_with_initial_clear,
+        AuthorityTransportStatus, EngineInputFilter, EngineInputSnapshot, EngineRenderState,
         MirrorReadiness, RawPtyInputRoute, RemoteInteractInputSignalDecoder, RemoteInteractSignal,
         RemoteInteractSurfaceSpec, RemoteMainSlotPaneRuntime, RemotePaneEvent,
         RemoteRawPtyMailboxReader, CLEAR_SCREEN_HOME_ESCAPE,
@@ -34,6 +35,7 @@ mod tests {
     use crate::runtime::remote_authority_transport_runtime::{
         authority_transport_socket_path, RemoteAuthorityCommand,
     };
+    use crate::runtime::remote_main_slot::engine_frame_renderer::RemoteRenderMode;
     use crate::runtime::remote_main_slot_runtime::RemoteAttachmentBinding;
     use crate::runtime::remote_main_slot_runtime::RemoteControlPlaneTransportError;
     use crate::runtime::remote_main_slot_runtime::RemoteMainSlotRuntime;
@@ -1144,9 +1146,20 @@ mod tests {
         // considered ready and queued input can be flushed.
         resize_acked_size = Some(last_synced_size);
 
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        let mut engine_render = EngineRenderState::new();
+        let (event_tx, _event_rx) = mpsc::channel();
         let mut raw_screen_initialized = false;
         render_remote_output_and_mark_ready(
             b"\x1b[?25h",
+            None,
+            RemoteRenderMode::Raw,
+            &mut observer,
+            &mut engine_render,
+            &event_tx,
             &runtime,
             &target,
             Some(&binding),
@@ -1169,6 +1182,219 @@ mod tests {
         let messages = authority_mailbox.snapshot();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].message_type, "raw_pty_input");
+    }
+
+    #[test]
+    fn engine_mode_input_gate_does_not_require_resize_ack() {
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        let authority_mailbox = runtime
+            .ensure_local_connection("peer-a")
+            .expect("authority loopback registration should succeed");
+        let target = remote_target();
+        let binding = runtime
+            .activate_target(
+                &target,
+                RemoteConsoleDescriptor {
+                    console_id: "console-a".to_string(),
+                    console_host_id: "observer-a".to_string(),
+                    location: ConsoleLocation::LocalWorkspace,
+                },
+                12,
+                4,
+            )
+            .expect("remote activation should open target");
+        assert_eq!(
+            authority_mailbox.snapshot()[0].message_type,
+            "open_mirror_request"
+        );
+
+        let mut pending_pty_size = None;
+        let mut paused_input_buffer = vec![b"x".to_vec()];
+        let mut console_seq = 0;
+        let readiness = MirrorReadiness::Ready;
+        let last_synced_size = TerminalSize {
+            cols: 12,
+            rows: 4,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let mut resize_acked_size = None;
+
+        // Raw mode holds paused input until the resize is acknowledged.
+        try_flush_ready_inputs(
+            RemoteRenderMode::Raw,
+            &runtime,
+            &target,
+            Some(&binding),
+            &mut pending_pty_size,
+            &mut paused_input_buffer,
+            &mut console_seq,
+            &readiness,
+            &last_synced_size,
+            &mut resize_acked_size,
+        )
+        .expect("raw flush should succeed");
+        assert_eq!(paused_input_buffer.len(), 1);
+        assert_eq!(authority_mailbox.snapshot().len(), 1);
+
+        // Engine mode flushes on mirror readiness alone, without a resize ack.
+        try_flush_ready_inputs(
+            RemoteRenderMode::Engine,
+            &runtime,
+            &target,
+            Some(&binding),
+            &mut pending_pty_size,
+            &mut paused_input_buffer,
+            &mut console_seq,
+            &readiness,
+            &last_synced_size,
+            &mut resize_acked_size,
+        )
+        .expect("engine flush should succeed");
+        assert!(paused_input_buffer.is_empty());
+        let messages = authority_mailbox.snapshot();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].message_type, "raw_pty_input");
+    }
+
+    #[test]
+    fn engine_mode_forwards_terminal_replies_to_remote_pty() {
+        let registry = RemoteConnectionRegistry::new();
+        let capture = Arc::new(CapturingRawRemoteConnection::default());
+        registry.register_connection("peer-a", capture.clone());
+        let route = RawPtyInputRoute::default();
+        route.activate(
+            &remote_target(),
+            &RemoteAttachmentBinding {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                attachment_id: "attach-1".to_string(),
+                console_id: "console-a".to_string(),
+            },
+            "observer-a",
+        );
+
+        let runtime = RemoteMainSlotRuntime::with_registry(RemoteConnectionRegistry::new());
+        let mailbox = runtime
+            .ensure_local_observer_connection("observer-a")
+            .expect("observer loopback registration should succeed");
+        let mut observer = RemoteObserverRuntime::new(mailbox, 12, 4);
+        observer.feed_raw_output(1, b"\x1b[c\x1b[6n");
+
+        forward_engine_replies(&mut observer, &route, &registry);
+
+        let payloads = capture.raw_inputs();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].input_bytes,
+            b"\x1b[?61;1;21;22c\x1b[1;1R".to_vec()
+        );
+        assert!(observer.drain_replies().is_empty());
+    }
+
+    fn engine_input_snapshot(
+        application_cursor_keys: bool,
+        mouse_reporting: bool,
+        cols: u16,
+        rows: u16,
+    ) -> EngineInputSnapshot {
+        EngineInputSnapshot {
+            application_cursor_keys,
+            mouse_reporting,
+            screen_cols: cols,
+            screen_rows: rows,
+        }
+    }
+
+    #[test]
+    fn engine_input_translates_cursor_keys_to_ss3_in_application_mode() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(true, false, 80, 24);
+
+        assert_eq!(
+            filter.translate(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F", snapshot),
+            b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF".to_vec()
+        );
+    }
+
+    #[test]
+    fn engine_input_normalizes_cursor_keys_to_csi_in_normal_mode() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(false, false, 80, 24);
+
+        assert_eq!(
+            filter.translate(b"\x1b[A\x1bOB\x1bOH", snapshot),
+            b"\x1b[A\x1b[B\x1b[H".to_vec()
+        );
+    }
+
+    #[test]
+    fn engine_input_passes_plain_text_paste_and_navigation_verbatim() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(true, false, 80, 24);
+        let input = b"abc\x1b[200~pasted text\x1b[201~\x1b[1;5C\x1b[5~";
+
+        assert_eq!(filter.translate(input, snapshot), input.to_vec());
+    }
+
+    #[test]
+    fn engine_input_drops_mouse_reports_when_remote_did_not_request_mouse() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(false, false, 80, 24);
+
+        assert_eq!(
+            filter.translate(b"a\x1b[<0;5;3Mb", snapshot),
+            b"ab".to_vec()
+        );
+    }
+
+    #[test]
+    fn engine_input_forwards_sgr_mouse_inside_region_and_clips_outside() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(false, true, 20, 10);
+
+        assert_eq!(
+            filter.translate(b"\x1b[<0;5;3M\x1b[<0;5;3m", snapshot),
+            b"\x1b[<0;5;3M\x1b[<0;5;3m".to_vec()
+        );
+        assert_eq!(
+            filter.translate(b"\x1b[<0;21;3M\x1b[<0;5;11M\x1b[<0;0;3M", snapshot),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn engine_input_forwards_x10_mouse_inside_region_and_clips_outside() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(false, true, 20, 10);
+
+        let inside = b"\x1b[M\x20\x25\x23";
+        assert_eq!(filter.translate(inside, snapshot), inside.to_vec());
+
+        let outside = b"\x1b[M\x20\x36\x23";
+        assert_eq!(filter.translate(outside, snapshot), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn engine_input_holds_split_escape_sequences_across_reads() {
+        let mut filter = EngineInputFilter::new();
+        let snapshot = engine_input_snapshot(true, false, 80, 24);
+
+        assert_eq!(filter.translate(b"\x1b[", snapshot), Vec::<u8>::new());
+        assert_eq!(filter.translate(b"A", snapshot), b"\x1bOA".to_vec());
+
+        let mut mouse_filter = EngineInputFilter::new();
+        assert_eq!(
+            mouse_filter.translate(b"\x1b[<0;5", engine_input_snapshot(false, true, 20, 10)),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            mouse_filter.translate(b";3M", engine_input_snapshot(false, true, 20, 10)),
+            b"\x1b[<0;5;3M".to_vec()
+        );
     }
 
     #[test]

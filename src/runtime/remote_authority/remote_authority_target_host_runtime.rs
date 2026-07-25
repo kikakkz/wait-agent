@@ -145,6 +145,7 @@ pub trait RemoteTargetPtyGateway: Send + Sync + Clone + 'static {
         target_session_name: &str,
     ) -> Result<TmuxPaneId, Self::Error>;
 
+    #[allow(dead_code)]
     fn resize_pty(
         &self,
         socket_name: &str,

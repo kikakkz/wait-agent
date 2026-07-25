@@ -531,40 +531,30 @@ fn wait_for_remote_session_sync_owner_ready(
         let _ = event_tx.send(SessionSyncOwnerReadyEvent::Exited(status));
     });
 
-    loop {
-        match event_rx.recv() {
-            Ok(SessionSyncOwnerReadyEvent::Ready(Ok(response))) => {
-                let response = response.trim();
-                if response == "ok" {
-                    return Ok(());
-                }
-                if let Some(error) = response.strip_prefix("err\t") {
-                    return Err(LifecycleError::Protocol(format!(
-                        "remote session sync owner failed to start: {error}"
-                    )));
-                }
+    match event_rx.recv() {
+        Ok(SessionSyncOwnerReadyEvent::Ready(Ok(response))) => {
+            let response = response.trim();
+            if response == "ok" {
+                return Ok(());
+            }
+            if let Some(error) = response.strip_prefix("err\t") {
                 return Err(LifecycleError::Protocol(format!(
-                    "remote session sync owner sent invalid ready response `{response}`"
+                    "remote session sync owner failed to start: {error}"
                 )));
             }
-            Ok(SessionSyncOwnerReadyEvent::Ready(Err(error))) => {
-                return Err(remote_session_sync_error(error));
-            }
-            Ok(SessionSyncOwnerReadyEvent::Exited(Ok(status))) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote session sync owner exited before reporting ready: {status}"
-                )));
-            }
-            Ok(SessionSyncOwnerReadyEvent::Exited(Err(error))) => {
-                return Err(remote_session_sync_error(error));
-            }
-            Err(_) => {
-                return Err(LifecycleError::Protocol(format!(
-                    "remote session sync owner ready socket `{}` closed before reporting ready",
-                    ready_socket.display()
-                )));
-            }
+            Err(LifecycleError::Protocol(format!(
+                "remote session sync owner sent invalid ready response `{response}`"
+            )))
         }
+        Ok(SessionSyncOwnerReadyEvent::Ready(Err(error))) => Err(remote_session_sync_error(error)),
+        Ok(SessionSyncOwnerReadyEvent::Exited(Ok(status))) => Err(LifecycleError::Protocol(
+            format!("remote session sync owner exited before reporting ready: {status}"),
+        )),
+        Ok(SessionSyncOwnerReadyEvent::Exited(Err(error))) => Err(remote_session_sync_error(error)),
+        Err(_) => Err(LifecycleError::Protocol(format!(
+            "remote session sync owner ready socket `{}` closed before reporting ready",
+            ready_socket.display()
+        ))),
     }
 }
 
