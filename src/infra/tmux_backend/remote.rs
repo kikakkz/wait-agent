@@ -554,6 +554,15 @@ impl EmbeddedTmuxBackend {
         let layout_string = self.window_layout_on_socket(socket_name, &window_id)?;
         let tree = geo::parse_layout(&layout_string)
             .map_err(|error| TmuxError::new(format!("parse window layout: {error}")))?;
+        // Auto-sized windows are planned at their current actual size (tmux
+        // derives it from client sizes minus status lines); manual windows at
+        // the minimum client size. Planning auto windows at raw client sizes
+        // lets the snap-back reflow steal rows from the target pane.
+        let window_sizing = if window_size_option.as_deref() == Some("manual") {
+            geo::WindowSizing::Manual
+        } else {
+            geo::WindowSizing::Auto
+        };
         let panes: Vec<geo::PaneInfo> = self
             .list_panes_detailed_on_socket(socket_name, &window_id)?
             .into_iter()
@@ -571,6 +580,7 @@ impl EmbeddedTmuxBackend {
             target_id,
             (cols as u32, rows as u32),
             &clients,
+            window_sizing,
         );
         match action {
             geo::CoordinationAction::NoOp => {}

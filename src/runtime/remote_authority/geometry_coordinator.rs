@@ -260,6 +260,22 @@ pub enum CoordinationAction {
     ResizePaneOnly { pane: (u32, u32) },
 }
 
+/// How the target window's own size is determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSizing {
+    /// tmux auto-sizes the window from attached clients (`window-size`
+    /// largest/smallest/latest): the layout must be planned at the window's
+    /// current actual size. tmux derives that size from client sizes minus
+    /// status lines, so planning at raw client sizes produces a layout that
+    /// is one or more rows too tall; the next snap reflows it and steals
+    /// rows from the target pane (the applied size never matches the plan).
+    Auto,
+    /// The window is pinned (`window-size manual`): the coordinator is the
+    /// only resizer and plans the window target as the per-dimension minimum
+    /// over attached client sizes.
+    Manual,
+}
+
 fn per_dimension_min(desired: (u32, u32), capacity: Option<(u32, u32)>) -> (u32, u32) {
     match capacity {
         Some((cw, ch)) => (desired.0.min(cw).max(2), desired.1.min(ch).max(2)),
@@ -285,6 +301,8 @@ fn chrome_titles(title: &str) -> Option<&'static str> {
 /// - `desired`: viewer-desired geometry for the target pane
 /// - `client_sizes`: sizes of tmux clients attached to the target session;
 ///   empty means the local user is detached (unbounded capacity)
+/// - `window_sizing`: how the window's own size is determined (see
+///   [`WindowSizing`]); only the attached branch's window target depends on it
 pub fn plan_coordination(
     layout: &LayoutCell,
     window_size: (u32, u32),
@@ -292,6 +310,7 @@ pub fn plan_coordination(
     target_pane_id: u32,
     desired: (u32, u32),
     client_sizes: &[(u32, u32)],
+    window_sizing: WindowSizing,
 ) -> CoordinationAction {
     let sidebar = panes.iter().find(|p| p.title == SIDEBAR_PANE_TITLE);
     let footer = panes.iter().find(|p| p.title == FOOTER_PANE_TITLE);
@@ -342,13 +361,20 @@ pub fn plan_coordination(
 
     // Attached: the window follows the smallest attached client so the local
     // user always sees the complete chrome layout (network-wide smallest
-    // semantics; window-size may be manual per window, so we resize
-    // explicitly rather than relying on tmux to snap).
-    let window_target = client_sizes
-        .iter()
-        .fold((u32::MAX, u32::MAX), |acc, &(cw, ch)| {
-            (acc.0.min(cw), acc.1.min(ch))
-        });
+    // semantics). For auto-sized windows tmux has already computed the actual
+    // window size from the clients (deducting status lines); plan at that
+    // size instead of raw client sizes, otherwise the layout is reflowed on
+    // the next snap and the target pane ends up smaller than planned. For
+    // manual windows the coordinator is the only resizer, so it computes the
+    // target explicitly rather than relying on tmux to snap.
+    let window_target = match window_sizing {
+        WindowSizing::Auto => window_size,
+        WindowSizing::Manual => client_sizes
+            .iter()
+            .fold((u32::MAX, u32::MAX), |acc, &(cw, ch)| {
+                (acc.0.min(cw), acc.1.min(ch))
+            }),
+    };
     // Only the standard waitagent chrome shape is restructured; anything
     // else (user splits) falls back to a plain resize-pane.
     let mut leaf_ids = Vec::new();
@@ -543,7 +569,15 @@ mod tests {
             pane(1, SIDEBAR_PANE_TITLE, 32, 22),
             pane(2, FOOTER_PANE_TITLE, 80, 1),
         ];
-        let action = plan_coordination(&layout, (80, 24), &panes, 3, (176, 48), &[]);
+        let action = plan_coordination(
+            &layout,
+            (80, 24),
+            &panes,
+            3,
+            (176, 48),
+            &[],
+            WindowSizing::Manual,
+        );
         assert_eq!(
             action,
             CoordinationAction::ResizeWindowAndPane {
@@ -563,7 +597,15 @@ mod tests {
             pane(2, FOOTER_PANE_TITLE, 80, 1),
         ];
         // kk attached at 80x24: capacity 47x22 < desired; T == current pane.
-        let action = plan_coordination(&layout, (80, 24), &panes, 3, (176, 48), &[(80, 24)]);
+        let action = plan_coordination(
+            &layout,
+            (80, 24),
+            &panes,
+            3,
+            (176, 48),
+            &[(80, 24)],
+            WindowSizing::Manual,
+        );
         assert_eq!(action, CoordinationAction::NoOp);
     }
 
@@ -576,7 +618,15 @@ mod tests {
             pane(2, FOOTER_PANE_TITLE, 80, 1),
         ];
         // kk attached at 237x60: capacity 204x58; desired 176x48 -> T=176x48.
-        let action = plan_coordination(&layout, (237, 60), &panes, 3, (176, 48), &[(237, 60)]);
+        let action = plan_coordination(
+            &layout,
+            (237, 60),
+            &panes,
+            3,
+            (176, 48),
+            &[(237, 60)],
+            WindowSizing::Manual,
+        );
         let CoordinationAction::ApplyLayout {
             layout,
             reuse_padding,
@@ -622,7 +672,15 @@ mod tests {
             pane(1, SIDEBAR_PANE_TITLE, 32, 22),
             pane(2, FOOTER_PANE_TITLE, 80, 1),
         ];
-        let action = plan_coordination(&layout, (200, 49), &panes, 3, (167, 47), &[(80, 24)]);
+        let action = plan_coordination(
+            &layout,
+            (200, 49),
+            &panes,
+            3,
+            (167, 47),
+            &[(80, 24)],
+            WindowSizing::Manual,
+        );
         let CoordinationAction::ApplyLayout {
             layout,
             window_target_size,
@@ -644,6 +702,70 @@ mod tests {
     }
 
     #[test]
+    fn auto_sized_window_plans_at_actual_window_size() {
+        // The client's raw height includes tmux's status line: the real
+        // window is one row shorter (80x24, client 80x25). Planning at the
+        // raw client size reflows on snap-back and steals a row from the
+        // target pane; the applied size then never matches the plan.
+        let layout = parse_layout(CHROME_LAYOUT).expect("layout should parse");
+        let panes = vec![
+            pane(3, "bash", 47, 22),
+            pane(1, SIDEBAR_PANE_TITLE, 32, 22),
+            pane(2, FOOTER_PANE_TITLE, 80, 1),
+        ];
+        let action = plan_coordination(
+            &layout,
+            (80, 24),
+            &panes,
+            3,
+            (40, 18),
+            &[(80, 25)],
+            WindowSizing::Auto,
+        );
+        let CoordinationAction::ApplyLayout {
+            layout,
+            window_target_size,
+            ..
+        } = action
+        else {
+            panic!("expected ApplyLayout, got {action:?}");
+        };
+        assert_eq!(window_target_size, (80, 24));
+        let mut layout = layout;
+        assign_padding_ids(&mut layout, &[90, 91]);
+        let dumped = dump_layout_with_checksum(&layout);
+        // Target pane is exactly T; padding absorbs the slack within the
+        // actual 80x24 window: row_h=22, vpad=22-18-1=3, hpad=80-40-32-2=6.
+        assert!(dumped.contains("40x18,0,0,3"), "dumped: {dumped}");
+        assert!(dumped.contains("40x3,0,19,90"), "dumped: {dumped}");
+        assert!(dumped.contains("6x22,41,0,91"), "dumped: {dumped}");
+        assert!(dumped.contains("80x1,0,23,2"), "dumped: {dumped}");
+    }
+
+    #[test]
+    fn auto_sized_window_is_noop_when_layout_already_matches() {
+        // Regression test for the resync loop: T fills the actual window's
+        // main area and the live layout already matches, so a raw client
+        // height one row taller than the window must not trigger a re-plan.
+        let layout = parse_layout(CHROME_LAYOUT).expect("layout should parse");
+        let panes = vec![
+            pane(3, "bash", 47, 22),
+            pane(1, SIDEBAR_PANE_TITLE, 32, 22),
+            pane(2, FOOTER_PANE_TITLE, 80, 1),
+        ];
+        let action = plan_coordination(
+            &layout,
+            (80, 24),
+            &panes,
+            3,
+            (47, 22),
+            &[(80, 25)],
+            WindowSizing::Auto,
+        );
+        assert_eq!(action, CoordinationAction::NoOp);
+    }
+
+    #[test]
     fn exotic_layout_falls_back_to_resize_pane_only() {
         let exotic = "aaaa,200x50,0,0{100x50,0,0{50x50,0,0,3,50x50,51,0,9},99x50,101,0,1}";
         let layout = parse_layout(exotic).expect("layout should parse");
@@ -652,7 +774,15 @@ mod tests {
             pane(9, "bash", 50, 50),
             pane(1, SIDEBAR_PANE_TITLE, 32, 22),
         ];
-        let action = plan_coordination(&layout, (200, 50), &panes, 3, (176, 48), &[(237, 60)]);
+        let action = plan_coordination(
+            &layout,
+            (200, 50),
+            &panes,
+            3,
+            (176, 48),
+            &[(237, 60)],
+            WindowSizing::Manual,
+        );
         assert_eq!(
             action,
             CoordinationAction::ResizePaneOnly { pane: (176, 48) }
@@ -668,7 +798,15 @@ mod tests {
             pane(2, FOOTER_PANE_TITLE, 80, 1),
         ];
         // Wide but short client: 237x30 -> capacity 204x28, T = 176x28.
-        let action = plan_coordination(&layout, (237, 30), &panes, 3, (176, 48), &[(237, 30)]);
+        let action = plan_coordination(
+            &layout,
+            (237, 30),
+            &panes,
+            3,
+            (176, 48),
+            &[(237, 30)],
+            WindowSizing::Manual,
+        );
         let CoordinationAction::ApplyLayout { layout, .. } = action else {
             panic!("expected ApplyLayout, got {action:?}");
         };
