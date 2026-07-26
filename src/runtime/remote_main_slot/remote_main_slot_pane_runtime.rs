@@ -507,6 +507,52 @@ impl RemoteMainSlotPaneRuntime {
                                 pixel_width: 0,
                                 pixel_height: 0,
                             };
+                            // If the previous binding is gone or the mirror
+                            // route was torn down, re-open the mirror before
+                            // trying to resize/report capacity. This keeps
+                            // engine mode's reconnect path aligned with raw
+                            // mode, which reactivates on every geometry mismatch.
+                            if matches!(authority_status, AuthorityTransportStatus::Connected)
+                                && needs_remote_surface_activation(
+                                    &binding,
+                                    &remote_runtime,
+                                    &target,
+                                )
+                            {
+                                ERROR_LOG.log(format!(
+                                    "[diag] geometry re-sync (engine): reactivating mirror (binding_none={}, pending={}, needed={})",
+                                    binding.is_none(),
+                                    remote_runtime.is_mirror_pending(&target),
+                                    remote_runtime.is_mirror_needed(&target)
+                                ));
+                                match activate_remote_surface_binding(
+                                    &remote_runtime,
+                                    &target,
+                                    &spec,
+                                    &effective,
+                                    &mut observer,
+                                    &mut raw_output_reader,
+                                    &raw_input_route,
+                                    &mut pending_pty_size,
+                                    &mut last_synced_size,
+                                    &mut resize_acked_size,
+                                    &mut raw_screen_initialized,
+                                    render_mode,
+                                    &mut engine_render,
+                                    event_tx.clone(),
+                                ) {
+                                    Ok(new_binding) => {
+                                        binding = Some(new_binding);
+                                        last_synced_size = effective;
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        authority_status =
+                                            AuthorityTransportStatus::Failed(error.to_string());
+                                        continue;
+                                    }
+                                }
+                            }
                             if effective != observer.terminal_size() {
                                 ERROR_LOG.log(format!(
                                     "[diag] geometry re-sync (engine): resizing engine to {}x{} (reported {}x{}, pane {}x{})",
@@ -866,9 +912,11 @@ impl RemoteMainSlotPaneRuntime {
                                 )?;
                             }
                             let needs_activation = reconnecting_since.is_some()
-                                || binding.is_none()
-                                || remote_runtime.is_mirror_pending(&target)
-                                || remote_runtime.is_mirror_needed(&target);
+                                || needs_remote_surface_activation(
+                                    &binding,
+                                    &remote_runtime,
+                                    &target,
+                                );
                             let mut activated = false;
                             if needs_activation
                                 && matches!(authority_status, AuthorityTransportStatus::Connected)
@@ -1852,6 +1900,19 @@ fn is_resize_acked(
     resize_acked_size: &Option<TerminalSize>,
 ) -> bool {
     resize_acked_size.as_ref() == Some(last_synced_size)
+}
+
+/// Returns true when the surface needs a fresh OpenMirrorRequest.
+/// This mirrors the raw-mode reconnect heuristic so engine mode can also
+/// recover when the previous binding has been torn down.
+fn needs_remote_surface_activation(
+    binding: &Option<RemoteAttachmentBinding>,
+    remote_runtime: &RemoteMainSlotRuntime,
+    target: &ManagedSessionRecord,
+) -> bool {
+    binding.is_none()
+        || remote_runtime.is_mirror_pending(target)
+        || remote_runtime.is_mirror_needed(target)
 }
 
 #[allow(clippy::too_many_arguments)]

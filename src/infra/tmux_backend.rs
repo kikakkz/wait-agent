@@ -50,6 +50,7 @@ pub(crate) const WAITAGENT_PANE_TARGET_ID_OPTION: &str = "@waitagent_target_id";
 pub(crate) const WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION: &str =
     "@waitagent_runtime_command_override";
 pub(crate) const WAITAGENT_RUNTIME_RUNNING_OVERRIDE: &str = "__waitagent_running__";
+pub(crate) const WAITAGENT_GEOMETRY_APPLYING_OPTION: &str = "@waitagent_geometry_applying";
 pub(crate) const WAITAGENT_AGENT_SIGNAL_AGENT_OPTION: &str = "@waitagent_agent_signal_agent";
 pub(crate) const WAITAGENT_AGENT_SIGNAL_PANE_OPTION: &str = "@waitagent_agent_signal_pane";
 pub(crate) const WAITAGENT_AGENT_SIGNAL_STATE_OPTION: &str = "@waitagent_agent_signal_state";

@@ -1,7 +1,9 @@
 use super::{
-    exact_session_target, EmbeddedTmuxBackend, TmuxError, WAITAGENT_PANE_PIPE_OWNER_OPTION,
+    exact_session_target, EmbeddedTmuxBackend, TmuxError, WAITAGENT_GEOMETRY_APPLYING_OPTION,
+    WAITAGENT_PANE_PIPE_OWNER_OPTION,
 };
 use crate::infra::tmux::{TmuxPaneId, TmuxSocketName};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const WAITAGENT_SIDEBAR_PANE_TITLE: &str = "waitagent-sidebar";
 const WAITAGENT_FOOTER_PANE_TITLE: &str = "waitagent-footer";
@@ -503,6 +505,45 @@ impl EmbeddedTmuxBackend {
         Ok(())
     }
 
+    pub(crate) fn set_session_option_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        option_name: &str,
+        value: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &[
+                "set-option".to_string(),
+                "-t".to_string(),
+                exact_session_target(session_name),
+                option_name.to_string(),
+                value.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn unset_session_option_on_socket(
+        &self,
+        socket_name: &str,
+        session_name: &str,
+        option_name: &str,
+    ) -> Result<(), TmuxError> {
+        self.run_on_socket(
+            &TmuxSocketName::new(socket_name),
+            &[
+                "set-option".to_string(),
+                "-u".to_string(),
+                "-t".to_string(),
+                exact_session_target(session_name),
+                option_name.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn set_session_hook_on_socket(
         &self,
         socket_name: &str,
@@ -675,7 +716,33 @@ impl EmbeddedTmuxBackend {
         cols: usize,
         rows: usize,
     ) -> Result<(usize, usize), TmuxError> {
-        let applied = self.coordinate_geometry_on_socket(socket_name, pane, cols, rows)?;
+        // Mark the session as "authority is applying a layout" so the
+        // window-layout-changed hook can suppress the self-triggered event.
+        // The value is a Unix-millis timestamp so the hook can still suppress
+        // even if run-shell -b schedules the check slightly after we return.
+        let session = self.pane_session_name_on_socket(socket_name, pane).ok();
+        if let Some(session) = &session {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+                .to_string();
+            let _ = self.set_session_option_on_socket(
+                socket_name,
+                session,
+                WAITAGENT_GEOMETRY_APPLYING_OPTION,
+                &ts,
+            );
+        }
+        let applied = self.coordinate_geometry_on_socket(socket_name, pane, cols, rows);
+        if let Some(session) = session {
+            let _ = self.unset_session_option_on_socket(
+                socket_name,
+                &session,
+                WAITAGENT_GEOMETRY_APPLYING_OPTION,
+            );
+        }
+        let applied = applied?;
         let window_output = self.run_on_socket(
             &TmuxSocketName::new(socket_name),
             &pane_window_id_args(pane),

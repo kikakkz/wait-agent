@@ -931,16 +931,6 @@ impl SessionSyncAuthorityManager {
         Ok(())
     }
 
-    pub(super) fn stop_hosts_bound_to_session(&mut self, session_instance_id: &str) {
-        self.running_hosts.retain(|_target_id, host| {
-            let matches = host.bound_session_instance_id == session_instance_id;
-            if matches {
-                host.running.store(false, Ordering::Relaxed);
-            }
-            !matches
-        });
-    }
-
     fn ensure_and_send_command(
         &mut self,
         session_handle: &RemoteNodeSessionHandle,

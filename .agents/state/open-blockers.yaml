@@ -1,3 +1,146 @@
 kind: state
 version: 1
-blockers: []
+blockers:
+  - id: blocker.engine-mode-remote-pane-flicker
+    title: engine-mode remote main-slot pane flickers due to recursive geometry coordination
+    status: fixed
+    discovered_at: 2026-07-26T09:30:00Z
+    fixed_at: 2026-07-26T02:50:00Z
+    symptom: >
+      When connecting to 192.168.31.182 and switching to its remote session,
+      the local main pane output flickers visibly.
+    root_cause: >
+      The authority-side geometry coordinator registers a `window-layout-changed`
+      tmux hook. Its own `select-layout` call during coordination triggers that
+      hook, which sends `GeometryChanged`, debounces 200ms, and coordinates again.
+      The applied geometry returned by tmux differs slightly each round
+      (e.g. 176x48 vs 176x46, 151x36 vs 151x35). Each changed geometry is pushed
+      to the server via `TargetGeometryChanged`, and in engine mode the server
+      resizes the TerminalEngine and calls `request_full_redraw()`. The next
+      frame emits `\x1b[2J` (clear screen) and redraws every row, producing a
+      visible flicker roughly every 200ms.
+    fix_plan: >
+      Use a tmux session option `@waitagent_geometry_applying` as a short-lived
+      semaphore. Before the authority calls its own coordinate_geometry, it sets
+      the option to the current Unix timestamp (ms). After coordinate_geometry
+      returns it unsets the option. The `window-layout-changed` hook command is
+      extended with `--session-name` and `--hook-name`; the geometry-event
+      handler reads the option and suppresses the event when the option exists
+      and is recent (<500ms). Other hooks (client-attached, client-detached,
+      client-resized) are unaffected. This stops the self-triggered recursion
+      without removing external layout-change detection.
+    affected_paths:
+      - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+      - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+      - src/runtime/remote_main_slot/engine_frame_renderer.rs
+      - src/infra/tmux_backend/remote.rs
+      - src/infra/tmux_backend.rs
+      - src/cli.rs
+    notes: >
+      User confirmed the peer has no tmux attach/detach activity during the
+      flicker. The recursion is self-triggered by the authority's own layout
+      operations. Fix implemented: authority sets `@waitagent_geometry_applying`
+      session option around coordinate_geometry and the window-layout-changed hook
+      suppresses events when the option is recent. Targeted tests (geometry
+      coordinator + new CLI parse test) pass. cargo fmt and cargo check are clean.
+      Full `cargo test --bin waitagent` is very slow and timed out at 5 minutes on
+      pre-existing workspace lifecycle tests; no failures were observed before the
+      timeout. Pending live validation on 192.168.31.182.
+  - id: blocker.remote-session-input-stuck-pipe-pane-orphaned
+    title: Remote session keystrokes stop reaching the shell because the authority target host is torn down
+    status: fixed
+    discovered_at: 2026-07-26T01:56:00Z
+    fixed_at: 2026-07-26T02:50:00Z
+    symptom: >
+      On 192.168.31.182 the two mirrored remote sessions ignore keyboard input.
+      The server keeps sending RawPtyInput (logged as send_command_to_host), but
+      the typed characters never appear in the target bash/vi panes.
+    root_cause: >
+      The authority-side `pipe-pane` is not dropped by tmux layout changes.
+      It is explicitly cleared by `cleanup_authority_pane_binding` during the
+      normal teardown of the in-process authority target-host thread. That
+      teardown is triggered when the inbound gRPC session instance ends: the
+      node-ingress server calls
+      `SessionSyncAuthorityManager::stop_hosts_bound_to_session`, which sets the
+      host's `running` flag to false. The live-authority bridge then shuts down
+      the Unix socket, the target-host event loop receives `TransportClosed`,
+      exits, and runs `deactivate_mirror` + `cleanup_authority_pane_binding`.
+      The latter calls `clear_output_pipe_if_owner`, removing `pipe-pane` and
+      the pane-died hook. The `__remote-authority-output-pump` sidecar survives
+      as an orphan (reading EOF), but the target-host thread is gone, so all
+      subsequent `RawPtyInput` envelopes are written to a dead route and lost.
+    fix_plan: >
+      Remove the `authority_manager.stop_hosts_bound_to_session(&session_instance_id)`
+      calls from `RemoteNodeTransportEvent::SessionClosed` and `TransportFailed` in
+      `remote_node_ingress_server_runtime.rs`. The authority target host's lifetime
+      should follow the remote target session, not the inbound gRPC routing session.
+      A stale host is still replaced when a new client session attaches to the same
+      target via `SessionSyncAuthorityManager::ensure_authority_host`.
+      `SessionSyncAuthorityManager::stop_hosts_bound_to_session` itself is removed
+      because it is no longer used.
+    evidence:
+      - "tmux list-panes -F '#{pane_pipe}' shows 0 for both target panes %3 and %4"
+      - "@waitagent_pane_pipe_owner option is absent on both panes"
+      - "no __remote-authority-target-host sidecar process is running; target hosts run in-process inside the node-ingress server (pid 55984)"
+      - "/proc/<output-pump>/fd stdin/stdout sockets are unconnected (peer closed)"
+      - "diag log for ab2baecd00742584: bridge_live_authority_stream exits Ok at 1785029998.841, target host sends TargetExited at 1785029998.841, output pump stdin EOF at 1785029998.843"
+      - "diag log for b6138bf938e460c3: same pattern at 1785028220.600-0.603"
+      - "between mirror acceptance and host exit there is no pane move, break, join, or resize event in the log"
+    affected_paths:
+      - src/runtime/remote_authority/remote_authority_target_host_runtime.rs
+      - src/runtime/remote_node/remote_node_ingress_server_runtime.rs
+      - src/runtime/remote_node/remote_node_session_sync_runtime.rs
+      - src/runtime/remote_node/remote_node_session_sync_runtime/sync_helpers.rs
+      - src/infra/tmux_backend/remote.rs
+    notes: >
+      Fix implemented: `stop_hosts_bound_to_session` removed from the two gRPC
+      session-close handlers in `remote_node_ingress_server_runtime.rs`. The
+      stale-host replacement logic in `ensure_authority_host` is retained, so a
+      new client session attaching to the same target still cleanly replaces the
+      old host. cargo fmt and cargo check are clean; targeted tests for
+      remote_main_slot, session_sync, and ingress_server pass.
+      Live validation on 192.168.31.182 is still pending.
+  - id: blocker.engine-mode-remote-reconnect-mirror-not-reactivated
+    title: Engine mode does not reopen remote mirror after reconnect, leaving input stuck
+    status: fixed
+    discovered_at: 2026-07-26T10:20:00Z
+    fixed_at: 2026-07-26T02:50:00Z
+    symptom: >
+      After a network disconnect/reconnect on a remote session rendered in engine
+      mode, keyboard input stops reaching the remote shell. The same reconnect
+      path in raw mode recovers and input works.
+    root_cause: >
+      In `remote_main_slot_pane_runtime.rs` the `GeometryResyncDue` event is
+      handled differently depending on `RemoteRenderMode`. In raw mode
+      (`:549-681`) a geometry mismatch calls `activate_remote_surface_binding`,
+      which sends a fresh `OpenMirrorRequest`, recreates the authority target
+      host, and re-installs the tmux `pipe-pane`. In engine mode (`:490-548`)
+      the same event only resizes the internal TerminalEngine and reports the
+      clamped capacity back to the authority; it never reopens the mirror.
+      Once the authority target host has been torn down (e.g. because the
+      inbound gRPC session closed during the network flap), engine mode has no
+      self-healing path. The local pane keeps the old `RemoteAttachmentBinding`
+      and keeps sending `RawPtyInput` envelopes to a dead route, while raw mode
+      rebuilds the mirror and resumes input.
+    fix_plan: >
+      In the `GeometryResyncDue` engine branch, before the resize-only path,
+      check `needs_remote_surface_activation` (binding missing, mirror pending, or
+      mirror needed). If the authority transport is connected, call
+      `activate_remote_surface_binding` with the clamped effective size. This
+      reuses the same activation helper as raw mode and the `Connected` event
+      handler, so engine mode now has a self-healing reconnect path. The
+      `Connected` handler is also refactored to use the same helper.
+    evidence:
+      - "raw branch at remote_main_slot_pane_runtime.rs:549-681 calls activate_remote_surface_binding on geometry mismatch"
+      - "engine branch at remote_main_slot_pane_runtime.rs:490-548 only calls observer.resize_terminal / sync_or_defer_remote_pty_size / engine_render.request_full_redraw"
+      - "192.168.31.182 diag log: ab2baecd00742584 mirror re-accepted at 1785029998.274, authority host exits at 1785029998.841, no further OpenMirror after that"
+      - "192.168.31.182 diag log: send_command_to_host continues after host exit but pipe-pane is already cleared"
+    affected_paths:
+      - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
+      - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+    notes: >
+      Fix implemented: `needs_remote_surface_activation` helper added and used in
+      both the `Connected` handler and the `GeometryResyncDue` engine branch.
+      cargo fmt and cargo check are clean; targeted tests for remote_main_slot,
+      session_sync, and ingress_server pass. Live validation on
+      192.168.31.182 is still pending.

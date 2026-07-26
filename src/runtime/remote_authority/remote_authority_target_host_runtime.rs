@@ -11,7 +11,8 @@ use crate::infra::per_server_geometry_store::{
 };
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxPaneId, TmuxSessionName, TmuxSocketName,
-    TmuxWorkspaceHandle, WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
+    TmuxWorkspaceHandle, WAITAGENT_GEOMETRY_APPLYING_OPTION,
+    WAITAGENT_RUNTIME_COMMAND_OVERRIDE_OPTION,
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
@@ -851,10 +852,6 @@ where
                     };
                     if !geometry_hooks_registered {
                         geometry_hooks_registered = true;
-                        let hook_command = remote_authority_geometry_event_hook_command(
-                            self.current_executable.to_string_lossy().as_ref(),
-                            &event_socket_path,
-                        );
                         // The hook target must be the pane's real tmux
                         // session; the published target session name is a
                         // logical id that may not exist as a tmux session.
@@ -863,6 +860,12 @@ where
                             .pane_session_name(&command.socket_name, &pane)
                             .unwrap_or_else(|_| command.target_session_name.clone());
                         for hook_name in GEOMETRY_EVENT_HOOKS {
+                            let hook_command = remote_authority_geometry_event_hook_command(
+                                self.current_executable.to_string_lossy().as_ref(),
+                                &event_socket_path,
+                                &hook_session,
+                                hook_name,
+                            );
                             if let Err(error) = self
                                 .gateway
                                 .set_session_hook(
@@ -1513,8 +1516,54 @@ pub fn run_pane_died_event(command: RemoteAuthorityPaneDiedCommand) -> Result<()
 pub fn run_geometry_event(
     command: crate::cli::RemoteAuthorityGeometryEventCommand,
 ) -> Result<(), LifecycleError> {
+    if geometry_event_is_self_triggered(&command) {
+        return Ok(());
+    }
     send_geometry_changed_event(&command.event_socket_path);
     Ok(())
+}
+
+const GEOMETRY_SELF_TRIGGER_SUPPRESS_MS: u128 = 500;
+
+fn geometry_event_is_self_triggered(
+    command: &crate::cli::RemoteAuthorityGeometryEventCommand,
+) -> bool {
+    if command.hook_name.as_deref() != Some("window-layout-changed") {
+        return false;
+    }
+    let Some(session_name) = &command.session_name else {
+        return false;
+    };
+    // run-shell inherits $TMUX from the tmux server, so we can talk to the
+    // same server without knowing the socket path. Fail-open on any error.
+    let output = std::process::Command::new("tmux")
+        .args([
+            "show-options",
+            "-qv",
+            "-t",
+            &format!("={session_name}:"),
+            WAITAGENT_GEOMETRY_APPLYING_OPTION,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let value = String::from_utf8_lossy(&output.stdout);
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    let Ok(applied_ms) = value.parse::<u128>() else {
+        return false;
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    now_ms.saturating_sub(applied_ms) < GEOMETRY_SELF_TRIGGER_SUPPRESS_MS
 }
 
 fn send_geometry_changed_event(event_socket_path: &str) {
@@ -2172,12 +2221,18 @@ fn remote_authority_pane_died_hook_command(
 fn remote_authority_geometry_event_hook_command(
     executable: &str,
     event_socket_path: &Path,
+    session_name: &str,
+    hook_name: &str,
 ) -> String {
     let shell_command = [
         shell_escape(executable),
         shell_escape("__remote-authority-geometry-event"),
         shell_escape("--event-socket-path"),
         shell_escape(&event_socket_path.display().to_string()),
+        shell_escape("--session-name"),
+        shell_escape(session_name),
+        shell_escape("--hook-name"),
+        shell_escape(hook_name),
     ]
     .join(" ");
     format!(

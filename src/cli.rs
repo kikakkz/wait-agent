@@ -289,6 +289,8 @@ pub struct RemoteAuthorityPaneDiedCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteAuthorityGeometryEventCommand {
     pub event_socket_path: String,
+    pub session_name: Option<String>,
+    pub hook_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1098,12 +1100,16 @@ fn parse_remote_authority_geometry_event(
 ) -> Result<RemoteAuthorityGeometryEventCommand, CliError> {
     let mut iter = args.into_iter();
     let mut event_socket_path = None;
+    let mut session_name = None;
+    let mut hook_name = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--event-socket-path" => {
                 event_socket_path = Some(expect_value("--event-socket-path", &mut iter)?)
             }
+            "--session-name" => session_name = Some(expect_value("--session-name", &mut iter)?),
+            "--hook-name" => hook_name = Some(expect_value("--hook-name", &mut iter)?),
             "--help" | "-h" => {}
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
@@ -1112,6 +1118,8 @@ fn parse_remote_authority_geometry_event(
     Ok(RemoteAuthorityGeometryEventCommand {
         event_socket_path: event_socket_path
             .ok_or_else(|| CliError::MissingValue("--event-socket-path".to_string()))?,
+        session_name,
+        hook_name,
     })
 }
 
@@ -2299,6 +2307,29 @@ mod tests {
             Command::RemoteAuthorityPaneDied(command) => {
                 assert_eq!(command.event_socket_path, "/tmp/event.sock");
                 assert_eq!(command.pane_id, "%42");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hidden_remote_authority_geometry_event_command() {
+        match parse(&[
+            "waitagent",
+            "__remote-authority-geometry-event",
+            "--event-socket-path",
+            "/tmp/event.sock",
+            "--session-name",
+            "session-1",
+            "--hook-name",
+            "window-layout-changed",
+        ])
+        .command
+        {
+            Command::RemoteAuthorityGeometryEvent(command) => {
+                assert_eq!(command.event_socket_path, "/tmp/event.sock");
+                assert_eq!(command.session_name, Some("session-1".to_string()));
+                assert_eq!(command.hook_name, Some("window-layout-changed".to_string()));
             }
             other => panic!("unexpected command: {other:?}"),
         }

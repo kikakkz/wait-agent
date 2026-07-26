@@ -1524,7 +1524,13 @@ fn handle_transport_event(
         } => {
             sessions.remove(&session_instance_id);
             closed_session_instances.insert(session_instance_id.clone());
-            authority_manager.stop_hosts_bound_to_session(&session_instance_id);
+            // Do NOT stop authority hosts here. An authority target host's
+            // lifetime belongs to the remote target session, not to the inbound
+            // gRPC session that happens to be routing for it. Stopping the host
+            // clears the tmux pipe-pane and breaks keyboard input across a
+            // transient disconnect. A stale host is still replaced when a new
+            // client session attaches to the same target via
+            // SessionSyncAuthorityManager::ensure_authority_host.
             mark_discovered_node_offline_if_last_ingress_session(
                 publication_runtime,
                 sessions,
@@ -1539,7 +1545,8 @@ fn handle_transport_event(
             if let Some(session_instance_id) = session_instance_id {
                 sessions.remove(&session_instance_id);
                 closed_session_instances.insert(session_instance_id.clone());
-                authority_manager.stop_hosts_bound_to_session(&session_instance_id);
+                // Authority hosts are not tied to the inbound gRPC session; see
+                // the SessionClosed branch above.
             }
             if let Some(node_id) = node_id {
                 mark_discovered_node_offline_if_last_ingress_session(
