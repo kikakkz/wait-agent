@@ -32,7 +32,6 @@ use std::time::Duration;
 use super::{AuthorityTransportStatus, RemoteInteractSignal, RemoteInteractSurfaceSpec};
 
 const SIGWINCH: c_int = 28;
-const HIDE_CURSOR_ESCAPE: &str = "\x1b[?25l";
 const SHOW_CURSOR_ESCAPE: &str = "\x1b[?25h";
 pub(super) const CLEAR_SCREEN_HOME_ESCAPE: &str = "\x1b[2J\x1b[H";
 const TARGET_PRESENCE_MISS_GRACE_POLLS: usize = 4;
@@ -596,21 +595,23 @@ struct RawPtyInputRouteState {
 }
 
 pub(super) struct RemotePaneCursorGuard {
-    visible_on_drop: bool,
+    restore_on_drop: bool,
 }
 
 impl RemotePaneCursorGuard {
-    pub(super) fn hide() -> io::Result<Self> {
-        write_escape(HIDE_CURSOR_ESCAPE)?;
+    /// Returns a guard that shows the cursor when dropped. The engine renderer
+    /// now manages cursor visibility per frame, so we no longer hide the cursor
+    /// for the entire process lifetime.
+    pub(super) fn restore_on_drop() -> io::Result<Self> {
         Ok(Self {
-            visible_on_drop: true,
+            restore_on_drop: true,
         })
     }
 }
 
 impl Drop for RemotePaneCursorGuard {
     fn drop(&mut self) {
-        if self.visible_on_drop {
+        if self.restore_on_drop {
             let _ = write_escape(SHOW_CURSOR_ESCAPE);
         }
     }

@@ -30,8 +30,7 @@ impl RemoteRenderMode {
 
 /// Terminal modes the renderer proxies to the local pane tty so engine mode
 /// gets the capabilities raw passthrough gets for free: bracketed paste and
-/// mouse reporting. Cursor visibility (`?25`) is never proxied (the overlay
-/// is the cursor) and application cursor keys (`?1`) are handled on the input
+/// mouse reporting. Application cursor keys (`?1`) are handled on the input
 /// side instead.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ProxiedModes {
@@ -156,16 +155,19 @@ fn mouse_encoding_mode_code(encoding: MouseEncoding) -> Option<u16> {
 
 /// Emit the ANSI bytes that turn `prev` into `next` on a dumb full-size pane:
 /// autowrap stays disabled, a first/full frame clears the screen, every
-/// changed row is redrawn with an absolute CUP, and the cursor is painted as
-/// a reverse-video overlay (tmux only shows the hardware cursor in the
-/// focused pane). Rows and columns beyond the pane bounds are clipped.
+/// changed row is redrawn with an absolute CUP, and the real terminal cursor
+/// is moved to the remote PTY's logical cursor position. Rows and columns
+/// beyond the pane bounds are clipped.
 pub(crate) fn diff_frame_ansi(
     prev: Option<&ScreenSnapshot>,
     next: &ScreenSnapshot,
     pane_size: TerminalSize,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"\x1b[?7l");
+    // Hide the real cursor while redrawing rows so it does not visibly jump
+    // across the pane; visibility is restored at the logical cursor position
+    // at the end of the frame.
+    out.extend_from_slice(b"\x1b[?25l\x1b[?7l");
     let full_redraw = prev.is_none();
     if full_redraw {
         out.extend_from_slice(b"\x1b[2J");
@@ -179,26 +181,13 @@ pub(crate) fn diff_frame_ansi(
 
     let cursor_row = usize::from(next.cursor_row);
     let cursor_col = usize::from(next.cursor_col);
-    let cursor_changed = prev
-        .map(|prev| {
-            (prev.cursor_row, prev.cursor_col, prev.cursor_visible)
-                != (next.cursor_row, next.cursor_col, next.cursor_visible)
-        })
-        .unwrap_or(true);
 
     for row in 0..next.lines.len().min(pane_rows) {
-        let mut changed = full_redraw
+        let changed = full_redraw
             || prev.is_none_or(|prev| {
                 prev.lines.get(row) != next.lines.get(row)
                     || prev.styled_lines.get(row) != next.styled_lines.get(row)
             });
-        // A moved or visibility-toggled cursor invalidates its old and new
-        // rows so the overlay cell is restored/redrawn even when the row
-        // content itself is unchanged.
-        if !changed && cursor_changed {
-            changed =
-                row == cursor_row || prev.is_some_and(|prev| usize::from(prev.cursor_row) == row);
-        }
         if !changed {
             continue;
         }
@@ -207,18 +196,25 @@ pub(crate) fn diff_frame_ansi(
         out.extend_from_slice(format!("\x1b[{};1H\x1b[K{}", row + 1, line).as_bytes());
     }
 
-    if next.cursor_visible && cursor_row < pane_rows && cursor_col < pane_cols {
-        let plain = next.lines.get(cursor_row).map(String::as_str).unwrap_or("");
-        let cursor_char = cell_char_at_col(plain, cursor_col);
+    // Move the real terminal cursor to the logical cursor position and restore
+    // visibility according to the remote PTY state.
+    if cursor_row < pane_rows && cursor_col < pane_cols {
         out.extend_from_slice(
             format!(
-                "\x1b[{};{}H\x1b[7m{}\x1b[27m",
+                "\x1b[{};{}H{}",
                 cursor_row + 1,
                 cursor_col + 1,
-                cursor_char
+                if next.cursor_visible {
+                    "\x1b[?25h"
+                } else {
+                    "\x1b[?25l"
+                }
             )
             .as_bytes(),
         );
+    } else {
+        // Cursor is outside the local pane bounds; keep it hidden.
+        out.extend_from_slice(b"\x1b[?25l");
     }
 
     out
@@ -260,20 +256,6 @@ fn clip_styled_row(styled: &str, max_cols: usize) -> String {
         rendered.push_str("\x1b[0m");
     }
     rendered
-}
-
-/// Character displayed at a 0-based display column of a plain row; blank when
-/// the row is shorter than the column.
-fn cell_char_at_col(line: &str, col: usize) -> char {
-    let mut display_col = 0usize;
-    for ch in line.chars() {
-        let width = terminal_char_display_width(ch);
-        if display_col == col || display_col + width > col {
-            return ch;
-        }
-        display_col += width;
-    }
-    ' '
 }
 
 #[cfg(test)]
@@ -354,11 +336,14 @@ mod tests {
         let next = snapshot_for(8, 3, b"ab\r\ncd");
         let frame = frame_text(&diff_frame_ansi(None, &next, size(8, 3)));
 
-        assert!(frame.starts_with("\x1b[?7l\x1b[2J"));
+        assert!(frame.starts_with("\x1b[?25l\x1b[?7l\x1b[2J"));
         assert!(frame.contains("\x1b[1;1H\x1b[Kab"));
         assert!(frame.contains("\x1b[2;1H\x1b[Kcd"));
         assert!(frame.contains("\x1b[3;1H\x1b[K"));
         assert_eq!(emitted_row_count(frame.as_bytes()), 3);
+        // The real cursor is moved to the logical cursor position and shown.
+        // After "ab\r\ncd" the cursor is at row 2 col 3.
+        assert!(frame.contains("\x1b[2;3H\x1b[?25h"));
     }
 
     #[test]
@@ -369,6 +354,9 @@ mod tests {
 
         assert!(!frame.contains("\x1b[2J"));
         assert_eq!(emitted_row_count(frame.as_bytes()), 0);
+        // Cursor is hidden during redraw and restored at the logical position.
+        assert!(frame.starts_with("\x1b[?25l"));
+        assert!(frame.contains("\x1b[2;3H\x1b[?25h"));
     }
 
     #[test]
@@ -379,30 +367,38 @@ mod tests {
 
         assert_eq!(emitted_row_count(frame.as_bytes()), 1);
         assert!(frame.contains("\x1b[1;1H\x1b[KaZcd"));
+        // The real cursor ends at row 1 col 3 (after Z) and is shown.
+        assert!(frame.contains("\x1b[1;3H\x1b[?25h"));
     }
 
     #[test]
-    fn cursor_overlay_is_reverse_video_at_the_cursor_cell() {
+    fn real_cursor_is_positioned_and_shown_at_the_cursor_cell() {
         let prev = snapshot_for(8, 3, b"abcd");
         let next = snapshot_for(8, 3, b"abcd\x1b[2;3H");
         let frame = frame_text(&diff_frame_ansi(Some(&prev), &next, size(8, 3)));
 
         assert!(
-            frame.contains("\x1b[2;3H\x1b[7m \x1b[27m"),
-            "expected reverse-video blank at row 2 col 3: {frame:?}"
+            frame.contains("\x1b[2;3H\x1b[?25h"),
+            "expected real cursor at row 2 col 3: {frame:?}"
         );
-        // The previous cursor cell must be restored by re-emitting its row.
-        assert!(frame.contains("\x1b[1;1H\x1b[Kabcd"));
+        // No reverse-video overlay is emitted.
+        assert!(!frame.contains("\x1b[7m"));
+        // Only the cursor moved; the previous cursor row does not need redraw.
+        assert!(!frame.contains("\x1b[1;1H\x1b[Kabcd"));
     }
 
     #[test]
-    fn hidden_cursor_emits_no_overlay_and_restores_previous_cell() {
+    fn hidden_cursor_keeps_real_cursor_hidden_without_redraw() {
         let prev = snapshot_for(8, 3, b"abcd");
         let next = snapshot_for(8, 3, b"abcd\x1b[?25l");
         let frame = frame_text(&diff_frame_ansi(Some(&prev), &next, size(8, 3)));
 
         assert!(!frame.contains("\x1b[7m"));
-        assert!(frame.contains("\x1b[1;1H\x1b[Kabcd"));
+        // No row redraw is needed when only visibility changes.
+        assert!(!frame.contains("\x1b[1;1H\x1b[Kabcd"));
+        // The real cursor is hidden for the whole frame.
+        assert!(frame.starts_with("\x1b[?25l"));
+        assert!(frame.ends_with("\x1b[?25l"));
     }
 
     #[test]

@@ -221,8 +221,8 @@ impl RemoteMainSlotPaneRuntime {
         let mut target = self.resolve_remote_target(&spec.target, "remote interact surface")?;
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
-        let _cursor_guard = RemotePaneCursorGuard::hide().map_err(|error| {
-            LifecycleError::Io("failed to hide remote interact cursor".to_string(), error)
+        let _cursor_guard = RemotePaneCursorGuard::restore_on_drop().map_err(|error| {
+            LifecycleError::Io("failed to create remote interact cursor guard".to_string(), error)
         })?;
 
         let registry = RemoteConnectionRegistry::new();
