@@ -1,9 +1,12 @@
-use crate::cli::{Command, RemoteNetworkConfig};
+use crate::cli::{Command, RatatuiClientCommand, RatatuiNodeServerCommand, RemoteNetworkConfig};
 use crate::error::AppError;
 use crate::infra::tmux::{EmbeddedTmuxBackend, WaitagentSessionListEntry};
 use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
+use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
+use crate::runtime::ratatui_node_runtime::RatatuiNodeRuntime;
+use crate::runtime::ratatui_workspace_runtime::RatatuiWorkspaceRuntime;
 use crate::runtime::remote_authority_target_host_runtime::{
     run_geometry_event, run_pane_died_event, RemoteAuthorityTargetHostRuntime,
 };
@@ -27,18 +30,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // dedicated event-driven pane runtimes.
 pub struct CommandDispatcher {
     network: RemoteNetworkConfig,
+    ratatui: bool,
 }
 
 impl CommandDispatcher {
     pub fn from_build_env_with_network_and_command(
         network: RemoteNetworkConfig,
+        ratatui: bool,
         _command: &Command,
     ) -> Result<Self, AppError> {
-        Ok(Self { network })
+        Ok(Self { network, ratatui })
     }
 
     pub fn dispatch(&self, command: Command) -> Result<(), AppError> {
         match command {
+            Command::Workspace if self.ratatui => self
+                .ratatui_workspace()?
+                .run_workspace_entry()
+                .map_err(AppError::from),
             Command::Workspace => self
                 .workspace()?
                 .run_workspace_entry()
@@ -224,17 +233,40 @@ impl CommandDispatcher {
                 .layout()?
                 .run_chrome_refresh_all()
                 .map_err(AppError::from),
+            Command::Attach(command) if self.ratatui => self
+                .ratatui_workspace()?
+                .attach(command.target.unwrap_or_else(|| "1".to_string()))
+                .map_err(AppError::from),
             Command::Attach(command) => self
                 .workspace()?
                 .run_attach(command)
                 .map_err(AppError::from),
+            Command::List if self.ratatui => {
+                self.ratatui_workspace()?.list().map_err(AppError::from)
+            }
             Command::List => self.run_list(),
             Command::Cleanup => self.run_cleanup(),
+            Command::Detach(command) if self.ratatui => self
+                .ratatui_workspace()?
+                .detach(command.target.unwrap_or_else(|| "1".to_string()))
+                .map_err(AppError::from),
             Command::Detach(command) => self
                 .workspace()?
                 .run_detach(command)
                 .map_err(AppError::from),
+            Command::Stop(command) if self.ratatui => self
+                .ratatui_workspace()?
+                .stop(command.target.unwrap_or_else(|| "1".to_string()))
+                .map_err(AppError::from),
             Command::Stop(command) => self.workspace()?.run_stop(command).map_err(AppError::from),
+            Command::RatatuiNodeServer(command) => self
+                .ratatui_node_server(command)
+                .and_then(|runtime| runtime.run().map_err(AppError::from))
+                .map_err(AppError::from),
+            Command::RatatuiClient(command) => self
+                .ratatui_client(command)
+                .and_then(|runtime| runtime.run().map_err(AppError::from))
+                .map_err(AppError::from),
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");
@@ -360,6 +392,25 @@ impl CommandDispatcher {
     fn layout(&self) -> Result<WorkspaceLayoutRuntime, AppError> {
         WorkspaceLayoutRuntime::from_build_env_with_network(self.network.clone())
             .map_err(AppError::from)
+    }
+
+    fn ratatui_workspace(&self) -> Result<RatatuiWorkspaceRuntime, AppError> {
+        RatatuiWorkspaceRuntime::from_build_env_with_network(self.network.clone())
+            .map_err(AppError::from)
+    }
+
+    fn ratatui_node_server(
+        &self,
+        command: RatatuiNodeServerCommand,
+    ) -> Result<RatatuiNodeRuntime, AppError> {
+        RatatuiNodeRuntime::from_session(command.session_name).map_err(AppError::from)
+    }
+
+    fn ratatui_client(
+        &self,
+        command: RatatuiClientCommand,
+    ) -> Result<RatatuiClientRuntime, AppError> {
+        RatatuiClientRuntime::from_session(command.session_name).map_err(AppError::from)
     }
 }
 

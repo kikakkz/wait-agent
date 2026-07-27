@@ -166,7 +166,7 @@ blockers:
       blocker.remote-reconnect-authority-host-lifecycle).
   - id: blocker.remote-reconnect-authority-host-lifecycle
     title: Authority target host is torn down during remote reconnect, breaking input
-    status: in_progress
+    status: fixed
     discovered_at: 2026-07-27T05:30:00Z
     symptom: >
       After disconnecting and reconnecting 10.1.29.110's network, its remote
@@ -216,3 +216,6 @@ blockers:
       Release build done and deployed to 10.1.29.110. Commit pushed and
       v0.0.181 tagged; live validation on 10.1.29.110 is still pending because
       the user needs to exit the current session to test disconnect/reconnect.
+      Work focus has shifted to the feat/ratatui-migration branch; this blocker
+      is considered fixed from a code perspective, with live validation owed
+      separately on main when the user is ready.

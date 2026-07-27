@@ -1,0 +1,40 @@
+id: task.ratatui-replace-tmux
+kind: task
+version: 1
+title: replace tmux with ratatui as the local workspace UI substrate
+status: in_progress
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  issue: null
+  why:
+    - tmux multi-process pane architecture causes consistency, geometry, and lifecycle issues
+    - ratatui + crossterm + mature terminal emulator libraries can support a single-process TUI
+    - a parallel --ratatui path allows incremental migration without breaking the existing tmux path
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-replace-tmux.yaml
+  reference: queued
+depends_on:
+  - task.github-issue-18-remote-dead-panes-accumulate.done
+done_criteria:
+  - --ratatui flag launches a complete ratatui workspace with sidebar, footer, and main pane
+  - ratatui path supports session detach/attach and server/client separation
+  - footer, sidebar, and main pane render real session state
+  - tmux backend is removed from the default build path
+  - cargo fmt --check passes
+  - cargo check passes
+  - relevant test suites pass
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo test --features ratatui -- --test-threads=1
+touched_paths:
+  - src/cli.rs
+  - src/command/dispatch.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+  - src/ui/*.rs
+  - src/terminal/*.rs
+  - src/runtime/workspace/*.rs
+  - src/infra/tmux_backend.rs
+notes:
+  - Umbrella task; concrete implementation is split into phase tasks.

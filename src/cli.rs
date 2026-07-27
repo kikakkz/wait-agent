@@ -19,6 +19,7 @@ pub fn default_remote_node_port() -> u16 {
 pub struct Cli {
     pub network: RemoteNetworkConfig,
     pub network_explicit: bool,
+    pub ratatui: bool,
     pub command: Command,
 }
 
@@ -186,6 +187,8 @@ pub enum Command {
     Cleanup,
     Detach(DetachCommand),
     Stop(StopCommand),
+    RatatuiNodeServer(RatatuiNodeServerCommand),
+    RatatuiClient(RatatuiClientCommand),
     Help(String),
     Version,
 }
@@ -203,6 +206,16 @@ pub struct DetachCommand {
 #[derive(Debug, Clone, Default)]
 pub struct StopCommand {
     pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RatatuiNodeServerCommand {
+    pub session_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RatatuiClientCommand {
+    pub session_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -482,17 +495,20 @@ impl Cli {
             return Ok(Self {
                 network: RemoteNetworkConfig::default(),
                 network_explicit: false,
+                ratatui: false,
                 command: Command::Help(help_text()),
             });
         }
 
         args.remove(0);
         let (network, network_explicit) = parse_global_network_config(&mut args)?;
+        let ratatui = parse_global_feature_flags(&mut args)?;
 
         if args.is_empty() {
             return Ok(Self {
                 network,
                 network_explicit,
+                ratatui,
                 command: Command::Workspace,
             });
         }
@@ -702,6 +718,14 @@ impl Cli {
                 args.remove(0);
                 Command::Stop(parse_stop(args)?)
             }
+            "__ratatui-node-server" => {
+                args.remove(0);
+                Command::RatatuiNodeServer(parse_ratatui_node_server(args)?)
+            }
+            "__ratatui-client" => {
+                args.remove(0);
+                Command::RatatuiClient(parse_ratatui_client(args)?)
+            }
             "version" => Command::Version,
             "help" => Command::Help(help_text()),
             "--version" | "-V" => Command::Version,
@@ -719,9 +743,28 @@ impl Cli {
         Ok(Self {
             network,
             network_explicit,
+            ratatui,
             command,
         })
     }
+}
+
+fn parse_global_feature_flags(args: &mut Vec<String>) -> Result<bool, CliError> {
+    let mut ratatui = false;
+
+    loop {
+        let Some(flag) = args.first().cloned() else {
+            break;
+        };
+        if flag == "--ratatui" {
+            args.remove(0);
+            ratatui = true;
+        } else {
+            break;
+        }
+    }
+
+    Ok(ratatui)
 }
 
 fn parse_global_network_config(
@@ -791,6 +834,48 @@ fn parse_global_network_config(
     }
 
     Ok((network, explicit))
+}
+
+fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = RatatuiNodeServerCommand::default();
+    command.session_name = "1".to_string();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(command),
+            "--session-name" => {
+                command.session_name = iter
+                    .next()
+                    .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
+            }
+            _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
+}
+
+fn parse_ratatui_client(args: Vec<String>) -> Result<RatatuiClientCommand, CliError> {
+    let mut iter = args.into_iter();
+    let mut command = RatatuiClientCommand::default();
+    command.session_name = "1".to_string();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(command),
+            "--session-name" => {
+                command.session_name = iter
+                    .next()
+                    .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
+            }
+            _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+
+    Ok(command)
 }
 
 fn parse_attach(args: Vec<String>) -> Result<AttachCommand, CliError> {
@@ -1882,8 +1967,8 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
-        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>]",
-        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<target>]",
+        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>]",
+        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<target>]",
         "  waitagent ls",
         "  waitagent cleanup",
         "  waitagent detach [<target>]",
@@ -1931,6 +2016,14 @@ mod tests {
         assert!(matches!(cli.command, Command::Workspace));
         assert_eq!(cli.network.port, default_remote_node_port());
         assert!(cli.network.connect.is_none());
+        assert!(!cli.ratatui);
+    }
+
+    #[test]
+    fn parses_ratatui_flag() {
+        let cli = parse(&["waitagent", "--ratatui"]);
+        assert!(matches!(cli.command, Command::Workspace));
+        assert!(cli.ratatui);
     }
 
     #[test]

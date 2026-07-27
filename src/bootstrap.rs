@@ -18,6 +18,7 @@ pub fn run() -> Result<(), AppError> {
     let dispatcher =
         crate::command::dispatch::CommandDispatcher::from_build_env_with_network_and_command(
             network,
+            cli.ratatui,
             &cli.command,
         )?;
 

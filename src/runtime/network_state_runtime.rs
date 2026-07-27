@@ -218,6 +218,14 @@ fn recover_network_config_for_command(
             // Network config is passed via global CLI args (prepend_global_network_args).
             None
         }
+        Command::RatatuiNodeServer(_command) => {
+            // The ratatui node server receives network config via explicit global CLI args.
+            None
+        }
+        Command::RatatuiClient(_command) => {
+            // The ratatui client receives network config via explicit global CLI args.
+            None
+        }
         Command::RemoteTargetBindPublication(command) => {
             recover_network_config_for_socket(backend, &command.socket_name)
         }

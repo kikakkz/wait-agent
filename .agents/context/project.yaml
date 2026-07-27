@@ -6,26 +6,28 @@ summary:
   repo_type: single_crate_rust_repo
   language: rust
   package_manager: cargo
-  architecture_style: tmux_first_local_workspace_runtime
-  active_business_goal: resume mirrored network interaction on top of the accepted tmux-first local workspace baseline
+  architecture_style: ratatui_first_local_workspace_runtime
+  active_business_goal: replace tmux with ratatui as the local workspace UI substrate while preserving distributed session capabilities
   framework_policy: prefer mature maintained Rust components over custom infrastructure, and avoid weakly maintained dependencies across the codebase
 current_phase:
-  phase_id: phase-2
-  phase_title: network aggregation MVP
-  stage_id: remote-network-completion
-  stage_title: close the remaining cross-host interaction gaps on top of the accepted shared catalog and routing boundary
+  phase_id: phase-3
+  phase_title: ratatui-first workspace runtime
+  stage_id: ratatui-footer-state
+  stage_title: migrate the footer status bar to a real ratatui widget backed by node-server state
 current_focus:
-  default_task_id: task.t5-08c4d3b
-  focus_statement: the remote transport, trust, replay, session export, and owner-lifecycle baselines are now fixed enough; active work now lands explicit session-scoped live-mirror control so opened remote sessions stop falling back to placeholder-only state
+  default_task_id: task.ratatui-phase-1-footer
+  focus_statement: render the footer status bar with real session state in the ratatui client, building on the phase-0 server/client skeleton
 upcoming_focus:
-  - keep `task.t5-08c4d3c` focused on PTY-owner mirror lifecycle rather than reopening protocol shape
-  - keep `task.t5-08c4d3d` focused on visible parity and final cross-host validation once mirror control exists
+  - migrate footer state bar to ratatui widget
+  - migrate sidebar session catalog and navigation to ratatui
+  - implement main pane PTY with alacritty_terminal
+  - remove tmux backend once ratatui path is feature-complete
+  - activate distributed control topologies on the server/client foundation
 source_of_truth:
+  - docs/ratatui-replace-tmux-plan.md
   - docs/execution-status-board.md
   - docs/remote-network-completion-plan.md
   - docs/remote-node-connection-architecture.md
   - docs/local-acceptance-checklist.md
   - docs/architecture.md
-  - docs/tmux-first-workspace-plan.md
-  - docs/tmux-first-runtime-architecture.md
   - docs/functional-design.md

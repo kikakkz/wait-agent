@@ -44,6 +44,11 @@ pub use workspace::workspace_runtime;
 
 pub mod session_lifecycle;
 
+// Ratatui migration path
+pub mod ratatui_client_runtime;
+pub mod ratatui_node_runtime;
+pub mod ratatui_workspace_runtime;
+
 // Standalone modules remaining in runtime root
 pub mod agent_signal_runtime;
 pub mod agent_signal_sender_bundle;

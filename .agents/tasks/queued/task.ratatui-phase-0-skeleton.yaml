@@ -11,8 +11,8 @@ design_ref:
     - first phase must prove the parallel ratatui path works end-to-end before migrating real UI components
     - establishes the server/client split that detach and future cloud capabilities depend on
 source_of_truth:
-  file: .agents/tasks/current.yaml
-  reference: current
+  file: .agents/tasks/queued/task.ratatui-phase-0-skeleton.yaml
+  reference: queued
 depends_on:
   - task.ratatui-replace-tmux.in_progress
 done_criteria:
@@ -48,4 +48,3 @@ notes:
   - This phase intentionally uses placeholder widgets; real footer/sidebar/main-pane content follows in later phases.
   - Session/socket isolation is per-UID (like tmux) rather than per-workspace_dir.
   - Focus and chrome keybindings align with the existing tmux path: Ctrl+Right focuses sidebar, Left returns to main, q/Ctrl+B d detaches.
-  - Previous task task.github-issue-18-remote-dead-panes-accumulate is done; focus has shifted to the ratatui migration branch.

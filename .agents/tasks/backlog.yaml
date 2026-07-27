@@ -19,6 +19,12 @@ active:
   - id: task.tmux-style-1
     title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
     status: done
+  - id: task.ratatui-replace-tmux
+    title: replace tmux with ratatui as the local workspace UI substrate
+    status: in_progress
+  - id: task.ratatui-phase-0-skeleton
+    title: add --ratatui flag and tmux-style multi-session server/client skeleton with attach/detach/ls/stop
+    status: done
 next:
   - id: task.event-r2a
     title: replace cross-session attach switching with fixed-chrome main-slot target activation
@@ -527,6 +533,21 @@ next:
     status: ready
   - id: task.bug-remote-main-slot-snapshot-clobber
     title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
+    status: ready
+  - id: task.ratatui-phase-1-footer
+    title: render real footer status bar with ratatui widget
+    status: ready
+  - id: task.ratatui-phase-2-sidebar
+    title: render real sidebar session catalog and navigation with ratatui
+    status: ready
+  - id: task.ratatui-phase-3-main-pane
+    title: implement main pane PTY with alacritty_terminal
+    status: ready
+  - id: task.ratatui-phase-4-remove-tmux
+    title: remove tmux backend once ratatui path is stable
+    status: ready
+  - id: task.ratatui-phase-5-cloud
+    title: activate distributed control topologies on the server/client foundation
     status: ready
 templates:
   - id: task-template.local-acceptance-cycle

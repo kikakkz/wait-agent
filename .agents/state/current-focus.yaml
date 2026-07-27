@@ -1,8 +1,8 @@
 kind: state
 version: 1
-current_task: task.github-issue-18-remote-dead-panes-accumulate
+current_task: task.ratatui-phase-1-footer
 focus_statement: >
-  active task is GitHub issue #18: remote sessions remain visible and dead wa-hidden panes accumulate after client hosts power off. Need to analyze the root cause in the lifecycle/catalog path that should react to node offline events by hiding or removing remote targets and cleaning up dead hidden panes.
+  active task is ratatui migration phase 1: render the footer status bar with real session state in the ratatui client. Build on the phase-0 server/client skeleton by having the node server maintain a minimal session catalog and stream snapshots to the client.
 last_updated_from:
-  file: .agents/tasks/current.yaml
-  reference: task.github-issue-18-remote-dead-panes-accumulate.in_progress
+  file: .agents/tasks/backlog.yaml
+  reference: task.ratatui-phase-1-footer.ready
