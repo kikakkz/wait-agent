@@ -263,6 +263,15 @@ impl TerminalEngine {
         std::mem::take(&mut self.osc52_queue)
     }
 
+    /// Plain-text scrollback lines that have rolled off the normal screen since
+    /// the last drain. Engine-mode rendering emits these to the local pane
+    /// before drawing the current frame so tmux copy-mode captures full history.
+    /// Only the normal buffer is bridged: alternate-screen applications (vim,
+    /// tmux, full-screen TUIs) should not pollute the local scrollback.
+    pub fn drain_scrollback_lines(&mut self) -> Vec<String> {
+        self.normal.drain_scrollback_lines()
+    }
+
     fn active_buffer(&self) -> &ScreenBuffer {
         if self.alternate_screen_active {
             &self.alternate
@@ -623,6 +632,10 @@ struct ScreenBuffer {
     current_style: TextStyle,
     saved_cursor: SavedCursorState,
     last_char: Option<char>,
+    /// Number of scrollback lines already emitted to the local pane. Used by
+    /// engine-mode rendering to bridge the engine's internal scrollback to the
+    /// local tmux pane scrollback without cloning the whole history each frame.
+    scrollback_emitted_count: usize,
 }
 
 impl ScreenBuffer {
@@ -640,7 +653,25 @@ impl ScreenBuffer {
             current_style: TextStyle::default(),
             saved_cursor: SavedCursorState::default(),
             last_char: None,
+            scrollback_emitted_count: 0,
         }
+    }
+
+    /// Return the plain-text scrollback lines that have not been emitted yet
+    /// and advance the emitted cursor. The styled scrollback is kept for
+    /// potential future use; plain text is sufficient for tmux scrollback.
+    fn drain_scrollback_lines(&mut self) -> Vec<String> {
+        let total = self.scrollback.len();
+        if total <= self.scrollback_emitted_count {
+            return Vec::new();
+        }
+        let new_lines: Vec<String> = self
+            .scrollback
+            .range(self.scrollback_emitted_count..total)
+            .cloned()
+            .collect();
+        self.scrollback_emitted_count = total;
+        new_lines
     }
 
     /// Truncates or pads the cell grid in place without reflowing content.
@@ -1206,6 +1237,9 @@ impl ScreenBuffer {
                 while self.scrollback.len() > MAX_SCROLLBACK_LINES {
                     self.scrollback.pop_front();
                     self.styled_scrollback.pop_front();
+                    // Keep the emitted cursor aligned with the trimmed queue so
+                    // drain_scrollback_lines never reports stale indices.
+                    self.scrollback_emitted_count = self.scrollback_emitted_count.saturating_sub(1);
                 }
             }
             self.cells.insert(

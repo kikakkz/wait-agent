@@ -178,6 +178,13 @@ impl RemoteObserverRuntime {
         self.terminal.drain_osc52()
     }
 
+    /// Scrollback lines that rolled off the normal screen since the last drain.
+    /// Engine-mode rendering emits these to the local pane so tmux copy-mode
+    /// captures the full remote session history.
+    pub fn drain_scrollback_lines(&mut self) -> Vec<String> {
+        self.terminal.drain_scrollback_lines()
+    }
+
     pub fn application_cursor_keys(&self) -> bool {
         self.terminal.application_cursor_keys()
     }

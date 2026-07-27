@@ -1410,3 +1410,66 @@ fn engine_collects_osc52_and_swallows_other_osc() {
     assert!(engine.drain_osc52().is_empty());
     assert_eq!(engine.snapshot().window_title.as_deref(), Some("title"));
 }
+
+#[test]
+fn engine_drains_scrollback_lines_incrementally() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 5,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"one\r\ntwo\r\nthree");
+    assert_eq!(engine.drain_scrollback_lines(), vec!["one  ".to_string()]);
+    assert!(engine.drain_scrollback_lines().is_empty());
+
+    engine.feed(b"\r\nfour");
+    assert_eq!(engine.drain_scrollback_lines(), vec!["two  ".to_string()]);
+}
+
+#[test]
+fn engine_does_not_bridge_alternate_buffer_scrollback() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 2,
+        cols: 5,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.feed(b"one\r\ntwo\r\nthree");
+    assert_eq!(engine.drain_scrollback_lines(), vec!["one  ".to_string()]);
+
+    // While the alternate screen is active, scrolling stays in the alternate
+    // buffer and must not add to the normal-buffer scrollback bridge.
+    engine.feed(b"\x1b[?47hthree\r\nfour\r\nfive");
+    assert!(engine.drain_scrollback_lines().is_empty());
+
+    // Returning to the normal screen resumes draining the queued normal
+    // scrollback, but still skips anything produced in the alternate buffer.
+    engine.feed(b"\x1b[?47l\r\nsix");
+    assert_eq!(engine.drain_scrollback_lines(), vec!["two  ".to_string()]);
+}
+
+#[test]
+fn engine_scrollback_drain_handles_trim() {
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 1,
+        cols: 10,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    // Push enough lines to exceed MAX_SCROLLBACK_LINES. With a 1-row screen,
+    // each completed line adds one scrollback line. Use a 10-column width so
+    // "line10004" (9 chars) does not wrap and create extra scrollback rows.
+    for i in 0..10_005 {
+        engine.feed(format!("line{i:04}\r\n").as_bytes());
+    }
+
+    let drained = engine.drain_scrollback_lines();
+    assert_eq!(drained.len(), 10_000);
+    // The oldest five lines were trimmed, so the first drained line is line0005.
+    assert_eq!(drained[0], "line0005  ");
+    assert_eq!(drained[9_999], "line10004 ");
+}

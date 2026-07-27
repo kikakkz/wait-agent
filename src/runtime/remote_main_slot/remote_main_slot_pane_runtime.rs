@@ -758,6 +758,17 @@ impl RemoteMainSlotPaneRuntime {
                         // Terminal query replies (DA/CPR/OSC) go back to the
                         // remote PTY so probing TUIs do not hang.
                         forward_engine_replies(&mut observer, &raw_input_route, &registry);
+                        // Bridge lines that rolled off the remote normal screen
+                        // into the local pane so tmux copy-mode captures history.
+                        let scrollback_lines = observer.drain_scrollback_lines();
+                        if !scrollback_lines.is_empty() {
+                            let mut scrollback_output = Vec::new();
+                            for line in scrollback_lines {
+                                scrollback_output.extend_from_slice(line.as_bytes());
+                                scrollback_output.extend_from_slice(b"\r\n");
+                            }
+                            write_remote_raw_output(&scrollback_output)?;
+                        }
                         let pane_size = current_remote_surface_size(&spec, &terminal);
                         let proxied_modes = ProxiedModes {
                             bracketed_paste: observer.bracketed_paste(),
