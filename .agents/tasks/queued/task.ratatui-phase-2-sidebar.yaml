@@ -12,8 +12,8 @@ design_ref:
     - footer menu popup replaces the tmux path's interactive footer menu for common actions
     - completing both surfaces makes the ratatui client self-sufficient for basic workspace operations
 source_of_truth:
-  file: .agents/tasks/current.yaml
-  reference: current
+  file: .agents/tasks/queued/task.ratatui-phase-2-sidebar.yaml
+  reference: queued
 depends_on:
   - task.ratatui-phase-1-footer.done
 done_criteria:

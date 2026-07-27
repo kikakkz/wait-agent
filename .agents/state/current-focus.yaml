@@ -1,10 +1,10 @@
 kind: state
 version: 1
-current_task: task.ratatui-phase-1-footer
+current_task: task.ratatui-phase-2-sidebar
 focus_statement: >
-  ratatui migration phase 1 is complete: the footer status bar now renders real session state
-  from the node server (active session, session list, listen/connect indicators). Ready to move
-  to phase 2 (real sidebar session catalog and navigation) once confirmed.
+  active task is ratatui migration phase 2: build the real sidebar session catalog with
+  navigation (Up/Down + Enter to switch sessions) and add the Ctrl+M footer menu popup
+  for common actions. Footer menu replaces the tmux path's interactive menu.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.ratatui-phase-1-footer.done
+  reference: task.ratatui-phase-2-sidebar.in_progress

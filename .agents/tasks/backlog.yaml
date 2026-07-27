@@ -538,8 +538,8 @@ next:
     title: render real footer status bar with ratatui widget
     status: done
   - id: task.ratatui-phase-2-sidebar
-    title: render real sidebar session catalog and navigation with ratatui
-    status: ready
+    title: render real sidebar session catalog, navigation, and footer menu popup with ratatui
+    status: in_progress
   - id: task.ratatui-phase-3-main-pane
     title: implement main pane PTY with alacritty_terminal
     status: ready
