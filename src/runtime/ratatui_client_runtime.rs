@@ -1,7 +1,8 @@
+use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot, SessionView};
+use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -21,11 +22,18 @@ use std::time::Duration;
 /// Ratatui TUI client: connects to a session's node server and renders the workspace chrome.
 pub struct RatatuiClientRuntime {
     session_name: String,
+    network: RemoteNetworkConfig,
 }
 
 impl RatatuiClientRuntime {
-    pub fn from_session(session_name: String) -> Result<Self, LifecycleError> {
-        Ok(Self { session_name })
+    pub fn from_session(
+        session_name: String,
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            session_name,
+            network,
+        })
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
@@ -108,6 +116,7 @@ impl RatatuiClientRuntime {
             snapshot,
             server_rx,
             &self.session_name,
+            &self.network,
         );
         let _ = restore_terminal();
 
@@ -130,29 +139,20 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-fn spawn_connect_popup(session_name: &str) -> Result<(), LifecycleError> {
-    let executable = current_waitagent_executable()?;
-
-    // Hand the terminal back to the shell so the existing connect pane popup
-    // can take over with its own raw-mode / alternate-screen setup.
-    let _ = restore_terminal();
-
-    let result = std::process::Command::new(&executable)
-        .arg("--ratatui")
-        .arg("__ratatui-connect-remote-host-pane")
-        .arg("--session-name")
-        .arg(session_name)
-        .status()
-        .map_err(|error| {
-            LifecycleError::Io(
-                "failed to spawn connect remote host popup".to_string(),
-                error,
-            )
-        });
-
-    // Re-enter ratatui TUI raw mode after the popup closes.
-    let _ = init_terminal();
-    result.map(|_| ())
+fn run_connect_popup(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    session_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Result<(), LifecycleError> {
+    let socket_path = ratatui_socket_path(session_name);
+    let runtime = ConnectRemoteHostPaneRuntime::new(network.clone())
+        .with_ratatui_session_name(session_name.to_string())
+        .with_ratatui_socket_path(socket_path);
+    let command = ConnectRemoteHostPaneCommand {
+        current_socket_name: String::new(),
+        current_session_name: session_name.to_string(),
+    };
+    runtime.run_embedded(terminal, command)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +176,7 @@ fn run_event_loop(
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
     session_name: &str,
+    network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
@@ -274,7 +275,11 @@ fn run_event_loop(
                                 let _ = stream.flush();
                             }
                             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                let _ = spawn_connect_popup(session_name);
+                                if let Err(error) =
+                                    run_connect_popup(&mut terminal, session_name, network)
+                                {
+                                    status_message = Some(error.to_string());
+                                }
                             }
                             _ => {}
                         }

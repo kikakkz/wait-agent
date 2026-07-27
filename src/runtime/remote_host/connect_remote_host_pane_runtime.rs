@@ -71,6 +71,22 @@ impl ConnectRemoteHostPaneRuntime {
         result
     }
 
+    /// Run the popup inside an existing ratatui terminal without taking over
+    /// raw mode or the alternate screen. Used by the ratatui client for Ctrl+W.
+    pub fn run_embedded(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        command: ConnectRemoteHostPaneCommand,
+    ) -> Result<(), LifecycleError> {
+        crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)
+            .map_err(write_error)?;
+        let (mut state, initial_secret_request) =
+            ConnectRemoteHostState::load_with_initial_secret_request();
+        let result = self.run_event_loop(terminal, &mut state, command, initial_secret_request);
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+        result
+    }
+
     fn run_event_loop(
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,

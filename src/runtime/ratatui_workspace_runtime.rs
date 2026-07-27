@@ -156,7 +156,7 @@ impl RatatuiWorkspaceRuntime {
             ));
         }
 
-        RatatuiClientRuntime::from_session(session_name.to_string())?.run()
+        RatatuiClientRuntime::from_session(session_name.to_string(), self.network.clone())?.run()
     }
 
     fn start_node_server(&self, session_name: &str) -> Result<(), LifecycleError> {

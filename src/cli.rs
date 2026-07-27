@@ -189,7 +189,6 @@ pub enum Command {
     Stop(StopCommand),
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
-    RatatuiConnectRemoteHostPane(RatatuiConnectRemoteHostPaneCommand),
     Help(String),
     Version,
 }
@@ -218,11 +217,6 @@ pub struct RatatuiNodeServerCommand {
 
 #[derive(Debug, Clone, Default)]
 pub struct RatatuiClientCommand {
-    pub session_name: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RatatuiConnectRemoteHostPaneCommand {
     pub session_name: String,
 }
 
@@ -734,10 +728,6 @@ impl Cli {
                 args.remove(0);
                 Command::RatatuiClient(parse_ratatui_client(args)?)
             }
-            "__ratatui-connect-remote-host-pane" => {
-                args.remove(0);
-                Command::RatatuiConnectRemoteHostPane(parse_ratatui_connect_remote_host_pane(args)?)
-            }
             "version" => Command::Version,
             "help" => Command::Help(help_text()),
             "--version" | "-V" => Command::Version,
@@ -885,28 +875,6 @@ fn parse_ratatui_client(args: Vec<String>) -> Result<RatatuiClientCommand, CliEr
     let mut iter = args.into_iter();
     let mut command = RatatuiClientCommand::default();
     command.session_name = "1".to_string();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(command),
-            "--session-name" => {
-                command.session_name = iter
-                    .next()
-                    .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
-            }
-            _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
-    }
-
-    Ok(command)
-}
-
-fn parse_ratatui_connect_remote_host_pane(
-    args: Vec<String>,
-) -> Result<RatatuiConnectRemoteHostPaneCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut command = RatatuiConnectRemoteHostPaneCommand::default();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
