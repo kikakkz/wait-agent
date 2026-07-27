@@ -10,7 +10,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -101,6 +101,22 @@ enum Focus {
     Sidebar,
 }
 
+/// Placeholder session rows for the sidebar UI skeleton.
+fn placeholder_sessions() -> Vec<String> {
+    vec![
+        "Session Alpha".to_string(),
+        "Session Beta".to_string(),
+        "Session Gamma".to_string(),
+        "Session Delta".to_string(),
+        "Session Epsilon".to_string(),
+        "Session Zeta".to_string(),
+        "Session Eta".to_string(),
+        "Session Theta".to_string(),
+        "Session Iota".to_string(),
+        "Session Kappa".to_string(),
+    ]
+}
+
 fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
@@ -112,10 +128,12 @@ fn run_event_loop(
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
+    let sessions = placeholder_sessions();
+    let mut selected_index = 0usize;
 
     loop {
         terminal
-            .draw(|frame| render(frame, &snapshot, focus))
+            .draw(|frame| render(frame, &snapshot, focus, &sessions, selected_index))
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
@@ -150,13 +168,27 @@ fn run_event_loop(
                         KeyCode::Left if focus == Focus::Sidebar => {
                             focus = Focus::Main;
                         }
+                        KeyCode::Up if focus == Focus::Sidebar && selected_index > 0 => {
+                            selected_index -= 1;
+                        }
+                        KeyCode::Down
+                            if focus == Focus::Sidebar && selected_index + 1 < sessions.len() =>
+                        {
+                            selected_index += 1;
+                        }
+                        KeyCode::Enter if focus == Focus::Sidebar => {
+                            ERROR_LOG.log(format!(
+                                "[ratatui-client] placeholder activate session: {}",
+                                sessions[selected_index]
+                            ));
+                        }
                         _ => {}
                     }
                 }
             }
             Event::Resize(_, _) => {
-                // Phase 0: re-draw on resize is automatic because the next loop
-                // iteration calls terminal.draw with the new frame.size().
+                // Re-draw on resize is automatic because the next loop iteration
+                // calls terminal.draw with the new frame.size().
             }
             _ => {}
         }
@@ -165,7 +197,13 @@ fn run_event_loop(
     Ok(())
 }
 
-fn render(frame: &mut Frame, snapshot: &RatatuiSnapshot, focus: Focus) {
+fn render(
+    frame: &mut Frame,
+    snapshot: &RatatuiSnapshot,
+    focus: Focus,
+    sessions: &[String],
+    selected_index: usize,
+) {
     let area = frame.size();
 
     // Outer vertical layout: chrome above, footer below.
@@ -193,8 +231,22 @@ fn render(frame: &mut Frame, snapshot: &RatatuiSnapshot, focus: Focus) {
         .title(snapshot.sidebar.clone())
         .borders(Borders::NONE)
         .title_style(title_style(focus == Focus::Sidebar));
-    let sidebar = Paragraph::new("Sidebar placeholder").block(sidebar_block);
-    frame.render_widget(sidebar, inner[1]);
+    let items: Vec<ListItem> = sessions
+        .iter()
+        .map(|name| ListItem::new(name.as_str()))
+        .collect();
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected_index));
+    let list = List::new(items)
+        .block(sidebar_block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, inner[1], &mut list_state);
 
     let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
     let footer =

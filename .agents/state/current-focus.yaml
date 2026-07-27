@@ -1,10 +1,10 @@
 kind: state
 version: 1
-current_task: task.ratatui-phase-2-sidebar
+current_task: task.ratatui-phase-2-5-session-backend
 focus_statement: >
-  active task is ratatui migration phase 2: build the sidebar UI skeleton with List widget,
-  Up/Down selection, Enter placeholder action, and scrolling. Real session data is intentionally
-  out of scope and will be provided by the follow-up Phase 2.5 session backend migration.
+  ratatui migration phase 2 (sidebar UI skeleton) is complete. Next task is phase 2.5:
+  migrate local and remote session creation from the tmux backend onto the ratatui node server
+  so the sidebar can display real workspace sessions.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.ratatui-phase-2-sidebar.in_progress
+  reference: task.ratatui-phase-2-5-session-backend.ready

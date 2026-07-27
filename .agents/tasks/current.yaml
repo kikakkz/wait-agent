@@ -1,27 +1,28 @@
-id: task.ratatui-phase-2-sidebar
+id: task.ratatui-phase-2-5-session-backend
 kind: task
 version: 1
-title: build sidebar UI skeleton with navigation (no real session data yet)
-status: in_progress
+title: migrate local and remote session creation onto the ratatui node server
+status: ready
 priority: high
 design_ref:
   doc: docs/ratatui-replace-tmux-plan.md
   section: 2
   why:
-    - sidebar is the primary navigation surface for sessions in the ratatui path
-    - UI interactions (selection, scroll, Enter) can be built before real session backend is ready
-    - having the skeleton in place lets Phase 2.5 session backend plug real data in immediately
+    - the existing Ctrl+N local session and Ctrl+W remote connection logic is tied to the tmux backend
+    - ratatui path needs its own session authority before sidebar can show real workspace sessions
+    - moving session ownership to the node server aligns with the long-term server/client split
 source_of_truth:
   file: .agents/tasks/current.yaml
   reference: current
 depends_on:
-  - task.ratatui-phase-1-footer.done
+  - task.ratatui-phase-2-sidebar.done
 done_criteria:
-  - sidebar is rendered as a ratatui List widget with placeholder rows
-  - sidebar supports Up/Down navigation and highlights the selected row
-  - pressing Enter on a sidebar row triggers a placeholder action (log/notification only)
-  - sidebar scrolls when rows exceed available height
-  - focus switching between main pane and sidebar remains working
+  - ratatui node server can create and hold a local shell session (without displaying it in main pane yet)
+  - ratatui node server can create a remote session by reusing the RemoteSessionCreationService logic
+  - node server maintains a real session catalog (local + remote sessions with state)
+  - snapshot protocol includes the real session catalog for the sidebar
+  - sidebar renders the real session catalog instead of placeholder rows
+  - footer menu Ctrl+W invokes the remote connection flow on the node server
   - cargo fmt --check passes
   - cargo check passes
   - cargo build --bin waitagent succeeds
@@ -29,9 +30,16 @@ verification:
   - cargo fmt --check
   - cargo check
   - cargo build --bin waitagent
-  - manual test: open ratatui session, move selection up/down in sidebar, press Enter, switch focus back to main
+  - manual test: create a local session, connect to a remote host, verify sidebar shows both with correct state
 touched_paths:
+  - src/runtime/ratatui_node_runtime.rs
   - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+  - src/runtime/workspace/workspace_command_runtime.rs
+  - src/application/remote_session_creation_service.rs
+  - src/application/session_service.rs
+  - src/application/target_registry_service.rs
 notes:
-  - This phase intentionally does not display real session data; that is the responsibility of Phase 2.5 session backend migration.
-  - Placeholder rows should make it obvious they are placeholders (e.g., "Session A", "Session B").
+  - Main pane PTY display is intentionally out of scope; it is Phase 3.
+  - Reuse existing remote/session services where possible instead of reimplementing protocols.
+  - Keep the tmux path untouched during this migration.

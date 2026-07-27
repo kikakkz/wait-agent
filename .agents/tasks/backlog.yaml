@@ -539,7 +539,7 @@ next:
     status: done
   - id: task.ratatui-phase-2-sidebar
     title: build sidebar UI skeleton with navigation (no real session data yet)
-    status: in_progress
+    status: done
   - id: task.ratatui-phase-2-5-session-backend
     title: migrate local and remote session creation onto the ratatui node server
     status: ready
