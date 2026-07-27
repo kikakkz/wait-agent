@@ -1558,12 +1558,26 @@ impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
         let width = popup_preferred_width(state).min(cols);
         let x = cols.saturating_sub(width) / 2;
-        let dialog = Rect::new(x, 0, width, rows);
+
+        // Keep the popup compact and centered, like the original tmux popup,
+        // instead of stretching to the full terminal height.
+        let label_count = host_list_labels(state).len() as u16;
+        let detail_rows = if state.selected_proxy_config() {
+            12
+        } else if state.has_saved_selection() {
+            14
+        } else {
+            13
+        };
+        let body_height = label_count.max(detail_rows).min(rows.saturating_sub(2));
+        let dialog_height = body_height + 2;
+        let y = rows.saturating_sub(dialog_height) / 2;
+        let dialog = Rect::new(x, y, width, dialog_height);
         let body = Rect::new(
             dialog.x,
             dialog.y.saturating_add(2),
             dialog.width,
-            dialog.height.saturating_sub(2),
+            body_height,
         );
         let host_width = host_list_width(state, body.width);
         let separator_width = u16::from(body.width > host_width);
@@ -3523,10 +3537,10 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
-        assert_eq!(geometry.dialog.height, 18);
-        assert_eq!(geometry.hosts.y, 2);
-        assert_eq!(geometry.details.y, 2);
-        assert_eq!(geometry.hosts.height, 16);
+        assert_eq!(geometry.dialog.height, 15);
+        assert_eq!(geometry.hosts.y, 3);
+        assert_eq!(geometry.details.y, 3);
+        assert_eq!(geometry.hosts.height, 13);
         assert_eq!(geometry.hosts.width, 29);
         assert_eq!(geometry.details.width, 68);
         assert_eq!(
@@ -3970,8 +3984,8 @@ mod tests {
         let popup = PopupGeometry::from_terminal_size((100, 18), &state);
         let details = DetailsGeometry::from_area(popup.details, &state);
 
-        assert_eq!(popup.details.y, 2);
-        assert_eq!(popup.details.height, 16);
+        assert_eq!(popup.details.y, 3);
+        assert_eq!(popup.details.height, 14);
         assert_eq!(details.rows.delete, Some(13));
         assert!(
             popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height
