@@ -1,16 +1,16 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot};
+use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot, SessionView};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -56,12 +56,12 @@ impl RatatuiClientRuntime {
         };
 
         ERROR_LOG.log(format!(
-            "[ratatui-client] snapshot session={} clients={} main={} sidebar={} footer={:?}",
+            "[ratatui-client] snapshot session={} clients={} main={} sidebar={} sessions={}",
             snapshot.session_name,
             snapshot.client_count,
             snapshot.main,
             snapshot.sidebar,
-            snapshot.footer
+            snapshot.sessions.len()
         ));
 
         let original_hook = std::panic::take_hook();
@@ -101,22 +101,6 @@ enum Focus {
     Sidebar,
 }
 
-/// Placeholder session rows for the sidebar UI skeleton.
-fn placeholder_sessions() -> Vec<String> {
-    vec![
-        "Session Alpha".to_string(),
-        "Session Beta".to_string(),
-        "Session Gamma".to_string(),
-        "Session Delta".to_string(),
-        "Session Epsilon".to_string(),
-        "Session Zeta".to_string(),
-        "Session Eta".to_string(),
-        "Session Theta".to_string(),
-        "Session Iota".to_string(),
-        "Session Kappa".to_string(),
-    ]
-}
-
 fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
@@ -128,12 +112,20 @@ fn run_event_loop(
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
-    let sessions = placeholder_sessions();
     let mut selected_index = 0usize;
+    let mut active_target = snapshot.active_target.clone();
 
     loop {
         terminal
-            .draw(|frame| render(frame, &snapshot, focus, &sessions, selected_index))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &snapshot,
+                    focus,
+                    selected_index,
+                    active_target.as_deref(),
+                )
+            })
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
@@ -154,16 +146,16 @@ fn run_event_loop(
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            let _ = writeln!(stream, "DETACH");
-                            let _ = stream.flush();
-                            break;
-                        }
                         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             prefix_pressed = true;
                         }
                         KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             focus = Focus::Sidebar;
+                            if selected_index >= snapshot.sessions.len()
+                                && !snapshot.sessions.is_empty()
+                            {
+                                selected_index = snapshot.sessions.len() - 1;
+                            }
                         }
                         KeyCode::Left if focus == Focus::Sidebar => {
                             focus = Focus::Main;
@@ -172,24 +164,31 @@ fn run_event_loop(
                             selected_index -= 1;
                         }
                         KeyCode::Down
-                            if focus == Focus::Sidebar && selected_index + 1 < sessions.len() =>
+                            if focus == Focus::Sidebar
+                                && selected_index + 1 < snapshot.sessions.len() =>
                         {
                             selected_index += 1;
                         }
                         KeyCode::Enter if focus == Focus::Sidebar => {
-                            ERROR_LOG.log(format!(
-                                "[ratatui-client] placeholder activate session: {}",
-                                sessions[selected_index]
-                            ));
+                            if let Some(session) = snapshot.sessions.get(selected_index) {
+                                active_target = Some(session.id.clone());
+                                let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
+                                let _ = stream.flush();
+                                ERROR_LOG.log(format!(
+                                    "[ratatui-client] activate session: {}",
+                                    session.id
+                                ));
+                            }
+                        }
+                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
+                            let _ = stream.flush();
                         }
                         _ => {}
                     }
                 }
             }
-            Event::Resize(_, _) => {
-                // Re-draw on resize is automatic because the next loop iteration
-                // calls terminal.draw with the new frame.size().
-            }
+            Event::Resize(_, _) => {}
             _ => {}
         }
     }
@@ -201,8 +200,8 @@ fn render(
     frame: &mut Frame,
     snapshot: &RatatuiSnapshot,
     focus: Focus,
-    sessions: &[String],
     selected_index: usize,
+    active_target: Option<&str>,
 ) {
     let area = frame.size();
 
@@ -212,46 +211,259 @@ fn render(
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    // Inner horizontal layout: main pane left, sidebar right.
+    // Inner horizontal layout: main pane left, separator, sidebar right.
     let inner = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(32)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(32),
+        ])
         .split(outer[0]);
 
     let main_block = Block::default()
         .title(snapshot.main.clone())
-        .borders(Borders::RIGHT)
-        .border_style(border_style(focus == Focus::Main))
+        .borders(Borders::NONE)
         .title_style(title_style(focus == Focus::Main));
     let main =
-        Paragraph::new("Main pane placeholder\n\nPress q or Ctrl+B d to quit.").block(main_block);
+        Paragraph::new("Main pane placeholder\n\nPress Ctrl+B d to detach.").block(main_block);
     frame.render_widget(main, inner[0]);
+
+    let separator = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(separator_style(focus));
+    frame.render_widget(separator, inner[1]);
 
     let sidebar_block = Block::default()
         .title(snapshot.sidebar.clone())
         .borders(Borders::NONE)
         .title_style(title_style(focus == Focus::Sidebar));
-    let items: Vec<ListItem> = sessions
-        .iter()
-        .map(|name| ListItem::new(name.as_str()))
-        .collect();
-    let mut list_state = ListState::default();
-    list_state.select(Some(selected_index));
-    let list = List::new(items)
-        .block(sidebar_block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, inner[1], &mut list_state);
+    let sidebar = Paragraph::new(render_sidebar_lines(
+        &snapshot.sessions,
+        selected_index,
+        inner[2],
+        focus == Focus::Sidebar,
+        active_target,
+    ))
+    .block(sidebar_block);
+    frame.render_widget(sidebar, inner[2]);
 
     let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
     let footer =
         Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style);
     frame.render_widget(footer, outer[1]);
+}
+
+fn render_sidebar_lines<'a>(
+    sessions: &'a [SessionView],
+    selected_index: usize,
+    area: Rect,
+    is_focused: bool,
+    active_target: Option<&'a str>,
+) -> Vec<Line<'a>> {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let mut lines = Vec::new();
+
+    // Header.
+    lines.push(Line::from(vec![Span::styled(
+        " Sessions  [h] hide",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    // Separator.
+    lines.push(Line::from("─".repeat(width)));
+
+    if sessions.is_empty() {
+        while lines.len() + 2 < height {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from("─".repeat(width)));
+        lines.push(Line::from(vec![Span::styled(
+            right_align("(no sessions)", width),
+            Style::default().fg(Color::Gray),
+        )]));
+        return lines;
+    }
+
+    let selected = sessions
+        .get(selected_index)
+        .cloned()
+        .unwrap_or_else(|| sessions[0].clone());
+
+    // Visible rows with scrolling.
+    let max_rows = height.saturating_sub(lines.len() + 2);
+    let start = if selected_index + 1 > max_rows {
+        selected_index + 1 - max_rows
+    } else {
+        0
+    };
+    for (idx, session) in sessions.iter().enumerate().skip(start).take(max_rows) {
+        let is_selected = idx == selected_index;
+        let is_current = active_target == Some(session.id.as_str());
+        lines.push(render_session_row(
+            session,
+            is_selected,
+            is_current,
+            width,
+            is_focused,
+        ));
+    }
+
+    while lines.len() + 2 < height {
+        lines.push(Line::from(""));
+    }
+
+    // Bottom separator and detail line.
+    lines.push(Line::from("─".repeat(width)));
+    lines.push(Line::from(vec![Span::styled(
+        right_align(&selected_detail_text(&selected, width), width),
+        Style::default().fg(Color::Gray),
+    )]));
+
+    lines
+}
+
+fn render_session_row(
+    session: &SessionView,
+    is_selected: bool,
+    is_current: bool,
+    width: usize,
+    is_focused: bool,
+) -> Line {
+    let marker = if is_selected {
+        ">"
+    } else if is_current {
+        "*"
+    } else {
+        " "
+    };
+    let (badge, badge_width) = sidebar_badge(&session.task_state);
+    let reserved = marker.len() + 1 + 1 + badge_width;
+    let label_width = width.saturating_sub(reserved);
+    let label = session_row_primary_label(session, label_width);
+
+    let base_style = if is_selected && is_focused {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    } else {
+        Style::default()
+    };
+
+    Line::from(vec![
+        Span::styled(format!("{}{} ", marker, label), base_style),
+        Span::styled(
+            badge.to_string(),
+            badge_style(&session.task_state).patch(base_style),
+        ),
+    ])
+}
+
+fn session_row_primary_label(session: &SessionView, width: usize) -> String {
+    for candidate in session.display_label_candidates() {
+        if display_width(&candidate) <= width {
+            return pad_right(&candidate, width);
+        }
+    }
+    if let Some(first) = session.display_label_candidates().first() {
+        return pad_right(&truncate_display_width(first, width), width);
+    }
+    pad_right(
+        &truncate_display_width(&session.display_label(), width),
+        width,
+    )
+}
+
+fn selected_detail_text(session: &SessionView, width: usize) -> String {
+    let suffix = if session.availability != "online" {
+        session.availability.to_ascii_uppercase()
+    } else {
+        session.task_state.to_uppercase()
+    };
+    let full_label = session.display_label();
+    let full_detail = format!("{full_label} {suffix}");
+    if display_width(&full_detail) <= width {
+        return full_detail;
+    }
+
+    if session.transport != "local" {
+        let command_host_label =
+            format!("{}@{}", session.command_name, session.display_authority_id);
+        let command_host_detail = format!("{command_host_label} {suffix}");
+        if display_width(&command_host_detail) <= width {
+            return command_host_detail;
+        }
+
+        let host_only_detail = format!("{} {suffix}", session.display_authority_id);
+        if display_width(&host_only_detail) <= width {
+            return host_only_detail;
+        }
+
+        if display_width(&session.display_authority_id) <= width {
+            return session.display_authority_id.clone();
+        }
+    }
+
+    truncate_display_width(&full_detail, width)
+}
+
+fn sidebar_badge(task_state: &str) -> (&'static str, usize) {
+    let badge = match task_state {
+        "running" => "🔥R",
+        "input" => "🔊I",
+        "confirm" => "📢C",
+        _ => "·U",
+    };
+    (badge, display_width(badge))
+}
+
+fn badge_style(task_state: &str) -> Style {
+    match task_state {
+        "running" => Style::default().fg(Color::Yellow),
+        "input" => Style::default().fg(Color::Cyan),
+        "confirm" => Style::default().fg(Color::Magenta),
+        _ => Style::default().fg(Color::Gray),
+    }
+}
+
+fn right_align(text: &str, width: usize) -> String {
+    let text_width = display_width(text);
+    let padding = width.saturating_sub(text_width);
+    format!("{}{}", " ".repeat(padding), text)
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    let truncated = truncate_display_width(text, width);
+    let padding = width.saturating_sub(display_width(&truncated));
+    format!("{}{}", truncated, " ".repeat(padding))
+}
+
+fn truncate_display_width(text: &str, width: usize) -> String {
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_width = char_width(ch);
+        if used + ch_width > width {
+            break;
+        }
+        output.push(ch);
+        used += ch_width;
+    }
+    output
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+fn char_width(ch: char) -> usize {
+    // Emoji and CJK characters are typically width 2 in terminals.
+    if ch as u32 >= 0x1F300 {
+        2
+    } else {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
 }
 
 fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize) -> Line {
@@ -260,7 +472,6 @@ fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize) -> Line {
 
     let mut spans = Vec::new();
 
-    // Connection status.
     if let Some(listener) = &snapshot.footer.listener_endpoint {
         spans.push(Span::styled("Listen ", accent_style));
         spans.push(Span::styled(format!("{} ", listener), muted_style));
@@ -281,14 +492,12 @@ fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize) -> Line {
         spans.push(Span::styled("· ", muted_style));
     }
 
-    // Shortcuts.
     spans.push(Span::styled(
         "Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu",
         muted_style,
     ));
 
-    // Pad to full width so the background color fills the line.
-    let text_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let text_width: usize = spans.iter().map(|s| display_width(&s.content)).sum();
     let fill = area_width.saturating_sub(text_width);
     if fill > 0 {
         spans.push(Span::styled(" ".repeat(fill), muted_style));
@@ -307,10 +516,9 @@ fn title_style(active: bool) -> Style {
     }
 }
 
-fn border_style(active: bool) -> Style {
-    if active {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
+fn separator_style(focus: Focus) -> Style {
+    match focus {
+        Focus::Main => Style::default().fg(Color::DarkGray),
+        Focus::Sidebar => Style::default().fg(Color::Yellow),
     }
 }

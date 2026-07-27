@@ -40,6 +40,7 @@ sha2 = "0.11"
 tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
 tonic = { version = "0.12", features = ["transport"] }
+unicode-width = "0.1.14"
 
 [build-dependencies]
 cc = "1"

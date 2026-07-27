@@ -1,3 +1,6 @@
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use std::io::{BufRead, BufReader, Write};
@@ -14,6 +17,8 @@ pub struct RatatuiNodeRuntime {
     session_name: String,
     listener_display: Option<String>,
     connect_endpoint: Option<String>,
+    sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    active_target: Arc<Mutex<Option<String>>>,
 }
 
 impl RatatuiNodeRuntime {
@@ -22,10 +27,20 @@ impl RatatuiNodeRuntime {
         listener_display: Option<String>,
         connect_endpoint: Option<String>,
     ) -> Result<Self, LifecycleError> {
+        let sessions = Arc::new(Mutex::new(vec![default_local_session_record(
+            &session_name,
+        )]));
+        let active_target = sessions
+            .lock()
+            .unwrap()
+            .first()
+            .map(|session| session.address.qualified_target());
         Ok(Self {
             session_name,
             listener_display,
             connect_endpoint,
+            sessions,
+            active_target: Arc::new(Mutex::new(active_target)),
         })
     }
 
@@ -76,6 +91,8 @@ impl RatatuiNodeRuntime {
                     let session_name = self.session_name.clone();
                     let listener_display = self.listener_display.clone();
                     let connect_endpoint = self.connect_endpoint.clone();
+                    let sessions = self.sessions.clone();
+                    let active_target = self.active_target.clone();
                     std::thread::spawn(move || {
                         let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
                         if let Err(error) = handle_client(
@@ -87,6 +104,8 @@ impl RatatuiNodeRuntime {
                             &session_name,
                             listener_display.as_deref(),
                             connect_endpoint.as_deref(),
+                            sessions,
+                            active_target,
                         ) {
                             ERROR_LOG
                                 .log(format!("[ratatui-node] client handler error: {error:?}"));
@@ -122,6 +141,8 @@ fn handle_client(
     session_name: &str,
     listener_display: Option<&str>,
     connect_endpoint: Option<&str>,
+    sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    active_target: Arc<Mutex<Option<String>>>,
 ) -> Result<(), LifecycleError> {
     ERROR_LOG.log(format!("[ratatui-node] client {client_id} connected"));
     let removed = Arc::new(AtomicBool::new(false));
@@ -138,7 +159,14 @@ fn handle_client(
 
     // Send snapshot so the client has something to render.
     let count = client_count.load(Ordering::SeqCst);
-    let snapshot = build_snapshot(session_name, count, listener_display, connect_endpoint);
+    let snapshot = build_snapshot(
+        session_name,
+        count,
+        listener_display,
+        connect_endpoint,
+        &sessions,
+        &active_target,
+    );
     let json = serde_json::to_string(&snapshot).unwrap_or_default();
     if let Err(error) = writeln!(stream, "{json}") {
         ERROR_LOG.log(format!(
@@ -182,7 +210,14 @@ fn handle_client(
                         forcibly_detached = true;
                         break;
                     }
-                    _ => {}
+                    _ => {
+                        if let Some(response) =
+                            handle_control_command(trimmed, session_name, &sessions, &active_target)
+                        {
+                            let _ = writeln!(stream, "{response}");
+                            let _ = stream.flush();
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -200,53 +235,95 @@ fn handle_client(
     Ok(())
 }
 
+fn handle_control_command(
+    command: &str,
+    session_name: &str,
+    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    active_target: &Arc<Mutex<Option<String>>>,
+) -> Option<String> {
+    if command == "CREATE_LOCAL_SESSION" {
+        let mut guard = sessions.lock().unwrap();
+        let id = format!("local-{}", guard.len() + 1);
+        let record = ManagedSessionRecord {
+            address: ManagedSessionAddress::local_tmux(session_name, &id),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: None,
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: None,
+            current_path: None,
+            task_state: ManagedSessionTaskState::Running,
+        };
+        guard.push(record);
+        Some("OK".to_string())
+    } else if let Some(target) = command.strip_prefix("ACTIVATE_TARGET ") {
+        let target = target.to_string();
+        let guard = sessions.lock().unwrap();
+        let exists = guard
+            .iter()
+            .any(|session| session.address.qualified_target() == target);
+        drop(guard);
+        if exists {
+            *active_target.lock().unwrap() = Some(target);
+            Some("OK".to_string())
+        } else {
+            Some("ERR unknown target".to_string())
+        }
+    } else {
+        None
+    }
+}
+
+fn default_local_session_record(session_name: &str) -> ManagedSessionRecord {
+    ManagedSessionRecord {
+        address: ManagedSessionAddress::local_tmux(session_name, "main"),
+        selector: None,
+        availability: SessionAvailability::Online,
+        workspace_dir: None,
+        workspace_key: None,
+        session_role: None,
+        opened_by: Vec::new(),
+        attached_clients: 0,
+        window_count: 1,
+        command_name: Some("bash".to_string()),
+        display_command_name: None,
+        current_path: None,
+        task_state: ManagedSessionTaskState::Input,
+    }
+}
+
 fn build_snapshot(
     session_name: &str,
     client_count: usize,
     listener_display: Option<&str>,
     connect_endpoint: Option<&str>,
+    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    active_target: &Arc<Mutex<Option<String>>>,
 ) -> RatatuiSnapshot {
-    let sessions = list_session_summaries();
+    let records = sessions.lock().unwrap();
+    let sessions: Vec<SessionView> = records.iter().map(SessionView::from_record).collect();
+    let active_target = active_target.lock().unwrap().clone();
 
     RatatuiSnapshot {
         session_name: session_name.to_string(),
         client_count,
         main: "Main pane placeholder".to_string(),
-        sidebar: "Sidebar placeholder".to_string(),
+        sidebar: "Sessions".to_string(),
         footer: FooterState {
             active_session: session_name.to_string(),
-            sessions,
+            sessions: vec![],
             listener_endpoint: listener_display.map(String::from),
             connect_endpoint: connect_endpoint.map(String::from),
             remote_count: 0,
         },
+        sessions,
+        active_target,
     }
-}
-
-fn list_session_summaries() -> Vec<SessionSummary> {
-    let mut summaries = Vec::new();
-    let Ok(entries) = std::fs::read_dir(ratatui_socket_dir()) else {
-        return summaries;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if !name.ends_with(".sock.info") {
-            continue;
-        }
-        if let Ok(json) = std::fs::read_to_string(&path) {
-            if let Ok(info) = serde_json::from_str::<RatatuiSocketInfo>(&json) {
-                summaries.push(SessionSummary {
-                    name: info.session_name,
-                    client_count: info.client_count,
-                });
-            }
-        }
-    }
-
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
-    summaries
 }
 
 fn detach_all_clients(
@@ -301,6 +378,86 @@ pub struct RatatuiSnapshot {
     pub main: String,
     pub sidebar: String,
     pub footer: FooterState,
+    pub sessions: Vec<SessionView>,
+    pub active_target: Option<String>,
+}
+
+/// Serializable session row exposed to the TUI client for sidebar rendering.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionView {
+    pub id: String,
+    pub transport: String,
+    pub command_name: String,
+    pub authority_node_id: String,
+    pub display_authority_id: String,
+    pub session_id: String,
+    pub task_state: String,
+    pub availability: String,
+    pub attached_clients: usize,
+}
+
+impl SessionView {
+    fn from_record(record: &ManagedSessionRecord) -> Self {
+        let command_name = record
+            .display_command_name
+            .as_deref()
+            .or(record.command_name.as_deref())
+            .unwrap_or("bash")
+            .to_string();
+        let authority_node_id = record.address.authority_id().to_string();
+        let display_authority_id = record.address.display_authority_id().to_string();
+        Self {
+            id: record.address.qualified_target(),
+            transport: match record.address.transport() {
+                crate::domain::session_catalog::SessionTransport::LocalTmux => "local".to_string(),
+                crate::domain::session_catalog::SessionTransport::RemotePeer => {
+                    "remote".to_string()
+                }
+            },
+            command_name,
+            authority_node_id,
+            display_authority_id,
+            session_id: record.address.session_id().to_string(),
+            task_state: record.task_state.as_str().to_string(),
+            availability: record.availability.as_str().to_string(),
+            attached_clients: record.attached_clients,
+        }
+    }
+
+    pub fn display_label(&self) -> String {
+        match self.transport.as_str() {
+            "local" => format!("{}@local", self.command_name),
+            _ => self.remote_row_label(),
+        }
+    }
+
+    fn remote_row_label(&self) -> String {
+        let (host, port) = self
+            .authority_node_id
+            .split_once('#')
+            .map(|(host, port)| (host, Some(port)))
+            .unwrap_or((self.display_authority_id.as_str(), None));
+        match port {
+            Some(port) => format!("{}@{}:{}", self.command_name, host, port),
+            None => format!("{}@{}", self.command_name, host),
+        }
+    }
+
+    pub fn display_label_candidates(&self) -> Vec<String> {
+        match self.transport.as_str() {
+            "local" => vec![self.display_label()],
+            _ => {
+                let mut candidates = Vec::new();
+                let full = self.remote_row_label();
+                let host_only = format!("{}@{}", self.command_name, self.display_authority_id);
+                if full != host_only {
+                    candidates.push(full);
+                }
+                candidates.push(host_only);
+                candidates
+            }
+        }
+    }
 }
 
 /// Footer state rendered by the TUI client.
