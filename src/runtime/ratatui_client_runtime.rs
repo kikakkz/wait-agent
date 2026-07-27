@@ -347,6 +347,27 @@ fn render(
     }
 }
 
+fn render_sidebar_header(width: usize) -> Line<'static> {
+    let title = "Sessions";
+    let hint = "ctrl+G hide";
+    let title_width = display_width(title);
+    let hint_width = display_width(hint);
+    let padding = width.saturating_sub(title_width + hint_width);
+
+    let bg = Style::default().bg(Color::Black);
+    Line::from(vec![
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+                .patch(bg),
+        ),
+        Span::styled(" ".repeat(padding), bg),
+        Span::styled(hint.to_string(), Style::default().fg(Color::Gray).patch(bg)),
+    ])
+}
+
 fn render_sidebar_lines<'a>(
     sessions: &'a [SessionView],
     selected_index: usize,
@@ -359,12 +380,7 @@ fn render_sidebar_lines<'a>(
     let mut lines = Vec::new();
 
     // Header.
-    lines.push(Line::from(vec![Span::styled(
-        " Sessions  ctrl G hide",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )]));
+    lines.push(render_sidebar_header(width));
 
     // Separator.
     lines.push(Line::from("─".repeat(width)));
