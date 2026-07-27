@@ -53,6 +53,7 @@ use crate::runtime::target_host_runtime::TargetHostRuntime;
 use crate::runtime::workspace_entry_runtime::WorkspaceEntryRuntime;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use crate::runtime::workspace_runtime::WorkspaceRuntime;
+use std::backtrace::Backtrace;
 use std::io::{self, Read};
 use std::thread;
 use std::time::Instant;
@@ -109,6 +110,14 @@ struct LiveWorkspaceRegistration<'a> {
 
 impl Drop for LiveWorkspaceRegistration<'_> {
     fn drop(&mut self) {
+        let args: Vec<String> = std::env::args().collect();
+        ERROR_LOG.log(format!(
+            "[diag-exit-debug] LiveWorkspaceRegistration::Drop pid={} socket={} args={:?} backtrace={}",
+            std::process::id(),
+            self.socket_name,
+            args,
+            Backtrace::force_capture()
+        ));
         self.runtime
             .unregister_live_workspace_socket(self.socket_name.as_str());
         let socket_name = TmuxSocketName::new(self.socket_name.as_str());
@@ -735,6 +744,14 @@ impl WorkspaceCommandRuntime {
     }
 
     fn unregister_live_workspace_socket(&self, socket_name: &str) {
+        let args: Vec<String> = std::env::args().collect();
+        ERROR_LOG.log(format!(
+            "[diag-exit-debug] WorkspaceCommandRuntime::unregister_live_workspace_socket pid={} socket={} args={:?} backtrace={}",
+            std::process::id(),
+            socket_name,
+            args,
+            Backtrace::force_capture()
+        ));
         let _ =
             shutdown_remote_session_sync_owner(&remote_session_sync_owner_socket_path(socket_name));
         if let Err(error) = self

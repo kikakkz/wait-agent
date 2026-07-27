@@ -18,6 +18,7 @@ use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::RemoteWorkspaceSocketRegistryRuntime;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use std::backtrace::Backtrace;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
@@ -225,6 +226,14 @@ impl LocalTargetHostRuntime {
     }
 
     fn unregister_live_workspace_socket(&self, socket_name: &str) {
+        let args: Vec<String> = std::env::args().collect();
+        ERROR_LOG.log(format!(
+            "[diag-exit-debug] LocalTargetHostRuntime::unregister_live_workspace_socket pid={} socket={} args={:?} backtrace={}",
+            std::process::id(),
+            socket_name,
+            args,
+            Backtrace::force_capture()
+        ));
         let _ = shutdown_remote_session_sync_owner(
             &crate::runtime::remote_node_session_sync_runtime::remote_session_sync_owner_socket_path(
                 socket_name,
