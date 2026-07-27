@@ -2,7 +2,7 @@ id: task.ratatui-phase-1-footer
 kind: task
 version: 1
 title: render real footer status bar with ratatui widget
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/ratatui-replace-tmux-plan.md

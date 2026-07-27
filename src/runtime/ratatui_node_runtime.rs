@@ -12,11 +12,21 @@ use std::sync::{Arc, Mutex};
 /// to the same session; the server keeps running until it is explicitly stopped.
 pub struct RatatuiNodeRuntime {
     session_name: String,
+    listener_display: Option<String>,
+    connect_endpoint: Option<String>,
 }
 
 impl RatatuiNodeRuntime {
-    pub fn from_session(session_name: String) -> Result<Self, LifecycleError> {
-        Ok(Self { session_name })
+    pub fn from_session_with_endpoints(
+        session_name: String,
+        listener_display: Option<String>,
+        connect_endpoint: Option<String>,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            session_name,
+            listener_display,
+            connect_endpoint,
+        })
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
@@ -64,6 +74,8 @@ impl RatatuiNodeRuntime {
                     let client_count = client_count.clone();
                     let info_path = info_path.clone();
                     let session_name = self.session_name.clone();
+                    let listener_display = self.listener_display.clone();
+                    let connect_endpoint = self.connect_endpoint.clone();
                     std::thread::spawn(move || {
                         let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
                         if let Err(error) = handle_client(
@@ -73,6 +85,8 @@ impl RatatuiNodeRuntime {
                             client_count,
                             &info_path,
                             &session_name,
+                            listener_display.as_deref(),
+                            connect_endpoint.as_deref(),
                         ) {
                             ERROR_LOG
                                 .log(format!("[ratatui-node] client handler error: {error:?}"));
@@ -106,6 +120,8 @@ fn handle_client(
     client_count: Arc<AtomicUsize>,
     info_path: &std::path::Path,
     session_name: &str,
+    listener_display: Option<&str>,
+    connect_endpoint: Option<&str>,
 ) -> Result<(), LifecycleError> {
     ERROR_LOG.log(format!("[ratatui-node] client {client_id} connected"));
     let removed = Arc::new(AtomicBool::new(false));
@@ -122,10 +138,9 @@ fn handle_client(
 
     // Send snapshot so the client has something to render.
     let count = client_count.load(Ordering::SeqCst);
-    let snapshot = format!(
-        "SNAPSHOT|{session_name}|{count}|Main pane placeholder|Sidebar placeholder|Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu"
-    );
-    if let Err(error) = writeln!(stream, "{snapshot}") {
+    let snapshot = build_snapshot(session_name, count, listener_display, connect_endpoint);
+    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+    if let Err(error) = writeln!(stream, "{json}") {
         ERROR_LOG.log(format!(
             "[ratatui-node] failed to write snapshot: {error:?}"
         ));
@@ -185,6 +200,55 @@ fn handle_client(
     Ok(())
 }
 
+fn build_snapshot(
+    session_name: &str,
+    client_count: usize,
+    listener_display: Option<&str>,
+    connect_endpoint: Option<&str>,
+) -> RatatuiSnapshot {
+    let sessions = list_session_summaries();
+
+    RatatuiSnapshot {
+        session_name: session_name.to_string(),
+        client_count,
+        main: "Main pane placeholder".to_string(),
+        sidebar: "Sidebar placeholder".to_string(),
+        footer: FooterState {
+            active_session: session_name.to_string(),
+            sessions,
+            listener_endpoint: listener_display.map(String::from),
+            connect_endpoint: connect_endpoint.map(String::from),
+            remote_count: 0,
+        },
+    }
+}
+
+fn list_session_summaries() -> Vec<SessionSummary> {
+    let mut summaries = Vec::new();
+    let Ok(entries) = std::fs::read_dir(ratatui_socket_dir()) else {
+        return summaries;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if !name.ends_with(".sock.info") {
+            continue;
+        }
+        if let Ok(json) = std::fs::read_to_string(&path) {
+            if let Ok(info) = serde_json::from_str::<RatatuiSocketInfo>(&json) {
+                summaries.push(SessionSummary {
+                    name: info.session_name,
+                    client_count: info.client_count,
+                });
+            }
+        }
+    }
+
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    summaries
+}
+
 fn detach_all_clients(
     clients: &Arc<Mutex<Vec<ClientHandle>>>,
     client_count: &Arc<AtomicUsize>,
@@ -227,6 +291,33 @@ fn remove_client(
 fn update_info_client_count(client_count: &Arc<AtomicUsize>, info_path: &std::path::Path) {
     let count = client_count.load(Ordering::SeqCst);
     update_socket_info_client_count(info_path, count);
+}
+
+/// Snapshot sent from the node server to a TUI client on attach and update.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RatatuiSnapshot {
+    pub session_name: String,
+    pub client_count: usize,
+    pub main: String,
+    pub sidebar: String,
+    pub footer: FooterState,
+}
+
+/// Footer state rendered by the TUI client.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FooterState {
+    pub active_session: String,
+    pub sessions: Vec<SessionSummary>,
+    pub listener_endpoint: Option<String>,
+    pub connect_endpoint: Option<String>,
+    pub remote_count: usize,
+}
+
+/// A single entry in the footer session list.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionSummary {
+    pub name: String,
+    pub client_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

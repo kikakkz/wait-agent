@@ -211,6 +211,8 @@ pub struct StopCommand {
 #[derive(Debug, Clone, Default)]
 pub struct RatatuiNodeServerCommand {
     pub session_name: String,
+    pub listener_display: Option<String>,
+    pub connect_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -848,6 +850,18 @@ fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerComma
                 command.session_name = iter
                     .next()
                     .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
+            }
+            "--listener-display" => {
+                command.listener_display = Some(
+                    iter.next()
+                        .ok_or_else(|| CliError::MissingValue("--listener-display".to_string()))?,
+                );
+            }
+            "--connect-endpoint" => {
+                command.connect_endpoint = Some(
+                    iter.next()
+                        .ok_or_else(|| CliError::MissingValue("--connect-endpoint".to_string()))?,
+                );
             }
             _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
             _ => return Err(CliError::UnexpectedArgument(arg)),

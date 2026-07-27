@@ -2,7 +2,9 @@ kind: state
 version: 1
 current_task: task.ratatui-phase-1-footer
 focus_statement: >
-  active task is ratatui migration phase 1: render the footer status bar with real session state in the ratatui client. Build on the phase-0 server/client skeleton by having the node server maintain a minimal session catalog and stream snapshots to the client.
+  ratatui migration phase 1 is complete: the footer status bar now renders real session state
+  from the node server (active session, session list, listen/connect indicators). Ready to move
+  to phase 2 (real sidebar session catalog and navigation) once confirmed.
 last_updated_from:
-  file: .agents/tasks/backlog.yaml
-  reference: task.ratatui-phase-1-footer.ready
+  file: .agents/tasks/current.yaml
+  reference: task.ratatui-phase-1-footer.done

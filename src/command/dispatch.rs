@@ -403,7 +403,12 @@ impl CommandDispatcher {
         &self,
         command: RatatuiNodeServerCommand,
     ) -> Result<RatatuiNodeRuntime, AppError> {
-        RatatuiNodeRuntime::from_session(command.session_name).map_err(AppError::from)
+        RatatuiNodeRuntime::from_session_with_endpoints(
+            command.session_name,
+            command.listener_display,
+            command.connect_endpoint,
+        )
+        .map_err(AppError::from)
     }
 
     fn ratatui_client(

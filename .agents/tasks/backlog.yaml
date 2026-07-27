@@ -536,7 +536,7 @@ next:
     status: ready
   - id: task.ratatui-phase-1-footer
     title: render real footer status bar with ratatui widget
-    status: in_progress
+    status: done
   - id: task.ratatui-phase-2-sidebar
     title: render real sidebar session catalog and navigation with ratatui
     status: ready

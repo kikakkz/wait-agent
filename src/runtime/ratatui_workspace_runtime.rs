@@ -185,9 +185,15 @@ impl RatatuiWorkspaceRuntime {
             .arg("__ratatui-node-server")
             .arg("--session-name")
             .arg(session_name)
+            .arg("--listener-display")
+            .arg(self.network.advertised_listener_label())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+
+        if let Some(connect) = &self.network.connect {
+            command.arg("--connect-endpoint").arg(connect);
+        }
 
         // Detach the child into its own session so it survives client exit.
         unsafe {

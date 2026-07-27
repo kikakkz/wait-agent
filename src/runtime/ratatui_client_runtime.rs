@@ -1,6 +1,6 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use crate::runtime::ratatui_node_runtime::ratatui_socket_path;
+use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -51,12 +51,12 @@ impl RatatuiClientRuntime {
         // Read the initial snapshot from the server.
         let mut line = String::new();
         let snapshot = match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => Snapshot::default(),
-            Ok(_) => Snapshot::parse(&line),
+            Ok(0) | Err(_) => RatatuiSnapshot::default(),
+            Ok(_) => parse_snapshot(&line),
         };
 
         ERROR_LOG.log(format!(
-            "[ratatui-client] snapshot session={} clients={} main={} sidebar={} footer={}",
+            "[ratatui-client] snapshot session={} clients={} main={} sidebar={} footer={:?}",
             snapshot.session_name,
             snapshot.client_count,
             snapshot.main,
@@ -110,50 +110,14 @@ impl Focus {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Snapshot {
-    session_name: String,
-    client_count: usize,
-    main: String,
-    sidebar: String,
-    footer: String,
-}
-
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self {
-            session_name: "1".to_string(),
-            client_count: 1,
-            main: "Main pane placeholder".to_string(),
-            sidebar: "Sidebar placeholder".to_string(),
-            footer:
-                "Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu"
-                    .to_string(),
-        }
-    }
-}
-
-impl Snapshot {
-    fn parse(line: &str) -> Self {
-        let parts: Vec<&str> = line.trim().splitn(6, '|').collect();
-        if parts.len() == 6 && parts[0] == "SNAPSHOT" {
-            Self {
-                session_name: parts[1].to_string(),
-                client_count: parts[2].parse().unwrap_or(1),
-                main: parts[3].to_string(),
-                sidebar: parts[4].to_string(),
-                footer: parts[5].to_string(),
-            }
-        } else {
-            Self::default()
-        }
-    }
+fn parse_snapshot(line: &str) -> RatatuiSnapshot {
+    serde_json::from_str(line.trim()).unwrap_or_default()
 }
 
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
     stream: &mut UnixStream,
-    snapshot: Snapshot,
+    snapshot: RatatuiSnapshot,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
@@ -210,7 +174,7 @@ fn run_event_loop(
     Ok(())
 }
 
-fn render(frame: &mut Frame, snapshot: &Snapshot, focus: Focus) {
+fn render(frame: &mut Frame, snapshot: &RatatuiSnapshot, focus: Focus) {
     let area = frame.size();
 
     // Outer vertical layout: chrome above, footer below.
@@ -250,24 +214,74 @@ fn render(frame: &mut Frame, snapshot: &Snapshot, focus: Focus) {
     let sidebar = Paragraph::new("Sidebar placeholder").block(sidebar_block);
     frame.render_widget(sidebar, inner[1]);
 
-    let footer_text = format!(
-        "[{}] {} · {} {}",
-        snapshot.session_name,
-        focus.label(),
-        snapshot.footer,
-        render_fill(
-            outer[1].width as usize,
-            snapshot.footer.chars().count()
-                + snapshot.session_name.chars().count()
-                + focus.label().chars().count()
-                + 8
-        )
-    );
-    let footer = Paragraph::new(Line::from(vec![Span::styled(
-        footer_text,
-        Style::default().bg(Color::Blue).fg(Color::White),
-    )]));
+    let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
+    let footer = Paragraph::new(render_footer_line(snapshot, focus, outer[1].width as usize))
+        .style(footer_style);
     frame.render_widget(footer, outer[1]);
+}
+
+fn render_footer_line(snapshot: &RatatuiSnapshot, focus: Focus, area_width: usize) -> Line {
+    let focus_style = Style::default().fg(Color::Cyan);
+    let muted_style = Style::default().fg(Color::Gray);
+    let active_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let attached_style = Style::default().fg(Color::Green);
+
+    let mut spans = vec![Span::styled(format!("[{}] ", focus.label()), focus_style)];
+
+    // Session tabs.
+    for session in &snapshot.footer.sessions {
+        let is_active = session.name == snapshot.footer.active_session;
+        let style = if is_active {
+            active_style
+        } else if session.client_count > 0 {
+            attached_style
+        } else {
+            muted_style
+        };
+        let indicator = if session.client_count > 0 {
+            "●"
+        } else {
+            "○"
+        };
+        spans.push(Span::styled(
+            format!("{} {} ", indicator, session.name),
+            style,
+        ));
+    }
+
+    // Connection status.
+    if let Some(listener) = &snapshot.footer.listener_endpoint {
+        spans.push(Span::styled("· ", muted_style));
+        spans.push(Span::styled(format!("Listen {} ", listener), muted_style));
+    }
+    if let Some(connect) = &snapshot.footer.connect_endpoint {
+        spans.push(Span::styled("· ", muted_style));
+        spans.push(Span::styled(format!("Connect {} ", connect), muted_style));
+    }
+    if snapshot.footer.remote_count > 0 {
+        spans.push(Span::styled("· ", muted_style));
+        spans.push(Span::styled(
+            format!("{} remote ", snapshot.footer.remote_count),
+            muted_style,
+        ));
+    }
+
+    // Shortcuts.
+    spans.push(Span::styled(
+        " · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu",
+        muted_style,
+    ));
+
+    // Pad to full width so the background color fills the line.
+    let text_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let fill = area_width.saturating_sub(text_width);
+    if fill > 0 {
+        spans.push(Span::styled(" ".repeat(fill), muted_style));
+    }
+
+    Line::from(spans)
 }
 
 fn focus_indicator(active: bool) -> &'static str {
@@ -294,9 +308,4 @@ fn border_style(active: bool) -> Style {
     } else {
         Style::default().fg(Color::DarkGray)
     }
-}
-
-fn render_fill(area_width: usize, text_width: usize) -> String {
-    let fill = area_width.saturating_sub(text_width);
-    " ".repeat(fill)
 }
