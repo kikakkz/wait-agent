@@ -349,7 +349,7 @@ fn render(
 
 fn render_sidebar_header(width: usize) -> Line<'static> {
     let title = "Sessions";
-    let hint = "ctrl+G hide";
+    let hint = "Ctrl-G hide";
     let title_width = display_width(title);
     let hint_width = display_width(hint);
     let padding = width.saturating_sub(title_width + hint_width);
