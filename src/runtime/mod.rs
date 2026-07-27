@@ -47,6 +47,7 @@ pub mod session_lifecycle;
 // Ratatui migration path
 pub mod ratatui_client_runtime;
 pub mod ratatui_node_runtime;
+pub mod ratatui_remote_connect;
 pub mod ratatui_workspace_runtime;
 
 // Standalone modules remaining in runtime root

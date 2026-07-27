@@ -10,10 +10,12 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 
 /// Ratatui TUI client: connects to a session's node server and renders the workspace chrome.
 pub struct RatatuiClientRuntime {
@@ -64,6 +66,32 @@ impl RatatuiClientRuntime {
             snapshot.sessions.len()
         ));
 
+        // Spawn a background reader so the server can push snapshot updates.
+        let (server_tx, server_rx) = mpsc::channel::<ServerMessage>();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let message = if trimmed.starts_with('{') {
+                            ServerMessage::Snapshot(parse_snapshot(trimmed))
+                        } else {
+                            ServerMessage::Log(trimmed.to_string())
+                        };
+                        if server_tx.send(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = restore_terminal();
@@ -73,7 +101,7 @@ impl RatatuiClientRuntime {
         let terminal = init_terminal().map_err(|error| {
             LifecycleError::Io("failed to initialize ratatui terminal".to_string(), error)
         })?;
-        let result = run_event_loop(terminal, &mut stream, snapshot);
+        let result = run_event_loop(terminal, &mut stream, snapshot, server_rx);
         let _ = restore_terminal();
 
         result
@@ -101,6 +129,24 @@ enum Focus {
     Sidebar,
 }
 
+enum ServerMessage {
+    Snapshot(RatatuiSnapshot),
+    Log(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct Overlay {
+    kind: OverlayKind,
+    buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum OverlayKind {
+    #[default]
+    None,
+    ConnectProfile,
+}
+
 fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
@@ -108,12 +154,14 @@ fn parse_snapshot(line: &str) -> RatatuiSnapshot {
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
     stream: &mut UnixStream,
-    snapshot: RatatuiSnapshot,
+    mut snapshot: RatatuiSnapshot,
+    server_rx: Receiver<ServerMessage>,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
     let mut selected_index = 0usize;
-    let mut active_target = snapshot.active_target.clone();
+    let mut overlay = Overlay::default();
+    let mut status_message: Option<String> = None;
 
     loop {
         terminal
@@ -123,73 +171,109 @@ fn run_event_loop(
                     &snapshot,
                     focus,
                     selected_index,
-                    active_target.as_deref(),
+                    snapshot.active_target.as_deref(),
+                    &overlay,
+                    status_message.as_deref(),
                 )
             })
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
 
-        match event::read().map_err(|error| {
-            LifecycleError::Io("failed to read crossterm event".to_string(), error)
-        })? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if prefix_pressed {
-                    prefix_pressed = false;
-                    match key.code {
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            let _ = writeln!(stream, "DETACH");
-                            let _ = stream.flush();
-                            break;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            prefix_pressed = true;
-                        }
-                        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            focus = Focus::Sidebar;
-                            if selected_index >= snapshot.sessions.len()
-                                && !snapshot.sessions.is_empty()
-                            {
-                                selected_index = snapshot.sessions.len() - 1;
-                            }
-                        }
-                        KeyCode::Left if focus == Focus::Sidebar => {
-                            focus = Focus::Main;
-                        }
-                        KeyCode::Up if focus == Focus::Sidebar && selected_index > 0 => {
-                            selected_index -= 1;
-                        }
-                        KeyCode::Down
-                            if focus == Focus::Sidebar
-                                && selected_index + 1 < snapshot.sessions.len() =>
-                        {
-                            selected_index += 1;
-                        }
-                        KeyCode::Enter if focus == Focus::Sidebar => {
-                            if let Some(session) = snapshot.sessions.get(selected_index) {
-                                active_target = Some(session.id.clone());
-                                let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
-                                let _ = stream.flush();
-                                ERROR_LOG.log(format!(
-                                    "[ratatui-client] activate session: {}",
-                                    session.id
-                                ));
-                            }
-                        }
-                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
-                            let _ = stream.flush();
-                        }
-                        _ => {}
+        // Drain any server-pushed snapshots before waiting for input.
+        loop {
+            match server_rx.try_recv() {
+                Ok(ServerMessage::Snapshot(new_snapshot)) => {
+                    snapshot = new_snapshot;
+                    if selected_index >= snapshot.sessions.len() && !snapshot.sessions.is_empty() {
+                        selected_index = snapshot.sessions.len() - 1;
                     }
                 }
+                Ok(ServerMessage::Log(text)) => {
+                    ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
+                    status_message = Some(text);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
-            Event::Resize(_, _) => {}
-            _ => {}
+        }
+
+        if event::poll(Duration::from_millis(50)).map_err(|error| {
+            LifecycleError::Io("failed to poll crossterm events".to_string(), error)
+        })? {
+            match event::read().map_err(|error| {
+                LifecycleError::Io("failed to read crossterm event".to_string(), error)
+            })? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if overlay.kind != OverlayKind::None {
+                        if handle_overlay_key(&key, &mut overlay, stream, &mut status_message) {
+                            continue;
+                        }
+                    }
+
+                    if prefix_pressed {
+                        prefix_pressed = false;
+                        match key.code {
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                let _ = writeln!(stream, "DETACH");
+                                let _ = stream.flush();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                prefix_pressed = true;
+                            }
+                            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                focus = Focus::Sidebar;
+                                if selected_index >= snapshot.sessions.len()
+                                    && !snapshot.sessions.is_empty()
+                                {
+                                    selected_index = snapshot.sessions.len() - 1;
+                                }
+                            }
+                            KeyCode::Left if focus == Focus::Sidebar => {
+                                focus = Focus::Main;
+                            }
+                            KeyCode::Up if focus == Focus::Sidebar && selected_index > 0 => {
+                                selected_index -= 1;
+                            }
+                            KeyCode::Down
+                                if focus == Focus::Sidebar
+                                    && selected_index + 1 < snapshot.sessions.len() =>
+                            {
+                                selected_index += 1;
+                            }
+                            KeyCode::Enter if focus == Focus::Sidebar => {
+                                if let Some(session) = snapshot.sessions.get(selected_index) {
+                                    snapshot.active_target = Some(session.id.clone());
+                                    let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
+                                    let _ = stream.flush();
+                                    ERROR_LOG.log(format!(
+                                        "[ratatui-client] activate session: {}",
+                                        session.id
+                                    ));
+                                }
+                            }
+                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
+                                let _ = stream.flush();
+                            }
+                            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                overlay = Overlay {
+                                    kind: OverlayKind::ConnectProfile,
+                                    buffer: String::new(),
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
         }
     }
 
@@ -202,6 +286,8 @@ fn render(
     focus: Focus,
     selected_index: usize,
     active_target: Option<&str>,
+    overlay: &Overlay,
+    status_message: Option<&str>,
 ) {
     let area = frame.size();
 
@@ -235,7 +321,6 @@ fn render(
     frame.render_widget(separator, inner[1]);
 
     let sidebar_block = Block::default()
-        .title(snapshot.sidebar.clone())
         .borders(Borders::NONE)
         .title_style(title_style(focus == Focus::Sidebar));
     let sidebar = Paragraph::new(render_sidebar_lines(
@@ -248,10 +333,18 @@ fn render(
     .block(sidebar_block);
     frame.render_widget(sidebar, inner[2]);
 
-    let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
-    let footer =
-        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style);
+    let footer = if let Some(status) = status_message {
+        let style = Style::default().bg(Color::Yellow).fg(Color::Black);
+        Paragraph::new(pad_right(status, outer[1].width as usize)).style(style)
+    } else {
+        let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
+        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style)
+    };
     frame.render_widget(footer, outer[1]);
+
+    if overlay.kind == OverlayKind::ConnectProfile {
+        render_connect_overlay(frame, overlay, area);
+    }
 }
 
 fn render_sidebar_lines<'a>(
@@ -267,7 +360,7 @@ fn render_sidebar_lines<'a>(
 
     // Header.
     lines.push(Line::from(vec![Span::styled(
-        " Sessions  [h] hide",
+        " [h] hide",
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -521,4 +614,56 @@ fn separator_style(focus: Focus) -> Style {
         Focus::Main => Style::default().fg(Color::DarkGray),
         Focus::Sidebar => Style::default().fg(Color::Yellow),
     }
+}
+
+fn handle_overlay_key(
+    key: &crossterm::event::KeyEvent,
+    overlay: &mut Overlay,
+    stream: &mut UnixStream,
+    status_message: &mut Option<String>,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            overlay.kind = OverlayKind::None;
+            overlay.buffer.clear();
+            true
+        }
+        KeyCode::Enter => {
+            let buffer = overlay.buffer.trim().to_string();
+            overlay.kind = OverlayKind::None;
+            overlay.buffer.clear();
+            if !buffer.is_empty() {
+                let _ = writeln!(stream, "CONNECT_REMOTE_HOST {}", buffer);
+                let _ = stream.flush();
+                *status_message = Some(format!("connecting to {buffer}..."));
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            overlay.buffer.pop();
+            true
+        }
+        KeyCode::Char(ch) => {
+            overlay.buffer.push(ch);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn render_connect_overlay(frame: &mut Frame, overlay: &Overlay, area: Rect) {
+    let width = area.width.saturating_sub(8).min(60);
+    let height = 3u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + area.height.saturating_sub(height + 2);
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title("Connect remote host")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = format!("Profile: {}", overlay.buffer);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup);
 }

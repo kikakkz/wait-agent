@@ -1,8 +1,10 @@
+use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_remote_connect::connect_remote_host;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -15,8 +17,7 @@ use std::sync::{Arc, Mutex};
 /// to the same session; the server keeps running until it is explicitly stopped.
 pub struct RatatuiNodeRuntime {
     session_name: String,
-    listener_display: Option<String>,
-    connect_endpoint: Option<String>,
+    network: RemoteNetworkConfig,
     sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
     active_target: Arc<Mutex<Option<String>>>,
 }
@@ -35,10 +36,32 @@ impl RatatuiNodeRuntime {
             .unwrap()
             .first()
             .map(|session| session.address.qualified_target());
+        let network =
+            ratatui_network_config(listener_display.as_deref(), connect_endpoint.as_deref());
         Ok(Self {
             session_name,
-            listener_display,
-            connect_endpoint,
+            network,
+            sessions,
+            active_target: Arc::new(Mutex::new(active_target)),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn from_session_with_network(
+        session_name: String,
+        network: RemoteNetworkConfig,
+    ) -> Result<Self, LifecycleError> {
+        let sessions = Arc::new(Mutex::new(vec![default_local_session_record(
+            &session_name,
+        )]));
+        let active_target = sessions
+            .lock()
+            .unwrap()
+            .first()
+            .map(|session| session.address.qualified_target());
+        Ok(Self {
+            session_name,
+            network,
             sessions,
             active_target: Arc::new(Mutex::new(active_target)),
         })
@@ -89,8 +112,7 @@ impl RatatuiNodeRuntime {
                     let client_count = client_count.clone();
                     let info_path = info_path.clone();
                     let session_name = self.session_name.clone();
-                    let listener_display = self.listener_display.clone();
-                    let connect_endpoint = self.connect_endpoint.clone();
+                    let network = self.network.clone();
                     let sessions = self.sessions.clone();
                     let active_target = self.active_target.clone();
                     std::thread::spawn(move || {
@@ -102,8 +124,7 @@ impl RatatuiNodeRuntime {
                             client_count,
                             &info_path,
                             &session_name,
-                            listener_display.as_deref(),
-                            connect_endpoint.as_deref(),
+                            &network,
                             sessions,
                             active_target,
                         ) {
@@ -139,8 +160,7 @@ fn handle_client(
     client_count: Arc<AtomicUsize>,
     info_path: &std::path::Path,
     session_name: &str,
-    listener_display: Option<&str>,
-    connect_endpoint: Option<&str>,
+    network: &RemoteNetworkConfig,
     sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
     active_target: Arc<Mutex<Option<String>>>,
 ) -> Result<(), LifecycleError> {
@@ -159,14 +179,7 @@ fn handle_client(
 
     // Send snapshot so the client has something to render.
     let count = client_count.load(Ordering::SeqCst);
-    let snapshot = build_snapshot(
-        session_name,
-        count,
-        listener_display,
-        connect_endpoint,
-        &sessions,
-        &active_target,
-    );
+    let snapshot = build_snapshot(session_name, count, network, &sessions, &active_target);
     let json = serde_json::to_string(&snapshot).unwrap_or_default();
     if let Err(error) = writeln!(stream, "{json}") {
         ERROR_LOG.log(format!(
@@ -211,11 +224,22 @@ fn handle_client(
                         break;
                     }
                     _ => {
-                        if let Some(response) =
-                            handle_control_command(trimmed, session_name, &sessions, &active_target)
-                        {
+                        if let Some(response) = handle_control_command(
+                            trimmed,
+                            session_name,
+                            network,
+                            &sessions,
+                            &active_target,
+                        ) {
                             let _ = writeln!(stream, "{response}");
                             let _ = stream.flush();
+                            let _ = broadcast_snapshot(
+                                &clients,
+                                session_name,
+                                network,
+                                &sessions,
+                                &active_target,
+                            );
                         }
                     }
                 }
@@ -238,6 +262,7 @@ fn handle_client(
 fn handle_control_command(
     command: &str,
     session_name: &str,
+    network: &RemoteNetworkConfig,
     sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
     active_target: &Arc<Mutex<Option<String>>>,
 ) -> Option<String> {
@@ -274,6 +299,19 @@ fn handle_control_command(
         } else {
             Some("ERR unknown target".to_string())
         }
+    } else if let Some(profile_name) = command.strip_prefix("CONNECT_REMOTE_HOST ") {
+        match connect_remote_host(profile_name, sessions, network) {
+            Ok(record) => {
+                let target = record.address.qualified_target();
+                let mut guard = sessions.lock().unwrap();
+                guard.retain(|session| session.address.id() != record.address.id());
+                guard.push(record);
+                drop(guard);
+                *active_target.lock().unwrap() = Some(target.clone());
+                Some(format!("OK connected {target}"))
+            }
+            Err(error) => Some(format!("ERR {error}")),
+        }
     } else {
         None
     }
@@ -300,8 +338,7 @@ fn default_local_session_record(session_name: &str) -> ManagedSessionRecord {
 fn build_snapshot(
     session_name: &str,
     client_count: usize,
-    listener_display: Option<&str>,
-    connect_endpoint: Option<&str>,
+    network: &RemoteNetworkConfig,
     sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
     active_target: &Arc<Mutex<Option<String>>>,
 ) -> RatatuiSnapshot {
@@ -317,13 +354,50 @@ fn build_snapshot(
         footer: FooterState {
             active_session: session_name.to_string(),
             sessions: vec![],
-            listener_endpoint: listener_display.map(String::from),
-            connect_endpoint: connect_endpoint.map(String::from),
-            remote_count: 0,
+            listener_endpoint: Some(network.advertised_listener_label().to_string()),
+            connect_endpoint: network.connect_endpoint_uri(),
+            remote_count: sessions
+                .iter()
+                .filter(|session| session.transport == "remote")
+                .count(),
         },
         sessions,
         active_target,
     }
+}
+
+fn broadcast_snapshot(
+    clients: &Arc<Mutex<Vec<ClientHandle>>>,
+    session_name: &str,
+    network: &RemoteNetworkConfig,
+    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
+    active_target: &Arc<Mutex<Option<String>>>,
+) {
+    let snapshot = build_snapshot(session_name, 0, network, sessions, active_target);
+    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+    let mut guard = clients.lock().unwrap();
+    guard.retain(|handle| !handle.removed.load(Ordering::SeqCst));
+    for handle in guard.iter() {
+        let mut stream = &handle.stream;
+        let _ = writeln!(stream, "{json}");
+        let _ = stream.flush();
+    }
+}
+
+fn ratatui_network_config(
+    listener_display: Option<&str>,
+    connect_endpoint: Option<&str>,
+) -> RemoteNetworkConfig {
+    let mut network = RemoteNetworkConfig::default();
+    if let Some(display) = listener_display {
+        if let Some((_, port_str)) = display.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                network.port = port;
+            }
+        }
+    }
+    network.connect = connect_endpoint.map(String::from);
+    network
 }
 
 fn detach_all_clients(
