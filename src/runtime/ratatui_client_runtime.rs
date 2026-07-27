@@ -1,5 +1,6 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot, SessionView};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -10,7 +11,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -101,7 +102,13 @@ impl RatatuiClientRuntime {
         let terminal = init_terminal().map_err(|error| {
             LifecycleError::Io("failed to initialize ratatui terminal".to_string(), error)
         })?;
-        let result = run_event_loop(terminal, &mut stream, snapshot, server_rx);
+        let result = run_event_loop(
+            terminal,
+            &mut stream,
+            snapshot,
+            server_rx,
+            &self.session_name,
+        );
         let _ = restore_terminal();
 
         result
@@ -123,6 +130,31 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
+fn spawn_connect_popup(session_name: &str) -> Result<(), LifecycleError> {
+    let executable = current_waitagent_executable()?;
+
+    // Hand the terminal back to the shell so the existing connect pane popup
+    // can take over with its own raw-mode / alternate-screen setup.
+    let _ = restore_terminal();
+
+    let result = std::process::Command::new(&executable)
+        .arg("--ratatui")
+        .arg("__ratatui-connect-remote-host-pane")
+        .arg("--session-name")
+        .arg(session_name)
+        .status()
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to spawn connect remote host popup".to_string(),
+                error,
+            )
+        });
+
+    // Re-enter ratatui TUI raw mode after the popup closes.
+    let _ = init_terminal();
+    result.map(|_| ())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Main,
@@ -134,19 +166,6 @@ enum ServerMessage {
     Log(String),
 }
 
-#[derive(Debug, Clone, Default)]
-struct Overlay {
-    kind: OverlayKind,
-    buffer: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum OverlayKind {
-    #[default]
-    None,
-    ConnectProfile,
-}
-
 fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
@@ -156,11 +175,11 @@ fn run_event_loop(
     stream: &mut UnixStream,
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
+    session_name: &str,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
     let mut selected_index = 0usize;
-    let mut overlay = Overlay::default();
     let mut status_message: Option<String> = None;
 
     loop {
@@ -172,7 +191,6 @@ fn run_event_loop(
                     focus,
                     selected_index,
                     snapshot.active_target.as_deref(),
-                    &overlay,
                     status_message.as_deref(),
                 )
             })
@@ -205,12 +223,6 @@ fn run_event_loop(
                 LifecycleError::Io("failed to read crossterm event".to_string(), error)
             })? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if overlay.kind != OverlayKind::None {
-                        if handle_overlay_key(&key, &mut overlay, stream, &mut status_message) {
-                            continue;
-                        }
-                    }
-
                     if prefix_pressed {
                         prefix_pressed = false;
                         match key.code {
@@ -262,10 +274,7 @@ fn run_event_loop(
                                 let _ = stream.flush();
                             }
                             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                overlay = Overlay {
-                                    kind: OverlayKind::ConnectProfile,
-                                    buffer: String::new(),
-                                };
+                                let _ = spawn_connect_popup(session_name);
                             }
                             _ => {}
                         }
@@ -286,7 +295,6 @@ fn render(
     focus: Focus,
     selected_index: usize,
     active_target: Option<&str>,
-    overlay: &Overlay,
     status_message: Option<&str>,
 ) {
     let area = frame.size();
@@ -341,10 +349,6 @@ fn render(
         Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style)
     };
     frame.render_widget(footer, outer[1]);
-
-    if overlay.kind == OverlayKind::ConnectProfile {
-        render_connect_overlay(frame, overlay, area);
-    }
 }
 
 fn render_sidebar_header(width: usize) -> Line<'static> {
@@ -630,56 +634,4 @@ fn separator_style(focus: Focus) -> Style {
         Focus::Main => Style::default().fg(Color::DarkGray),
         Focus::Sidebar => Style::default().fg(Color::Yellow),
     }
-}
-
-fn handle_overlay_key(
-    key: &crossterm::event::KeyEvent,
-    overlay: &mut Overlay,
-    stream: &mut UnixStream,
-    status_message: &mut Option<String>,
-) -> bool {
-    match key.code {
-        KeyCode::Esc => {
-            overlay.kind = OverlayKind::None;
-            overlay.buffer.clear();
-            true
-        }
-        KeyCode::Enter => {
-            let buffer = overlay.buffer.trim().to_string();
-            overlay.kind = OverlayKind::None;
-            overlay.buffer.clear();
-            if !buffer.is_empty() {
-                let _ = writeln!(stream, "CONNECT_REMOTE_HOST {}", buffer);
-                let _ = stream.flush();
-                *status_message = Some(format!("connecting to {buffer}..."));
-            }
-            true
-        }
-        KeyCode::Backspace => {
-            overlay.buffer.pop();
-            true
-        }
-        KeyCode::Char(ch) => {
-            overlay.buffer.push(ch);
-            true
-        }
-        _ => true,
-    }
-}
-
-fn render_connect_overlay(frame: &mut Frame, overlay: &Overlay, area: Rect) {
-    let width = area.width.saturating_sub(8).min(60);
-    let height = 3u16;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height.saturating_sub(height + 2);
-    let popup = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .title("Connect remote host")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-    let text = format!("Profile: {}", overlay.buffer);
-    let paragraph = Paragraph::new(text).block(block);
-    frame.render_widget(paragraph, popup);
 }

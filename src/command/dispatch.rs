@@ -5,7 +5,7 @@ use crate::runtime::event_driven_pane_runtime::EventDrivenPaneRuntime;
 use crate::runtime::footer_menu_runtime::FooterMenuRuntime;
 use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
-use crate::runtime::ratatui_node_runtime::RatatuiNodeRuntime;
+use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiNodeRuntime};
 use crate::runtime::ratatui_workspace_runtime::RatatuiWorkspaceRuntime;
 use crate::runtime::remote_authority_target_host_runtime::{
     run_geometry_event, run_pane_died_event, RemoteAuthorityTargetHostRuntime,
@@ -267,6 +267,18 @@ impl CommandDispatcher {
                 .ratatui_client(command)
                 .and_then(|runtime| runtime.run().map_err(AppError::from))
                 .map_err(AppError::from),
+            Command::RatatuiConnectRemoteHostPane(command) => {
+                let socket_path = ratatui_socket_path(&command.session_name);
+                let pane_command = crate::cli::ConnectRemoteHostPaneCommand {
+                    current_socket_name: String::new(),
+                    current_session_name: command.session_name.clone(),
+                };
+                ConnectRemoteHostPaneRuntime::new(self.network.clone())
+                    .with_ratatui_session_name(command.session_name.clone())
+                    .with_ratatui_socket_path(socket_path)
+                    .run(pane_command)
+                    .map_err(AppError::from)
+            }
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");

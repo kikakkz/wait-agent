@@ -19,7 +19,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -27,11 +28,27 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct ConnectRemoteHostPaneRuntime {
     network: RemoteNetworkConfig,
+    ratatui_session_name: Option<String>,
+    ratatui_socket_path: Option<std::path::PathBuf>,
 }
 
 impl ConnectRemoteHostPaneRuntime {
     pub fn new(network: RemoteNetworkConfig) -> Self {
-        Self { network }
+        Self {
+            network,
+            ratatui_session_name: None,
+            ratatui_socket_path: None,
+        }
+    }
+
+    pub fn with_ratatui_session_name(mut self, session_name: impl Into<String>) -> Self {
+        self.ratatui_session_name = Some(session_name.into());
+        self
+    }
+
+    pub fn with_ratatui_socket_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.ratatui_socket_path = Some(path.into());
+        self
     }
 
     pub fn run(&self, command: ConnectRemoteHostPaneCommand) -> Result<(), LifecycleError> {
@@ -145,7 +162,13 @@ impl ConnectRemoteHostPaneRuntime {
                     terminal
                         .draw(|frame| render(frame, state))
                         .map_err(write_error)?;
-                    match run_connect(state, &command, &self.network) {
+                    match run_connect(
+                        state,
+                        &command,
+                        &self.network,
+                        self.ratatui_session_name.as_deref(),
+                        self.ratatui_socket_path.as_deref(),
+                    ) {
                         Ok(_) => return Ok(()),
                         Err(message) => state.status = Status::Error(message),
                     }
@@ -2727,11 +2750,57 @@ fn delete_selected_host(
     Ok(request)
 }
 
+fn run_ratatui_connect(
+    state: &ConnectRemoteHostState,
+    session_name: &str,
+    socket_path: &std::path::Path,
+) -> Result<String, String> {
+    let Some(profile) = state
+        .selected_profile()
+        .filter(|profile| saved_profile_can_connect_by_id(state, profile))
+    else {
+        return Err("ratatui mode only supports saved profiles with saved credentials".to_string());
+    };
+
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        format!("failed to connect to ratatui node for `{session_name}`: {error}")
+    })?;
+    writeln!(stream, "CONNECT_REMOTE_HOST {}", profile.name)
+        .map_err(|error| format!("failed to send connect command: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("failed to flush connect command: {error}"))?;
+
+    let reader = stream
+        .try_clone()
+        .map_err(|error| format!("failed to clone node socket: {error}"))?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("failed to read node response: {error}"))?;
+    let response = line.trim();
+    if response.starts_with("OK") {
+        Ok("Connected. Press Esc to close.".to_string())
+    } else {
+        Err(response
+            .strip_prefix("ERR ")
+            .unwrap_or(response)
+            .to_string())
+    }
+}
+
 fn run_connect(
     state: &ConnectRemoteHostState,
     command: &ConnectRemoteHostPaneCommand,
     network: &RemoteNetworkConfig,
+    ratatui_session_name: Option<&str>,
+    ratatui_socket_path: Option<&std::path::Path>,
 ) -> Result<String, String> {
+    if let (Some(session_name), Some(socket_path)) = (ratatui_session_name, ratatui_socket_path) {
+        return run_ratatui_connect(state, session_name, socket_path);
+    }
+
     validate(state)?;
     let executable = current_waitagent_executable()
         .map_err(|error| error.to_string())?
