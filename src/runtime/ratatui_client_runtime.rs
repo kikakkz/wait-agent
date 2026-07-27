@@ -101,15 +101,6 @@ enum Focus {
     Sidebar,
 }
 
-impl Focus {
-    fn label(self) -> &'static str {
-        match self {
-            Focus::Main => "MAIN",
-            Focus::Sidebar => "SIDEBAR",
-        }
-    }
-}
-
 fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
@@ -189,76 +180,42 @@ fn render(frame: &mut Frame, snapshot: &RatatuiSnapshot, focus: Focus) {
         .constraints([Constraint::Min(0), Constraint::Length(32)])
         .split(outer[0]);
 
-    let main_title = format!(
-        "{} {}",
-        focus_indicator(focus == Focus::Main),
-        snapshot.main
-    );
     let main_block = Block::default()
-        .title(main_title)
+        .title(snapshot.main.clone())
         .borders(Borders::RIGHT)
-        .border_style(border_style(focus == Focus::Main));
+        .border_style(border_style(focus == Focus::Main))
+        .title_style(title_style(focus == Focus::Main));
     let main =
         Paragraph::new("Main pane placeholder\n\nPress q or Ctrl+B d to quit.").block(main_block);
     frame.render_widget(main, inner[0]);
 
-    let sidebar_title = format!(
-        "{} {}",
-        focus_indicator(focus == Focus::Sidebar),
-        snapshot.sidebar
-    );
     let sidebar_block = Block::default()
-        .title(sidebar_title)
+        .title(snapshot.sidebar.clone())
         .borders(Borders::NONE)
         .title_style(title_style(focus == Focus::Sidebar));
     let sidebar = Paragraph::new("Sidebar placeholder").block(sidebar_block);
     frame.render_widget(sidebar, inner[1]);
 
     let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
-    let footer = Paragraph::new(render_footer_line(snapshot, focus, outer[1].width as usize))
-        .style(footer_style);
+    let footer =
+        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style);
     frame.render_widget(footer, outer[1]);
 }
 
-fn render_footer_line(snapshot: &RatatuiSnapshot, focus: Focus, area_width: usize) -> Line {
-    let focus_style = Style::default().fg(Color::Cyan);
+fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize) -> Line {
     let muted_style = Style::default().fg(Color::Gray);
-    let active_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let attached_style = Style::default().fg(Color::Green);
+    let accent_style = Style::default().fg(Color::White);
 
-    let mut spans = vec![Span::styled(format!("[{}] ", focus.label()), focus_style)];
-
-    // Session tabs.
-    for session in &snapshot.footer.sessions {
-        let is_active = session.name == snapshot.footer.active_session;
-        let style = if is_active {
-            active_style
-        } else if session.client_count > 0 {
-            attached_style
-        } else {
-            muted_style
-        };
-        let indicator = if session.client_count > 0 {
-            "●"
-        } else {
-            "○"
-        };
-        spans.push(Span::styled(
-            format!("{} {} ", indicator, session.name),
-            style,
-        ));
-    }
+    let mut spans = Vec::new();
 
     // Connection status.
     if let Some(listener) = &snapshot.footer.listener_endpoint {
-        spans.push(Span::styled("· ", muted_style));
-        spans.push(Span::styled(format!("Listen {} ", listener), muted_style));
+        spans.push(Span::styled("Listen ", accent_style));
+        spans.push(Span::styled(format!("{} ", listener), muted_style));
     }
     if let Some(connect) = &snapshot.footer.connect_endpoint {
-        spans.push(Span::styled("· ", muted_style));
-        spans.push(Span::styled(format!("Connect {} ", connect), muted_style));
+        spans.push(Span::styled("· Connect ", accent_style));
+        spans.push(Span::styled(format!("{} ", connect), muted_style));
     }
     if snapshot.footer.remote_count > 0 {
         spans.push(Span::styled("· ", muted_style));
@@ -268,9 +225,13 @@ fn render_footer_line(snapshot: &RatatuiSnapshot, focus: Focus, area_width: usiz
         ));
     }
 
+    if !spans.is_empty() {
+        spans.push(Span::styled("· ", muted_style));
+    }
+
     // Shortcuts.
     spans.push(Span::styled(
-        " · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu",
+        "Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu",
         muted_style,
     ));
 
@@ -282,14 +243,6 @@ fn render_footer_line(snapshot: &RatatuiSnapshot, focus: Focus, area_width: usiz
     }
 
     Line::from(spans)
-}
-
-fn focus_indicator(active: bool) -> &'static str {
-    if active {
-        "▸"
-    } else {
-        " "
-    }
 }
 
 fn title_style(active: bool) -> Style {
