@@ -321,8 +321,12 @@ impl WorkspaceCommandRuntime {
         match command.target.clone() {
             Some(target) => {
                 let session = self.attachable_session(target)?;
-                let _live_workspace_registration =
-                    self.register_live_workspace(session.address.server_id())?;
+                // Attach is a transient client: it should not hold a
+                // LiveWorkspaceRegistration drop guard.  If it did, detaching
+                // from tmux would drop the guard and tear down the remote
+                // sidecars that the daemon owns.  Just make sure the socket is
+                // registered (idempotent) so remote publications work.
+                self.register_live_workspace_socket(session.address.server_id())?;
                 self.ensure_agent_signal_runtime(session.address.server_id())?;
                 self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
@@ -336,8 +340,9 @@ impl WorkspaceCommandRuntime {
                     .session_service
                     .resolve_default_attach_session()
                     .map_err(tmux_runtime_error)?;
-                let _live_workspace_registration =
-                    self.register_live_workspace(session.address.server_id())?;
+                // See above: attach is transient and must not own workspace
+                // lifecycle teardown.
+                self.register_live_workspace_socket(session.address.server_id())?;
                 self.ensure_agent_signal_runtime(session.address.server_id())?;
                 self.remote_runtime_owner_runtime.ensure_owner_running()?;
                 self.start_remote_node_ingress(session.address.server_id())?;
