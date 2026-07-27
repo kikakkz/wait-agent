@@ -1573,10 +1573,11 @@ impl PopupGeometry {
         let dialog_height = body_height + 2;
         let y = rows.saturating_sub(dialog_height) / 2;
         let dialog = Rect::new(x, y, width, dialog_height);
+        // Leave one column/row on each side for the border.
         let body = Rect::new(
-            dialog.x,
-            dialog.y.saturating_add(2),
-            dialog.width,
+            dialog.x.saturating_add(1),
+            dialog.y.saturating_add(1),
+            dialog.width.saturating_sub(2),
             body_height,
         );
         let host_width = host_list_width(state, body.width);
@@ -1683,17 +1684,13 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
         PopupGeometry::from_terminal_size((frame.size().width, frame.size().height), state);
     frame.render_widget(Clear, geometry.dialog);
     frame.render_widget(
-        Paragraph::new(
-            Line::from("Connect Remote Host")
-                .style(Style::default().add_modifier(Modifier::BOLD))
-                .alignment(Alignment::Center),
-        ),
-        Rect::new(
-            geometry.dialog.x,
-            geometry.dialog.y,
-            geometry.dialog.width,
-            1,
-        ),
+        Block::default()
+            .title("Connect Remote Host")
+            .title_alignment(Alignment::Center)
+            .title_style(Style::default().add_modifier(Modifier::BOLD))
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black).fg(Color::White)),
+        geometry.dialog,
     );
 
     render_hosts(frame, geometry.hosts, state);
@@ -3538,14 +3535,14 @@ mod tests {
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.dialog.height, 15);
-        assert_eq!(geometry.hosts.y, 3);
-        assert_eq!(geometry.details.y, 3);
+        assert_eq!(geometry.hosts.y, 2);
+        assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 13);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
@@ -3574,10 +3571,10 @@ mod tests {
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
@@ -3690,7 +3687,7 @@ mod tests {
         assert_eq!(geometry.dialog.x, 0);
         assert_eq!(geometry.dialog.width, 66);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 34);
+        assert_eq!(geometry.details.width, 32);
     }
 
     #[test]
@@ -3984,7 +3981,7 @@ mod tests {
         let popup = PopupGeometry::from_terminal_size((100, 18), &state);
         let details = DetailsGeometry::from_area(popup.details, &state);
 
-        assert_eq!(popup.details.y, 3);
+        assert_eq!(popup.details.y, 2);
         assert_eq!(popup.details.height, 14);
         assert_eq!(details.rows.delete, Some(13));
         assert!(
