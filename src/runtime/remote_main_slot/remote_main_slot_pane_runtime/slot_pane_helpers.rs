@@ -77,6 +77,7 @@ pub(super) fn activate_surface_target(
     observer: &mut RemoteObserverRuntime,
     raw_output_reader: &mut RemoteRawPtyMailboxReader,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
+    let mut direct_raw_output_last_seq = None;
     activate_surface_target_with_mode(
         remote_runtime,
         target,
@@ -84,6 +85,7 @@ pub(super) fn activate_surface_target(
         size,
         observer,
         raw_output_reader,
+        &mut direct_raw_output_last_seq,
     )
     .map(|(binding, _)| binding)
 }
@@ -95,18 +97,21 @@ pub(super) fn activate_surface_target_with_mode(
     size: &TerminalSize,
     observer: &mut RemoteObserverRuntime,
     raw_output_reader: &mut RemoteRawPtyMailboxReader,
+    direct_raw_output_last_seq: &mut Option<u64>,
 ) -> Result<(RemoteAttachmentBinding, Vec<u8>), LifecycleError> {
     let had_visible_output = observer.snapshot().has_visible_output;
     if had_visible_output {
         // Reconnect path: keep the last known screen visible while the
-        // new mirror is being set up. Clear sequence tracking in both the
-        // observer terminal engine and the raw PTY mailbox reader so
-        // incoming TargetOutput and RawPtyOutput frames won't be rejected
-        // as out-of-order after the remote authority restarts numbering.
+        // new mirror is being set up. Clear sequence tracking in the
+        // observer terminal engine, the raw PTY mailbox reader, and the
+        // direct-transport raw output path so incoming TargetOutput and
+        // RawPtyOutput frames won't be rejected as out-of-order after the
+        // remote authority restarts numbering.
         // The first BootstrapChunk or TargetOutput will overwrite the old
         // terminal state naturally via feed().
         observer.clear_output_seq();
         raw_output_reader.clear_output_seq();
+        *direct_raw_output_last_seq = None;
     } else {
         observer.begin_bootstrap();
     }

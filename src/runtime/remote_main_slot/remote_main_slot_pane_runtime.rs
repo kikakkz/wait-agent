@@ -222,7 +222,10 @@ impl RemoteMainSlotPaneRuntime {
         let terminal = TerminalRuntime::stdio();
         let _raw_mode = terminal.enter_raw_mode()?;
         let _cursor_guard = RemotePaneCursorGuard::restore_on_drop().map_err(|error| {
-            LifecycleError::Io("failed to create remote interact cursor guard".to_string(), error)
+            LifecycleError::Io(
+                "failed to create remote interact cursor guard".to_string(),
+                error,
+            )
         })?;
 
         let registry = RemoteConnectionRegistry::new();
@@ -334,6 +337,7 @@ impl RemoteMainSlotPaneRuntime {
                 render_mode,
                 &mut engine_render,
                 event_tx.clone(),
+                &mut direct_raw_output_last_seq,
             ) {
                 Ok(activated_binding) => {
                     binding = Some(activated_binding);
@@ -540,6 +544,7 @@ impl RemoteMainSlotPaneRuntime {
                                     render_mode,
                                     &mut engine_render,
                                     event_tx.clone(),
+                                    &mut direct_raw_output_last_seq,
                                 ) {
                                     Ok(new_binding) => {
                                         binding = Some(new_binding);
@@ -714,6 +719,7 @@ impl RemoteMainSlotPaneRuntime {
                             render_mode,
                             &mut engine_render,
                             event_tx.clone(),
+                            &mut direct_raw_output_last_seq,
                         ) {
                             Ok(new_binding) => {
                                 binding = Some(new_binding);
@@ -937,6 +943,7 @@ impl RemoteMainSlotPaneRuntime {
                                     render_mode,
                                     &mut engine_render,
                                     event_tx.clone(),
+                                    &mut direct_raw_output_last_seq,
                                 ) {
                                     Ok(activated_binding) => {
                                         binding = Some(activated_binding);
@@ -1464,6 +1471,7 @@ impl RemoteMainSlotPaneRuntime {
                                 render_mode,
                                 &mut engine_render,
                                 event_tx.clone(),
+                                &mut direct_raw_output_last_seq,
                             ) {
                                 Ok(activated_binding) => {
                                     binding = Some(activated_binding);
@@ -1754,6 +1762,7 @@ fn activate_remote_surface_binding(
     render_mode: RemoteRenderMode,
     engine_render: &mut EngineRenderState,
     event_tx: mpsc::Sender<RemotePaneEvent>,
+    direct_raw_output_last_seq: &mut Option<u64>,
 ) -> Result<RemoteAttachmentBinding, LifecycleError> {
     let (activated_binding, raw) = activate_surface_target_with_mode(
         remote_runtime,
@@ -1762,6 +1771,7 @@ fn activate_remote_surface_binding(
         size,
         observer,
         raw_output_reader,
+        direct_raw_output_last_seq,
     )?;
     raw_input_route.activate(target, &activated_binding, &spec.console_host_id);
     schedule_post_activation_resize_probe(event_tx.clone());

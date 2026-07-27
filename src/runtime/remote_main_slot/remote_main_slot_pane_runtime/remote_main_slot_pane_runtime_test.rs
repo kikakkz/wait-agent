@@ -811,6 +811,7 @@ mod tests {
             console_location: ConsoleLocation::LocalWorkspace,
         };
 
+        let mut direct_raw_output_last_seq = None;
         let (binding, raw) = activate_surface_target_with_mode(
             &runtime,
             &target,
@@ -823,6 +824,7 @@ mod tests {
             },
             &mut observer,
             &mut raw_output_reader,
+            &mut direct_raw_output_last_seq,
         )
         .expect("raw activation should succeed");
 
@@ -1760,6 +1762,82 @@ mod tests {
 
         assert_eq!(raw, b"\x1b[32mok\r\n");
         assert_eq!(last_output_seq, Some(1));
+    }
+
+    #[test]
+    fn activate_surface_target_resets_direct_raw_output_seq_on_reconnect() {
+        let registry = RemoteConnectionRegistry::new();
+        let mailbox = registry.register_loopback_connection("observer-a");
+        let connection = registry
+            .connection_for("observer-a")
+            .expect("loopback connection should exist");
+
+        let target = remote_target();
+        let runtime = RemoteMainSlotRuntime::with_registry(registry.clone());
+        runtime.ensure_local_connection("peer-a");
+
+        let mut observer = RemoteObserverRuntime::new(mailbox.clone(), 80, 24);
+        let mut raw_output_reader = RemoteRawPtyMailboxReader::new(mailbox.clone());
+        let spec = RemoteInteractSurfaceSpec {
+            socket_name: "wa-1".to_string(),
+            surface_scope: "workspace-1".to_string(),
+            target: target.address.qualified_target(),
+            console_id: "workspace-main-slot:wa-1:workspace-1".to_string(),
+            console_host_id: "observer-a".to_string(),
+            console_location: ConsoleLocation::LocalWorkspace,
+        };
+
+        // Initial activation: no visible output yet, so begin_bootstrap path.
+        let mut direct_raw_output_last_seq = None;
+        activate_surface_target_with_mode(
+            &runtime,
+            &target,
+            &spec,
+            &TerminalSize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &mut observer,
+            &mut raw_output_reader,
+            &mut direct_raw_output_last_seq,
+        )
+        .expect("initial activation should succeed");
+
+        // Simulate some direct raw output arriving with seq=1.
+        direct_raw_output_last_seq = Some(1);
+
+        // Put visible output into the observer so the next activation takes the
+        // reconnect path (had_visible_output == true).
+        connection
+            .send(&authority_target_output_envelope(1))
+            .expect("target output should enqueue");
+        observer.sync().expect("observer should sync");
+        assert!(observer.snapshot().has_visible_output);
+
+        // Reactivate: direct raw output sequence must be cleared so the authority
+        // can restart numbering from 1 after the target host is recreated.
+        activate_surface_target_with_mode(
+            &runtime,
+            &target,
+            &spec,
+            &TerminalSize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &mut observer,
+            &mut raw_output_reader,
+            &mut direct_raw_output_last_seq,
+        )
+        .expect("reconnect activation should succeed");
+
+        assert_eq!(
+            direct_raw_output_last_seq, None,
+            "direct raw output seq should be reset on reconnect"
+        );
     }
 
     #[test]

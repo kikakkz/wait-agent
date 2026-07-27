@@ -101,16 +101,17 @@ blockers:
       remote_main_slot, session_sync, and ingress_server pass.
       Live validation on 192.168.31.182 is still pending.
   - id: blocker.engine-mode-remote-reconnect-mirror-not-reactivated
-    title: Engine mode does not reopen remote mirror after reconnect, leaving input stuck
+    title: Engine mode remote reconnect leaves input stuck due to incomplete sequence reset
     status: fixed
     discovered_at: 2026-07-26T10:20:00Z
-    fixed_at: 2026-07-26T02:50:00Z
+    fixed_at: 2026-07-27T04:22:00Z
     symptom: >
       After a network disconnect/reconnect on a remote session rendered in engine
       mode, keyboard input stops reaching the remote shell. The same reconnect
       path in raw mode recovers and input works.
     root_cause: >
-      In `remote_main_slot_pane_runtime.rs` the `GeometryResyncDue` event is
+      Two gaps in the engine-mode reconnect path compared to raw mode:
+      (1) In `remote_main_slot_pane_runtime.rs` the `GeometryResyncDue` event is
       handled differently depending on `RemoteRenderMode`. In raw mode
       (`:549-681`) a geometry mismatch calls `activate_remote_surface_binding`,
       which sends a fresh `OpenMirrorRequest`, recreates the authority target
@@ -118,29 +119,48 @@ blockers:
       the same event only resizes the internal TerminalEngine and reports the
       clamped capacity back to the authority; it never reopens the mirror.
       Once the authority target host has been torn down (e.g. because the
-      inbound gRPC session closed during the network flap), engine mode has no
-      self-healing path. The local pane keeps the old `RemoteAttachmentBinding`
-      and keeps sending `RawPtyInput` envelopes to a dead route, while raw mode
-      rebuilds the mirror and resumes input.
+      inbound gRPC session closed during the network flap), engine mode had no
+      self-healing path. The local pane kept the old `RemoteAttachmentBinding`
+      and kept sending `RawPtyInput` envelopes to a dead route, while raw mode
+      rebuilt the mirror and resumed input.
+      (2) Even after the mirror was reopened, `activate_surface_target_with_mode`
+      only cleared `observer.last_output_seq` and `raw_output_reader.last_output_seq`
+      on reconnect. It did not clear the pane runtime's own
+      `direct_raw_output_last_seq`. After the authority target host restarts,
+      the first post-reconnect `RawPtyOutput` frame arrives with `output_seq=1`,
+      which is compared against the stale last seq and rejected as out-of-order.
+      Without that direct raw output the engine never regains `mirror_readiness`,
+      so input keeps being buffered and the session appears stuck.
     fix_plan: >
-      In the `GeometryResyncDue` engine branch, before the resize-only path,
+      (1) In the `GeometryResyncDue` engine branch, before the resize-only path,
       check `needs_remote_surface_activation` (binding missing, mirror pending, or
       mirror needed). If the authority transport is connected, call
       `activate_remote_surface_binding` with the clamped effective size. This
       reuses the same activation helper as raw mode and the `Connected` event
       handler, so engine mode now has a self-healing reconnect path. The
       `Connected` handler is also refactored to use the same helper.
+      (2) Extend `activate_surface_target_with_mode` to accept and clear
+      `direct_raw_output_last_seq` in the reconnect branch, alongside the
+      observer and raw-output-reader sequence trackers. This aligns engine-mode
+      reactivation with raw-mode reactivation and allows the restarted authority
+      to resume `RawPtyOutput` numbering from 1.
     evidence:
       - "raw branch at remote_main_slot_pane_runtime.rs:549-681 calls activate_remote_surface_binding on geometry mismatch"
       - "engine branch at remote_main_slot_pane_runtime.rs:490-548 only calls observer.resize_terminal / sync_or_defer_remote_pty_size / engine_render.request_full_redraw"
       - "192.168.31.182 diag log: ab2baecd00742584 mirror re-accepted at 1785029998.274, authority host exits at 1785029998.841, no further OpenMirror after that"
       - "192.168.31.182 diag log: send_command_to_host continues after host exit but pipe-pane is already cleared"
+      - "slot_pane_helpers.rs activate_surface_target_with_mode cleared observer.last_output_seq and raw_output_reader.last_output_seq but not direct_raw_output_last_seq"
+      - "engine direct raw output seq comparison rejects output_seq=1 after reconnect because last seq is still the pre-disconnect value"
     affected_paths:
       - src/runtime/remote_main_slot/remote_main_slot_pane_runtime.rs
       - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
+      - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/remote_main_slot_pane_runtime_test.rs
     notes: >
-      Fix implemented: `needs_remote_surface_activation` helper added and used in
-      both the `Connected` handler and the `GeometryResyncDue` engine branch.
-      cargo fmt and cargo check are clean; targeted tests for remote_main_slot,
-      session_sync, and ingress_server pass. Live validation on
-      192.168.31.182 is still pending.
+      Fix implemented: (1) `needs_remote_surface_activation` helper added and used
+      in both the `Connected` handler and the `GeometryResyncDue` engine branch.
+      (2) `activate_surface_target_with_mode` now takes `direct_raw_output_last_seq`
+      and clears it on the reconnect path. All 5 call sites in
+      `remote_main_slot_pane_runtime.rs` pass the runtime's tracker. New unit test
+      `activate_surface_target_resets_direct_raw_output_seq_on_reconnect` verifies
+      the sequence reset. cargo fmt and cargo check are clean; targeted tests for
+      remote_main_slot pass (469 passed, 1 ignored). Live validation pending.
