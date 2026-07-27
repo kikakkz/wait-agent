@@ -12,8 +12,8 @@ design_ref:
     - establishes the snapshot protocol extension that sidebar and main pane will reuse
     - proves node server can maintain state and stream it to the TUI client
 source_of_truth:
-  file: .agents/tasks/current.yaml
-  reference: current
+  file: .agents/tasks/queued/task.ratatui-phase-1-footer.yaml
+  reference: queued
 depends_on:
   - task.ratatui-phase-0-skeleton.done
 done_criteria:
