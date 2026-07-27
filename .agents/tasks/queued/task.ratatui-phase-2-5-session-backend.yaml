@@ -1,0 +1,45 @@
+id: task.ratatui-phase-2-5-session-backend
+kind: task
+version: 1
+title: migrate local and remote session creation onto the ratatui node server
+status: ready
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 2
+  why:
+    - the existing Ctrl+N local session and Ctrl+W remote connection logic is tied to the tmux backend
+    - ratatui path needs its own session authority before sidebar can show real workspace sessions
+    - moving session ownership to the node server aligns with the long-term server/client split
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-2-5-session-backend.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-phase-2-sidebar.done
+done_criteria:
+  - ratatui node server can create and hold a local shell session (without displaying it in main pane yet)
+  - ratatui node server can create a remote session by reusing the RemoteSessionCreationService logic
+  - node server maintains a real session catalog (local + remote sessions with state)
+  - snapshot protocol includes the real session catalog for the sidebar
+  - sidebar renders the real session catalog instead of placeholder rows
+  - footer menu Ctrl+W invokes the remote connection flow on the node server
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo build --bin waitagent succeeds
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo build --bin waitagent
+  - manual test: create a local session, connect to a remote host, verify sidebar shows both with correct state
+touched_paths:
+  - src/runtime/ratatui_node_runtime.rs
+  - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+  - src/runtime/workspace/workspace_command_runtime.rs
+  - src/application/remote_session_creation_service.rs
+  - src/application/session_service.rs
+  - src/application/target_registry_service.rs
+notes:
+  - Main pane PTY display is intentionally out of scope; it is Phase 3.
+  - Reuse existing remote/session services where possible instead of reimplementing protocols.
+  - Keep the tmux path untouched during this migration.

@@ -1,7 +1,7 @@
 id: task.ratatui-phase-2-sidebar
 kind: task
 version: 1
-title: render real sidebar session catalog, navigation, and footer menu popup with ratatui
+title: build sidebar UI skeleton with navigation (no real session data yet)
 status: in_progress
 priority: high
 design_ref:
@@ -9,21 +9,19 @@ design_ref:
   section: 2
   why:
     - sidebar is the primary navigation surface for sessions in the ratatui path
-    - footer menu popup replaces the tmux path's interactive footer menu for common actions
-    - completing both surfaces makes the ratatui client self-sufficient for basic workspace operations
+    - UI interactions (selection, scroll, Enter) can be built before real session backend is ready
+    - having the skeleton in place lets Phase 2.5 session backend plug real data in immediately
 source_of_truth:
   file: .agents/tasks/queued/task.ratatui-phase-2-sidebar.yaml
   reference: queued
 depends_on:
   - task.ratatui-phase-1-footer.done
 done_criteria:
-  - sidebar renders the real session catalog from the node server snapshot
-  - each sidebar row shows session name and attached/detached status
+  - sidebar is rendered as a ratatui List widget with placeholder rows
   - sidebar supports Up/Down navigation and highlights the selected row
-  - pressing Enter on a sidebar row attaches to that session
-  - footer shortcut hints include Ctrl-M for the menu
-  - Ctrl+M opens a popup menu with actions: New Session, Connect Remote Host, New Remote Session, Close Current Session, Quit Client, Error Log
-  - selecting a menu item dispatches the corresponding command (or placeholder action for items not yet wired)
+  - pressing Enter on a sidebar row triggers a placeholder action (log/notification only)
+  - sidebar scrolls when rows exceed available height
+  - focus switching between main pane and sidebar remains working
   - cargo fmt --check passes
   - cargo check passes
   - cargo build --bin waitagent succeeds
@@ -31,14 +29,9 @@ verification:
   - cargo fmt --check
   - cargo check
   - cargo build --bin waitagent
-  - manual test: create sessions 1 and 2, navigate sidebar, switch session via Enter, open footer menu and select Quit Client
+  - manual test: open ratatui session, move selection up/down in sidebar, press Enter, switch focus back to main
 touched_paths:
-  - src/runtime/ratatui_node_runtime.rs
   - src/runtime/ratatui_client_runtime.rs
-  - src/runtime/ratatui_workspace_runtime.rs
-  - src/cli.rs
-  - src/command/dispatch.rs
 notes:
-  - Menu actions can start as workspace-level shell-outs (spawn waitagent subcommands) and later move to direct node-server RPC.
-  - Keep the existing tmux path footer/menu untouched; this is ratatui-path only.
-  - Phase 2 deliberately keeps the main pane as a placeholder; PTY integration is Phase 3.
+  - This phase intentionally does not display real session data; that is the responsibility of Phase 2.5 session backend migration.
+  - Placeholder rows should make it obvious they are placeholders (e.g., "Session A", "Session B").

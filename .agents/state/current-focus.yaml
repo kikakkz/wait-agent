@@ -2,9 +2,9 @@ kind: state
 version: 1
 current_task: task.ratatui-phase-2-sidebar
 focus_statement: >
-  active task is ratatui migration phase 2: build the real sidebar session catalog with
-  navigation (Up/Down + Enter to switch sessions) and add the Ctrl+M footer menu popup
-  for common actions. Footer menu replaces the tmux path's interactive menu.
+  active task is ratatui migration phase 2: build the sidebar UI skeleton with List widget,
+  Up/Down selection, Enter placeholder action, and scrolling. Real session data is intentionally
+  out of scope and will be provided by the follow-up Phase 2.5 session backend migration.
 last_updated_from:
   file: .agents/tasks/current.yaml
   reference: task.ratatui-phase-2-sidebar.in_progress
