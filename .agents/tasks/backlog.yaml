@@ -542,7 +542,7 @@ next:
     status: done
   - id: task.ratatui-phase-2-5-session-backend
     title: migrate local and remote session creation onto the ratatui node server
-    status: ready
+    status: in_progress
   - id: task.ratatui-phase-3-main-pane
     title: implement main pane PTY with alacritty_terminal
     status: ready
