@@ -360,7 +360,7 @@ fn render_sidebar_lines<'a>(
 
     // Header.
     lines.push(Line::from(vec![Span::styled(
-        " [h] hide",
+        " Sessions  ctrl G hide",
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
