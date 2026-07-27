@@ -433,13 +433,9 @@ mod tests {
     }
 
     fn test_authority_socket_path(socket_name: &str, target_session_name: &str) -> String {
-        live_authority_session_socket_path(
-            socket_name,
-            target_session_name,
-            "test-session-instance",
-        )
-        .to_string_lossy()
-        .into_owned()
+        live_authority_session_socket_path(socket_name, target_session_name)
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]

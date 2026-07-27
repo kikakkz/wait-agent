@@ -43,7 +43,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1631,7 +1631,7 @@ pub(super) fn spawn_in_process_authority_target_host(
 pub(super) fn spawn_live_authority_listener(
     socket_path: PathBuf,
     node_id: String,
-    session_instance_id: String,
+    bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1648,7 +1648,7 @@ pub(super) fn spawn_live_authority_listener(
                     let _ = bridge_live_authority_stream(
                         stream,
                         node_id.clone(),
-                        session_instance_id.clone(),
+                        bridge_session_id.clone(),
                         output_route.clone(),
                         running.clone(),
                         writer.clone(),
@@ -1677,7 +1677,7 @@ fn bind_live_authority_listener(socket_path: &Path) -> Result<UnixListener, io::
 fn bridge_live_authority_stream(
     mut host_stream: UnixStream,
     node_id: String,
-    session_instance_id: String,
+    bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<UnixStream>>>,
@@ -1709,12 +1709,15 @@ fn bridge_live_authority_stream(
         host_reader,
         writer.clone(),
         node_id,
-        session_instance_id,
+        bridge_session_id,
         output_route,
         running.clone(),
     );
     ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_owner exited, result={:?}", result));
-    running.store(false, Ordering::Relaxed);
+    // Do NOT set running=false here. The live authority listener and target
+    // host should survive transient bridge exits (e.g. gRPC session hand-off)
+    // so reconnects can reuse the same socket. Only the target host lifecycle
+    // or explicit shutdown stops the listener.
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
         Ok(mut guard) => guard.take(),
@@ -1756,7 +1759,7 @@ fn forward_host_output(
     mut host_reader: UnixStream,
     writer: Arc<Mutex<Option<UnixStream>>>,
     node_id: String,
-    session_instance_id: String,
+    bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
     running: Arc<AtomicBool>,
 ) -> Result<(), LifecycleError> {
@@ -1782,11 +1785,19 @@ fn forward_host_output(
             Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
                 last_received = Instant::now();
                 keepalive_sent_at = None;
+                let session_instance_id = bridge_session_id
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
                 forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
             }
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                 last_received = Instant::now();
                 keepalive_sent_at = None;
+                let session_instance_id = bridge_session_id
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
                 let envelope = ProtocolEnvelope {
                     protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION
                         .to_string(),
@@ -1815,6 +1826,10 @@ fn forward_host_output(
             Err(ref e) if e.is_read_timeout() => {
                 if let Some(sent_at) = keepalive_sent_at {
                     if sent_at.elapsed() >= ping_timeout {
+                        let session_instance_id = bridge_session_id
+                            .read()
+                            .map(|g| g.clone())
+                            .unwrap_or_default();
                         ERROR_LOG.log(format!(
                             "[diag-timing] forward_host_output: keepalive timed out for node={node_id} session={session_instance_id}, declaring host dead"
                         ));

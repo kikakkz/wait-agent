@@ -344,9 +344,13 @@ where
 pub(crate) fn live_authority_session_socket_path(
     socket_name: &str,
     target_session_name: &str,
-    session_instance_id: &str,
 ) -> PathBuf {
-    let hash = stable_socket_hash(&[socket_name, target_session_name, session_instance_id]);
+    // The live authority socket is scoped to the workspace socket and target
+    // session, not to a particular inbound gRPC session instance. This lets the
+    // authority target host survive transient reconnects: a new client session
+    // attaches to the same socket and the existing bridge forwards output using
+    // the current session id.
+    let hash = stable_socket_hash(&[socket_name, target_session_name]);
     std::env::temp_dir().join(format!("waitagent-live-authority-{hash}.sock"))
 }
 
@@ -531,11 +535,7 @@ fn ensure_live_session_route_with_target_host_mode(
         target_id: target_id.to_string(),
         transport_session_id,
         transport_socket_path: transport_socket_path.to_string(),
-        socket_path: live_authority_session_socket_path(
-            socket_name,
-            target_session_name,
-            target_id,
-        ),
+        socket_path: live_authority_session_socket_path(socket_name, target_session_name),
         running: Arc::new(AtomicBool::new(true)),
         writer: Arc::new(Mutex::new(None)),
         pending_commands: Arc::new(Mutex::new(Vec::new())),

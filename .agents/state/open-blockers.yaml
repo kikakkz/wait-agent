@@ -156,11 +156,63 @@ blockers:
       - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/slot_pane_helpers.rs
       - src/runtime/remote_main_slot/remote_main_slot_pane_runtime/remote_main_slot_pane_runtime_test.rs
     notes: >
-      Fix implemented: (1) `needs_remote_surface_activation` helper added and used
-      in both the `Connected` handler and the `GeometryResyncDue` engine branch.
-      (2) `activate_surface_target_with_mode` now takes `direct_raw_output_last_seq`
-      and clears it on the reconnect path. All 5 call sites in
-      `remote_main_slot_pane_runtime.rs` pass the runtime's tracker. New unit test
-      `activate_surface_target_resets_direct_raw_output_seq_on_reconnect` verifies
-      the sequence reset. cargo fmt and cargo check are clean; targeted tests for
-      remote_main_slot pass (469 passed, 1 ignored). Live validation pending.
+      First attempt implemented: (1) `needs_remote_surface_activation` helper added
+      and used in both the `Connected` handler and the `GeometryResyncDue` engine
+      branch. (2) `activate_surface_target_with_mode` now takes
+      `direct_raw_output_last_seq` and clears it on the reconnect path. However,
+      live validation on 10.1.29.110 showed input still stuck after reconnect.
+      The seq fix addressed a secondary symptom; the real root cause is the
+      authority target host being torn down during reconnect (see
+      blocker.remote-reconnect-authority-host-lifecycle).
+  - id: blocker.remote-reconnect-authority-host-lifecycle
+    title: Authority target host is torn down during remote reconnect, breaking input
+    status: in_progress
+    discovered_at: 2026-07-27T05:30:00Z
+    symptom: >
+      After disconnecting and reconnecting 10.1.29.110's network, its remote
+      sessions remain visible but keyboard input is stuck. `send_command_to_host`
+      keeps routing input, but the authority target host processes have exited and
+      `pipe-pane` is cleared on the remote panes.
+    root_cause: >
+      The live authority Unix socket (`live_authority_session_socket_path`) was
+      hashed with the inbound gRPC `session_instance_id`, so every reconnect
+      created a brand new socket. `SessionSyncAuthorityManager::ensure_authority_host`
+      treated a different session instance as a reason to stop the existing target
+      host and spawn a new one. The bridge forwarding host output to the gRPC
+      session was also session-specific and set the shared `running` flag to false
+      when it exited, which stopped the live authority listener and caused the
+      target host to receive `TransportClosed` and exit. During reconnect storms
+      this produced a chain of short-lived target hosts; the output pump sidecar
+      could not connect to the already-removed ingest socket, pipe-pane was
+      cleared, and input had no live route.
+    fix_plan: >
+      (1) Make `live_authority_session_socket_path` depend only on the workspace
+      socket and target session name, not on the gRPC session instance, so the
+      socket and listener survive reconnects. (2) In `ensure_authority_host`, reuse
+      a healthy existing target host when a new gRPC session attaches to the same
+      target; just update the bridge's forwarding session id. (3) Make the bridge
+      read the current session id from a shared `RwLock<String>` so output is
+      forwarded to the active session without tearing the bridge down. (4) Stop
+      the bridge from setting `running=false` on exit; only the target host
+      lifecycle or explicit shutdown should stop the listener.
+    evidence:
+      - "10.1.29.110 diag log: target host event loop exits sending TargetExited right after open_mirror_accepted/bootstrap"
+      - "10.1.29.110 diag log: output pump UnixStream::connect to ingest socket fails with No such file or directory"
+      - "10.1.29.110 tmux state: remote panes have pipe=0 after reconnect"
+      - "live_authority_session_socket_path hash included session_instance_id, creating a new socket per reconnect"
+      - "ensure_authority_host stopped existing host whenever bound_session_instance_id changed"
+      - "bridge_live_authority_stream set running=false on exit, stopping the listener"
+    affected_paths:
+      - src/runtime/remote_node/remote_node_session_owner_runtime/owner_helpers.rs
+      - src/runtime/remote_node/remote_node_session_sync_runtime.rs
+      - src/runtime/remote_node/remote_node_session_sync_runtime/sync_helpers.rs
+      - src/runtime/remote_node/remote_node_session_sync_runtime/remote_node_session_sync_runtime_test.rs
+      - src/runtime/remote_node/remote_node_session_owner_runtime/remote_node_session_owner_runtime_test.rs
+      - src/runtime/remote_authority/remote_authority_target_host_runtime/remote_authority_target_host_runtime_test.rs
+    notes: >
+      Implementation complete. cargo fmt and cargo check pass; targeted tests
+      for session_sync_runtime, remote_authority_target_host_runtime,
+      remote_node_ingress_server_runtime, and remote_main_slot_pane_runtime pass.
+      Release build done and deployed to 10.1.29.110. Commit pushed and
+      v0.0.181 tagged; live validation on 10.1.29.110 is still pending because
+      the user needs to exit the current session to test disconnect/reconnect.

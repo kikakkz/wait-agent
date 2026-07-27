@@ -35,7 +35,7 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc, Condvar, Mutex};
+    use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
     use std::thread;
     use std::time::Duration;
 
@@ -411,6 +411,7 @@ mod tests {
             running: Arc::new(AtomicBool::new(true)),
             writer_ready: Arc::new(Condvar::new()),
             bound_session_instance_id: "session-1".to_string(),
+            bridge_session_id: Arc::new(RwLock::new("session-1".to_string())),
         };
         assert_eq!(authority_host_signal(&host), AuthorityHostSignal::Starting);
 
@@ -449,6 +450,7 @@ mod tests {
             running: Arc::new(AtomicBool::new(false)),
             writer_ready: Arc::new(Condvar::new()),
             bound_session_instance_id: "session-1".to_string(),
+            bridge_session_id: Arc::new(RwLock::new("session-1".to_string())),
         };
 
         assert_eq!(authority_host_signal(&host), AuthorityHostSignal::Closed);

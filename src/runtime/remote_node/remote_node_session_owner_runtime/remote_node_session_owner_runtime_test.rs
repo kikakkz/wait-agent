@@ -339,19 +339,17 @@ mod tests {
         wait_for_ready_socket(&live_authority_session_socket_path(
             socket_name,
             target_session_a,
-            target_id_a,
         ));
         wait_for_ready_socket(&live_authority_session_socket_path(
             socket_name,
             target_session_b,
-            target_id_b,
         ));
         let transport_a = connect_authority_transport_with_retry(
-            live_authority_session_socket_path(socket_name, target_session_a, target_id_a),
+            live_authority_session_socket_path(socket_name, target_session_a),
             "peer-a",
         );
         let transport_b = connect_authority_transport_with_retry(
-            live_authority_session_socket_path(socket_name, target_session_b, target_id_b),
+            live_authority_session_socket_path(socket_name, target_session_b),
             "peer-a",
         );
 
@@ -603,10 +601,9 @@ mod tests {
         wait_for_ready_socket(&live_authority_session_socket_path(
             socket_name,
             target_session_name,
-            target_id,
         ));
         let transport_a = Arc::new(connect_authority_transport_with_retry(
-            live_authority_session_socket_path(socket_name, target_session_name, target_id),
+            live_authority_session_socket_path(socket_name, target_session_name),
             "peer-a",
         ));
 

@@ -32,7 +32,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -205,6 +205,10 @@ pub(super) struct SessionSyncAuthorityHost {
     pub(super) running: Arc<AtomicBool>,
     pub(super) writer_ready: Arc<Condvar>,
     pub(super) bound_session_instance_id: String,
+    /// The bridge forwards authority output using this session id. It is updated
+    /// when a new inbound gRPC session takes over the same target, so the
+    /// existing target host and bridge survive transient reconnects.
+    pub(super) bridge_session_id: Arc<RwLock<String>>,
 }
 
 #[derive(Clone)]
@@ -859,13 +863,27 @@ impl SessionSyncAuthorityManager {
         target_id: &str,
     ) -> Result<(), LifecycleError> {
         let bound_session_instance_id = session_handle.session_instance_id().to_string();
-        if let Some(existing) = self.running_hosts.get(target_id) {
-            if existing.bound_session_instance_id == bound_session_instance_id {
+        let should_remove_stale = if let Some(existing) = self.running_hosts.get(target_id) {
+            if existing.running.load(Ordering::Relaxed) {
+                // A healthy authority target host is already running for this
+                // target. Reuse it: just point the bridge at the new inbound
+                // gRPC session id so output is forwarded to the current client
+                // session instead of tearing the host down.
+                if let Some(existing) = self.running_hosts.get_mut(target_id) {
+                    existing.bound_session_instance_id = bound_session_instance_id.clone();
+                    if let Ok(mut guard) = existing.bridge_session_id.write() {
+                        *guard = bound_session_instance_id;
+                    }
+                }
                 return Ok(());
             }
-            // The target is being attached by a different client gRPC session.
-            // Stop the old host so a new one can be bound to the current session.
-            existing.running.store(false, Ordering::Relaxed);
+            // Host has already exited; drop the stale entry so a new one can be
+            // created below.
+            true
+        } else {
+            false
+        };
+        if should_remove_stale {
             self.running_hosts.remove(target_id);
         }
 
@@ -885,19 +903,16 @@ impl SessionSyncAuthorityManager {
                 "no local workspace socket owns session `{session_name}` for `{target_id}`"
             ))
         })?;
-        let authority_socket_path = live_authority_session_socket_path(
-            &socket_name,
-            &session_name,
-            &bound_session_instance_id,
-        );
+        let authority_socket_path = live_authority_session_socket_path(&socket_name, &session_name);
         let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
         let running = Arc::new(AtomicBool::new(true));
         let writer = Arc::new(Mutex::new(None));
         let writer_ready = Arc::new(Condvar::new());
+        let bridge_session_id = Arc::new(RwLock::new(bound_session_instance_id.clone()));
         spawn_live_authority_listener(
             authority_socket_path.clone(),
             session_handle.node_id().to_string(),
-            bound_session_instance_id.clone(),
+            bridge_session_id.clone(),
             self.output_route.clone(),
             running.clone(),
             writer.clone(),
@@ -926,6 +941,7 @@ impl SessionSyncAuthorityManager {
                 running,
                 writer_ready,
                 bound_session_instance_id,
+                bridge_session_id,
             },
         );
         Ok(())
