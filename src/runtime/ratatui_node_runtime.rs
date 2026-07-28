@@ -27,6 +27,7 @@ impl RatatuiNodeRuntime {
         session_name: String,
         listener_display: Option<String>,
         connect_endpoint: Option<String>,
+        public_endpoint: Option<String>,
     ) -> Result<Self, LifecycleError> {
         let sessions = Arc::new(Mutex::new(vec![default_local_session_record(
             &session_name,
@@ -36,8 +37,11 @@ impl RatatuiNodeRuntime {
             .unwrap()
             .first()
             .map(|session| session.address.qualified_target());
-        let network =
-            ratatui_network_config(listener_display.as_deref(), connect_endpoint.as_deref());
+        let network = ratatui_network_config(
+            listener_display.as_deref(),
+            connect_endpoint.as_deref(),
+            public_endpoint.as_deref(),
+        );
         Ok(Self {
             session_name,
             network,
@@ -387,6 +391,7 @@ fn broadcast_snapshot(
 fn ratatui_network_config(
     listener_display: Option<&str>,
     connect_endpoint: Option<&str>,
+    public_endpoint: Option<&str>,
 ) -> RemoteNetworkConfig {
     let mut network = RemoteNetworkConfig::default();
     if let Some(display) = listener_display {
@@ -397,6 +402,7 @@ fn ratatui_network_config(
         }
     }
     network.connect = connect_endpoint.map(String::from);
+    network.public_endpoint = public_endpoint.map(String::from);
     network
 }
 

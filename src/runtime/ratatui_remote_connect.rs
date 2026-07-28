@@ -61,7 +61,7 @@ pub fn connect_remote_host(
             LifecycleError::Protocol(format!("remote host profile `{profile_name}` not found"))
         })?;
 
-    let local_connect_endpoint = network.advertised_listener_label().to_string();
+    let local_connect_endpoint = network.advertised_public_endpoint_label();
     let preference = port_preference(&profile.preferred_remote_port);
     let port_probe = SshRemotePortProbeFactory.create(&profile);
     let port = port_probe

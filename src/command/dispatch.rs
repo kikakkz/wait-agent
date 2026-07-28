@@ -407,6 +407,7 @@ impl CommandDispatcher {
             command.session_name,
             command.listener_display,
             command.connect_endpoint,
+            command.public_endpoint,
         )
         .map_err(AppError::from)
     }

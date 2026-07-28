@@ -213,6 +213,7 @@ pub struct RatatuiNodeServerCommand {
     pub session_name: String,
     pub listener_display: Option<String>,
     pub connect_endpoint: Option<String>,
+    pub public_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -503,8 +504,8 @@ impl Cli {
         }
 
         args.remove(0);
-        let (network, network_explicit) = parse_global_network_config(&mut args)?;
         let ratatui = parse_global_feature_flags(&mut args)?;
+        let (network, network_explicit) = parse_global_network_config(&mut args)?;
 
         if args.is_empty() {
             return Ok(Self {
@@ -861,6 +862,12 @@ fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerComma
                 command.connect_endpoint = Some(
                     iter.next()
                         .ok_or_else(|| CliError::MissingValue("--connect-endpoint".to_string()))?,
+                );
+            }
+            "--public-endpoint" => {
+                command.public_endpoint = Some(
+                    iter.next()
+                        .ok_or_else(|| CliError::MissingValue("--public-endpoint".to_string()))?,
                 );
             }
             _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),

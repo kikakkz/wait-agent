@@ -194,6 +194,9 @@ impl RatatuiWorkspaceRuntime {
         if let Some(connect) = &self.network.connect {
             command.arg("--connect-endpoint").arg(connect);
         }
+        if let Some(public) = &self.network.public_endpoint {
+            command.arg("--public-endpoint").arg(public);
+        }
 
         // Detach the child into its own session so it survives client exit.
         unsafe {
