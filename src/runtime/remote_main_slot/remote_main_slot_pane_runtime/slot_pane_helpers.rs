@@ -11,16 +11,16 @@ use crate::infra::remote_protocol::{
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use crate::runtime::remote_authority_connection_runtime::AuthorityTransportEvent;
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::{RemoteObserverRuntime, RemoteObserverSnapshot};
 use crate::runtime::remote_transport_runtime::{LocalNodeMailbox, RemoteConnectionRegistry};
 use crate::terminal::{ScreenSnapshot, TerminalRuntime, TerminalSize};
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
@@ -97,19 +97,26 @@ pub(crate) fn ensure_history_pane(
     let window_target = format!("{}:{}", session_name, window_name);
 
     // Reuse an existing history pane if it is still alive.
-    if let Ok(Some(pane_id)) = backend.run_on_socket(
-        &socket,
-        &[
-            "show-options".to_string(),
-            "-qv".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            pane_option.clone(),
-        ],
-    ).map(|out| {
-        let pane = out.stdout.trim().to_string();
-        if pane.is_empty() { None } else { Some(pane) }
-    }) {
+    if let Ok(Some(pane_id)) = backend
+        .run_on_socket(
+            &socket,
+            &[
+                "show-options".to_string(),
+                "-qv".to_string(),
+                "-t".to_string(),
+                session_name.to_string(),
+                pane_option.clone(),
+            ],
+        )
+        .map(|out| {
+            let pane = out.stdout.trim().to_string();
+            if pane.is_empty() {
+                None
+            } else {
+                Some(pane)
+            }
+        })
+    {
         if backend
             .run_on_socket(
                 &socket,
@@ -136,13 +143,12 @@ pub(crate) fn ensure_history_pane(
             ) {
                 let tty = tty_out.stdout.trim();
                 if !tty.is_empty() {
-                    return OpenOptions::new()
-                        .write(true)
-                        .open(tty)
-                        .map_err(|error| LifecycleError::Io(
+                    return OpenOptions::new().write(true).open(tty).map_err(|error| {
+                        LifecycleError::Io(
                             format!("failed to open reused history pane tty {tty}"),
                             error,
-                        ));
+                        )
+                    });
                 }
             }
         }
@@ -158,26 +164,30 @@ pub(crate) fn ensure_history_pane(
         ],
     );
 
-    let output = backend.run_on_socket(
-        &socket,
-        &[
-            "new-window".to_string(),
-            "-d".to_string(),
-            "-P".to_string(),
-            "-F".to_string(),
-            "#{pane_id}".to_string(),
-            "-n".to_string(),
-            window_name,
-            "-t".to_string(),
-            session_name.to_string(),
-            "tail".to_string(),
-            "-f".to_string(),
-            "/dev/null".to_string(),
-        ],
-    ).map_err(|error| LifecycleError::Io(
-        "failed to create history pane window".to_string(),
-        io::Error::new(io::ErrorKind::Other, error.to_string()),
-    ))?;
+    let output = backend
+        .run_on_socket(
+            &socket,
+            &[
+                "new-window".to_string(),
+                "-d".to_string(),
+                "-P".to_string(),
+                "-F".to_string(),
+                "#{pane_id}".to_string(),
+                "-n".to_string(),
+                window_name,
+                "-t".to_string(),
+                session_name.to_string(),
+                "tail".to_string(),
+                "-f".to_string(),
+                "/dev/null".to_string(),
+            ],
+        )
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to create history pane window".to_string(),
+                io::Error::new(io::ErrorKind::Other, error.to_string()),
+            )
+        })?;
     let pane_id = output.stdout.trim().to_string();
     if pane_id.is_empty() {
         return Err(LifecycleError::Protocol(
@@ -185,46 +195,50 @@ pub(crate) fn ensure_history_pane(
         ));
     }
 
-    backend.run_on_socket(
-        &socket,
-        &[
-            "set-option".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            pane_option,
-            pane_id.clone(),
-        ],
-    ).map_err(|error| LifecycleError::Io(
-        "failed to store history pane id".to_string(),
-        io::Error::new(io::ErrorKind::Other, error.to_string()),
-    ))?;
+    backend
+        .run_on_socket(
+            &socket,
+            &[
+                "set-option".to_string(),
+                "-t".to_string(),
+                session_name.to_string(),
+                pane_option,
+                pane_id.clone(),
+            ],
+        )
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to store history pane id".to_string(),
+                io::Error::new(io::ErrorKind::Other, error.to_string()),
+            )
+        })?;
 
-    let tty_output = backend.run_on_socket(
-        &socket,
-        &[
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-t".to_string(),
-            pane_id,
-            "#{pane_tty}".to_string(),
-        ],
-    ).map_err(|error| LifecycleError::Io(
-        "failed to read history pane tty".to_string(),
-        io::Error::new(io::ErrorKind::Other, error.to_string()),
-    ))?;
+    let tty_output = backend
+        .run_on_socket(
+            &socket,
+            &[
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                pane_id,
+                "#{pane_tty}".to_string(),
+            ],
+        )
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to read history pane tty".to_string(),
+                io::Error::new(io::ErrorKind::Other, error.to_string()),
+            )
+        })?;
     let tty = tty_output.stdout.trim();
     if tty.is_empty() {
         return Err(LifecycleError::Protocol(
             "history pane tty is empty".to_string(),
         ));
     }
-    OpenOptions::new()
-        .write(true)
-        .open(tty)
-        .map_err(|error| LifecycleError::Io(
-            format!("failed to open history pane tty {tty}"),
-            error,
-        ))
+    OpenOptions::new().write(true).open(tty).map_err(|error| {
+        LifecycleError::Io(format!("failed to open history pane tty {tty}"), error)
+    })
 }
 
 /// Return a `Box<dyn Write>` pointing to the session pane TTY when

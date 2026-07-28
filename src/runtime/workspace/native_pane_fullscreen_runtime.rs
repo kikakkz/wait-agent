@@ -5,13 +5,13 @@ use crate::application::target_registry_service::{
 use crate::cli::ToggleFullscreenCommand;
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
-use crate::runtime::remote_main_slot::remote_main_slot_pane_runtime::history_pane_option_name;
-use crate::runtime::workspace::main_slot_runtime::WAITAGENT_ACTIVE_TARGET_OPTION;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxSessionName,
     TmuxSocketName, TmuxWorkspaceHandle,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::remote_main_slot::remote_main_slot_pane_runtime::history_pane_option_name;
+use crate::runtime::workspace::main_slot_runtime::WAITAGENT_ACTIVE_TARGET_OPTION;
 use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
 use std::io;
 
@@ -53,10 +53,7 @@ impl NativePaneFullscreenRuntime {
         if let Some(history_pane) = self.remote_history_pane(&workspace)? {
             if self
                 .backend
-                .pane_in_mode_on_socket(
-                    workspace.socket_name.as_str(),
-                    history_pane.as_str(),
-                )
+                .pane_in_mode_on_socket(workspace.socket_name.as_str(), history_pane.as_str())
                 .map_err(history_error)?
             {
                 self.backend
@@ -71,6 +68,9 @@ impl NativePaneFullscreenRuntime {
                 return Ok(());
             }
 
+            self.backend
+                .select_pane(&workspace, &history_pane)
+                .map_err(history_error)?;
             self.backend
                 .enter_copy_mode(&workspace, &history_pane)
                 .map_err(history_error)?;
