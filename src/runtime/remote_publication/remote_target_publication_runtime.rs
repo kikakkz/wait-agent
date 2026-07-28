@@ -8,23 +8,18 @@ use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope};
 use crate::infra::remote_transport_codec::read_node_session_envelope;
-use crate::infra::tmux::{
-    EmbeddedTmuxBackend, RemoteTargetPublicationBinding, TmuxSessionGateway, TmuxSocketName,
-};
+use crate::infra::tmux::RemoteTargetPublicationBinding;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::network_state_runtime::recover_network_config_for_socket;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
+use crate::runtime::remote_publication::remote_target_publication_backend::{
+    RemoteTargetPublicationBackend, TmuxRemoteTargetPublicationBackend,
+};
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
-use crate::runtime::remote_workspace_socket_registry_runtime::{
-    live_workspace_socket_names_for_network, retain_live_workspace_socket_names_for_network,
-    RemoteWorkspaceSocketRegistryRuntime,
-};
-use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -36,14 +31,12 @@ use std::time::Duration;
 mod publication_helpers;
 pub(crate) use publication_helpers::*;
 
-const WAITAGENT_PANE_ROLE_OPTION: &str = "@waitagent_pane_role";
-const WAITAGENT_PANE_ROLE_CONTENT: &str = "content";
-const WAITAGENT_PANE_SESSION_INSTANCE_OPTION: &str = "@waitagent_session_instance_id";
-
 #[derive(Clone)]
-pub struct RemoteTargetPublicationRuntime {
+pub struct RemoteTargetPublicationRuntime<
+    B: RemoteTargetPublicationBackend = TmuxRemoteTargetPublicationBackend,
+> {
     remote_runtime_owner: RemoteRuntimeOwnerClient,
-    local_tmux: EmbeddedTmuxBackend,
+    backend: B,
     current_executable: PathBuf,
     network: RemoteNetworkConfig,
     discover_live_workspaces: bool,
@@ -114,7 +107,7 @@ impl RemoteRuntimeOwnerClient {
     }
 }
 
-impl RemoteTargetPublicationRuntime {
+impl RemoteTargetPublicationRuntime<TmuxRemoteTargetPublicationBackend> {
     #[cfg(test)]
     pub fn from_build_env() -> Result<Self, LifecycleError> {
         Self::from_build_env_with_network(RemoteNetworkConfig::default())
@@ -127,8 +120,7 @@ impl RemoteTargetPublicationRuntime {
             remote_runtime_owner: RemoteRuntimeOwnerClient::Runtime(
                 RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
             ),
-            local_tmux: EmbeddedTmuxBackend::from_build_env()
-                .map_err(remote_target_publication_error)?,
+            backend: TmuxRemoteTargetPublicationBackend::from_build_env()?,
             current_executable: current_waitagent_executable()?,
             network,
             discover_live_workspaces: true,
@@ -140,14 +132,15 @@ impl RemoteTargetPublicationRuntime {
     {
         Ok(Self {
             remote_runtime_owner: RemoteRuntimeOwnerClient::Noop,
-            local_tmux: EmbeddedTmuxBackend::from_build_env()
-                .map_err(remote_target_publication_error)?,
+            backend: TmuxRemoteTargetPublicationBackend::from_build_env()?,
             current_executable: current_waitagent_executable()?,
             network: RemoteNetworkConfig::default(),
             discover_live_workspaces: false,
         })
     }
+}
 
+impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
     pub fn run_publication_server(
         &self,
         command: RemoteTargetPublicationServerCommand,
@@ -483,45 +476,7 @@ impl RemoteTargetPublicationRuntime {
         if !self.discover_live_workspaces {
             return Ok(Vec::new());
         }
-        let registered_sockets = live_workspace_socket_names_for_network(&self.network)?;
-        if !registered_sockets.is_empty()
-            || RemoteWorkspaceSocketRegistryRuntime::new(self.network.clone()).registry_exists()
-        {
-            let live_sockets =
-                retain_live_workspace_socket_names_for_network(&self.network, |socket_name| {
-                    self.socket_is_live(socket_name)
-                })?;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_live_sockets_registry count={} live={} stage=publication_apply",
-                registered_sockets.len(),
-                live_sockets.len()
-            ));
-            return Ok(live_sockets);
-        }
-        ERROR_LOG.log_exit_latency(
-            "[diag-exit] publication_live_sockets_registry_empty fallback=tmux_scan stage=publication_apply"
-                .to_string(),
-        );
-        let mut all_sessions = Vec::new();
-        if let Ok(managed_sockets) = self.local_tmux.discover_waitagent_sockets() {
-            for socket in &managed_sockets {
-                // Only include sockets that belong to this waitagent instance.
-                // Each socket stores its owner's network port in a tmux global
-                // option, so we filter out sockets created by other waitagent
-                // processes on the same machine.
-                if let Some(config) =
-                    recover_network_config_for_socket(&self.local_tmux, socket.as_str())
-                {
-                    if config.port != self.network.port {
-                        continue;
-                    }
-                }
-                if let Ok(sessions) = self.local_tmux.list_sessions_on_socket(socket) {
-                    all_sessions.extend(sessions);
-                }
-            }
-        }
-        Ok(live_workspace_socket_names_from_sessions(&all_sessions))
+        self.backend.live_workspace_socket_names(&self.network)
     }
 
     fn signal_remote_target_exited_to_live_workspaces(
@@ -531,43 +486,29 @@ impl RemoteTargetPublicationRuntime {
     ) -> Result<usize, LifecycleError> {
         let mut signalled = 0;
         for socket_name in socket_names {
-            let socket = TmuxSocketName::new(socket_name);
-            if !self.local_tmux.socket_is_live(&socket) {
-                continue;
-            }
-            let Ok(sessions) = self.local_tmux.list_sessions_on_socket(&socket) else {
-                continue;
-            };
-            for session in sessions
-                .into_iter()
-                .filter(|session| session.is_workspace_chrome())
-            {
-                let t_spawn = std::time::Instant::now();
-                spawn_waitagent_sidecar(
-                    &self.current_executable,
-                    remote_target_exited_args(socket_name, session.address.session_id(), target),
-                )
-                .map_err(remote_target_publication_error)?;
-                signalled += 1;
-                ERROR_LOG.log_exit_latency(format!(
-                    "[diag-exit] publication_workspace_exit_spawn socket={} session={} target={} elapsed={:?} stage=publication_apply",
-                    socket_name,
-                    session.address.session_id(),
-                    target,
-                    t_spawn.elapsed()
-                ));
-            }
+            let t_workspace = std::time::Instant::now();
+            let count = self.backend.signal_remote_target_exited_to_workspace(
+                socket_name,
+                target,
+                &self.current_executable,
+            )?;
+            signalled += count;
+            ERROR_LOG.log_exit_latency(format!(
+                "[diag-exit] publication_workspace_exit_spawn socket={} target={} signalled={} elapsed={:?} stage=publication_apply",
+                socket_name,
+                target,
+                count,
+                t_workspace.elapsed()
+            ));
         }
         Ok(signalled)
     }
 
     fn refresh_live_workspaces(&self, socket_names: &[String]) -> Result<(), LifecycleError> {
         for socket_name in socket_names {
-            if !self.socket_is_live(socket_name) {
-                continue;
-            }
             let t_spawn = std::time::Instant::now();
-            spawn_socket_chrome_refresh(&self.current_executable, socket_name)?;
+            self.backend
+                .refresh_workspace_socket(socket_name, &self.current_executable)?;
             ERROR_LOG.log_exit_latency(format!(
                 "[diag-exit] publication_refresh_spawn socket={} elapsed={:?} stage=publication_apply",
                 socket_name,
@@ -578,10 +519,8 @@ impl RemoteTargetPublicationRuntime {
     }
 
     fn refresh_live_workspace_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        if !self.socket_is_live(socket_name) {
-            return Ok(());
-        }
-        spawn_socket_chrome_refresh(&self.current_executable, socket_name)
+        self.backend
+            .refresh_workspace_socket(socket_name, &self.current_executable)
     }
 
     pub fn run_publication_owner(
@@ -623,9 +562,8 @@ impl RemoteTargetPublicationRuntime {
             };
 
             let session = self
-                .local_tmux
-                .list_sessions_on_socket(&TmuxSocketName::new(&command.socket_name))
-                .map_err(remote_target_publication_error)?
+                .backend
+                .list_sessions_on_socket(&command.socket_name)?
                 .into_iter()
                 .find(|session| {
                     session.address.session_id() == command.target_session_name
@@ -701,15 +639,13 @@ impl RemoteTargetPublicationRuntime {
         command: RemoteTargetBindPublicationCommand,
     ) -> Result<(), LifecycleError> {
         self.ensure_publication_hooks_on_socket(&command.socket_name)?;
-        bind_publication_on_socket(
-            &self.local_tmux,
+        self.backend.bind_publication(
             &command.socket_name,
             &command.target_session_name,
             &command.authority_id,
             &command.transport_session_id,
             command.selector.as_deref(),
-        )
-        .map_err(remote_target_publication_error)?;
+        )?;
         self.ensure_publication_owner_running(&command.socket_name, &command.target_session_name)?;
         self.signal_publication_owner_command(
             &command.socket_name,
@@ -730,12 +666,8 @@ impl RemoteTargetPublicationRuntime {
                 PublicationOwnerCommand::Stop,
             )
             .is_ok();
-        unbind_publication_on_socket(
-            &self.local_tmux,
-            &command.socket_name,
-            &command.target_session_name,
-        )
-        .map_err(remote_target_publication_error)?;
+        self.backend
+            .unbind_publication(&command.socket_name, &command.target_session_name)?;
         if owner_stopped {
             return Ok(());
         }
@@ -848,79 +780,30 @@ impl RemoteTargetPublicationRuntime {
         socket_name: &str,
         session_name: &str,
     ) -> Result<bool, LifecycleError> {
-        let socket_name = TmuxSocketName::new(socket_name);
-        let format = format!(
-            "#{{pane_dead}}\t#{{{WAITAGENT_PANE_ROLE_OPTION}}}\t#{{{WAITAGENT_PANE_SESSION_INSTANCE_OPTION}}}"
-        );
-        let output = self
-            .local_tmux
-            .run_on_socket(
-                &socket_name,
-                &[
-                    "list-panes".to_string(),
-                    "-a".to_string(),
-                    "-F".to_string(),
-                    format,
-                ],
-            )
-            .map_err(remote_target_publication_error)?;
-        Ok(output.stdout.lines().any(|line| {
-            let mut parts = line.split('\t');
-            let pane_dead = parts.next().unwrap_or_default();
-            let role = parts.next().unwrap_or_default();
-            let owner = parts.next().unwrap_or_default();
-            pane_dead == "0" && role == WAITAGENT_PANE_ROLE_CONTENT && owner == session_name
-        }))
+        self.backend
+            .live_content_pane_for_session(socket_name, session_name)
     }
 
     pub fn ensure_publication_server_running(
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
-        let socket_path = remote_target_publication_socket_path(socket_name);
-        if publication_server_available(&socket_path) {
-            return Ok(());
-        }
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-
-        spawn_waitagent_sidecar(
+        self.backend.ensure_publication_server_running(
+            socket_name,
+            &self.network,
             &self.current_executable,
-            remote_target_publication_server_args(socket_name, &self.network),
         )
-        .map_err(remote_target_publication_error)?;
-
-        for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
-            if publication_server_available(&socket_path) {
-                return Ok(());
-            }
-            thread::sleep(PUBLICATION_SERVER_READY_SLEEP);
-        }
-
-        Err(LifecycleError::Protocol(format!(
-            "remote target publication server for socket `{socket_name}` did not become ready"
-        )))
     }
 
     pub fn ensure_configured_publications_on_socket(
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
-        let socket = TmuxSocketName::new(socket_name);
-        if !self.local_tmux.socket_is_live(&socket) {
+        if !self.socket_is_live(socket_name) {
             return Ok(());
         }
         self.ensure_publication_hooks_on_socket(socket_name)?;
-        let bindings = match list_publication_bindings_on_socket(&self.local_tmux, &socket) {
-            Ok(bindings) => bindings,
-            Err(error)
-                if error.is_command_failure() && !self.local_tmux.socket_is_live(&socket) =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(remote_target_publication_error(error)),
-        };
+        let bindings = self.backend.list_publication_bindings(socket_name)?;
 
         for binding in &bindings {
             self.ensure_publication_owner_running(socket_name, &binding.target_session_name)?;
@@ -929,35 +812,12 @@ impl RemoteTargetPublicationRuntime {
     }
 
     fn ensure_publication_hooks_on_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        let socket = TmuxSocketName::new(socket_name);
-        if !self.local_tmux.socket_is_live(&socket) {
-            return Ok(());
-        }
-        let hook_command = publication_socket_hook_tmux_command(
-            self.current_executable.to_string_lossy().as_ref(),
-            socket_name,
-            &self.network,
-        );
-        for hook_name in PUBLICATION_GLOBAL_HOOKS {
-            match self
-                .local_tmux
-                .set_global_hook_on_socket(socket_name, hook_name, &hook_command)
-            {
-                Ok(()) => {}
-                Err(error)
-                    if error.is_command_failure() && !self.local_tmux.socket_is_live(&socket) =>
-                {
-                    return Ok(());
-                }
-                Err(error) => return Err(remote_target_publication_error(error)),
-            }
-        }
-        Ok(())
+        self.backend
+            .ensure_publication_hooks(socket_name, &self.network)
     }
 
     fn socket_is_live(&self, socket_name: &str) -> bool {
-        self.local_tmux
-            .socket_is_live(&TmuxSocketName::new(socket_name))
+        self.backend.socket_is_live(socket_name)
     }
 
     fn publish_bound_target_with_cache(
@@ -968,9 +828,8 @@ impl RemoteTargetPublicationRuntime {
         self.ensure_publication_server_running(socket_name)?;
         self.ensure_publication_sender_running(socket_name)?;
         let local_target = self
-            .local_tmux
-            .list_sessions_on_socket(&TmuxSocketName::new(socket_name))
-            .map_err(remote_target_publication_error)?
+            .backend
+            .list_sessions_on_socket(socket_name)?
             .into_iter()
             .find(|session| {
                 session.address.session_id() == binding.target_session_name
@@ -1011,14 +870,8 @@ impl RemoteTargetPublicationRuntime {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<Option<RemoteTargetPublicationBinding>, LifecycleError> {
-        let bindings = list_publication_bindings_on_socket(
-            &self.local_tmux,
-            &TmuxSocketName::new(socket_name),
-        )
-        .map_err(remote_target_publication_error)?;
-        Ok(bindings
-            .into_iter()
-            .find(|binding| binding.target_session_name == target_session_name))
+        self.backend
+            .find_publication_binding(socket_name, target_session_name)
     }
 
     fn signal_publication_reconcile(&self, socket_name: &str) -> Result<(), LifecycleError> {
@@ -1042,40 +895,21 @@ impl RemoteTargetPublicationRuntime {
     }
 
     fn ensure_publication_agent_running(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        let socket_path = remote_target_publication_agent_socket_path(socket_name);
-        if publication_agent_available(&socket_path) {
-            return Ok(());
-        }
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-
-        spawn_waitagent_sidecar(
+        self.backend.ensure_publication_agent_running(
+            socket_name,
+            &self.network,
             &self.current_executable,
-            remote_target_publication_agent_args(socket_name, &self.network),
         )
-        .map_err(remote_target_publication_error)?;
-
-        for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
-            if publication_agent_available(&socket_path) {
-                return Ok(());
-            }
-            thread::sleep(PUBLICATION_SERVER_READY_SLEEP);
-        }
-
-        Err(LifecycleError::Protocol(format!(
-            "remote target publication agent for socket `{socket_name}` did not become ready"
-        )))
     }
 
     pub(crate) fn ensure_publication_sender_running(
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
-        ensure_publication_sender_process_running(
-            &self.current_executable,
+        self.backend.ensure_publication_sender_running(
             socket_name,
             &self.network,
+            &self.current_executable,
         )
     }
 
@@ -1084,11 +918,11 @@ impl RemoteTargetPublicationRuntime {
         socket_name: &str,
         target_session_name: &str,
     ) -> Result<(), LifecycleError> {
-        ensure_publication_owner_process_running(
-            &self.current_executable,
+        self.backend.ensure_publication_owner_running(
             socket_name,
             target_session_name,
             &self.network,
+            &self.current_executable,
         )
     }
 
@@ -1122,13 +956,8 @@ impl RemoteTargetPublicationRuntime {
     ) -> Result<(), LifecycleError> {
         self.ensure_publication_server_running(socket_name)?;
         self.ensure_publication_sender_running(socket_name)?;
-        let socket = TmuxSocketName::new(socket_name);
-        let bindings = list_publication_bindings_on_socket(&self.local_tmux, &socket)
-            .map_err(remote_target_publication_error)?;
-        let local_targets = self
-            .local_tmux
-            .list_sessions_on_socket(&socket)
-            .map_err(remote_target_publication_error)?;
+        let bindings = self.backend.list_publication_bindings(socket_name)?;
+        let local_targets = self.backend.list_sessions_on_socket(socket_name)?;
 
         for binding in bindings {
             let Some(local_target) = local_targets.iter().find(|session| {

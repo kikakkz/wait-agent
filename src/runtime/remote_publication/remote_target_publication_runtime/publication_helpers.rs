@@ -21,10 +21,10 @@ use std::str;
 use std::thread;
 use std::time::Duration;
 
-pub(super) const PUBLICATION_SERVER_READY_RETRIES: usize = 20;
-pub(super) const PUBLICATION_SERVER_READY_SLEEP: Duration = Duration::from_millis(25);
-pub(super) const PUBLICATION_OWNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
-pub(super) const PUBLICATION_GLOBAL_HOOKS: [&str; 4] = [
+pub(crate) const PUBLICATION_SERVER_READY_RETRIES: usize = 20;
+pub(crate) const PUBLICATION_SERVER_READY_SLEEP: Duration = Duration::from_millis(25);
+pub(crate) const PUBLICATION_OWNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const PUBLICATION_GLOBAL_HOOKS: [&str; 4] = [
     "session-created",
     "session-closed",
     "client-attached",
@@ -32,14 +32,14 @@ pub(super) const PUBLICATION_GLOBAL_HOOKS: [&str; 4] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SocketLifecyclePublicationAction {
+pub(crate) enum SocketLifecyclePublicationAction {
     TargetedPublish,
     TargetedExit,
     FullReconcile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PublicationAgentCommand {
+pub(crate) enum PublicationAgentCommand {
     Stop,
     FullReconcile,
     PublishSession {
@@ -90,44 +90,44 @@ pub(crate) enum PublicationSenderCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PublicationOwnerCommand {
+pub(crate) enum PublicationOwnerCommand {
     Refresh,
     Stop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PublicationServerCommand {
+pub(crate) enum PublicationServerCommand {
     Stop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct PublicationOwnerDrain {
-    pub(super) refresh_requested: bool,
-    pub(super) stop_requested: bool,
+pub(crate) struct PublicationOwnerDrain {
+    pub(crate) refresh_requested: bool,
+    pub(crate) stop_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PublicationOwnerSnapshot {
-    pub(super) authority_id: String,
-    pub(super) transport_session_id: String,
-    pub(super) selector: Option<String>,
-    pub(super) availability: SessionAvailability,
-    pub(super) workspace_key: Option<String>,
-    pub(super) session_role: Option<WorkspaceSessionRole>,
-    pub(super) attached_clients: usize,
-    pub(super) window_count: usize,
-    pub(super) command_name: Option<String>,
-    pub(super) display_command_name: Option<String>,
-    pub(super) current_path: Option<PathBuf>,
-    pub(super) task_state: ManagedSessionTaskState,
+pub(crate) struct PublicationOwnerSnapshot {
+    pub(crate) authority_id: String,
+    pub(crate) transport_session_id: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) availability: SessionAvailability,
+    pub(crate) workspace_key: Option<String>,
+    pub(crate) session_role: Option<WorkspaceSessionRole>,
+    pub(crate) attached_clients: usize,
+    pub(crate) window_count: usize,
+    pub(crate) command_name: Option<String>,
+    pub(crate) display_command_name: Option<String>,
+    pub(crate) current_path: Option<PathBuf>,
+    pub(crate) task_state: ManagedSessionTaskState,
 }
 
-pub(super) struct DiscoveredRemoteSessionEnvelopeEffect {
-    pub(super) published_session: Option<ManagedSessionRecord>,
-    pub(super) exited_session: Option<(String, String)>,
+pub(crate) struct DiscoveredRemoteSessionEnvelopeEffect {
+    pub(crate) published_session: Option<ManagedSessionRecord>,
+    pub(crate) exited_session: Option<(String, String)>,
 }
 
-pub(super) fn remote_target_publication_error<E>(error: E) -> LifecycleError
+pub(crate) fn remote_target_publication_error<E>(error: E) -> LifecycleError
 where
     E: ToString,
 {
@@ -137,7 +137,7 @@ where
     )
 }
 
-pub(super) fn remote_target_publication_server_args(
+pub(crate) fn remote_target_publication_server_args(
     socket_name: &str,
     network: &RemoteNetworkConfig,
 ) -> Vec<String> {
@@ -151,7 +151,7 @@ pub(super) fn remote_target_publication_server_args(
     )
 }
 
-pub(super) fn remote_target_publication_agent_args(
+pub(crate) fn remote_target_publication_agent_args(
     socket_name: &str,
     network: &RemoteNetworkConfig,
 ) -> Vec<String> {
@@ -179,7 +179,7 @@ pub(crate) fn remote_target_publication_sender_args(
     )
 }
 
-pub(super) fn remote_target_publication_owner_args(
+pub(crate) fn remote_target_publication_owner_args(
     socket_name: &str,
     target_session_name: &str,
     network: &RemoteNetworkConfig,
@@ -196,7 +196,7 @@ pub(super) fn remote_target_publication_owner_args(
     )
 }
 
-pub(super) fn publication_socket_hook_tmux_command(
+pub(crate) fn publication_socket_hook_tmux_command(
     executable: &str,
     socket_name: &str,
     network: &RemoteNetworkConfig,
@@ -204,7 +204,7 @@ pub(super) fn publication_socket_hook_tmux_command(
     session_lifecycle_hook_tmux_command(executable, socket_name, network)
 }
 
-pub(super) fn socket_lifecycle_publication_action(
+pub(crate) fn socket_lifecycle_publication_action(
     hook_name: Option<&str>,
 ) -> SocketLifecyclePublicationAction {
     match hook_name {
@@ -216,37 +216,37 @@ pub(super) fn socket_lifecycle_publication_action(
     }
 }
 
-pub(super) fn publication_server_available(socket_path: &std::path::Path) -> bool {
+pub(crate) fn publication_server_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-pub(super) fn publication_agent_available(socket_path: &std::path::Path) -> bool {
+pub(crate) fn publication_agent_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-pub(super) fn publication_sender_available(socket_path: &std::path::Path) -> bool {
+pub(crate) fn publication_sender_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-pub(super) fn publication_owner_available(socket_path: &std::path::Path) -> bool {
+pub(crate) fn publication_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-pub(super) fn remote_target_publication_agent_socket_path(socket_name: &str) -> PathBuf {
+pub(crate) fn remote_target_publication_agent_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-publication-agent-{}.sock",
         sanitize_path_component(socket_name)
     ))
 }
 
-pub(super) fn remote_target_publication_server_command_socket_path(socket_name: &str) -> PathBuf {
+pub(crate) fn remote_target_publication_server_command_socket_path(socket_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "waitagent-remote-publication-server-command-{}.sock",
         sanitize_path_component(socket_name)
     ))
 }
 
-pub(super) fn remote_target_publication_owner_socket_path(
+pub(crate) fn remote_target_publication_owner_socket_path(
     socket_name: &str,
     target_session_name: &str,
 ) -> PathBuf {
@@ -264,7 +264,7 @@ pub(crate) fn remote_target_publication_sender_socket_path(socket_name: &str) ->
     ))
 }
 
-pub(super) fn render_publication_agent_command(command: &PublicationAgentCommand) -> String {
+pub(crate) fn render_publication_agent_command(command: &PublicationAgentCommand) -> String {
     match command {
         PublicationAgentCommand::Stop => "stop\n".to_string(),
         PublicationAgentCommand::FullReconcile => "full_reconcile\n".to_string(),
@@ -355,20 +355,20 @@ pub(crate) fn render_publication_sender_command(command: &PublicationSenderComma
     }
 }
 
-pub(super) fn render_publication_owner_command(command: PublicationOwnerCommand) -> &'static str {
+pub(crate) fn render_publication_owner_command(command: PublicationOwnerCommand) -> &'static str {
     match command {
         PublicationOwnerCommand::Refresh => "refresh\n",
         PublicationOwnerCommand::Stop => "stop\n",
     }
 }
 
-pub(super) fn render_publication_server_command(command: PublicationServerCommand) -> &'static str {
+pub(crate) fn render_publication_server_command(command: PublicationServerCommand) -> &'static str {
     match command {
         PublicationServerCommand::Stop => "stop\n",
     }
 }
 
-pub(super) fn signal_publication_server_command(
+pub(crate) fn signal_publication_server_command(
     socket_name: &str,
     command: PublicationServerCommand,
 ) -> Result<(), LifecycleError> {
@@ -382,7 +382,7 @@ pub(super) fn signal_publication_server_command(
     stream.flush().map_err(remote_target_publication_error)
 }
 
-pub(super) fn signal_publication_owner_command(
+pub(crate) fn signal_publication_owner_command(
     socket_name: &str,
     target_session_name: &str,
     command: PublicationOwnerCommand,
@@ -398,7 +398,7 @@ pub(super) fn signal_publication_owner_command(
     stream.flush().map_err(remote_target_publication_error)
 }
 
-pub(super) fn read_publication_agent_command(
+pub(crate) fn read_publication_agent_command(
     reader: &mut impl Read,
 ) -> Result<PublicationAgentCommand, LifecycleError> {
     let mut bytes = Vec::new();
@@ -424,7 +424,7 @@ pub(crate) fn read_publication_sender_command(
     parse_publication_sender_command(line)
 }
 
-pub(super) fn parse_publication_agent_command(
+pub(crate) fn parse_publication_agent_command(
     line: &str,
 ) -> Result<PublicationAgentCommand, LifecycleError> {
     let mut parts = line.split('\t');
@@ -475,7 +475,7 @@ pub(super) fn parse_publication_agent_command(
     }
 }
 
-pub(super) fn parse_publication_sender_command(
+pub(crate) fn parse_publication_sender_command(
     line: &str,
 ) -> Result<PublicationSenderCommand, LifecycleError> {
     let mut parts = line.split('\t');
@@ -722,7 +722,7 @@ fn decode_optional_static_agent_field(value: &str) -> Result<Option<&'static str
         .transpose()
 }
 
-pub(super) fn drain_pending_publication_agent_commands(
+pub(crate) fn drain_pending_publication_agent_commands(
     listener: &UnixListener,
     commands: &mut Vec<PublicationAgentCommand>,
 ) -> Result<(), LifecycleError> {
@@ -786,7 +786,7 @@ fn drain_pending_publication_sender_commands_nonblocking(
     }
 }
 
-pub(super) fn sanitize_path_component(value: &str) -> String {
+pub(crate) fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
         .map(|ch| {
@@ -799,7 +799,7 @@ pub(super) fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
-pub(super) fn publication_owner_snapshot(
+pub(crate) fn publication_owner_snapshot(
     binding: &RemoteTargetPublicationBinding,
     local_target: &ManagedSessionRecord,
 ) -> PublicationOwnerSnapshot {
@@ -822,7 +822,7 @@ pub(super) fn publication_owner_snapshot(
     }
 }
 
-pub(super) fn publication_target_identity_changed(
+pub(crate) fn publication_target_identity_changed(
     previous: &PublicationOwnerSnapshot,
     current: &PublicationOwnerSnapshot,
 ) -> bool {
@@ -830,7 +830,7 @@ pub(super) fn publication_target_identity_changed(
         || previous.transport_session_id != current.transport_session_id
 }
 
-pub(super) fn published_remote_target_from_local(
+pub(crate) fn published_remote_target_from_local(
     binding: &RemoteTargetPublicationBinding,
     local_target: &ManagedSessionRecord,
 ) -> ManagedSessionRecord {
@@ -857,7 +857,7 @@ pub(super) fn published_remote_target_from_local(
     }
 }
 
-pub(super) fn parse_publication_owner_command(
+pub(crate) fn parse_publication_owner_command(
     line: &str,
 ) -> Result<Option<PublicationOwnerCommand>, LifecycleError> {
     match line.trim() {
@@ -870,7 +870,7 @@ pub(super) fn parse_publication_owner_command(
     }
 }
 
-pub(super) fn parse_publication_server_command(
+pub(crate) fn parse_publication_server_command(
     line: &str,
 ) -> Result<Option<PublicationServerCommand>, LifecycleError> {
     match line.trim() {
@@ -882,7 +882,7 @@ pub(super) fn parse_publication_server_command(
     }
 }
 
-pub(super) fn drain_publication_server_commands(
+pub(crate) fn drain_publication_server_commands(
     listener: &UnixListener,
 ) -> Result<bool, LifecycleError> {
     let mut stop_requested = false;
@@ -906,7 +906,7 @@ pub(super) fn drain_publication_server_commands(
     }
 }
 
-pub(super) fn drain_publication_owner_commands(
+pub(crate) fn drain_publication_owner_commands(
     listener: &UnixListener,
 ) -> Result<PublicationOwnerDrain, LifecycleError> {
     let mut drain = PublicationOwnerDrain::default();
@@ -929,14 +929,14 @@ pub(super) fn drain_publication_owner_commands(
     }
 }
 
-pub(super) fn apply_publication_envelope(
+pub(crate) fn apply_publication_envelope(
     _source_socket_name: &str,
     _envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<bool, LifecycleError> {
     Ok(false)
 }
 
-pub(super) fn discovered_remote_session_from_envelope(
+pub(crate) fn discovered_remote_session_from_envelope(
     authority_id: &str,
     envelope: &ProtocolEnvelope<ControlPlanePayload>,
 ) -> Result<DiscoveredRemoteSessionEnvelopeEffect, LifecycleError> {
@@ -964,7 +964,7 @@ pub(super) fn discovered_remote_session_from_envelope(
     }
 }
 
-pub(super) fn spawn_socket_chrome_refresh(
+pub(crate) fn spawn_socket_chrome_refresh(
     current_executable: &std::path::Path,
     socket_name: &str,
 ) -> Result<(), LifecycleError> {
@@ -972,7 +972,7 @@ pub(super) fn spawn_socket_chrome_refresh(
         .map_err(remote_target_publication_error)
 }
 
-pub(super) fn live_workspace_socket_names_from_sessions(
+pub(crate) fn live_workspace_socket_names_from_sessions(
     sessions: &[ManagedSessionRecord],
 ) -> Vec<String> {
     let mut socket_names = BTreeSet::new();
@@ -987,11 +987,11 @@ pub(super) fn live_workspace_socket_names_from_sessions(
     socket_names.into_iter().collect()
 }
 
-pub(super) fn is_publishable_discovered_remote_session(session: &ManagedSessionRecord) -> bool {
+pub(crate) fn is_publishable_discovered_remote_session(session: &ManagedSessionRecord) -> bool {
     session.address.transport() == &SessionTransport::RemotePeer && session.is_target_host()
 }
 
-pub(super) fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
+pub(crate) fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
     vec![
         "__chrome-refresh-socket".to_string(),
         "--socket-name".to_string(),
@@ -999,7 +999,7 @@ pub(super) fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
     ]
 }
 
-pub(super) fn remote_target_exited_args(
+pub(crate) fn remote_target_exited_args(
     socket_name: &str,
     session_name: &str,
     target: &str,
@@ -1015,7 +1015,7 @@ pub(super) fn remote_target_exited_args(
     ]
 }
 
-pub(super) fn published_remote_target_record_from_payload(
+pub(crate) fn published_remote_target_record_from_payload(
     authority_id: &str,
     payload: &TargetPublishedPayload,
 ) -> Result<ManagedSessionRecord, LifecycleError> {

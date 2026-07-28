@@ -28,13 +28,20 @@ pub struct RatatuiNodeRuntime {
     remote_owner: RemoteRuntimeOwnerRuntime,
 }
 
-struct SharedState {
+pub(crate) struct SharedState {
     network: RemoteNetworkConfig,
-    sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
+    pub(crate) sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
     active_target: Mutex<Option<String>>,
     client_count: AtomicUsize,
+    clients: Arc<Mutex<Vec<ClientHandle>>>,
     start_time: Instant,
     shutdown: AtomicBool,
+}
+
+impl SharedState {
+    pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
+        broadcast_snapshot(&self.clients, self)
+    }
 }
 
 impl RatatuiNodeRuntime {
@@ -53,6 +60,7 @@ impl RatatuiNodeRuntime {
                 sessions: Mutex::new(sessions),
                 active_target: Mutex::new(active_target),
                 client_count: AtomicUsize::new(0),
+                clients: Arc::new(Mutex::new(Vec::new())),
                 start_time: Instant::now(),
                 shutdown: AtomicBool::new(false),
             }),
@@ -94,11 +102,13 @@ impl RatatuiNodeRuntime {
         let owner = self.remote_owner.clone();
         let _owner_thread = std::thread::spawn(move || {
             if let Err(error) = owner.run_owner(RemoteRuntimeOwnerCommand::default()) {
-                ERROR_LOG.log(format!("[ratatui-node] remote runtime owner exited: {error}"));
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] remote runtime owner exited: {error}"
+                ));
             }
         });
 
-        let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
+        let clients = self.shared.clients.clone();
 
         for stream in listener.incoming() {
             if self.shared.shutdown.load(Ordering::SeqCst) {
@@ -137,7 +147,7 @@ impl RatatuiNodeRuntime {
     }
 }
 
-struct ClientHandle {
+pub(crate) struct ClientHandle {
     id: u64,
     stream: UnixStream,
     removed: Arc<AtomicBool>,
@@ -417,7 +427,7 @@ fn build_snapshot(client_count: usize, shared: &SharedState) -> RatatuiSnapshot 
     }
 }
 
-fn broadcast_snapshot(
+pub(crate) fn broadcast_snapshot(
     clients: &Arc<Mutex<Vec<ClientHandle>>>,
     shared: &SharedState,
 ) -> Result<(), LifecycleError> {
