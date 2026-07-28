@@ -29,7 +29,9 @@ use crate::runtime::remote_authority_transport_runtime::{
 use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
-use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
+use crate::runtime::remote_node_session_sync_runtime::{
+    SessionSyncAuthorityManager, TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
+};
 use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::{
     workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
@@ -154,7 +156,7 @@ impl ReceiverPublicationRevisionTable {
     }
 }
 
-pub(super) enum InternalEvent {
+pub(crate) enum InternalEvent {
     BridgeClosed {
         node_id: String,
         socket_path: PathBuf,
@@ -1250,8 +1252,20 @@ fn run_node_ingress_server_loop(
     start_authority_socket_watcher: bool,
 ) {
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
-    let mut authority_manager =
-        SessionSyncAuthorityManager::with_ingress_events(network, None, internal_tx.clone());
+    let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
+        network.clone(),
+        None,
+        internal_tx.clone(),
+        TmuxLocalTargetFactory::with_network_socket_and_executable(
+            network.clone(),
+            String::new(),
+            current_waitagent_executable().unwrap_or_else(|_| std::env::current_exe().unwrap_or_default()),
+        ),
+        TmuxLocalAuthorityHostBackend::with_network_and_executable(
+            network.clone(),
+            current_waitagent_executable().unwrap_or_else(|_| std::env::current_exe().unwrap_or_default()),
+        ),
+    );
     let mut pending_create_sessions =
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let mut registered_workspace_sockets = BTreeSet::<String>::new();
@@ -1428,7 +1442,7 @@ fn ingress_event_priority(event: &IngressServerEvent) -> IngressEventPriority {
 
 fn handle_transport_event(
     publication_runtime: &RemoteTargetPublicationRuntime,
-    authority_manager: &mut SessionSyncAuthorityManager,
+    authority_manager: &mut SessionSyncAuthorityManager<TmuxLocalTargetFactory, TmuxLocalAuthorityHostBackend>,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
     registered_workspace_sockets: &BTreeSet<String>,

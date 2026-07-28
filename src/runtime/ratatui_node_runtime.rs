@@ -31,7 +31,7 @@ pub struct RatatuiNodeRuntime {
 pub(crate) struct SharedState {
     network: RemoteNetworkConfig,
     pub(crate) sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
-    active_target: Mutex<Option<String>>,
+    pub(crate) active_target: Mutex<Option<String>>,
     client_count: AtomicUsize,
     clients: Arc<Mutex<Vec<ClientHandle>>>,
     start_time: Instant,
