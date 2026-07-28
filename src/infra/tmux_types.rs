@@ -483,10 +483,11 @@ pub trait TmuxControlGateway: TmuxLayoutGateway {
         command: &str,
     ) -> Result<(), Self::Error>;
 
-    fn bind_copy_mode_cancel_key(
+    fn bind_key_in_table(
         &self,
         workspace: &TmuxWorkspaceHandle,
         table: &str,
         key: &str,
+        command_and_args: &[String],
     ) -> Result<(), Self::Error>;
 }

@@ -149,16 +149,31 @@ where
             .bind_key_without_prefix(workspace, HISTORY_TOGGLE_KEY, &[command.to_string()])?;
         self.tmux
             .bind_command_with_prefix(workspace, HISTORY_TOGGLE_PREFIX_KEY, command)?;
+        // In copy-mode, C-o/Escape/q should toggle the history view back off.
+        // Using the same __toggle-fullscreen command for both entry and exit
+        // keeps local and remote behavior consistent: remote history is shown
+        // by swapping the history pane into the main content area, and exit
+        // swaps the live pane back.
         for table in ["copy-mode", "copy-mode-vi"] {
-            self.tmux
-                .bind_copy_mode_cancel_key(workspace, table, HISTORY_TOGGLE_KEY)?;
-            self.tmux
-                .bind_copy_mode_cancel_key(workspace, table, "Escape")?;
+            self.tmux.bind_key_in_table(
+                workspace,
+                table,
+                HISTORY_TOGGLE_KEY,
+                &[command.to_string()],
+            )?;
+            self.tmux.bind_key_in_table(
+                workspace,
+                table,
+                "Escape",
+                &[command.to_string()],
+            )?;
         }
-        // Ensure that vi copy-mode's default quit key also returns focus to the
-        // main pane when the history view was opened for a remote session.
-        self.tmux
-            .bind_copy_mode_cancel_key(workspace, "copy-mode-vi", "q")?;
+        self.tmux.bind_key_in_table(
+            workspace,
+            "copy-mode-vi",
+            "q",
+            &[command.to_string()],
+        )?;
         Ok(())
     }
 
@@ -285,7 +300,7 @@ mod tests {
         BindWaitagentSidebarToggle(String, String, String),
         BindWaitagentSidebarShow(String, String, String),
         BindWaitagentFooterAction(String, String, String),
-        BindCopyModeCancelKey(String, String),
+        BindKeyInTable(String, String, Vec<String>),
     }
 
     #[derive(Clone, Default)]
@@ -671,15 +686,17 @@ mod tests {
             Ok(())
         }
 
-        fn bind_copy_mode_cancel_key(
+        fn bind_key_in_table(
             &self,
             _workspace: &TmuxWorkspaceHandle,
             table: &str,
             key: &str,
+            command_and_args: &[String],
         ) -> Result<(), Self::Error> {
-            self.calls.borrow_mut().push(Call::BindCopyModeCancelKey(
+            self.calls.borrow_mut().push(Call::BindKeyInTable(
                 table.to_string(),
                 key.to_string(),
+                command_and_args.to_vec(),
             ));
             Ok(())
         }
@@ -754,11 +771,31 @@ mod tests {
                     "z".to_string(),
                     "run-shell -b \"waitagent __toggle-fullscreen\"".to_string(),
                 ),
-                Call::BindCopyModeCancelKey("copy-mode".to_string(), "C-o".to_string()),
-                Call::BindCopyModeCancelKey("copy-mode".to_string(), "Escape".to_string()),
-                Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "C-o".to_string()),
-                Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "Escape".to_string()),
-                Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "q".to_string()),
+                Call::BindKeyInTable(
+                    "copy-mode".to_string(),
+                    "C-o".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string()],
+                ),
+                Call::BindKeyInTable(
+                    "copy-mode".to_string(),
+                    "Escape".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string()],
+                ),
+                Call::BindKeyInTable(
+                    "copy-mode-vi".to_string(),
+                    "C-o".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string()],
+                ),
+                Call::BindKeyInTable(
+                    "copy-mode-vi".to_string(),
+                    "Escape".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string()],
+                ),
+                Call::BindKeyInTable(
+                    "copy-mode-vi".to_string(),
+                    "q".to_string(),
+                    vec!["run-shell -b \"waitagent __toggle-fullscreen\"".to_string()],
+                ),
                 Call::BindWaitagentSidebarToggle(
                     "C-g".to_string(),
                     "%1".to_string(),

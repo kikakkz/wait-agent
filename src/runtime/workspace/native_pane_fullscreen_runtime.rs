@@ -49,7 +49,9 @@ impl NativePaneFullscreenRuntime {
         let main_pane = self.workspace_main_pane(&workspace)?;
 
         // Remote sessions keep their scrollback in a dedicated history pane so
-        // engine-mode frame rendering does not pollute the history.
+        // engine-mode frame rendering does not pollute the history. To give the
+        // same UX as local sessions, we swap the history pane into the main
+        // content area before entering copy-mode, then swap back on exit.
         if let Some(history_pane) = self.remote_history_pane(&workspace)? {
             if self
                 .backend
@@ -63,11 +65,18 @@ impl NativePaneFullscreenRuntime {
                     )
                     .map_err(history_error)?;
                 self.backend
+                    .swap_panes(&workspace, &history_pane, &main_pane)
+                    .map_err(history_error)?;
+                self.backend
                     .select_pane(&workspace, &main_pane)
                     .map_err(history_error)?;
                 return Ok(());
             }
 
+            self.resize_history_pane_to_main(&workspace, &main_pane, &history_pane)?;
+            self.backend
+                .swap_panes(&workspace, &history_pane, &main_pane)
+                .map_err(history_error)?;
             self.backend
                 .select_pane(&workspace, &history_pane)
                 .map_err(history_error)?;
@@ -96,6 +105,26 @@ impl NativePaneFullscreenRuntime {
             .map_err(history_error)?;
         self.backend
             .enter_copy_mode(&workspace, &main_pane)
+            .map_err(history_error)
+    }
+
+    fn resize_history_pane_to_main(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+        main_pane: &TmuxPaneId,
+        history_pane: &TmuxPaneId,
+    ) -> Result<(), LifecycleError> {
+        let (width, height) = self
+            .backend
+            .pane_dimensions_on_socket(workspace.socket_name.as_str(), main_pane.as_str())
+            .map_err(history_error)?;
+        self.backend
+            .resize_pane_to_geometry(
+                workspace,
+                history_pane,
+                width as u16,
+                height as u16,
+            )
             .map_err(history_error)
     }
 

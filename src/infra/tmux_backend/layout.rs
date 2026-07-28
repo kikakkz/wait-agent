@@ -82,7 +82,7 @@ impl EmbeddedTmuxBackend {
         .map(|_| ())
     }
 
-    fn resize_pane_to_geometry(
+    pub(crate) fn resize_pane_to_geometry(
         &self,
         workspace: &TmuxWorkspaceHandle,
         pane: &TmuxPaneId,

@@ -109,13 +109,20 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
         Ok(())
     }
 
-    fn bind_copy_mode_cancel_key(
+    fn bind_key_in_table(
         &self,
         workspace: &TmuxWorkspaceHandle,
         table: &str,
         key: &str,
+        command_and_args: &[String],
     ) -> Result<(), Self::Error> {
-        let args = bind_copy_mode_cancel_key_args(table, key);
+        let mut args = vec![
+            "bind-key".to_string(),
+            "-T".to_string(),
+            table.to_string(),
+            key.to_string(),
+        ];
+        args.extend(command_and_args.iter().cloned());
         self.run_workspace_command(workspace, &args)?;
         Ok(())
     }
@@ -123,16 +130,6 @@ impl TmuxControlGateway for EmbeddedTmuxBackend {
 
 fn bind_command_with_prefix_args(key: &str, command: &str) -> Vec<String> {
     bind_key_args(key, true, vec![command.to_string()])
-}
-
-fn bind_copy_mode_cancel_key_args(table: &str, key: &str) -> Vec<String> {
-    vec![
-        "bind-key".to_string(),
-        "-T".to_string(),
-        table.to_string(),
-        key.to_string(),
-        "send-keys -X cancel ; select-pane -t '#{@waitagent_main_pane_id}'".to_string(),
-    ]
 }
 
 fn bind_waitagent_focus_sidebar_args(
@@ -256,10 +253,10 @@ fn current_pane_is(pane: &TmuxPaneId) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_command_with_prefix_args, bind_copy_mode_cancel_key_args,
-        bind_waitagent_focus_main_args, bind_waitagent_focus_sidebar_args,
-        bind_waitagent_footer_action_args, bind_waitagent_main_pane_command_args,
-        bind_waitagent_sidebar_back_args, bind_waitagent_sidebar_hide_args,
+        bind_command_with_prefix_args, bind_waitagent_focus_main_args,
+        bind_waitagent_focus_sidebar_args, bind_waitagent_footer_action_args,
+        bind_waitagent_main_pane_command_args, bind_waitagent_sidebar_back_args,
+        bind_waitagent_sidebar_hide_args,
     };
     use crate::infra::tmux_types::TmuxPaneId;
 
@@ -270,22 +267,6 @@ mod tests {
         assert_eq!(
             args,
             vec!["bind-key", "s", "run-shell -b \"waitagent __footer-menu\"",]
-        );
-    }
-
-    #[test]
-    fn copy_mode_cancel_binding_targets_tmux_copy_mode_table() {
-        let args = bind_copy_mode_cancel_key_args("copy-mode-vi", "Escape");
-
-        assert_eq!(
-            args,
-            vec![
-                "bind-key",
-                "-T",
-                "copy-mode-vi",
-                "Escape",
-                "send-keys -X cancel ; select-pane -t '#{@waitagent_main_pane_id}'",
-            ]
         );
     }
 
