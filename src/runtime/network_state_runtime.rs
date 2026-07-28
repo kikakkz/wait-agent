@@ -297,6 +297,7 @@ fn recover_network_config_for_command(
         | Command::Cleanup
         | Command::Detach(_)
         | Command::Stop(_)
+        | Command::RatatuiListSessions(_)
         | Command::Help(_)
         | Command::Version => None,
     }

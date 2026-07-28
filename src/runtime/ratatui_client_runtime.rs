@@ -19,29 +19,23 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
-/// Ratatui TUI client: connects to a session's node server and renders the workspace chrome.
+/// Ratatui TUI client: connects to a server's node and renders the workspace chrome.
 pub struct RatatuiClientRuntime {
-    session_name: String,
+    port: u16,
     network: RemoteNetworkConfig,
 }
 
 impl RatatuiClientRuntime {
-    pub fn from_session(
-        session_name: String,
-        network: RemoteNetworkConfig,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self {
-            session_name,
-            network,
-        })
+    pub fn from_port(port: u16, network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
+        Ok(Self { port, network })
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
-        let socket_path = ratatui_socket_path(&self.session_name);
+        let socket_path = ratatui_socket_path(self.port);
         ERROR_LOG.log(format!(
-            "[ratatui-client] connecting to socket={} session={}",
+            "[ratatui-client] connecting to socket={} port={}",
             socket_path.display(),
-            self.session_name
+            self.port
         ));
 
         let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
@@ -50,6 +44,19 @@ impl RatatuiClientRuntime {
                     "failed to connect to ratatui node socket {}",
                     socket_path.display()
                 ),
+                error,
+            )
+        })?;
+
+        writeln!(stream, "ATTACH").map_err(|error| {
+            LifecycleError::Io(
+                "failed to send attach command to ratatui node".to_string(),
+                error,
+            )
+        })?;
+        stream.flush().map_err(|error| {
+            LifecycleError::Io(
+                "failed to flush attach command to ratatui node".to_string(),
                 error,
             )
         })?;
@@ -115,7 +122,7 @@ impl RatatuiClientRuntime {
             &mut stream,
             snapshot,
             server_rx,
-            &self.session_name,
+            self.port,
             &self.network,
         );
         let _ = restore_terminal();
@@ -141,20 +148,20 @@ fn restore_terminal() -> io::Result<()> {
 
 fn run_connect_popup<F>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    session_name: &str,
+    port: u16,
     network: &RemoteNetworkConfig,
     render_background: F,
 ) -> Result<(), LifecycleError>
 where
     F: FnMut(&mut Frame),
 {
-    let socket_path = ratatui_socket_path(session_name);
+    let socket_path = ratatui_socket_path(port);
     let runtime = ConnectRemoteHostPaneRuntime::new(network.clone())
-        .with_ratatui_session_name(session_name.to_string())
+        .with_ratatui_port(port)
         .with_ratatui_socket_path(socket_path);
     let command = ConnectRemoteHostPaneCommand {
         current_socket_name: String::new(),
-        current_session_name: session_name.to_string(),
+        current_session_name: "1".to_string(),
     };
     runtime.run_embedded(terminal, command, render_background)
 }
@@ -179,7 +186,7 @@ fn run_event_loop(
     stream: &mut UnixStream,
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
-    session_name: &str,
+    port: u16,
     network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
@@ -291,7 +298,7 @@ fn run_event_loop(
                                 };
                                 if let Err(error) = run_connect_popup(
                                     &mut terminal,
-                                    session_name,
+                                    port,
                                     network,
                                     render_background,
                                 ) {

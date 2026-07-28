@@ -189,6 +189,7 @@ pub enum Command {
     Stop(StopCommand),
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
+    RatatuiListSessions(RatatuiListSessionsCommand),
     Help(String),
     Version,
 }
@@ -209,16 +210,14 @@ pub struct StopCommand {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RatatuiNodeServerCommand {
-    pub session_name: String,
-    pub listener_display: Option<String>,
-    pub connect_endpoint: Option<String>,
-    pub public_endpoint: Option<String>,
-}
+pub struct RatatuiNodeServerCommand;
 
 #[derive(Debug, Clone, Default)]
-pub struct RatatuiClientCommand {
-    pub session_name: String,
+pub struct RatatuiClientCommand;
+
+#[derive(Debug, Clone, Default)]
+pub struct RatatuiListSessionsCommand {
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -721,6 +720,10 @@ impl Cli {
                 args.remove(0);
                 Command::Stop(parse_stop(args)?)
             }
+            "list-sessions" => {
+                args.remove(0);
+                Command::RatatuiListSessions(parse_ratatui_list_sessions(args)?)
+            }
             "__ratatui-node-server" => {
                 args.remove(0);
                 Command::RatatuiNodeServer(parse_ratatui_node_server(args)?)
@@ -840,58 +843,42 @@ fn parse_global_network_config(
 }
 
 fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerCommand, CliError> {
-    let mut iter = args.into_iter();
-    let mut command = RatatuiNodeServerCommand::default();
-    command.session_name = "1".to_string();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(command),
-            "--session-name" => {
-                command.session_name = iter
-                    .next()
-                    .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
-            }
-            "--listener-display" => {
-                command.listener_display = Some(
-                    iter.next()
-                        .ok_or_else(|| CliError::MissingValue("--listener-display".to_string()))?,
-                );
-            }
-            "--connect-endpoint" => {
-                command.connect_endpoint = Some(
-                    iter.next()
-                        .ok_or_else(|| CliError::MissingValue("--connect-endpoint".to_string()))?,
-                );
-            }
-            "--public-endpoint" => {
-                command.public_endpoint = Some(
-                    iter.next()
-                        .ok_or_else(|| CliError::MissingValue("--public-endpoint".to_string()))?,
-                );
-            }
-            _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            return Ok(RatatuiNodeServerCommand);
         }
+        if arg.starts_with("--") {
+            return Err(CliError::UnexpectedArgument(arg));
+        }
+        return Err(CliError::UnexpectedArgument(arg));
     }
 
-    Ok(command)
+    Ok(RatatuiNodeServerCommand)
 }
 
 fn parse_ratatui_client(args: Vec<String>) -> Result<RatatuiClientCommand, CliError> {
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            return Ok(RatatuiClientCommand);
+        }
+        if arg.starts_with("--") {
+            return Err(CliError::UnexpectedArgument(arg));
+        }
+        return Err(CliError::UnexpectedArgument(arg));
+    }
+
+    Ok(RatatuiClientCommand)
+}
+
+fn parse_ratatui_list_sessions(args: Vec<String>) -> Result<RatatuiListSessionsCommand, CliError> {
     let mut iter = args.into_iter();
-    let mut command = RatatuiClientCommand::default();
-    command.session_name = "1".to_string();
+    let mut command = RatatuiListSessionsCommand::default();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(command),
-            "--session-name" => {
-                command.session_name = iter
-                    .next()
-                    .ok_or_else(|| CliError::MissingValue("--session-name".to_string()))?;
-            }
             _ if arg.starts_with("--") => return Err(CliError::UnexpectedArgument(arg)),
+            _ if command.target.is_none() => command.target = Some(arg),
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
     }
@@ -1989,11 +1976,12 @@ fn help_text() -> String {
         "",
         "Usage:",
         "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>]",
-        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<target>]",
-        "  waitagent ls",
+        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<index>]",
+        "  waitagent [--ratatui] ls",
+        "  waitagent [--ratatui] list-sessions [<index>]",
         "  waitagent cleanup",
-        "  waitagent detach [<target>]",
-        "  waitagent stop [<target>]",
+        "  waitagent [--ratatui] detach [<index>]",
+        "  waitagent [--ratatui] stop [<index>]",
         "  waitagent version",
     ]
     .join("\n")

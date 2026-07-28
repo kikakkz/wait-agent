@@ -235,7 +235,7 @@ impl CommandDispatcher {
                 .map_err(AppError::from),
             Command::Attach(command) if self.ratatui => self
                 .ratatui_workspace()?
-                .attach(command.target.unwrap_or_else(|| "1".to_string()))
+                .attach(command.target)
                 .map_err(AppError::from),
             Command::Attach(command) => self
                 .workspace()?
@@ -248,7 +248,7 @@ impl CommandDispatcher {
             Command::Cleanup => self.run_cleanup(),
             Command::Detach(command) if self.ratatui => self
                 .ratatui_workspace()?
-                .detach(command.target.unwrap_or_else(|| "1".to_string()))
+                .detach(command.target)
                 .map_err(AppError::from),
             Command::Detach(command) => self
                 .workspace()?
@@ -256,9 +256,18 @@ impl CommandDispatcher {
                 .map_err(AppError::from),
             Command::Stop(command) if self.ratatui => self
                 .ratatui_workspace()?
-                .stop(command.target.unwrap_or_else(|| "1".to_string()))
+                .stop(command.target)
                 .map_err(AppError::from),
             Command::Stop(command) => self.workspace()?.run_stop(command).map_err(AppError::from),
+            Command::RatatuiListSessions(command) if self.ratatui => self
+                .ratatui_workspace()?
+                .list_sessions(command.target)
+                .map_err(AppError::from),
+            Command::RatatuiListSessions(_) => {
+                Err(AppError::from(crate::lifecycle::LifecycleError::Protocol(
+                    "list-sessions is only supported in --ratatui mode".to_string(),
+                )))
+            }
             Command::RatatuiNodeServer(command) => self
                 .ratatui_node_server(command)
                 .and_then(|runtime| runtime.run().map_err(AppError::from))
@@ -401,22 +410,16 @@ impl CommandDispatcher {
 
     fn ratatui_node_server(
         &self,
-        command: RatatuiNodeServerCommand,
+        _command: RatatuiNodeServerCommand,
     ) -> Result<RatatuiNodeRuntime, AppError> {
-        RatatuiNodeRuntime::from_session_with_endpoints(
-            command.session_name,
-            command.listener_display,
-            command.connect_endpoint,
-            command.public_endpoint,
-        )
-        .map_err(AppError::from)
+        RatatuiNodeRuntime::from_network(self.network.clone()).map_err(AppError::from)
     }
 
     fn ratatui_client(
         &self,
-        command: RatatuiClientCommand,
+        _command: RatatuiClientCommand,
     ) -> Result<RatatuiClientRuntime, AppError> {
-        RatatuiClientRuntime::from_session(command.session_name, self.network.clone())
+        RatatuiClientRuntime::from_port(self.network.port, self.network.clone())
             .map_err(AppError::from)
     }
 }

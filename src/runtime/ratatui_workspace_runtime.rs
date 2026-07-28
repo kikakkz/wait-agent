@@ -4,20 +4,19 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
 use crate::runtime::ratatui_node_runtime::{
-    node_is_running, ratatui_socket_dir, ratatui_socket_path, read_socket_info, remove_node_socket,
+    node_is_running, ratatui_socket_dir, ratatui_socket_path, remove_node_socket, send_node_command,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-const DEFAULT_SESSION_NAME: &str = "1";
-
-/// Top-level entry point for `waitagent --ratatui` and its session subcommands.
+/// Top-level entry point for `waitagent --ratatui` and its subcommands.
 ///
-/// Sessions are global per user (scoped by UID, like tmux). The default session
-/// name is `"1"`, matching tmux-style numbered sessions.
+/// A ratatui "server" is identified by its listener port. Each port runs a
+/// single `__ratatui-node-server` process. Multiple TUI clients can attach to
+/// the same server. Sessions inside the server are created via the TUI.
 pub struct RatatuiWorkspaceRuntime {
     network: RemoteNetworkConfig,
 }
@@ -29,31 +28,33 @@ impl RatatuiWorkspaceRuntime {
         Ok(Self { network })
     }
 
-    /// Default entry: attach to (or create) the default session "1" and run the TUI.
+    /// Default entry: attach to (or create) the server for the configured port
+    /// and run the TUI.
     pub fn run_workspace_entry(&self) -> Result<(), LifecycleError> {
-        self.attach_or_create(DEFAULT_SESSION_NAME)
+        self.attach_or_create()
     }
 
-    /// Attach to a named session, creating it if it does not exist, and run the TUI.
-    pub fn attach(&self, session_name: impl AsRef<str>) -> Result<(), LifecycleError> {
-        self.attach_or_create(session_name.as_ref())
+    /// Attach to the server for the configured port, creating it if it does not
+    /// exist, and run the TUI.
+    pub fn attach(&self, _target: Option<String>) -> Result<(), LifecycleError> {
+        // `attach` for ratatui currently means "attach to the server selected by
+        // --port". An optional index argument is reserved for future use but is
+        // not needed because the entry command already implies the port.
+        self.attach_or_create()
     }
 
-    /// Detach all clients from a session.
-    pub fn detach(&self, session_name: impl AsRef<str>) -> Result<(), LifecycleError> {
-        let session_name = session_name.as_ref();
-        ERROR_LOG.log(format!(
-            "[ratatui-workspace] detach session={}",
-            session_name
-        ));
+    /// Detach all clients from a server.
+    pub fn detach(&self, target: Option<String>) -> Result<(), LifecycleError> {
+        let port = resolve_target_to_port(target.as_deref())?;
+        ERROR_LOG.log(format!("[ratatui-workspace] detach port={port}"));
 
-        if !node_is_running(session_name) {
+        if !node_is_running(port) {
             return Err(LifecycleError::Protocol(format!(
-                "ratatui session `{session_name}` is not running"
+                "ratatui server on port {port} is not running"
             )));
         }
 
-        let socket_path = ratatui_socket_path(session_name);
+        let socket_path = ratatui_socket_path(port);
         let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
             LifecycleError::Io(
                 format!(
@@ -84,93 +85,130 @@ impl RatatuiWorkspaceRuntime {
         let mut buf = [0u8; 1];
         let _ = stream.read(&mut buf);
 
-        println!("detached clients from ratatui session `{session_name}`");
+        println!("detached clients from ratatui server on port {port}");
         Ok(())
     }
 
-    /// Stop a session's node server.
-    pub fn stop(&self, session_name: impl AsRef<str>) -> Result<(), LifecycleError> {
-        let session_name = session_name.as_ref();
-        ERROR_LOG.log(format!("[ratatui-workspace] stop session={}", session_name));
+    /// Stop a server.
+    pub fn stop(&self, target: Option<String>) -> Result<(), LifecycleError> {
+        let port = resolve_target_to_port(target.as_deref())?;
+        ERROR_LOG.log(format!("[ratatui-workspace] stop port={port}"));
 
-        let info = read_socket_info(session_name).ok_or_else(|| {
+        if !node_is_running(port) {
+            remove_node_socket(port);
+            return Err(LifecycleError::Protocol(format!(
+                "ratatui server on port {port} is not running"
+            )));
+        }
+
+        send_node_command(port, "STOP").map_err(|error| {
             LifecycleError::Protocol(format!(
-                "ratatui session `{session_name}` is not running or info file is missing"
+                "failed to send stop command to ratatui server on port {port}: {error}"
             ))
         })?;
 
-        // Gracefully terminate the node server process.
-        unsafe {
-            libc::kill(info.pid as i32, libc::SIGTERM);
-        }
-
-        // Wait briefly for the process to exit and the socket to disappear.
+        // Wait briefly for the server process to exit and the socket to disappear.
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if !node_is_running(session_name) {
+            if !node_is_running(port) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        remove_node_socket(session_name);
-        println!("stopped ratatui session `{session_name}`");
+        remove_node_socket(port);
+        println!("stopped ratatui server on port {port}");
         Ok(())
     }
 
-    /// List ratatui sessions for the current user.
+    /// List running ratatui servers for the current user.
     pub fn list(&self) -> Result<(), LifecycleError> {
-        let sessions = list_ratatui_sessions();
-        if sessions.is_empty() {
-            println!("no ratatui sessions running");
+        let servers = list_ratatui_servers();
+        if servers.is_empty() {
+            println!("no ratatui servers running");
             return Ok(());
         }
 
-        for session in sessions {
-            let status = if session.client_count > 0 {
+        for (index, server) in servers.iter().enumerate() {
+            let idx = index + 1;
+            let status = if server.client_count > 0 {
                 "attached"
             } else {
                 "detached"
             };
             println!(
-                "{}: {}, up {}",
-                session.session_name,
+                "{}: port {}, {}, up {}, {} session{}",
+                idx,
+                server.port,
                 status,
-                format_uptime(session.created_at_unix_secs),
+                format_duration(server.uptime_secs),
+                server.session_count,
+                if server.session_count == 1 { "" } else { "s" }
             );
         }
         Ok(())
     }
 
-    fn attach_or_create(&self, session_name: &str) -> Result<(), LifecycleError> {
-        ERROR_LOG.log(format!(
-            "[ratatui-workspace] entry session={}",
-            session_name
-        ));
+    /// List sessions inside a server.
+    pub fn list_sessions(&self, target: Option<String>) -> Result<(), LifecycleError> {
+        let port = resolve_target_to_port(target.as_deref())?;
+        let response = send_node_command(port, "LIST_SESSIONS").map_err(|error| {
+            LifecycleError::Protocol(format!(
+                "failed to list sessions for ratatui server on port {port}: {error}"
+            ))
+        })?;
 
-        if !node_is_running(session_name) {
-            self.start_node_server(session_name)?;
+        let sessions: Vec<crate::runtime::ratatui_node_runtime::SessionView> =
+            serde_json::from_str(&response).map_err(|error| {
+                LifecycleError::Protocol(format!(
+                    "failed to parse session list for ratatui server on port {port}: {error}"
+                ))
+            })?;
+
+        if sessions.is_empty() {
+            println!("no sessions in ratatui server on port {port}");
+            return Ok(());
+        }
+
+        for session in sessions {
+            println!(
+                "{} [{}] {}",
+                session.id,
+                session.task_state,
+                session.display_label()
+            );
+        }
+        Ok(())
+    }
+
+    fn attach_or_create(&self) -> Result<(), LifecycleError> {
+        let port = self.network.port;
+        ERROR_LOG.log(format!("[ratatui-workspace] entry port={port}"));
+
+        if !node_is_running(port) {
+            self.start_node_server()?;
         } else {
             ERROR_LOG.log(format!(
-                "[ratatui-workspace] existing node found for session {session_name}"
+                "[ratatui-workspace] existing node found for port {port}"
             ));
         }
 
-        RatatuiClientRuntime::from_session(session_name.to_string(), self.network.clone())?.run()
+        RatatuiClientRuntime::from_port(port, self.network.clone())?.run()
     }
 
-    fn start_node_server(&self, session_name: &str) -> Result<(), LifecycleError> {
+    fn start_node_server(&self) -> Result<(), LifecycleError> {
         let executable = current_waitagent_executable()?;
-        let socket_path = ratatui_socket_path(session_name);
+        let socket_path = ratatui_socket_path(self.network.port);
+        let port = self.network.port;
 
         // Remove any stale socket left by a previous crash.
-        remove_node_socket(session_name);
+        remove_node_socket(port);
 
         ERROR_LOG.log(format!(
-            "[ratatui-workspace] spawning node server executable={:?} socket={} session={}",
+            "[ratatui-workspace] spawning node server executable={:?} socket={} port={}",
             executable,
             socket_path.display(),
-            session_name
+            port
         ));
 
         let mut command = Command::new(&executable);
@@ -183,20 +221,9 @@ impl RatatuiWorkspaceRuntime {
 
         command
             .arg("__ratatui-node-server")
-            .arg("--session-name")
-            .arg(session_name)
-            .arg("--listener-display")
-            .arg(self.network.advertised_listener_label())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-
-        if let Some(connect) = &self.network.connect {
-            command.arg("--connect-endpoint").arg(connect);
-        }
-        if let Some(public) = &self.network.public_endpoint {
-            command.arg("--public-endpoint").arg(public);
-        }
 
         // Detach the child into its own session so it survives client exit.
         unsafe {
@@ -215,7 +242,7 @@ impl RatatuiWorkspaceRuntime {
         // Wait briefly for the server socket to appear.
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if socket_path.exists() && node_is_running(session_name) {
+            if socket_path.exists() && node_is_running(port) {
                 ERROR_LOG.log("[ratatui-workspace] node server ready".to_string());
                 return Ok(());
             }
@@ -229,52 +256,92 @@ impl RatatuiWorkspaceRuntime {
 }
 
 #[derive(Debug)]
-struct RatatuiSessionListEntry {
-    session_name: String,
+struct RatatuiServerListEntry {
+    port: u16,
     client_count: usize,
-    created_at_unix_secs: Option<u64>,
+    uptime_secs: u64,
+    session_count: usize,
 }
 
-fn list_ratatui_sessions() -> Vec<RatatuiSessionListEntry> {
-    let mut sessions = Vec::new();
+fn list_ratatui_servers() -> Vec<RatatuiServerListEntry> {
+    let mut servers = Vec::new();
     let Ok(entries) = std::fs::read_dir(ratatui_socket_dir()) else {
-        return sessions;
+        return servers;
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if !name.ends_with(".sock.info") {
+        if !name.ends_with(".sock") {
             continue;
         }
-        if let Ok(json) = std::fs::read_to_string(&path) {
-            if let Ok(info) = serde_json::from_str::<
-                crate::runtime::ratatui_node_runtime::RatatuiSocketInfo,
-            >(&json)
-            {
-                sessions.push(RatatuiSessionListEntry {
-                    session_name: info.session_name,
-                    client_count: info.client_count,
-                    created_at_unix_secs: Some(info.created_at_unix_secs),
-                });
+        let port_str = name.trim_end_matches(".sock");
+        let Ok(port) = port_str.parse::<u16>() else {
+            continue;
+        };
+        match query_server_status(port) {
+            Ok(status) => servers.push(RatatuiServerListEntry {
+                port,
+                client_count: status.client_count,
+                uptime_secs: status.uptime_secs,
+                session_count: status.session_count,
+            }),
+            Err(_) => {
+                // Stale socket: remove it.
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
 
-    sessions.sort_by(|a, b| a.session_name.cmp(&b.session_name));
-    sessions
+    servers.sort_by(|a, b| a.port.cmp(&b.port));
+    servers
 }
 
-fn format_uptime(created_at_unix_secs: Option<u64>) -> String {
-    let Some(created_at_unix_secs) = created_at_unix_secs else {
-        return "-".to_string();
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(created_at_unix_secs);
-    let elapsed = now.saturating_sub(created_at_unix_secs);
-    format_duration(elapsed)
+fn query_server_status(
+    port: u16,
+) -> Result<crate::runtime::ratatui_node_runtime::ServerStatus, LifecycleError> {
+    let response = send_node_command(port, "STATUS")?;
+    serde_json::from_str(&response).map_err(|error| {
+        LifecycleError::Protocol(format!(
+            "failed to parse status response for port {port}: {error}"
+        ))
+    })
+}
+
+fn resolve_target_to_port(target: Option<&str>) -> Result<u16, LifecycleError> {
+    let servers = list_ratatui_servers();
+
+    match target {
+        None => {
+            if servers.len() == 1 {
+                Ok(servers[0].port)
+            } else if servers.is_empty() {
+                Err(LifecycleError::Protocol(
+                    "no ratatui servers are running".to_string(),
+                ))
+            } else {
+                let mut message =
+                    "multiple ratatui servers are running; specify an index:\n".to_string();
+                for (index, server) in servers.iter().enumerate() {
+                    message.push_str(&format!("  {}: port {}\n", index + 1, server.port));
+                }
+                Err(LifecycleError::Protocol(message))
+            }
+        }
+        Some(value) => {
+            let index: usize = value.parse().map_err(|_| {
+                LifecycleError::Protocol(format!(
+                    "invalid server index `{value}`; expected a number like 1, 2, 3"
+                ))
+            })?;
+            if index == 0 || index > servers.len() {
+                return Err(LifecycleError::Protocol(format!(
+                    "server index {index} is out of range; run `waitagent --ratatui ls` to see valid indices"
+                )));
+            }
+            Ok(servers[index - 1].port)
+        }
+    }
 }
 
 fn format_duration(seconds: u64) -> String {

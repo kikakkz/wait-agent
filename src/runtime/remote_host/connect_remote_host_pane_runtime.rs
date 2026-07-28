@@ -28,7 +28,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct ConnectRemoteHostPaneRuntime {
     network: RemoteNetworkConfig,
-    ratatui_session_name: Option<String>,
+    ratatui_port: Option<u16>,
     ratatui_socket_path: Option<std::path::PathBuf>,
 }
 
@@ -36,13 +36,13 @@ impl ConnectRemoteHostPaneRuntime {
     pub fn new(network: RemoteNetworkConfig) -> Self {
         Self {
             network,
-            ratatui_session_name: None,
+            ratatui_port: None,
             ratatui_socket_path: None,
         }
     }
 
-    pub fn with_ratatui_session_name(mut self, session_name: impl Into<String>) -> Self {
-        self.ratatui_session_name = Some(session_name.into());
+    pub fn with_ratatui_port(mut self, port: u16) -> Self {
+        self.ratatui_port = Some(port);
         self
     }
 
@@ -205,7 +205,7 @@ impl ConnectRemoteHostPaneRuntime {
                         state,
                         &command,
                         &self.network,
-                        self.ratatui_session_name.as_deref(),
+                        self.ratatui_port,
                         self.ratatui_socket_path.as_deref(),
                     ) {
                         Ok(_) => return Ok(()),
@@ -2804,7 +2804,7 @@ fn delete_selected_host(
 
 fn run_ratatui_connect(
     state: &ConnectRemoteHostState,
-    session_name: &str,
+    port: u16,
     socket_path: &std::path::Path,
 ) -> Result<String, String> {
     let Some(profile) = state
@@ -2814,9 +2814,8 @@ fn run_ratatui_connect(
         return Err("ratatui mode only supports saved profiles with saved credentials".to_string());
     };
 
-    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
-        format!("failed to connect to ratatui node for `{session_name}`: {error}")
-    })?;
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
     writeln!(stream, "CONNECT_REMOTE_HOST {}", profile.name)
         .map_err(|error| format!("failed to send connect command: {error}"))?;
     stream
@@ -2856,11 +2855,11 @@ fn run_connect(
     state: &ConnectRemoteHostState,
     command: &ConnectRemoteHostPaneCommand,
     network: &RemoteNetworkConfig,
-    ratatui_session_name: Option<&str>,
+    ratatui_port: Option<u16>,
     ratatui_socket_path: Option<&std::path::Path>,
 ) -> Result<String, String> {
-    if let (Some(session_name), Some(socket_path)) = (ratatui_session_name, ratatui_socket_path) {
-        return run_ratatui_connect(state, session_name, socket_path);
+    if let (Some(port), Some(socket_path)) = (ratatui_port, ratatui_socket_path) {
+        return run_ratatui_connect(state, port, socket_path);
     }
 
     validate(state)?;

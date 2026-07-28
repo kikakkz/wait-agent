@@ -5,93 +5,70 @@ use crate::domain::session_catalog::{
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-/// Ratatui node server: holds session state and survives TUI client disconnects.
+const DEFAULT_SESSION_ID: &str = "1";
+
+/// Ratatui node server: holds all session state for a single `--port` and
+/// survives TUI client disconnects.
 ///
-/// A node server is scoped to a single session name. Multiple clients can attach
-/// to the same session; the server keeps running until it is explicitly stopped.
+/// One server process maps to one listener port. Multiple clients can attach to
+/// the same server. Sessions inside the server are created via the TUI
+/// (Ctrl+N/W/S), not via command-line arguments.
 pub struct RatatuiNodeRuntime {
-    session_name: String,
     network: RemoteNetworkConfig,
-    sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    active_target: Arc<Mutex<Option<String>>>,
+    shared: Arc<SharedState>,
+}
+
+struct SharedState {
+    network: RemoteNetworkConfig,
+    sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
+    active_target: Mutex<Option<String>>,
+    client_count: AtomicUsize,
+    start_time: Instant,
+    shutdown: AtomicBool,
 }
 
 impl RatatuiNodeRuntime {
-    pub fn from_session_with_endpoints(
-        session_name: String,
-        listener_display: Option<String>,
-        connect_endpoint: Option<String>,
-        public_endpoint: Option<String>,
-    ) -> Result<Self, LifecycleError> {
-        let sessions = Arc::new(Mutex::new(vec![default_local_session_record(
-            &session_name,
-        )]));
-        let active_target = sessions
-            .lock()
-            .unwrap()
-            .first()
-            .map(|session| session.address.qualified_target());
-        let network = ratatui_network_config(
-            listener_display.as_deref(),
-            connect_endpoint.as_deref(),
-            public_endpoint.as_deref(),
-        );
-        Ok(Self {
-            session_name,
-            network,
-            sessions,
-            active_target: Arc::new(Mutex::new(active_target)),
-        })
-    }
+    pub fn from_network(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
+        let mut sessions = HashMap::new();
+        let default_record = default_local_session_record(DEFAULT_SESSION_ID);
+        let active_target = Some(default_record.address.qualified_target());
+        sessions.insert(DEFAULT_SESSION_ID.to_string(), default_record);
 
-    #[allow(dead_code)]
-    pub fn from_session_with_network(
-        session_name: String,
-        network: RemoteNetworkConfig,
-    ) -> Result<Self, LifecycleError> {
-        let sessions = Arc::new(Mutex::new(vec![default_local_session_record(
-            &session_name,
-        )]));
-        let active_target = sessions
-            .lock()
-            .unwrap()
-            .first()
-            .map(|session| session.address.qualified_target());
         Ok(Self {
-            session_name,
-            network,
-            sessions,
-            active_target: Arc::new(Mutex::new(active_target)),
+            network: network.clone(),
+            shared: Arc::new(SharedState {
+                network,
+                sessions: Mutex::new(sessions),
+                active_target: Mutex::new(active_target),
+                client_count: AtomicUsize::new(0),
+                start_time: Instant::now(),
+                shutdown: AtomicBool::new(false),
+            }),
         })
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
-        let socket_path = ratatui_socket_path(&self.session_name);
-        let info_path = ratatui_info_path(&self.session_name);
+        let socket_path = ratatui_socket_path(self.network.port);
         ERROR_LOG.log(format!(
-            "[ratatui-node] starting for session={} socket={}",
-            self.session_name,
+            "[ratatui-node] starting port={} socket={}",
+            self.network.port,
             socket_path.display()
         ));
 
-        // Ensure the per-user socket directory exists.
         if let Some(parent) = socket_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
         // Remove stale socket before binding.
         let _ = std::fs::remove_file(&socket_path);
-        if let Err(error) = write_socket_info(&info_path, &self.session_name, 0) {
-            ERROR_LOG.log(format!(
-                "[ratatui-node] failed to write socket info: {error:?}"
-            ));
-        }
 
         let listener = UnixListener::bind(&socket_path).map_err(|error| {
             LifecycleError::Io(
@@ -106,32 +83,19 @@ impl RatatuiNodeRuntime {
         ERROR_LOG.log("[ratatui-node] listening".to_string());
 
         let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
-        let client_count = Arc::new(AtomicUsize::new(0));
 
-        let info_path = Arc::new(info_path);
         for stream in listener.incoming() {
+            if self.shared.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+
             match stream {
                 Ok(stream) => {
                     let clients = clients.clone();
-                    let client_count = client_count.clone();
-                    let info_path = info_path.clone();
-                    let session_name = self.session_name.clone();
-                    let network = self.network.clone();
-                    let sessions = self.sessions.clone();
-                    let active_target = self.active_target.clone();
+                    let shared = self.shared.clone();
                     std::thread::spawn(move || {
                         let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
-                        if let Err(error) = handle_client(
-                            stream,
-                            client_id,
-                            clients,
-                            client_count,
-                            &info_path,
-                            &session_name,
-                            &network,
-                            sessions,
-                            active_target,
-                        ) {
+                        if let Err(error) = handle_client(stream, client_id, clients, shared) {
                             ERROR_LOG
                                 .log(format!("[ratatui-node] client handler error: {error:?}"));
                         }
@@ -144,7 +108,10 @@ impl RatatuiNodeRuntime {
         }
 
         let _ = std::fs::remove_file(&socket_path);
-        let _ = std::fs::remove_file(&*info_path);
+        ERROR_LOG.log(format!(
+            "[ratatui-node] shutting down port={}",
+            self.network.port
+        ));
         Ok(())
     }
 }
@@ -161,18 +128,43 @@ fn handle_client(
     mut stream: UnixStream,
     client_id: u64,
     clients: Arc<Mutex<Vec<ClientHandle>>>,
-    client_count: Arc<AtomicUsize>,
-    info_path: &std::path::Path,
-    session_name: &str,
-    network: &RemoteNetworkConfig,
-    sessions: Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    active_target: Arc<Mutex<Option<String>>>,
+    shared: Arc<SharedState>,
 ) -> Result<(), LifecycleError> {
     ERROR_LOG.log(format!("[ratatui-node] client {client_id} connected"));
     let removed = Arc::new(AtomicBool::new(false));
-    client_count.fetch_add(1, Ordering::SeqCst);
-    update_info_client_count(&client_count, info_path);
 
+    let reader = stream.try_clone().map_err(|error| {
+        LifecycleError::Io("failed to clone ratatui client stream".to_string(), error)
+    })?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    // Read the first line to decide whether this is a TUI attach or a
+    // one-shot control command.
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => {
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
+
+    let trimmed = line.trim();
+    ERROR_LOG.log(format!(
+        "[ratatui-node] client {client_id} first message: {trimmed}"
+    ));
+
+    // One-shot control commands do not join the client list and do not
+    // receive the initial snapshot.
+    if is_one_shot_control_command(trimmed) {
+        let response = handle_control_command(trimmed, &shared, &mut stream)
+            .unwrap_or_else(|| "ERR unknown command".to_string());
+        let _ = writeln!(stream, "{response}");
+        let _ = stream.flush();
+        return Ok(());
+    }
+
+    // Register as a TUI client and send the initial snapshot.
+    shared.client_count.fetch_add(1, Ordering::SeqCst);
     if let Ok(clone) = stream.try_clone() {
         clients.lock().unwrap().push(ClientHandle {
             id: client_id,
@@ -181,31 +173,15 @@ fn handle_client(
         });
     }
 
-    // Send snapshot so the client has something to render.
-    let count = client_count.load(Ordering::SeqCst);
-    let snapshot = build_snapshot(session_name, count, network, &sessions, &active_target);
+    // The "ATTACH" command is a no-op beyond triggering the snapshot.
+    let count = shared.client_count.load(Ordering::SeqCst);
+    let snapshot = build_snapshot(count, &shared);
     let json = serde_json::to_string(&snapshot).unwrap_or_default();
-    if let Err(error) = writeln!(stream, "{json}") {
-        ERROR_LOG.log(format!(
-            "[ratatui-node] failed to write snapshot: {error:?}"
-        ));
-        remove_client(client_id, &clients, &client_count, info_path);
-        return Ok(());
-    }
-    if let Err(error) = stream.flush() {
-        ERROR_LOG.log(format!(
-            "[ratatui-node] failed to flush snapshot: {error:?}"
-        ));
-        remove_client(client_id, &clients, &client_count, info_path);
+    if writeln!(stream, "{json}").is_err() || stream.flush().is_err() {
+        remove_client(client_id, &clients, &shared);
         return Ok(());
     }
 
-    // Read until client disconnects or sends a control command.
-    let reader = stream.try_clone().map_err(|error| {
-        LifecycleError::Io("failed to clone ratatui client stream".to_string(), error)
-    })?;
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
     let mut forcibly_detached = false;
 
     loop {
@@ -223,27 +199,19 @@ fn handle_client(
                 match trimmed {
                     "DETACH" => break,
                     "DETACH_ALL" => {
-                        detach_all_clients(&clients, &client_count, info_path);
+                        detach_all_clients(&clients, &shared);
                         forcibly_detached = true;
                         break;
                     }
                     _ => {
-                        if let Some(response) = handle_control_command(
-                            trimmed,
-                            session_name,
-                            network,
-                            &sessions,
-                            &active_target,
-                        ) {
+                        if let Some(response) =
+                            handle_control_command(trimmed, &shared, &mut stream)
+                        {
                             let _ = writeln!(stream, "{response}");
                             let _ = stream.flush();
-                            let _ = broadcast_snapshot(
-                                &clients,
-                                session_name,
-                                network,
-                                &sessions,
-                                &active_target,
-                            );
+                            if response_should_broadcast(&response) {
+                                let _ = broadcast_snapshot(&clients, &shared);
+                            }
                         }
                     }
                 }
@@ -258,23 +226,57 @@ fn handle_client(
     }
 
     if !forcibly_detached {
-        remove_client(client_id, &clients, &client_count, info_path);
+        remove_client(client_id, &clients, &shared);
     }
     Ok(())
 }
 
+fn is_one_shot_control_command(command: &str) -> bool {
+    matches!(command, "STATUS" | "STOP" | "LIST_SESSIONS" | "DETACH_ALL")
+        || command.starts_with("CONNECT_REMOTE_HOST ")
+}
+
+fn response_should_broadcast(response: &str) -> bool {
+    response.starts_with("OK")
+}
+
 fn handle_control_command(
     command: &str,
-    session_name: &str,
-    network: &RemoteNetworkConfig,
-    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    active_target: &Arc<Mutex<Option<String>>>,
+    shared: &Arc<SharedState>,
+    _stream: &mut UnixStream,
 ) -> Option<String> {
+    if command == "STATUS" {
+        let count = shared.client_count.load(Ordering::SeqCst);
+        let uptime = shared.start_time.elapsed().as_secs();
+        let session_count = shared.sessions.lock().unwrap().len();
+        let status = ServerStatus {
+            port: shared.network.port,
+            client_count: count,
+            uptime_secs: uptime,
+            session_count,
+        };
+        return Some(serde_json::to_string(&status).unwrap_or_default());
+    }
+
+    if command == "STOP" {
+        shared.shutdown.store(true, Ordering::SeqCst);
+        // Wake up the listener by connecting to it from this side.
+        let _ = UnixStream::connect(ratatui_socket_path(shared.network.port));
+        return Some("OK stopping".to_string());
+    }
+
+    if command == "LIST_SESSIONS" {
+        let guard = shared.sessions.lock().unwrap();
+        let sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
+        drop(guard);
+        return Some(serde_json::to_string(&sessions).unwrap_or_default());
+    }
+
     if command == "CREATE_LOCAL_SESSION" {
-        let mut guard = sessions.lock().unwrap();
-        let id = format!("local-{}", guard.len() + 1);
+        let mut guard = shared.sessions.lock().unwrap();
+        let id = format!("{}", guard.len() + 1);
         let record = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(session_name, &id),
+            address: ManagedSessionAddress::local_tmux(&id, "main"),
             selector: None,
             availability: SessionAvailability::Online,
             workspace_dir: None,
@@ -288,30 +290,42 @@ fn handle_control_command(
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
-        guard.push(record);
-        Some("OK".to_string())
-    } else if let Some(target) = command.strip_prefix("ACTIVATE_TARGET ") {
+        let target = record.address.qualified_target();
+        guard.insert(id, record);
+        drop(guard);
+        *shared.active_target.lock().unwrap() = Some(target);
+        return Some("OK created local session".to_string());
+    }
+
+    if let Some(target) = command.strip_prefix("ACTIVATE_TARGET ") {
         let target = target.to_string();
-        let guard = sessions.lock().unwrap();
+        let guard = shared.sessions.lock().unwrap();
         let exists = guard
-            .iter()
+            .values()
             .any(|session| session.address.qualified_target() == target);
         drop(guard);
         if exists {
-            *active_target.lock().unwrap() = Some(target);
-            Some("OK".to_string())
-        } else {
-            Some("ERR unknown target".to_string())
+            *shared.active_target.lock().unwrap() = Some(target);
+            return Some("OK".to_string());
         }
-    } else if let Some(profile_name) = command.strip_prefix("CONNECT_REMOTE_HOST ") {
-        match connect_remote_host(profile_name, sessions, network) {
+        return Some("ERR unknown target".to_string());
+    }
+
+    if let Some(profile_name) = command.strip_prefix("CONNECT_REMOTE_HOST ") {
+        // Build a temporary Vec view for the existing connect helper.
+        let sessions_vec: Vec<ManagedSessionRecord> = {
+            let guard = shared.sessions.lock().unwrap();
+            guard.values().cloned().collect()
+        };
+        let sessions_arc = Arc::new(Mutex::new(sessions_vec));
+        match connect_remote_host(profile_name, &sessions_arc, &shared.network) {
             Ok(record) => {
                 let target = record.address.qualified_target();
-                let mut guard = sessions.lock().unwrap();
-                guard.retain(|session| session.address.id() != record.address.id());
-                guard.push(record);
+                let mut guard = shared.sessions.lock().unwrap();
+                guard.retain(|_, session| session.address.id() != record.address.id());
+                guard.insert(record.address.session_id().to_string(), record);
                 drop(guard);
-                *active_target.lock().unwrap() = Some(target.clone());
+                *shared.active_target.lock().unwrap() = Some(target.clone());
                 Some(format!("OK connected {target}"))
             }
             Err(error) => Some(format!("ERR {error}")),
@@ -321,9 +335,17 @@ fn handle_control_command(
     }
 }
 
-fn default_local_session_record(session_name: &str) -> ManagedSessionRecord {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerStatus {
+    pub port: u16,
+    pub client_count: usize,
+    pub uptime_secs: u64,
+    pub session_count: usize,
+}
+
+fn default_local_session_record(session_id: &str) -> ManagedSessionRecord {
     ManagedSessionRecord {
-        address: ManagedSessionAddress::local_tmux(session_name, "main"),
+        address: ManagedSessionAddress::local_tmux(session_id, "main"),
         selector: None,
         availability: SessionAvailability::Online,
         workspace_dir: None,
@@ -339,27 +361,31 @@ fn default_local_session_record(session_name: &str) -> ManagedSessionRecord {
     }
 }
 
-fn build_snapshot(
-    session_name: &str,
-    client_count: usize,
-    network: &RemoteNetworkConfig,
-    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    active_target: &Arc<Mutex<Option<String>>>,
-) -> RatatuiSnapshot {
-    let records = sessions.lock().unwrap();
-    let sessions: Vec<SessionView> = records.iter().map(SessionView::from_record).collect();
-    let active_target = active_target.lock().unwrap().clone();
+fn build_snapshot(client_count: usize, shared: &SharedState) -> RatatuiSnapshot {
+    let guard = shared.sessions.lock().unwrap();
+    let sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
+    let active_target = shared.active_target.lock().unwrap().clone();
+    let active_session_id = active_target
+        .as_deref()
+        .and_then(|target| {
+            guard
+                .values()
+                .find(|s| s.address.qualified_target() == target)
+        })
+        .map(|s| s.address.session_id().to_string())
+        .unwrap_or_else(|| DEFAULT_SESSION_ID.to_string());
+    drop(guard);
 
     RatatuiSnapshot {
-        session_name: session_name.to_string(),
+        session_name: active_session_id.clone(),
         client_count,
         main: "Main pane placeholder".to_string(),
         sidebar: "Sessions".to_string(),
         footer: FooterState {
-            active_session: session_name.to_string(),
+            active_session: active_session_id,
             sessions: vec![],
-            listener_endpoint: Some(network.advertised_listener_label().to_string()),
-            connect_endpoint: network.connect_endpoint_uri(),
+            listener_endpoint: Some(shared.network.advertised_listener_label().to_string()),
+            connect_endpoint: shared.network.connect_endpoint_uri(),
             remote_count: sessions
                 .iter()
                 .filter(|session| session.transport == "remote")
@@ -372,12 +398,9 @@ fn build_snapshot(
 
 fn broadcast_snapshot(
     clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    session_name: &str,
-    network: &RemoteNetworkConfig,
-    sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    active_target: &Arc<Mutex<Option<String>>>,
-) {
-    let snapshot = build_snapshot(session_name, 0, network, sessions, active_target);
+    shared: &SharedState,
+) -> Result<(), LifecycleError> {
+    let snapshot = build_snapshot(0, shared);
     let json = serde_json::to_string(&snapshot).unwrap_or_default();
     let mut guard = clients.lock().unwrap();
     guard.retain(|handle| !handle.removed.load(Ordering::SeqCst));
@@ -386,47 +409,20 @@ fn broadcast_snapshot(
         let _ = writeln!(stream, "{json}");
         let _ = stream.flush();
     }
+    Ok(())
 }
 
-fn ratatui_network_config(
-    listener_display: Option<&str>,
-    connect_endpoint: Option<&str>,
-    public_endpoint: Option<&str>,
-) -> RemoteNetworkConfig {
-    let mut network = RemoteNetworkConfig::default();
-    if let Some(display) = listener_display {
-        if let Some((_, port_str)) = display.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                network.port = port;
-            }
-        }
-    }
-    network.connect = connect_endpoint.map(String::from);
-    network.public_endpoint = public_endpoint.map(String::from);
-    network
-}
-
-fn detach_all_clients(
-    clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    client_count: &Arc<AtomicUsize>,
-    info_path: &std::path::Path,
-) {
+fn detach_all_clients(clients: &Arc<Mutex<Vec<ClientHandle>>>, shared: &SharedState) {
     ERROR_LOG.log("[ratatui-node] detaching all clients".to_string());
     let mut guard = clients.lock().unwrap();
     for handle in guard.drain(..) {
         handle.removed.store(true, Ordering::SeqCst);
         let _ = handle.stream.shutdown(std::net::Shutdown::Both);
     }
-    client_count.store(0, Ordering::SeqCst);
-    update_socket_info_client_count(info_path, 0);
+    shared.client_count.store(0, Ordering::SeqCst);
 }
 
-fn remove_client(
-    client_id: u64,
-    clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    client_count: &Arc<AtomicUsize>,
-    info_path: &std::path::Path,
-) {
+fn remove_client(client_id: u64, clients: &Arc<Mutex<Vec<ClientHandle>>>, shared: &SharedState) {
     let already_removed = {
         let mut guard = clients.lock().unwrap();
         if let Some(pos) = guard.iter().position(|handle| handle.id == client_id) {
@@ -440,14 +436,8 @@ fn remove_client(
     };
 
     if !already_removed {
-        client_count.fetch_sub(1, Ordering::SeqCst);
-        update_info_client_count(client_count, info_path);
+        shared.client_count.fetch_sub(1, Ordering::SeqCst);
     }
-}
-
-fn update_info_client_count(client_count: &Arc<AtomicUsize>, info_path: &std::path::Path) {
-    let count = client_count.load(Ordering::SeqCst);
-    update_socket_info_client_count(info_path, count);
 }
 
 /// Snapshot sent from the node server to a TUI client on attach and update.
@@ -557,77 +547,17 @@ pub struct SessionSummary {
     pub client_count: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RatatuiSocketInfo {
-    pub session_name: String,
-    pub pid: u32,
-    pub client_count: usize,
-    pub created_at_unix_secs: u64,
-}
-
-fn write_socket_info(
-    info_path: &Path,
-    session_name: &str,
-    client_count: usize,
-) -> Result<(), LifecycleError> {
-    let info = RatatuiSocketInfo {
-        session_name: session_name.to_string(),
-        pid: std::process::id(),
-        client_count,
-        created_at_unix_secs: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    };
-    write_socket_info_internal(info_path, &info)
-}
-
-fn update_socket_info_client_count(info_path: &Path, client_count: usize) {
-    if let Ok(json) = std::fs::read_to_string(info_path) {
-        if let Ok(mut info) = serde_json::from_str::<RatatuiSocketInfo>(&json) {
-            info.client_count = client_count;
-            let _ = write_socket_info_internal(info_path, &info);
-        }
-    }
-}
-
-fn write_socket_info_internal(
-    info_path: &Path,
-    info: &RatatuiSocketInfo,
-) -> Result<(), LifecycleError> {
-    let json = serde_json::to_string(info).map_err(|error| {
-        LifecycleError::Io(
-            "failed to serialize ratatui socket info".to_string(),
-            error.into(),
-        )
-    })?;
-    std::fs::write(info_path, json).map_err(|error| {
-        LifecycleError::Io(
-            format!(
-                "failed to write ratatui socket info {}",
-                info_path.display()
-            ),
-            error,
-        )
-    })
-}
-
 /// Returns the per-user directory that holds ratatui sockets.
 ///
 /// Mirrors tmux's convention: a user-specific subdirectory under the system
-/// temp directory so sessions from different users do not collide.
+/// temp directory so sockets from different users do not collide.
 pub fn ratatui_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("waitagent-ratatui-{}", effective_uid()))
 }
 
-/// Returns a stable Unix socket path for a given session.
-pub fn ratatui_socket_path(session_name: &str) -> PathBuf {
-    ratatui_socket_dir().join(format!("{session_name}.sock"))
-}
-
-/// Returns the companion info file path for a socket.
-pub fn ratatui_info_path(session_name: &str) -> PathBuf {
-    ratatui_socket_path(session_name).with_extension("sock.info")
+/// Returns a stable Unix socket path for a given listener port.
+pub fn ratatui_socket_path(port: u16) -> PathBuf {
+    ratatui_socket_dir().join(format!("{port}.sock"))
 }
 
 fn effective_uid() -> u32 {
@@ -638,50 +568,71 @@ extern "C" {
     fn geteuid() -> u32;
 }
 
-/// Returns true if a ratatui node server appears to be listening for this session.
-pub fn node_is_running(session_name: &str) -> bool {
-    let socket_path = ratatui_socket_path(session_name);
+/// Returns true if a ratatui node server appears to be listening on the port.
+pub fn node_is_running(port: u16) -> bool {
+    let socket_path = ratatui_socket_path(port);
     if !socket_path.exists() {
         return false;
     }
     UnixStream::connect(&socket_path).is_ok()
 }
 
-/// Removes the socket and info files for a session, if any.
-pub fn remove_node_socket(session_name: &str) {
-    let _ = std::fs::remove_file(ratatui_socket_path(session_name));
-    let _ = std::fs::remove_file(ratatui_info_path(session_name));
+/// Removes the socket file for a port, if any.
+pub fn remove_node_socket(port: u16) {
+    let _ = std::fs::remove_file(ratatui_socket_path(port));
 }
 
-/// Reads the socket info file for a session, if it exists.
-pub fn read_socket_info(session_name: &str) -> Option<RatatuiSocketInfo> {
-    let info_path = ratatui_info_path(session_name);
-    let json = std::fs::read_to_string(&info_path).ok()?;
-    serde_json::from_str(&json).ok()
+/// Sends a one-shot control command to the server on `port` and returns the
+/// first line of response. Used by `ls`, `detach`, `stop`, `list-sessions`.
+pub fn send_node_command(port: u16, command: &str) -> Result<String, LifecycleError> {
+    let socket_path = ratatui_socket_path(port);
+    let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+        LifecycleError::Io(
+            format!(
+                "failed to connect to ratatui node socket {}",
+                socket_path.display()
+            ),
+            error,
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| {
+            LifecycleError::Io(
+                "failed to set read timeout on ratatui node socket".to_string(),
+                error,
+            )
+        })?;
+    writeln!(stream, "{command}").map_err(|error| {
+        LifecycleError::Io("failed to send command to ratatui node".to_string(), error)
+    })?;
+    stream.flush().map_err(|error| {
+        LifecycleError::Io("failed to flush command to ratatui node".to_string(), error)
+    })?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|error| {
+        LifecycleError::Io("failed to read ratatui node response".to_string(), error)
+    })?;
+    Ok(line.trim().to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ratatui_info_path, ratatui_socket_dir, ratatui_socket_path};
+    use super::{ratatui_socket_dir, ratatui_socket_path};
 
     #[test]
     fn socket_path_is_in_user_specific_dir() {
-        let path = ratatui_socket_path("1");
+        let path = ratatui_socket_path(7575);
         assert!(path.starts_with(ratatui_socket_dir()));
         assert!(path.as_os_str().to_string_lossy().ends_with(".sock"));
     }
 
     #[test]
-    fn socket_path_differs_by_session() {
-        let path1 = ratatui_socket_path("1");
-        let path2 = ratatui_socket_path("2");
+    fn socket_path_differs_by_port() {
+        let path1 = ratatui_socket_path(7575);
+        let path2 = ratatui_socket_path(7576);
         assert_ne!(path1, path2);
-    }
-
-    #[test]
-    fn info_path_is_next_to_socket() {
-        let socket = ratatui_socket_path("1");
-        let info = ratatui_info_path("1");
-        assert_eq!(info, socket.with_extension("sock.info"));
     }
 }
