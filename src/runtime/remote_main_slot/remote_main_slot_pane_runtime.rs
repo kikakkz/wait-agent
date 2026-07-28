@@ -763,6 +763,11 @@ impl RemoteMainSlotPaneRuntime {
                         let scrollback_lines = observer.drain_scrollback_lines();
                         if !scrollback_lines.is_empty() {
                             let mut scrollback_output = Vec::new();
+                            // The renderer disables autowrap while diffing the
+                            // current frame. Re-enable it so scrollback lines
+                            // wrap naturally into the local pane history
+                            // instead of being truncated at the right edge.
+                            scrollback_output.extend_from_slice(b"\x1b[?7h");
                             for line in scrollback_lines {
                                 scrollback_output.extend_from_slice(line.as_bytes());
                                 scrollback_output.extend_from_slice(b"\r\n");
