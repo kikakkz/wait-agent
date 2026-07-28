@@ -35,7 +35,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::LocalSessionCatalog;
+use super::{LocalSessionCatalog, LocalTargetExitObserver};
 
 /// Result of creating a local target in response to a remote `CreateSessionRequest`.
 #[derive(Debug, Clone)]
@@ -901,6 +901,23 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
             session_id: id,
             target_id,
         })
+    }
+}
+
+/// Ratatui-backed local target exit observer.
+///
+/// In the single-process model, local target exit is handled directly by the
+/// server loop, so there is no separate sidecar to spawn.
+#[derive(Clone)]
+pub struct RatatuiLocalTargetExitObserver;
+
+impl LocalTargetExitObserver for RatatuiLocalTargetExitObserver {
+    fn observe_local_target_exit(
+        &self,
+        _socket_name: &str,
+        _target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        Ok(())
     }
 }
 

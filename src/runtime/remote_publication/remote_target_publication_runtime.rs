@@ -141,6 +141,21 @@ impl RemoteTargetPublicationRuntime<TmuxRemoteTargetPublicationBackend> {
 }
 
 impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
+    pub fn with_network_and_backend(
+        network: RemoteNetworkConfig,
+        backend: B,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            remote_runtime_owner: RemoteRuntimeOwnerClient::Runtime(
+                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
+            ),
+            backend,
+            current_executable: current_waitagent_executable()?,
+            network,
+            discover_live_workspaces: true,
+        })
+    }
+
     pub fn run_publication_server(
         &self,
         command: RemoteTargetPublicationServerCommand,

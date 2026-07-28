@@ -606,7 +606,7 @@ where
         self.start_with_local_catalog_changes(local_catalog_rx)
     }
 
-    fn start_with_local_catalog_changes(
+    pub fn start_with_local_catalog_changes(
         self,
         local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     ) -> Result<RemoteNodeSessionSyncGuard, LifecycleError> {

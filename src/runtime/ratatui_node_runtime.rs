@@ -5,6 +5,14 @@ use crate::domain::session_catalog::{
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
+use crate::runtime::remote_node::remote_node_session_sync_runtime::{
+    RatatuiLocalAuthorityHostBackend, RatatuiLocalSessionCatalog, RatatuiLocalTargetExitObserver,
+    RatatuiLocalTargetFactory, RemoteNodeSessionSyncRuntime,
+};
+use crate::runtime::remote_publication::remote_target_publication_backend::
+    RatatuiRemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::
+    RemoteTargetPublicationRuntime;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -107,6 +115,38 @@ impl RatatuiNodeRuntime {
                 ));
             }
         });
+
+        // Start the remote session sync runtime when a connect endpoint is
+        // configured. It publishes the local ratatui session catalog to the
+        // remote authority and accepts create-session requests from it.
+        let _sync_guard = if self.network.connect.is_some() {
+            let sync_network = self.network.clone();
+            let shared = self.shared.clone();
+            let backend = RatatuiRemoteTargetPublicationBackend::new(shared.clone(), sync_network.clone());
+            let publication_runtime =
+                RemoteTargetPublicationRuntime::with_network_and_backend(sync_network.clone(), backend)?;
+            let sync_runtime = RemoteNodeSessionSyncRuntime::new_with_backends(
+                RatatuiLocalSessionCatalog::new(shared.clone()),
+                crate::infra::remote_grpc_transport::GrpcRemoteNodeTransport::new(),
+                RatatuiLocalTargetExitObserver,
+                RatatuiLocalTargetFactory::new(shared.clone(), sync_network.clone()),
+                RatatuiLocalAuthorityHostBackend::new(shared.clone(), sync_network.clone()),
+                Some(publication_runtime),
+                sync_network,
+            );
+            let (_catalog_tx, catalog_rx) = std::sync::mpsc::channel();
+            match sync_runtime.start_with_local_catalog_changes(catalog_rx) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] failed to start remote session sync: {error}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let clients = self.shared.clients.clone();
 
