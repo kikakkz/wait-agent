@@ -2828,17 +2828,27 @@ fn run_ratatui_connect(
         .map_err(|error| format!("failed to clone node socket: {error}"))?;
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|error| format!("failed to read node response: {error}"))?;
-    let response = line.trim();
-    if response.starts_with("OK") {
-        Ok("Connected. Press Esc to close.".to_string())
-    } else {
-        Err(response
+    loop {
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("failed to read node response: {error}"))?;
+        let response = line.trim();
+        if response.is_empty() {
+            continue;
+        }
+        // The node server pushes JSON snapshots to every client; skip them
+        // and wait for the command reply line.
+        if response.starts_with('{') {
+            continue;
+        }
+        if response.starts_with("OK") {
+            return Ok("Connected. Press Esc to close.".to_string());
+        }
+        return Err(response
             .strip_prefix("ERR ")
             .unwrap_or(response)
-            .to_string())
+            .to_string());
     }
 }
 
