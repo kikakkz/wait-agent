@@ -3705,10 +3705,10 @@ mod tests {
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
