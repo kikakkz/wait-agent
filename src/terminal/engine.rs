@@ -627,7 +627,6 @@ struct ScreenBuffer {
     pending_wrap: bool,
     scroll_top: u16,
     scroll_bottom: u16,
-    scrollback: VecDeque<String>,
     styled_scrollback: VecDeque<String>,
     current_style: TextStyle,
     saved_cursor: SavedCursorState,
@@ -648,7 +647,6 @@ impl ScreenBuffer {
             pending_wrap: false,
             scroll_top: 0,
             scroll_bottom: size.rows.saturating_sub(1),
-            scrollback: VecDeque::new(),
             styled_scrollback: VecDeque::new(),
             current_style: TextStyle::default(),
             saved_cursor: SavedCursorState::default(),
@@ -657,16 +655,16 @@ impl ScreenBuffer {
         }
     }
 
-    /// Return the plain-text scrollback lines that have not been emitted yet
-    /// and advance the emitted cursor. The styled scrollback is kept for
-    /// potential future use; plain text is sufficient for tmux scrollback.
+    /// Scrollback lines that have not been emitted yet and advance the emitted
+    /// cursor. The returned lines preserve ANSI SGR escape sequences so the
+    /// local tmux pane copy-mode can show color, bold, and other styles.
     fn drain_scrollback_lines(&mut self) -> Vec<String> {
-        let total = self.scrollback.len();
+        let total = self.styled_scrollback.len();
         if total <= self.scrollback_emitted_count {
             return Vec::new();
         }
         let new_lines: Vec<String> = self
-            .scrollback
+            .styled_scrollback
             .range(self.scrollback_emitted_count..total)
             .cloned()
             .collect();
@@ -735,11 +733,6 @@ impl ScreenBuffer {
                 .map(|row| render_styled_row(row))
                 .collect(),
             active_style_ansi: self.current_style.to_ansi(),
-            scrollback: if include_scrollback {
-                self.scrollback.iter().cloned().collect()
-            } else {
-                Vec::new()
-            },
             styled_scrollback: if include_scrollback {
                 self.styled_scrollback.iter().cloned().collect()
             } else {
@@ -1231,11 +1224,9 @@ impl ScreenBuffer {
         for _ in 0..count {
             let removed = self.cells.remove(top);
             if full_screen_region {
-                self.scrollback.push_back(render_plain_row(&removed));
                 self.styled_scrollback
                     .push_back(render_styled_row(&removed));
-                while self.scrollback.len() > MAX_SCROLLBACK_LINES {
-                    self.scrollback.pop_front();
+                while self.styled_scrollback.len() > MAX_SCROLLBACK_LINES {
                     self.styled_scrollback.pop_front();
                     // Keep the emitted cursor aligned with the trimmed queue so
                     // drain_scrollback_lines never reports stale indices.

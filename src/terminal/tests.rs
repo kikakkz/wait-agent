@@ -596,7 +596,6 @@ fn engine_tracks_scrollback_when_screen_overflows() {
     engine.feed(b"one\r\ntwo\r\nthree");
     let snapshot = engine.snapshot();
 
-    assert_eq!(snapshot.scrollback, vec!["one  ".to_string()]);
     assert_eq!(snapshot.styled_scrollback, vec!["one  ".to_string()]);
     assert_eq!(snapshot.lines[0], "two  ");
     assert_eq!(snapshot.lines[1], "three");
@@ -614,7 +613,6 @@ fn engine_tracks_styled_scrollback_when_screen_overflows() {
     engine.feed(b"\x1b[31mred\r\nplain\r\nnext");
     let snapshot = engine.snapshot();
 
-    assert_eq!(snapshot.scrollback, vec!["red  ".to_string()]);
     assert!(
         snapshot.styled_scrollback[0].starts_with("\x1b[0;38;5;1mred"),
         "expected styled scrollback to retain foreground color, got {:?}",
@@ -1178,7 +1176,7 @@ fn engine_ris_resets_terminal_state() {
     assert_eq!(snapshot.active_style_ansi, "\x1b[0m");
     assert_eq!(snapshot.scroll_top, 0);
     assert_eq!(snapshot.scroll_bottom, 2);
-    assert_eq!(snapshot.scrollback, vec!["one     ".to_string()]);
+    assert_eq!(snapshot.styled_scrollback, vec!["one     ".to_string()]);
 
     engine.feed(b"q\x1b8Z");
     let snapshot = engine.snapshot();
@@ -1205,10 +1203,12 @@ fn engine_bounds_scrollback_to_ten_thousand_lines() {
     engine.feed(input.as_bytes());
     let snapshot = engine.snapshot();
 
-    assert_eq!(snapshot.scrollback.len(), 10_000);
     assert_eq!(snapshot.styled_scrollback.len(), 10_000);
-    assert_eq!(snapshot.scrollback[0], format!("{:<8}", "L1"));
-    assert_eq!(snapshot.scrollback[9_999], format!("{:<8}", "L10000"));
+    assert_eq!(snapshot.styled_scrollback[0], format!("{:<8}", "L1"));
+    assert_eq!(
+        snapshot.styled_scrollback[9_999],
+        format!("{:<8}", "L10000")
+    );
 }
 
 #[test]
@@ -1337,11 +1337,9 @@ fn engine_snapshot_visible_omits_scrollback() {
 
     assert_eq!(visible.lines[0], "two  ");
     assert_eq!(visible.lines[1], "three");
-    assert!(visible.scrollback.is_empty());
     assert!(visible.styled_scrollback.is_empty());
 
     let full = engine.snapshot();
-    assert_eq!(full.scrollback, vec!["one  ".to_string()]);
     assert_eq!(full.styled_scrollback, vec!["one  ".to_string()]);
 }
 

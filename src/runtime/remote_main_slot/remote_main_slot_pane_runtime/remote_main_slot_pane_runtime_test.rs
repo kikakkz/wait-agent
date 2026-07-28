@@ -145,7 +145,6 @@ mod tests {
             lines: Vec::new(),
             styled_lines: Vec::new(),
             active_style_ansi: String::new(),
-            scrollback: Vec::new(),
             styled_scrollback: Vec::new(),
             scroll_top: 0,
             scroll_bottom: 24,
