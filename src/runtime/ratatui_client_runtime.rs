@@ -139,11 +139,15 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-fn run_connect_popup(
+fn run_connect_popup<F>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session_name: &str,
     network: &RemoteNetworkConfig,
-) -> Result<(), LifecycleError> {
+    render_background: F,
+) -> Result<(), LifecycleError>
+where
+    F: FnMut(&mut Frame),
+{
     let socket_path = ratatui_socket_path(session_name);
     let runtime = ConnectRemoteHostPaneRuntime::new(network.clone())
         .with_ratatui_session_name(session_name.to_string())
@@ -152,7 +156,7 @@ fn run_connect_popup(
         current_socket_name: String::new(),
         current_session_name: session_name.to_string(),
     };
-    runtime.run_embedded(terminal, command)
+    runtime.run_embedded(terminal, command, render_background)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,9 +279,22 @@ fn run_event_loop(
                                 let _ = stream.flush();
                             }
                             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                if let Err(error) =
-                                    run_connect_popup(&mut terminal, session_name, network)
-                                {
+                                let render_background = |frame: &mut Frame| {
+                                    render(
+                                        frame,
+                                        &snapshot,
+                                        focus,
+                                        selected_index,
+                                        snapshot.active_target.as_deref(),
+                                        status_message.as_deref(),
+                                    );
+                                };
+                                if let Err(error) = run_connect_popup(
+                                    &mut terminal,
+                                    session_name,
+                                    network,
+                                    render_background,
+                                ) {
                                     status_message = Some(error.to_string());
                                 }
                             }

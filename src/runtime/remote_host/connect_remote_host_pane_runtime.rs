@@ -61,8 +61,14 @@ impl ConnectRemoteHostPaneRuntime {
 
         let (mut state, initial_secret_request) =
             ConnectRemoteHostState::load_with_initial_secret_request();
-        let result =
-            self.run_event_loop(&mut terminal, &mut state, command, initial_secret_request);
+        let mut render_background = |_frame: &mut Frame| {};
+        let result = self.run_event_loop(
+            &mut terminal,
+            &mut state,
+            command,
+            initial_secret_request,
+            &mut render_background,
+        );
 
         crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
             .map_err(write_error)?;
@@ -73,16 +79,26 @@ impl ConnectRemoteHostPaneRuntime {
 
     /// Run the popup inside an existing ratatui terminal without taking over
     /// raw mode or the alternate screen. Used by the ratatui client for Ctrl+W.
-    pub fn run_embedded(
+    pub fn run_embedded<F>(
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         command: ConnectRemoteHostPaneCommand,
-    ) -> Result<(), LifecycleError> {
+        mut render_background: F,
+    ) -> Result<(), LifecycleError>
+    where
+        F: FnMut(&mut Frame),
+    {
         crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)
             .map_err(write_error)?;
         let (mut state, initial_secret_request) =
             ConnectRemoteHostState::load_with_initial_secret_request();
-        let result = self.run_event_loop(terminal, &mut state, command, initial_secret_request);
+        let result = self.run_event_loop(
+            terminal,
+            &mut state,
+            command,
+            initial_secret_request,
+            &mut render_background,
+        );
         let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
         result
     }
@@ -93,13 +109,17 @@ impl ConnectRemoteHostPaneRuntime {
         state: &mut ConnectRemoteHostState,
         command: ConnectRemoteHostPaneCommand,
         initial_secret_request: Option<SecretLoadRequest>,
+        render_background: &mut dyn FnMut(&mut Frame),
     ) -> Result<(), LifecycleError> {
         let (secret_tx, secret_rx) = mpsc::channel();
         if let Some(request) = initial_secret_request {
             spawn_secret_loader(request, secret_tx.clone());
         }
         terminal
-            .draw(|frame| render(frame, state))
+            .draw(|frame| {
+                render_background(frame);
+                render(frame, state);
+            })
             .map_err(write_error)?;
         loop {
             let mut needs_draw = self.apply_secret_results(state, &secret_rx);
@@ -176,7 +196,10 @@ impl ConnectRemoteHostPaneRuntime {
                     }
                     state.status = Status::Working("Connecting...".to_string());
                     terminal
-                        .draw(|frame| render(frame, state))
+                        .draw(|frame| {
+                            render_background(frame);
+                            render(frame, state);
+                        })
                         .map_err(write_error)?;
                     match run_connect(
                         state,
@@ -192,7 +215,10 @@ impl ConnectRemoteHostPaneRuntime {
             }
             if needs_draw {
                 terminal
-                    .draw(|frame| render(frame, state))
+                    .draw(|frame| {
+                        render_background(frame);
+                        render(frame, state);
+                    })
                     .map_err(write_error)?;
             }
         }
