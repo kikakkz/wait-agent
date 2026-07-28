@@ -30,9 +30,13 @@ use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
 use crate::runtime::remote_node_session_sync_runtime::{
+    LocalAuthorityHostBackend, LocalSessionCatalog, LocalTargetFactory,
     SessionSyncAuthorityManager, TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
 };
-use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use crate::runtime::remote_publication::remote_target_publication_backend::
+    RemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::
+    RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::{
     workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
 };
@@ -71,8 +75,14 @@ pub(super) enum AuthoritySocketReadyStatus {
     Error,
 }
 
-pub struct RemoteNodeIngressServerRuntime {
-    publication_runtime: RemoteTargetPublicationRuntime,
+pub struct RemoteNodeIngressServerRuntime<
+    B: RemoteTargetPublicationBackend = crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend,
+    F: LocalTargetFactory = TmuxLocalTargetFactory,
+    A: LocalAuthorityHostBackend = TmuxLocalAuthorityHostBackend,
+> {
+    publication_runtime: RemoteTargetPublicationRuntime<B>,
+    target_factory: F,
+    authority_backend: A,
     network: RemoteNetworkConfig,
 }
 
@@ -203,7 +213,7 @@ pub(crate) enum InternalEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OwnerLifecycleEvent {
+pub(crate) enum OwnerLifecycleEvent {
     WorkspaceRegistered(String),
     WorkspaceUnregistered(String),
     WorkspaceRegistryChanged(BTreeSet<String>),
@@ -213,14 +223,39 @@ enum OwnerLifecycleEvent {
 impl RemoteNodeIngressServerRuntime {
     pub fn from_build_env_with_network_and_socket(
         network: RemoteNetworkConfig,
-        _socket_name: impl Into<String>,
+        socket_name: impl Into<String>,
     ) -> Result<Self, LifecycleError> {
+        let socket_name = socket_name.into();
         Ok(Self {
             publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
                 network.clone(),
             )?,
+            target_factory: TmuxLocalTargetFactory::from_build_env_with_socket(
+                network.clone(),
+                &socket_name,
+            )?,
+            authority_backend: TmuxLocalAuthorityHostBackend::from_build_env(network.clone())?,
             network,
         })
+    }
+
+    pub fn new_with_backends<B, F, A>(
+        network: RemoteNetworkConfig,
+        publication_runtime: RemoteTargetPublicationRuntime<B>,
+        target_factory: F,
+        authority_backend: A,
+    ) -> RemoteNodeIngressServerRuntime<B, F, A>
+    where
+        B: RemoteTargetPublicationBackend,
+        F: LocalTargetFactory,
+        A: LocalAuthorityHostBackend,
+    {
+        RemoteNodeIngressServerRuntime {
+            publication_runtime,
+            target_factory,
+            authority_backend,
+            network,
+        }
     }
 
     pub fn run_owner(&self, ready_socket: Option<&str>) -> Result<(), LifecycleError> {
@@ -359,6 +394,15 @@ impl RemoteNodeIngressServerRuntime {
         shutdown_owner_with_control_socket(network)
     }
 
+}
+
+impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
+where
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
         let transport = GrpcRemoteNodeTransport::new();
         let (transport_tx, transport_rx) = mpsc::channel();
@@ -367,11 +411,15 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
+        let target_factory = self.target_factory.clone();
+        let authority_backend = self.authority_backend.clone();
         let network = self.network.clone();
         let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
             let _ = run_node_ingress_server_loop(
                 publication_runtime,
+                target_factory,
+                authority_backend,
                 network,
                 transport_rx,
                 internal_rx,
@@ -624,7 +672,7 @@ fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-fn start_owner_control_acceptor(
+pub(crate) fn start_owner_control_acceptor(
     listener: UnixListener,
     owner_tx: &mpsc::Sender<InternalEvent>,
     lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
@@ -1215,7 +1263,7 @@ fn start_inotify_watcher(
 }
 
 impl RemoteNodeIngressServerGuard {
-    fn owner_event_sender(&self) -> Option<mpsc::Sender<InternalEvent>> {
+    pub fn owner_event_sender(&self) -> Option<mpsc::Sender<InternalEvent>> {
         self.shutdown_tx.clone()
     }
 }
@@ -1243,28 +1291,29 @@ enum IngressEventPriority {
     Low,
 }
 
-fn run_node_ingress_server_loop(
-    publication_runtime: RemoteTargetPublicationRuntime,
+fn run_node_ingress_server_loop<
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+>(
+    publication_runtime: RemoteTargetPublicationRuntime<B>,
+    target_factory: F,
+    authority_backend: A,
     network: RemoteNetworkConfig,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
     start_authority_socket_watcher: bool,
-) {
+) where
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
     let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
         network.clone(),
         None,
         internal_tx.clone(),
-        TmuxLocalTargetFactory::with_network_socket_and_executable(
-            network.clone(),
-            String::new(),
-            current_waitagent_executable().unwrap_or_else(|_| std::env::current_exe().unwrap_or_default()),
-        ),
-        TmuxLocalAuthorityHostBackend::with_network_and_executable(
-            network.clone(),
-            current_waitagent_executable().unwrap_or_else(|_| std::env::current_exe().unwrap_or_default()),
-        ),
+        target_factory,
+        authority_backend,
     );
     let mut pending_create_sessions =
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
@@ -1440,9 +1489,13 @@ fn ingress_event_priority(event: &IngressServerEvent) -> IngressEventPriority {
     }
 }
 
-fn handle_transport_event(
-    publication_runtime: &RemoteTargetPublicationRuntime,
-    authority_manager: &mut SessionSyncAuthorityManager<TmuxLocalTargetFactory, TmuxLocalAuthorityHostBackend>,
+fn handle_transport_event<
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
+    authority_manager: &mut SessionSyncAuthorityManager<F, A>,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
     registered_workspace_sockets: &BTreeSet<String>,
@@ -1451,7 +1504,9 @@ fn handle_transport_event(
     socket_discovery_retry_scheduled: &mut bool,
     closed_session_instances: &mut HashSet<String>,
     event: RemoteNodeTransportEvent,
-) {
+) where
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     match event {
         RemoteNodeTransportEvent::SessionOpened { session } => {
             let node_id = session.node_id().to_string();
@@ -1582,8 +1637,10 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
-fn mark_discovered_node_offline_if_last_ingress_session(
-    publication_runtime: &RemoteTargetPublicationRuntime,
+fn mark_discovered_node_offline_if_last_ingress_session<
+    B: RemoteTargetPublicationBackend,
+>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &HashMap<String, ActiveNodeIngressSession>,
     node_id: &str,
 ) {
@@ -1989,8 +2046,10 @@ fn target_published_fingerprint(payload: &GrpcTargetPublished) -> String {
     .join("\u{1f}")
 }
 
-fn route_transport_envelope(
-    publication_runtime: &RemoteTargetPublicationRuntime,
+fn route_transport_envelope<
+    B: RemoteTargetPublicationBackend,
+>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,
     mut session: Option<&mut ActiveNodeIngressSession>,

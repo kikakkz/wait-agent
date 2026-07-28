@@ -5,6 +5,10 @@ use crate::domain::session_catalog::{
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
+use crate::runtime::remote_node::remote_node_ingress_server_runtime::{
+    remote_node_ingress_owner_socket_path, start_owner_control_acceptor, OwnerLifecycleEvent,
+    RemoteNodeIngressServerRuntime,
+};
 use crate::runtime::remote_node::remote_node_session_sync_runtime::{
     RatatuiLocalAuthorityHostBackend, RatatuiLocalSessionCatalog, RatatuiLocalTargetExitObserver,
     RatatuiLocalTargetFactory, RemoteNodeSessionSyncRuntime,
@@ -146,6 +150,44 @@ impl RatatuiNodeRuntime {
             }
         } else {
             None
+        };
+
+        // Start the remote node ingress server inside the server process so
+        // peers can connect in and request local target sessions.
+        let ingress_network = self.network.clone();
+        let shared = self.shared.clone();
+        let ingress_backend = RatatuiRemoteTargetPublicationBackend::new(shared.clone(), ingress_network.clone());
+        let ingress_publication_runtime =
+            RemoteTargetPublicationRuntime::with_network_and_backend(ingress_network.clone(), ingress_backend)?;
+        let ingress_runtime = RemoteNodeIngressServerRuntime::new_with_backends(
+            ingress_network,
+            ingress_publication_runtime,
+            RatatuiLocalTargetFactory::new(shared.clone(), self.network.clone()),
+            RatatuiLocalAuthorityHostBackend::new(shared.clone(), self.network.clone()),
+        );
+        let _ingress_guard = match ingress_runtime.start() {
+            Ok(guard) => {
+                // Bind the same local control socket that tmux-sidecar ingress
+                // owners use, so __remote-session-creation and Ctrl+W connect
+                // can reach this single-process server.
+                let owner_socket_path = remote_node_ingress_owner_socket_path(&self.network);
+                let _ = std::fs::remove_file(&owner_socket_path);
+                if let Ok(owner_listener) = std::os::unix::net::UnixListener::bind(&owner_socket_path)
+                {
+                    if let Some(owner_tx) = guard.owner_event_sender() {
+                        let (_lifecycle_tx, _lifecycle_rx) = std::sync::mpsc::channel::<OwnerLifecycleEvent>();
+                        let _owner_acceptor =
+                            start_owner_control_acceptor(owner_listener, &owner_tx, _lifecycle_tx);
+                    }
+                }
+                Some(guard)
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] failed to start remote node ingress: {error}"
+                ));
+                None
+            }
         };
 
         let clients = self.shared.clients.clone();
