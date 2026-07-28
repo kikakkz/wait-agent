@@ -573,6 +573,10 @@ impl RemoteRuntimeOwnerRuntime {
         if !sockets.is_empty() {
             return Ok(());
         }
+        Self::shutdown_owner(network)
+    }
+
+    pub fn shutdown_owner(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
         try_signal_remote_runtime_owner_command(
             network,
             &RemoteRuntimeOwnerCommandEnvelope::Shutdown,

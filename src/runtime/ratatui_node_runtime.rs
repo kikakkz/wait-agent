@@ -1,10 +1,11 @@
-use crate::cli::RemoteNetworkConfig;
+use crate::cli::{RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
+use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -24,6 +25,7 @@ const DEFAULT_SESSION_ID: &str = "1";
 pub struct RatatuiNodeRuntime {
     network: RemoteNetworkConfig,
     shared: Arc<SharedState>,
+    remote_owner: RemoteRuntimeOwnerRuntime,
 }
 
 struct SharedState {
@@ -42,6 +44,8 @@ impl RatatuiNodeRuntime {
         let active_target = Some(default_record.address.qualified_target());
         sessions.insert(DEFAULT_SESSION_ID.to_string(), default_record);
 
+        let remote_owner = RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
+
         Ok(Self {
             network: network.clone(),
             shared: Arc::new(SharedState {
@@ -52,6 +56,7 @@ impl RatatuiNodeRuntime {
                 start_time: Instant::now(),
                 shutdown: AtomicBool::new(false),
             }),
+            remote_owner,
         })
     }
 
@@ -82,6 +87,17 @@ impl RatatuiNodeRuntime {
 
         ERROR_LOG.log("[ratatui-node] listening".to_string());
 
+        // Start the remote runtime owner inside the server process so that
+        // discovered remote sessions are kept in-memory and shared with the
+        // remote target publication / sync runtimes.
+        let owner_network = self.network.clone();
+        let owner = self.remote_owner.clone();
+        let _owner_thread = std::thread::spawn(move || {
+            if let Err(error) = owner.run_owner(RemoteRuntimeOwnerCommand::default()) {
+                ERROR_LOG.log(format!("[ratatui-node] remote runtime owner exited: {error}"));
+            }
+        });
+
         let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
 
         for stream in listener.incoming() {
@@ -108,6 +124,11 @@ impl RatatuiNodeRuntime {
         }
 
         let _ = std::fs::remove_file(&socket_path);
+        if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner(&owner_network) {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] remote runtime owner shutdown error: {error}"
+            ));
+        }
         ERROR_LOG.log(format!(
             "[ratatui-node] shutting down port={}",
             self.network.port
