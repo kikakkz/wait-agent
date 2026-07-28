@@ -9,8 +9,10 @@ use crate::infra::remote_protocol::{
     RemoteConsoleDescriptor,
 };
 use crate::infra::remote_transport_codec::RemoteTransportCodecError;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError};
+use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxError, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use crate::runtime::remote_authority_connection_runtime::AuthorityTransportEvent;
 use crate::runtime::remote_main_slot_runtime::{RemoteAttachmentBinding, RemoteMainSlotRuntime};
 use crate::runtime::remote_observer_runtime::{RemoteObserverRuntime, RemoteObserverSnapshot};
@@ -48,10 +50,181 @@ static REMOTE_DRAW_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
 // instead of stdout. This gives each session its own scrollback buffer.
 thread_local! {
     static SESSION_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
+    static HISTORY_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
 }
 
 fn with_session_output<R>(f: impl FnOnce(&mut File) -> R) -> Option<R> {
     SESSION_OUTPUT.with(|o| o.borrow_mut().as_mut().map(|file| f(file)))
+}
+
+fn with_history_output<R>(f: impl FnOnce(&mut File) -> R) -> Option<R> {
+    HISTORY_OUTPUT.with(|o| o.borrow_mut().as_mut().map(|file| f(file)))
+}
+
+/// Set the file descriptor used for scrollback history output. The history pane
+/// is a separate tmux pane so scrollback lines do not pollute the rendering
+/// pane.
+pub(crate) fn set_history_output(file: File) {
+    HISTORY_OUTPUT.with(|o| *o.borrow_mut() = Some(file));
+}
+
+fn target_history_hash(target_id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    target_id.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub(crate) fn history_pane_option_name(target_id: &str) -> String {
+    format!("@waitagent_history_pane_{}", target_history_hash(target_id))
+}
+
+fn history_window_name(target_id: &str) -> String {
+    format!("wa-history-{}", target_history_hash(target_id))
+}
+
+/// Create or reuse a hidden history pane for the remote session and return an
+/// open file for its TTY. The pane id is stored in a session option so the
+/// fullscreen toggle can find it later.
+pub(crate) fn ensure_history_pane(
+    backend: &EmbeddedTmuxBackend,
+    socket_name: &str,
+    session_name: &str,
+    target_id: &str,
+) -> Result<File, LifecycleError> {
+    let window_name = history_window_name(target_id);
+    let pane_option = history_pane_option_name(target_id);
+    let socket = TmuxSocketName::new(socket_name);
+    let window_target = format!("{}:{}", session_name, window_name);
+
+    // Reuse an existing history pane if it is still alive.
+    if let Ok(Some(pane_id)) = backend.run_on_socket(
+        &socket,
+        &[
+            "show-options".to_string(),
+            "-qv".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            pane_option.clone(),
+        ],
+    ).map(|out| {
+        let pane = out.stdout.trim().to_string();
+        if pane.is_empty() { None } else { Some(pane) }
+    }) {
+        if backend
+            .run_on_socket(
+                &socket,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane_id.clone(),
+                    "#{pane_dead}".to_string(),
+                ],
+            )
+            .map(|out| out.stdout.trim() == "0")
+            .unwrap_or(false)
+        {
+            if let Ok(tty_out) = backend.run_on_socket(
+                &socket,
+                &[
+                    "display-message".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    pane_id,
+                    "#{pane_tty}".to_string(),
+                ],
+            ) {
+                let tty = tty_out.stdout.trim();
+                if !tty.is_empty() {
+                    return OpenOptions::new()
+                        .write(true)
+                        .open(tty)
+                        .map_err(|error| LifecycleError::Io(
+                            format!("failed to open reused history pane tty {tty}"),
+                            error,
+                        ));
+                }
+            }
+        }
+    }
+
+    // Kill any stale window with the same name, ignoring errors.
+    let _ = backend.run_on_socket(
+        &socket,
+        &[
+            "kill-window".to_string(),
+            "-t".to_string(),
+            window_target.clone(),
+        ],
+    );
+
+    let output = backend.run_on_socket(
+        &socket,
+        &[
+            "new-window".to_string(),
+            "-d".to_string(),
+            "-P".to_string(),
+            "-F".to_string(),
+            "#{pane_id}".to_string(),
+            "-n".to_string(),
+            window_name,
+            "-t".to_string(),
+            session_name.to_string(),
+            "tail".to_string(),
+            "-f".to_string(),
+            "/dev/null".to_string(),
+        ],
+    ).map_err(|error| LifecycleError::Io(
+        "failed to create history pane window".to_string(),
+        io::Error::new(io::ErrorKind::Other, error.to_string()),
+    ))?;
+    let pane_id = output.stdout.trim().to_string();
+    if pane_id.is_empty() {
+        return Err(LifecycleError::Protocol(
+            "history pane creation returned empty pane id".to_string(),
+        ));
+    }
+
+    backend.run_on_socket(
+        &socket,
+        &[
+            "set-option".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            pane_option,
+            pane_id.clone(),
+        ],
+    ).map_err(|error| LifecycleError::Io(
+        "failed to store history pane id".to_string(),
+        io::Error::new(io::ErrorKind::Other, error.to_string()),
+    ))?;
+
+    let tty_output = backend.run_on_socket(
+        &socket,
+        &[
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane_id,
+            "#{pane_tty}".to_string(),
+        ],
+    ).map_err(|error| LifecycleError::Io(
+        "failed to read history pane tty".to_string(),
+        io::Error::new(io::ErrorKind::Other, error.to_string()),
+    ))?;
+    let tty = tty_output.stdout.trim();
+    if tty.is_empty() {
+        return Err(LifecycleError::Protocol(
+            "history pane tty is empty".to_string(),
+        ));
+    }
+    OpenOptions::new()
+        .write(true)
+        .open(tty)
+        .map_err(|error| LifecycleError::Io(
+            format!("failed to open history pane tty {tty}"),
+            error,
+        ))
 }
 
 /// Return a `Box<dyn Write>` pointing to the session pane TTY when
@@ -162,6 +335,21 @@ pub(super) fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError
     stdout
         .flush()
         .map_err(|error| LifecycleError::Io("failed to flush remote raw output".to_string(), error))
+}
+
+/// Write scrollback history lines to the dedicated history pane. Scrollback
+/// must never go to the rendering pane, otherwise the current frame is pushed
+/// into the pane history and pollutes it.
+pub(super) fn write_remote_scrollback_output(bytes: &[u8]) -> Result<(), LifecycleError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if with_history_output(|f| f.write_all(bytes).and_then(|_| f.flush())).is_some() {
+        return Ok(());
+    }
+    // If no history pane is configured, silently drop scrollback lines rather
+    // than sending them to the rendering pane.
+    Ok(())
 }
 
 pub(super) fn write_remote_raw_output_with_initial_clear(

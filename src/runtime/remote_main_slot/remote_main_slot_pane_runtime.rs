@@ -286,6 +286,20 @@ impl RemoteMainSlotPaneRuntime {
         );
         let authority_transport_socket_path =
             authority_transport_socket_path(&spec.socket_name, &spec.surface_scope, &spec.target);
+        match ensure_history_pane(
+            &self.backend,
+            &spec.socket_name,
+            &spec.surface_scope,
+            &target.address.qualified_target(),
+        ) {
+            Ok(history_tty) => set_history_output(history_tty),
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[diag] failed to ensure history pane for {}: {error}",
+                    target.address.qualified_target()
+                ));
+            }
+        }
         let authority_tx = authority_transport_event_sender(event_tx.clone());
         let _authority_listener = self
             .start_authority_connection(
@@ -759,20 +773,19 @@ impl RemoteMainSlotPaneRuntime {
                         // remote PTY so probing TUIs do not hang.
                         forward_engine_replies(&mut observer, &raw_input_route, &registry);
                         // Bridge lines that rolled off the remote normal screen
-                        // into the local pane so tmux copy-mode captures history.
-                        let scrollback_lines = observer.drain_scrollback_lines();
-                        if !scrollback_lines.is_empty() {
-                            let mut scrollback_output = Vec::new();
-                            // The renderer disables autowrap while diffing the
-                            // current frame. Re-enable it so scrollback lines
-                            // wrap naturally into the local pane history
-                            // instead of being truncated at the right edge.
-                            scrollback_output.extend_from_slice(b"\x1b[?7h");
-                            for line in scrollback_lines {
-                                scrollback_output.extend_from_slice(line.as_bytes());
-                                scrollback_output.extend_from_slice(b"\r\n");
+                        // into the dedicated history pane. They must not be
+                        // written to the rendering pane, otherwise the current
+                        // frame is pushed into the pane history and pollutes it.
+                        if observer.bootstrap_complete() {
+                            let scrollback_lines = observer.drain_scrollback_lines();
+                            if !scrollback_lines.is_empty() {
+                                let mut scrollback_output = Vec::new();
+                                for line in scrollback_lines {
+                                    scrollback_output.extend_from_slice(line.as_bytes());
+                                    scrollback_output.extend_from_slice(b"\r\n");
+                                }
+                                write_remote_scrollback_output(&scrollback_output)?;
                             }
-                            write_remote_raw_output(&scrollback_output)?;
                         }
                         let pane_size = current_remote_surface_size(&spec, &terminal);
                         let proxied_modes = ProxiedModes {

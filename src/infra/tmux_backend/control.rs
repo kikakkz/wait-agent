@@ -131,9 +131,7 @@ fn bind_copy_mode_cancel_key_args(table: &str, key: &str) -> Vec<String> {
         "-T".to_string(),
         table.to_string(),
         key.to_string(),
-        "send-keys".to_string(),
-        "-X".to_string(),
-        "cancel".to_string(),
+        "send-keys -X cancel ; select-pane -t '#{@waitagent_main_pane_id}'".to_string(),
     ]
 }
 
@@ -286,9 +284,7 @@ mod tests {
                 "-T",
                 "copy-mode-vi",
                 "Escape",
-                "send-keys",
-                "-X",
-                "cancel",
+                "send-keys -X cancel ; select-pane -t '#{@waitagent_main_pane_id}'",
             ]
         );
     }

@@ -115,6 +115,10 @@ impl RemoteObserverRuntime {
         }
     }
 
+    pub fn bootstrap_complete(&self) -> bool {
+        self.bootstrap_complete
+    }
+
     pub fn begin_bootstrap(&mut self) {
         let size = self.terminal.snapshot().size;
         self.bootstrap_complete = false;

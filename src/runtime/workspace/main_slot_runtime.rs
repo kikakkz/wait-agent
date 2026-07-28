@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const WAITAGENT_MAIN_PANE_OPTION: &str = "@waitagent_main_pane_id";
-const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
+pub(crate) const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 const WAITAGENT_SESSION_PANE_PREFIX: &str = "@waitagent_session_pane_";
 const WAITAGENT_PANE_ROLE_OPTION: &str = "@waitagent_pane_role";
 const WAITAGENT_PANE_ROLE_CONTENT: &str = "content";

@@ -3,8 +3,10 @@ use crate::application::target_registry_service::{
     DefaultTargetCatalogGateway, TargetRegistryService,
 };
 use crate::cli::ToggleFullscreenCommand;
-use crate::domain::session_catalog::ManagedSessionRecord;
+use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceId;
+use crate::runtime::remote_main_slot::remote_main_slot_pane_runtime::history_pane_option_name;
+use crate::runtime::workspace::main_slot_runtime::WAITAGENT_ACTIVE_TARGET_OPTION;
 use crate::infra::tmux::{
     EmbeddedTmuxBackend, TmuxError, TmuxGateway, TmuxLayoutGateway, TmuxPaneId, TmuxSessionName,
     TmuxSocketName, TmuxWorkspaceHandle,
@@ -45,6 +47,36 @@ impl NativePaneFullscreenRuntime {
 
         let workspace = workspace_handle(&command.socket_name, &command.session_name);
         let main_pane = self.workspace_main_pane(&workspace)?;
+
+        // Remote sessions keep their scrollback in a dedicated history pane so
+        // engine-mode frame rendering does not pollute the history.
+        if let Some(history_pane) = self.remote_history_pane(&workspace)? {
+            if self
+                .backend
+                .pane_in_mode_on_socket(
+                    workspace.socket_name.as_str(),
+                    history_pane.as_str(),
+                )
+                .map_err(history_error)?
+            {
+                self.backend
+                    .cancel_pane_mode_on_socket(
+                        workspace.socket_name.as_str(),
+                        history_pane.as_str(),
+                    )
+                    .map_err(history_error)?;
+                self.backend
+                    .select_pane(&workspace, &main_pane)
+                    .map_err(history_error)?;
+                return Ok(());
+            }
+
+            self.backend
+                .enter_copy_mode(&workspace, &history_pane)
+                .map_err(history_error)?;
+            return Ok(());
+        }
+
         if self
             .backend
             .pane_in_mode_on_socket(workspace.socket_name.as_str(), main_pane.as_str())
@@ -65,6 +97,37 @@ impl NativePaneFullscreenRuntime {
         self.backend
             .enter_copy_mode(&workspace, &main_pane)
             .map_err(history_error)
+    }
+
+    fn remote_history_pane(
+        &self,
+        workspace: &TmuxWorkspaceHandle,
+    ) -> Result<Option<TmuxPaneId>, LifecycleError> {
+        let Some(active_target) = self
+            .backend
+            .show_session_option(workspace, WAITAGENT_ACTIVE_TARGET_OPTION)
+            .map_err(history_error)?
+            .filter(|target| !target.is_empty())
+        else {
+            return Ok(None);
+        };
+        let is_remote = self
+            .target_registry
+            .find_target(&active_target)
+            .ok()
+            .flatten()
+            .map(|session| *session.address.transport() == SessionTransport::RemotePeer)
+            .unwrap_or(false);
+        if !is_remote {
+            return Ok(None);
+        }
+        let option = history_pane_option_name(&active_target);
+        Ok(self
+            .backend
+            .show_session_option(workspace, &option)
+            .map_err(history_error)?
+            .filter(|pane| !pane.is_empty())
+            .map(TmuxPaneId::new))
     }
 
     fn resolve_session(

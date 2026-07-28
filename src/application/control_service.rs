@@ -155,6 +155,10 @@ where
             self.tmux
                 .bind_copy_mode_cancel_key(workspace, table, "Escape")?;
         }
+        // Ensure that vi copy-mode's default quit key also returns focus to the
+        // main pane when the history view was opened for a remote session.
+        self.tmux
+            .bind_copy_mode_cancel_key(workspace, "copy-mode-vi", "q")?;
         Ok(())
     }
 
@@ -754,6 +758,7 @@ mod tests {
                 Call::BindCopyModeCancelKey("copy-mode".to_string(), "Escape".to_string()),
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "C-o".to_string()),
                 Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "Escape".to_string()),
+                Call::BindCopyModeCancelKey("copy-mode-vi".to_string(), "q".to_string()),
                 Call::BindWaitagentSidebarToggle(
                     "C-g".to_string(),
                     "%1".to_string(),
