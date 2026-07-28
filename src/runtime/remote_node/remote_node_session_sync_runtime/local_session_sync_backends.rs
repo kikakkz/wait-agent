@@ -409,7 +409,7 @@ fn timestamp_millis_now() -> u128 {
         .as_millis()
 }
 
-fn target_session_name_from_target_id(target_id: &str) -> Option<String> {
+pub(crate) fn target_session_name_from_target_id(target_id: &str) -> Option<String> {
     let target_id = target_id
         .strip_prefix("remote-peer:")
         .or_else(|| target_id.strip_prefix("local-tmux:"))
@@ -1011,4 +1011,71 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         ));
         host.running.store(false, Ordering::Relaxed);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn authority_host_signal(host: &SessionSyncAuthorityHost) -> AuthorityHostSignal {
+    match host.writer.lock() {
+        Ok(guard) => {
+            if guard.is_some() {
+                AuthorityHostSignal::Ready
+            } else if host.running.load(Ordering::Relaxed) {
+                AuthorityHostSignal::Starting
+            } else {
+                AuthorityHostSignal::Closed
+            }
+        }
+        Err(poisoned) => {
+            let guard = poisoned.into_inner();
+            if guard.is_some() {
+                AuthorityHostSignal::Ready
+            } else if host.running.load(Ordering::Relaxed) {
+                AuthorityHostSignal::Starting
+            } else {
+                AuthorityHostSignal::Closed
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn deliver_command_to_ready_host(
+    host: &SessionSyncAuthorityHost,
+    command: RemoteAuthorityCommand,
+) -> Result<AuthorityHostSignal, LifecycleError> {
+    const AUTHORITY_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
+    let target_id = authority_command_target_id(&command).to_string();
+    let mut guard = match host.writer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    while guard.is_none() && host.running.load(Ordering::Relaxed) {
+        let wait_result = host
+            .writer_ready
+            .wait_timeout(guard, AUTHORITY_HOST_READY_TIMEOUT)
+            .map_err(|_| {
+                LifecycleError::Protocol(
+                    "authority writer mutex poisoned while waiting for ready signal".to_string(),
+                )
+            })?;
+        guard = wait_result.0;
+        if wait_result.1.timed_out() {
+            return Ok(AuthorityHostSignal::Starting);
+        }
+    }
+
+    let Some(writer) = guard.as_mut() else {
+        return Ok(AuthorityHostSignal::Closed);
+    };
+    let envelope = authority_command_envelope(command);
+    if let Err(error) = write_control_plane_envelope(writer, &envelope) {
+        let _ = writer.shutdown(Shutdown::Both);
+        *guard = None;
+        ERROR_LOG.log(format!(
+            "[diag-timing] send_command_to_host: write failed for target={target_id}: {error}"
+        ));
+        return Ok(AuthorityHostSignal::Closed);
+    }
+    Ok(AuthorityHostSignal::Ready)
 }

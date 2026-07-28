@@ -17,6 +17,7 @@ mod tests {
         BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
         RawPtyOutputPayload, REMOTE_PROTOCOL_VERSION,
     };
+    use crate::lifecycle::LifecycleError;
     use crate::infra::remote_transport_codec::write_control_plane_envelope;
     use crate::runtime::remote_authority_transport_runtime::{
         authority_transport_socket_path, RemoteAuthorityTransportRuntime,
@@ -30,6 +31,73 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone)]
+    struct DummyTargetFactory;
+
+    impl crate::runtime::remote_node::remote_node_session_sync_runtime::LocalTargetFactory
+        for DummyTargetFactory
+    {
+        type Error = LifecycleError;
+
+        fn create_local_target(
+            &self,
+            _node_id: &str,
+            _cwd: &std::path::Path,
+            _cols: u16,
+            _rows: u16,
+        ) -> Result<
+            crate::runtime::remote_node::remote_node_session_sync_runtime::CreatedLocalTarget,
+            Self::Error,
+        > {
+            Err(LifecycleError::Protocol("dummy factory".to_string()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct DummyAuthorityBackend;
+
+    impl crate::runtime::remote_node::remote_node_session_sync_runtime::LocalAuthorityHostBackend
+        for DummyAuthorityBackend
+    {
+        type Error = LifecycleError;
+
+        fn spawn_authority_host(
+            &self,
+            _session_handle: &RemoteNodeSessionHandle,
+            _target_id: &str,
+            _output_route: crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityOutputRoute,
+        ) -> Result<
+            crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityHost,
+            Self::Error,
+        > {
+            Err(LifecycleError::Protocol("dummy backend".to_string()))
+        }
+
+        fn authority_host_signal(
+            &self,
+            _host: &crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityHost,
+        ) -> crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal {
+            crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal::Closed
+        }
+
+        fn deliver_command(
+            &self,
+            _host: &crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityHost,
+            _command: crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand,
+        ) -> Result<
+            crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal,
+            Self::Error,
+        > {
+            Ok(crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal::Closed)
+        }
+
+        fn shutdown_authority_host(
+            &self,
+            _host: &crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityHost,
+        ) {
+        }
+    }
 
     #[test]
     fn owner_registry_empty_snapshot_does_not_clear_saw_workspace() {
@@ -643,6 +711,8 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                DummyTargetFactory,
+                DummyAuthorityBackend,
                 RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
@@ -766,6 +836,8 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                DummyTargetFactory,
+                DummyAuthorityBackend,
                 RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
@@ -972,6 +1044,8 @@ mod tests {
         let worker = thread::spawn(move || {
             run_node_ingress_server_loop(
                 publication_runtime,
+                DummyTargetFactory,
+                DummyAuthorityBackend,
                 RemoteNetworkConfig::default(),
                 transport_rx,
                 internal_rx,
