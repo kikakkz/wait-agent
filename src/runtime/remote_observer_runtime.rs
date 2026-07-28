@@ -115,10 +115,6 @@ impl RemoteObserverRuntime {
         }
     }
 
-    pub fn bootstrap_complete(&self) -> bool {
-        self.bootstrap_complete
-    }
-
     pub fn begin_bootstrap(&mut self) {
         let size = self.terminal.snapshot().size;
         self.bootstrap_complete = false;
@@ -180,13 +176,6 @@ impl RemoteObserverRuntime {
     /// OSC 52 clipboard payloads observed since the last drain.
     pub fn drain_osc52(&mut self) -> Vec<String> {
         self.terminal.drain_osc52()
-    }
-
-    /// Scrollback lines that rolled off the normal screen since the last drain.
-    /// Engine-mode rendering emits these to the local pane so tmux copy-mode
-    /// captures the full remote session history.
-    pub fn drain_scrollback_lines(&mut self) -> Vec<String> {
-        self.terminal.drain_scrollback_lines()
     }
 
     pub fn application_cursor_keys(&self) -> bool {

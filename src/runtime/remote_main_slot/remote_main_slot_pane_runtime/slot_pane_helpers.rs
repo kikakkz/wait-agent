@@ -51,6 +51,7 @@ static REMOTE_DRAW_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static SESSION_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
     static HISTORY_OUTPUT: RefCell<Option<File>> = const { RefCell::new(None) };
+    static HISTORY_LAST_SEQ: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
 fn with_session_output<R>(f: impl FnOnce(&mut File) -> R) -> Option<R> {
@@ -351,18 +352,35 @@ pub(super) fn write_remote_raw_output(bytes: &[u8]) -> Result<(), LifecycleError
         .map_err(|error| LifecycleError::Io("failed to flush remote raw output".to_string(), error))
 }
 
-/// Write scrollback history lines to the dedicated history pane. Scrollback
-/// must never go to the rendering pane, otherwise the current frame is pushed
-/// into the pane history and pollutes it.
-pub(super) fn write_remote_scrollback_output(bytes: &[u8]) -> Result<(), LifecycleError> {
+/// Mirror raw PTY output into the dedicated history pane. The history pane is
+/// a real terminal, so it builds scrollback naturally as lines scroll, and it
+/// always reflects the current visible screen. This must not be the rendering
+/// pane, otherwise full-screen redraws push stale frames into scrollback.
+pub(super) fn write_remote_history_output(
+    output_seq: Option<u64>,
+    bytes: &[u8],
+) -> Result<(), LifecycleError> {
     if bytes.is_empty() {
+        return Ok(());
+    }
+    let should_write = HISTORY_LAST_SEQ.with(|last| {
+        let mut last = last.borrow_mut();
+        match (output_seq, *last) {
+            (Some(seq), Some(prev)) if seq <= prev => false,
+            _ => {
+                *last = output_seq;
+                true
+            }
+        }
+    });
+    if !should_write {
         return Ok(());
     }
     if with_history_output(|f| f.write_all(bytes).and_then(|_| f.flush())).is_some() {
         return Ok(());
     }
-    // If no history pane is configured, silently drop scrollback lines rather
-    // than sending them to the rendering pane.
+    // If no history pane is configured, silently drop history output rather
+    // than sending it to the rendering pane.
     Ok(())
 }
 

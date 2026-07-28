@@ -772,21 +772,6 @@ impl RemoteMainSlotPaneRuntime {
                         // Terminal query replies (DA/CPR/OSC) go back to the
                         // remote PTY so probing TUIs do not hang.
                         forward_engine_replies(&mut observer, &raw_input_route, &registry);
-                        // Bridge lines that rolled off the remote normal screen
-                        // into the dedicated history pane. They must not be
-                        // written to the rendering pane, otherwise the current
-                        // frame is pushed into the pane history and pollutes it.
-                        if observer.bootstrap_complete() {
-                            let scrollback_lines = observer.drain_scrollback_lines();
-                            if !scrollback_lines.is_empty() {
-                                let mut scrollback_output = Vec::new();
-                                for line in scrollback_lines {
-                                    scrollback_output.extend_from_slice(line.as_bytes());
-                                    scrollback_output.extend_from_slice(b"\r\n");
-                                }
-                                write_remote_scrollback_output(&scrollback_output)?;
-                            }
-                        }
                         let pane_size = current_remote_surface_size(&spec, &terminal);
                         let proxied_modes = ProxiedModes {
                             bracketed_paste: observer.bracketed_paste(),
@@ -1821,6 +1806,9 @@ fn activate_remote_surface_binding(
         if !raw.is_empty() {
             engine_render.mark_dirty_and_schedule(&event_tx);
         }
+        // Seed the history pane with the bootstrap/mirror replay so it starts
+        // with the current remote screen.
+        write_remote_history_output(None, &raw)?;
     } else {
         write_remote_raw_output_with_initial_clear(&raw, raw_screen_initialized)?;
     }
@@ -1862,6 +1850,10 @@ fn render_remote_output_and_mark_ready(
         if let Some(output_seq) = raw_output_seq {
             observer.feed_raw_output(output_seq, raw);
         }
+        // Mirror the raw PTY output into the dedicated history pane so it
+        // accumulates a full, styled terminal history (current screen +
+        // scrollback) without polluting the rendering pane.
+        write_remote_history_output(raw_output_seq, raw)?;
         engine_render.mark_dirty_and_schedule(event_tx);
     } else {
         write_remote_raw_output_with_initial_clear(raw, raw_screen_initialized)?;
