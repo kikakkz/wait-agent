@@ -65,7 +65,10 @@ impl RemoteNetworkConfig {
     }
 
     pub fn advertised_host_id(&self) -> String {
-        self.advertised_listener_addr().ip().to_string()
+        self.public_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.rsplit_once(':').map(|(host, _)| host.to_string()))
+            .unwrap_or_else(|| self.advertised_listener_addr().ip().to_string())
     }
 
     pub fn advertised_node_id(&self) -> String {
