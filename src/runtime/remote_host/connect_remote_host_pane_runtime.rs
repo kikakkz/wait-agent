@@ -1708,6 +1708,12 @@ impl ProxyDetailsGeometry {
 fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     let geometry =
         PopupGeometry::from_terminal_size((frame.size().width, frame.size().height), state);
+
+    // The background is rendered with a dim modifier behind the popup. Reset
+    // the dialog area to the default style so the popup text and borders are
+    // drawn at full brightness.
+    frame.render_widget(Clear, geometry.dialog);
+
     frame.render_widget(
         Block::default()
             .title("Connect Remote Host")
