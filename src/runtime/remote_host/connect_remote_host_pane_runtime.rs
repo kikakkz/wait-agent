@@ -1,6 +1,7 @@
 use crate::cli::{prepend_global_network_args, ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::ratatui_node_runtime::ServerMessageJson;
 use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostProfile, RemotePortPreference,
 };
@@ -2842,11 +2843,20 @@ fn run_ratatui_connect(
         if response.is_empty() {
             continue;
         }
-        // The node server pushes JSON snapshots to every client; skip them
-        // and wait for the command reply line.
-        if response.starts_with('{') {
-            continue;
+        // The node server wraps command replies in `ServerMessageJson::Response`.
+        // Snapshots may also arrive on this socket while we wait, so skip them.
+        if let Ok(message) = serde_json::from_str::<ServerMessageJson>(response) {
+            match message {
+                ServerMessageJson::Response(resp) => {
+                    if resp.ok {
+                        return Ok("Connected. Press Esc to close.".to_string());
+                    }
+                    return Err(resp.message.unwrap_or_default());
+                }
+                ServerMessageJson::Snapshot(_) => continue,
+            }
         }
+        // Plain-text fallback for older/simple replies.
         if response.starts_with("OK") {
             return Ok("Connected. Press Esc to close.".to_string());
         }
