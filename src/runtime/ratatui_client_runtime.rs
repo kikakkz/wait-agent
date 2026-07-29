@@ -3,7 +3,7 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot, SessionView};
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -317,17 +317,64 @@ fn run_event_loop(
                                     status_message = Some(error.to_string());
                                 }
                             }
+                            _ if focus == Focus::Main => {
+                                if let Some(bytes) = key_event_to_bytes(&key) {
+                                    let session_id = snapshot.session_name.clone();
+                                    let encoded = base64::encode(&bytes);
+                                    let _ = writeln!(stream, "INPUT {session_id} {encoded}");
+                                    let _ = stream.flush();
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(cols, rows) => {
+                    let _ = writeln!(stream, "RESIZE {cols} {rows}");
+                    let _ = stream.flush();
+                }
                 _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
+    // For now, forward printable characters and a minimal set of control keys.
+    // This is enough to interact with a shell; we can expand to full CSI/SS3
+    // sequences later.
+    match key.code {
+        KeyCode::Char(c) => {
+            let mut bytes = Vec::new();
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                let ctrl = c.to_ascii_lowercase();
+                if ('a'..='z').contains(&ctrl) {
+                    bytes.push(ctrl as u8 - b'a' + 1);
+                    return Some(bytes);
+                }
+            }
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            Some(bytes)
+        }
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Up => Some(vec![0x1b, b'[', b'A']),
+        KeyCode::Down => Some(vec![0x1b, b'[', b'B']),
+        KeyCode::Right => Some(vec![0x1b, b'[', b'C']),
+        KeyCode::Left => Some(vec![0x1b, b'[', b'D']),
+        KeyCode::Home => Some(vec![0x1b, b'[', b'H']),
+        KeyCode::End => Some(vec![0x1b, b'[', b'F']),
+        KeyCode::PageUp => Some(vec![0x1b, b'[', b'5', b'~']),
+        KeyCode::PageDown => Some(vec![0x1b, b'[', b'6', b'~']),
+        KeyCode::Delete => Some(vec![0x1b, b'[', b'3', b'~']),
+        KeyCode::Insert => Some(vec![0x1b, b'[', b'2', b'~']),
+        _ => None,
+    }
 }
 
 fn render(
@@ -358,13 +405,30 @@ fn render(
         .split(outer[0]);
 
     let main_block = Block::default()
-        .title(snapshot.main.clone())
-        .borders(Borders::NONE)
-        .title_style(title_style(focus == Focus::Main))
+        .borders(if focus == Focus::Main {
+            Borders::ALL
+        } else {
+            Borders::NONE
+        })
+        .border_style(Style::default().fg(Color::Yellow))
         .style(dim_style(Style::default(), dim_background));
-    let main =
-        Paragraph::new("Main pane placeholder\n\nPress Ctrl+B d to detach.").block(main_block);
+    let main_text = render_main_text(snapshot, inner[0]);
+    let main = Paragraph::new(main_text).block(main_block);
     frame.render_widget(main, inner[0]);
+
+    // Draw cursor if the active local session provided a cursor position.
+    if focus == Focus::Main {
+        if let Some((col, row)) = snapshot.main_cursor {
+            let cursor_x = inner[0].x + col;
+            let cursor_y = inner[0].y + row;
+            if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
+                frame
+                    .buffer_mut()
+                    .get_mut(cursor_x, cursor_y)
+                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
 
     let separator = Block::default()
         .borders(Borders::LEFT)
@@ -401,6 +465,22 @@ fn render(
             .style(footer_style)
     };
     frame.render_widget(footer, outer[1]);
+}
+
+fn render_main_text<'a>(snapshot: &'a RatatuiSnapshot, area: Rect) -> Vec<Line<'a>> {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let mut lines = Vec::new();
+
+    for line in snapshot.main_lines.iter() {
+        lines.push(Line::from(truncate_display_width(line, width)));
+    }
+
+    while lines.len() < height {
+        lines.push(Line::from(""));
+    }
+
+    lines
 }
 
 fn render_sidebar_header(width: usize, dim_background: bool) -> Line<'static> {

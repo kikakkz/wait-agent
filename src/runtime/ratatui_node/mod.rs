@@ -1,5 +1,6 @@
 pub mod client;
 pub mod commands;
+pub mod local_session;
 pub mod runtime;
 pub mod snapshot;
 pub mod socket;

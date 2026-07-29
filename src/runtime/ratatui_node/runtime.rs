@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::client::ClientHandle;
+use super::local_session::RatatuiLocalSession;
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "1";
 
@@ -47,34 +48,133 @@ pub(crate) struct SharedState {
     pub(crate) clients: Arc<Mutex<Vec<ClientHandle>>>,
     pub(crate) start_time: Instant,
     pub(crate) shutdown: AtomicBool,
+    pub(crate) local_sessions: Mutex<HashMap<String, Arc<RatatuiLocalSession>>>,
 }
 
 impl SharedState {
     pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
+
+    /// Mark a local session as exited in the session catalog.
+    pub(crate) fn mark_local_session_exited(&self, session_id: &str) {
+        let mut guard = self.sessions.lock().unwrap();
+        if let Some(record) = guard.get_mut(session_id) {
+            record.availability = SessionAvailability::Exited;
+            record.task_state = ManagedSessionTaskState::Unknown;
+        }
+        drop(guard);
+
+        let mut local_guard = self.local_sessions.lock().unwrap();
+        local_guard.remove(session_id);
+        drop(local_guard);
+    }
+
+    /// Update the displayed command name from the terminal title.
+    pub(crate) fn set_local_session_title(&self, session_id: &str, title: String) {
+        let mut guard = self.sessions.lock().unwrap();
+        if let Some(record) = guard.get_mut(session_id) {
+            record.display_command_name = Some(title);
+        }
+    }
+
+    /// Spawn a real local PTY session and register it in the catalog.
+    pub(crate) fn create_local_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, LifecycleError> {
+        let command_name = std::env::var("SHELL")
+            .ok()
+            .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
+            .unwrap_or_else(|| "bash".to_string());
+
+        let session = RatatuiLocalSession::spawn(
+            session_id.to_string(),
+            command_name.clone(),
+            cols,
+            rows,
+            self.clone(),
+        )?;
+
+        {
+            let mut local_guard = self.local_sessions.lock().unwrap();
+            local_guard.insert(session_id.to_string(), session);
+        }
+
+        let target = {
+            let mut guard = self.sessions.lock().unwrap();
+            let record = ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux(self.network.port.to_string(), session_id),
+                selector: None,
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some(command_name),
+                display_command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Input,
+            };
+            let target = record.address.qualified_target();
+            guard.insert(session_id.to_string(), record);
+            target
+        };
+
+        *self.active_target.lock().unwrap() = Some(target.clone());
+        let _ = self.broadcast_snapshot();
+        Ok(target)
+    }
+
+    /// Resize the active local session, if any.
+    pub(crate) fn resize_active_local_session(&self, cols: u16, rows: u16) {
+        let active = self.active_target.lock().unwrap().clone();
+        let session_id = active
+            .as_deref()
+            .and_then(|target| target.split_once(':').map(|(_, id)| id.to_string()));
+        if let Some(id) = session_id {
+            let guard = self.local_sessions.lock().unwrap();
+            if let Some(session) = guard.get(&id) {
+                session.resize(cols, rows);
+            }
+        }
+    }
+
+    /// Forward input bytes to a specific local session.
+    pub(crate) fn feed_local_session_input(&self, session_id: &str, bytes: Vec<u8>) {
+        let guard = self.local_sessions.lock().unwrap();
+        if let Some(session) = guard.get(session_id) {
+            session.feed_input(bytes);
+        }
+    }
 }
 
 impl RatatuiNodeRuntime {
     pub fn from_network(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
-        let mut sessions = HashMap::new();
-        let default_record = default_local_session_record(DEFAULT_SESSION_ID);
-        let active_target = Some(default_record.address.qualified_target());
-        sessions.insert(DEFAULT_SESSION_ID.to_string(), default_record);
-
         let remote_owner = RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
+
+        let shared = Arc::new(SharedState {
+            network: network.clone(),
+            sessions: Mutex::new(HashMap::new()),
+            active_target: Mutex::new(None),
+            client_count: AtomicUsize::new(0),
+            clients: Arc::new(Mutex::new(Vec::new())),
+            start_time: Instant::now(),
+            shutdown: AtomicBool::new(false),
+            local_sessions: Mutex::new(HashMap::new()),
+        });
+
+        // Create the default local session with a reasonable initial size.
+        // The client will send a RESIZE once it knows the terminal dimensions.
+        let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
 
         Ok(Self {
             network: network.clone(),
-            shared: Arc::new(SharedState {
-                network,
-                sessions: Mutex::new(sessions),
-                active_target: Mutex::new(active_target),
-                client_count: AtomicUsize::new(0),
-                clients: Arc::new(Mutex::new(Vec::new())),
-                start_time: Instant::now(),
-                shutdown: AtomicBool::new(false),
-            }),
+            shared,
             remote_owner,
         })
     }
@@ -231,20 +331,4 @@ impl RatatuiNodeRuntime {
     }
 }
 
-pub(crate) fn default_local_session_record(session_id: &str) -> ManagedSessionRecord {
-    ManagedSessionRecord {
-        address: ManagedSessionAddress::local_tmux(session_id, "main"),
-        selector: None,
-        availability: SessionAvailability::Online,
-        workspace_dir: None,
-        workspace_key: None,
-        session_role: None,
-        opened_by: Vec::new(),
-        attached_clients: 0,
-        window_count: 1,
-        command_name: Some("bash".to_string()),
-        display_command_name: None,
-        current_path: None,
-        task_state: ManagedSessionTaskState::Input,
-    }
-}
+

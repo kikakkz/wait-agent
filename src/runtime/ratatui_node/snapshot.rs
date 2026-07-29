@@ -22,6 +22,8 @@ pub struct RatatuiSnapshot {
     pub session_name: String,
     pub client_count: usize,
     pub main: String,
+    pub main_lines: Vec<String>,
+    pub main_cursor: Option<(u16, u16)>,
     pub sidebar: String,
     pub footer: FooterState,
     pub sessions: Vec<SessionView>,
@@ -136,10 +138,21 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         .unwrap_or_else(|| super::runtime::DEFAULT_SESSION_ID.to_string());
     drop(guard);
 
+    let (main_lines, main_cursor) = active_target
+        .as_deref()
+        .and_then(|target| target.split_once(':').map(|(_, id)| id.to_string()))
+        .and_then(|session_id| {
+            let local_guard = shared.local_sessions.lock().unwrap();
+            local_guard.get(&session_id).map(|s| s.snapshot())
+        })
+        .unwrap_or_else(|| (Vec::new(), None));
+
     RatatuiSnapshot {
         session_name: active_session_id.clone(),
         client_count,
-        main: "Main pane placeholder".to_string(),
+        main: main_lines.join("\n"),
+        main_lines,
+        main_cursor,
         sidebar: "Sessions".to_string(),
         footer: FooterState {
             active_session: active_session_id,

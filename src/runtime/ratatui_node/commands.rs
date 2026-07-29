@@ -1,6 +1,4 @@
-use crate::domain::session_catalog::{
-    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
-};
+use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +8,8 @@ use super::snapshot::{ServerStatus, SessionView};
 pub(crate) fn is_one_shot_control_command(command: &str) -> bool {
     matches!(command, "STATUS" | "STOP" | "LIST_SESSIONS" | "DETACH_ALL")
         || command.starts_with("CONNECT_REMOTE_HOST ")
+        || command.starts_with("RESIZE ")
+        || command.starts_with("INPUT ")
 }
 
 pub(crate) fn response_should_broadcast(response: &str) -> bool {
@@ -53,28 +53,39 @@ pub(crate) fn handle_control_command(
     }
 
     if command == "CREATE_LOCAL_SESSION" {
-        let mut guard = shared.sessions.lock().unwrap();
-        let id = format!("{}", guard.len() + 1);
-        let record = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(&id, "main"),
-            selector: None,
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: None,
-            session_role: None,
-            opened_by: Vec::new(),
-            attached_clients: 0,
-            window_count: 1,
-            command_name: Some("bash".to_string()),
-            display_command_name: None,
-            current_path: None,
-            task_state: ManagedSessionTaskState::Running,
+        let id = {
+            let guard = shared.sessions.lock().unwrap();
+            format!("{}", guard.len() + 1)
         };
-        let target = record.address.qualified_target();
-        guard.insert(id, record);
-        drop(guard);
-        *shared.active_target.lock().unwrap() = Some(target);
-        return Some("OK created local session".to_string());
+        match shared.create_local_session(&id, 80, 24) {
+            Ok(target) => {
+                return Some(format!("OK created local session {target}"));
+            }
+            Err(error) => {
+                return Some(format!("ERR {error}"));
+            }
+        }
+    }
+
+    if let Some(args) = command.strip_prefix("RESIZE ") {
+        let mut parts = args.split_whitespace();
+        let cols: u16 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(80);
+        let rows: u16 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(24);
+        shared.resize_active_local_session(cols, rows);
+        return Some("OK".to_string());
+    }
+
+    if let Some(args) = command.strip_prefix("INPUT ") {
+        let mut parts = args.splitn(2, ' ');
+        let session_id = parts.next().unwrap_or("").to_string();
+        let encoded = parts.next().unwrap_or("");
+        match base64::decode(encoded) {
+            Ok(bytes) => {
+                shared.feed_local_session_input(&session_id, bytes);
+                return Some("OK".to_string());
+            }
+            Err(_) => return Some("ERR invalid base64".to_string()),
+        }
     }
 
     if let Some(target) = command.strip_prefix("ACTIVATE_TARGET ") {
