@@ -116,6 +116,10 @@ impl SharedState {
         }
     }
 
+    pub(crate) fn event_sender(&self) -> mpsc::Sender<LocalSessionEvent> {
+        self.event_tx.lock().unwrap().clone()
+    }
+
     pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
@@ -259,7 +263,7 @@ impl SharedState {
                 return Ok(target_id);
             }
         }
-        let session = RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network)?;
+        let session = RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network, self)?;
         session.send_open_mirror(80, 24);
         {
             let mut guard = self.remote_sessions.lock().unwrap();

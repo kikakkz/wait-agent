@@ -12,6 +12,8 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
+use crate::runtime::ratatui_node::local_session::LocalSessionEvent;
+use crate::runtime::ratatui_node::runtime::SharedState;
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
 use std::fs;
@@ -20,6 +22,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -39,6 +42,7 @@ pub struct RatatuiRemoteSession {
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
+    wakeup_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
 }
 
 impl RatatuiRemoteSession {
@@ -49,6 +53,7 @@ impl RatatuiRemoteSession {
         target: &ManagedSessionRecord,
         socket_name: &str,
         network: &RemoteNetworkConfig,
+        shared: &Arc<SharedState>,
     ) -> Result<Arc<Self>, LifecycleError> {
         let target_id = target.address.qualified_target();
         let session_id = target.address.session_id().to_string();
@@ -90,6 +95,7 @@ impl RatatuiRemoteSession {
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
+            wakeup_tx: Mutex::new(shared.event_sender()),
         });
 
         spawn_authority_transport_acceptor(
@@ -315,14 +321,25 @@ fn handle_authority_transport_stream(
         );
     }
     session.flush_open_mirror();
+    ERROR_LOG.log(format!(
+        "[ratatui-remote-session] authority reader started for {}",
+        target_id
+    ));
 
     let mut output_seq: u64 = 0;
     while session.running.load(Ordering::Relaxed) {
         match read_authority_transport_frame(&mut stream) {
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                 output_seq = output_seq.max(payload.output_seq);
-                let mut observer = session.observer.lock().unwrap();
-                observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
+                {
+                    let mut observer = session.observer.lock().unwrap();
+                    observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
+                }
+                let _ = session
+                    .wakeup_tx
+                    .lock()
+                    .unwrap()
+                    .send(LocalSessionEvent::Wakeup);
             }
             Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match &envelope.payload {
                 ControlPlanePayload::OpenMirrorAccepted(_) => {
@@ -335,6 +352,18 @@ fn handle_authority_transport_stream(
                         "[ratatui-remote-session] mirror rejected for {target_id}: {}",
                         payload.message
                     ));
+                }
+                ControlPlanePayload::RawPtyOutput(payload) => {
+                    output_seq = output_seq.max(payload.output_seq);
+                    {
+                        let mut observer = session.observer.lock().unwrap();
+                        observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
+                    }
+                    let _ = session
+                        .wakeup_tx
+                        .lock()
+                        .unwrap()
+                        .send(LocalSessionEvent::Wakeup);
                 }
                 ControlPlanePayload::RawPtyOutput(payload) => {
                     output_seq = output_seq.max(payload.output_seq);
@@ -361,12 +390,15 @@ fn handle_authority_transport_stream(
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
-                    "[ratatui-remote-session] authority stream read error: {error}"
+                    "[ratatui-remote-session] authority stream read error: {error} for {target_id}"
                 ));
                 break;
             }
         }
     }
+    ERROR_LOG.log(format!(
+        "[ratatui-remote-session] authority reader exiting for {target_id}"
+    ));
     session.running.store(false, Ordering::Relaxed);
 }
 
