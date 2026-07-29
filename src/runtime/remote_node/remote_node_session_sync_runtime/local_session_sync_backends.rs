@@ -24,7 +24,7 @@ use crate::runtime::remote_node_session_sync_runtime::{
 };
 use crate::runtime::remote_node_session_sync_runtime::sync_helpers::
     remote_session_sync_owner_socket_path;
-use crate::runtime::ratatui_node_runtime::SharedState;
+use crate::runtime::ratatui_node::SharedState;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::io::{self, Write};
 use std::net::Shutdown;
