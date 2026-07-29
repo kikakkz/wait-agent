@@ -181,6 +181,16 @@ fn parse_snapshot(line: &str) -> RatatuiSnapshot {
     serde_json::from_str(line.trim()).unwrap_or_default()
 }
 
+/// Apply a dim modifier to a style when the background should be muted behind a
+/// modal popup.
+fn dim_style(style: Style, dim: bool) -> Style {
+    if dim {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
     stream: &mut UnixStream,
@@ -204,6 +214,7 @@ fn run_event_loop(
                     selected_index,
                     snapshot.active_target.as_deref(),
                     status_message.as_deref(),
+                    false,
                 )
             })
             .map_err(|error| {
@@ -294,6 +305,7 @@ fn run_event_loop(
                                         selected_index,
                                         snapshot.active_target.as_deref(),
                                         status_message.as_deref(),
+                                        true,
                                     );
                                 };
                                 if let Err(error) = run_connect_popup(
@@ -325,6 +337,7 @@ fn render(
     selected_index: usize,
     active_target: Option<&str>,
     status_message: Option<&str>,
+    dim_background: bool,
 ) {
     let area = frame.size();
 
@@ -347,40 +360,50 @@ fn render(
     let main_block = Block::default()
         .title(snapshot.main.clone())
         .borders(Borders::NONE)
-        .title_style(title_style(focus == Focus::Main));
+        .title_style(title_style(focus == Focus::Main))
+        .style(dim_style(Style::default(), dim_background));
     let main =
         Paragraph::new("Main pane placeholder\n\nPress Ctrl+B d to detach.").block(main_block);
     frame.render_widget(main, inner[0]);
 
     let separator = Block::default()
         .borders(Borders::LEFT)
-        .border_style(separator_style(focus));
+        .border_style(dim_style(separator_style(focus), dim_background));
     frame.render_widget(separator, inner[1]);
 
     let sidebar_block = Block::default()
         .borders(Borders::NONE)
-        .title_style(title_style(focus == Focus::Sidebar));
+        .title_style(title_style(focus == Focus::Sidebar))
+        .style(dim_style(Style::default(), dim_background));
     let sidebar = Paragraph::new(render_sidebar_lines(
         &snapshot.sessions,
         selected_index,
         inner[2],
         focus == Focus::Sidebar,
         active_target,
+        dim_background,
     ))
     .block(sidebar_block);
     frame.render_widget(sidebar, inner[2]);
 
     let footer = if let Some(status) = status_message {
-        let style = Style::default().bg(Color::Yellow).fg(Color::Black);
+        let style = dim_style(
+            Style::default().bg(Color::Yellow).fg(Color::Black),
+            dim_background,
+        );
         Paragraph::new(pad_right(status, outer[1].width as usize)).style(style)
     } else {
-        let footer_style = Style::default().bg(Color::Blue).fg(Color::White);
-        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize)).style(footer_style)
+        let footer_style = dim_style(
+            Style::default().bg(Color::Blue).fg(Color::White),
+            dim_background,
+        );
+        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize, dim_background))
+            .style(footer_style)
     };
     frame.render_widget(footer, outer[1]);
 }
 
-fn render_sidebar_header(width: usize) -> Line<'static> {
+fn render_sidebar_header(width: usize, dim_background: bool) -> Line<'static> {
     let title = "Sessions";
     let hint = "Ctrl-G hide";
     let title_width = display_width(title);
@@ -391,13 +414,19 @@ fn render_sidebar_header(width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             title.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-                .patch(bg),
+            dim_style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(bg),
+                dim_background,
+            ),
         ),
-        Span::styled(" ".repeat(padding), bg),
-        Span::styled(hint.to_string(), Style::default().fg(Color::Gray).patch(bg)),
+        Span::styled(" ".repeat(padding), dim_style(bg, dim_background)),
+        Span::styled(
+            hint.to_string(),
+            dim_style(Style::default().fg(Color::Gray).patch(bg), dim_background),
+        ),
     ])
 }
 
@@ -407,25 +436,32 @@ fn render_sidebar_lines<'a>(
     area: Rect,
     is_focused: bool,
     active_target: Option<&'a str>,
+    dim_background: bool,
 ) -> Vec<Line<'a>> {
     let width = area.width as usize;
     let height = area.height as usize;
     let mut lines = Vec::new();
 
     // Header.
-    lines.push(render_sidebar_header(width));
+    lines.push(render_sidebar_header(width, dim_background));
 
     // Separator.
-    lines.push(Line::from("─".repeat(width)));
+    lines.push(Line::from(vec![Span::styled(
+        "─".repeat(width),
+        dim_style(Style::default().fg(Color::DarkGray), dim_background),
+    )]));
 
     if sessions.is_empty() {
         while lines.len() + 2 < height {
             lines.push(Line::from(""));
         }
-        lines.push(Line::from("─".repeat(width)));
+        lines.push(Line::from(vec![Span::styled(
+            "─".repeat(width),
+            dim_style(Style::default().fg(Color::DarkGray), dim_background),
+        )]));
         lines.push(Line::from(vec![Span::styled(
             right_align("(no sessions)", width),
-            Style::default().fg(Color::Gray),
+            dim_style(Style::default().fg(Color::Gray), dim_background),
         )]));
         return lines;
     }
@@ -451,6 +487,7 @@ fn render_sidebar_lines<'a>(
             is_current,
             width,
             is_focused,
+            dim_background,
         ));
     }
 
@@ -459,10 +496,13 @@ fn render_sidebar_lines<'a>(
     }
 
     // Bottom separator and detail line.
-    lines.push(Line::from("─".repeat(width)));
+    lines.push(Line::from(vec![Span::styled(
+        "─".repeat(width),
+        dim_style(Style::default().fg(Color::DarkGray), dim_background),
+    )]));
     lines.push(Line::from(vec![Span::styled(
         right_align(&selected_detail_text(&selected, width), width),
-        Style::default().fg(Color::Gray),
+        dim_style(Style::default().fg(Color::Gray), dim_background),
     )]));
 
     lines
@@ -474,6 +514,7 @@ fn render_session_row(
     is_current: bool,
     width: usize,
     is_focused: bool,
+    dim_background: bool,
 ) -> Line {
     let marker = if is_selected {
         ">"
@@ -487,11 +528,14 @@ fn render_session_row(
     let label_width = width.saturating_sub(reserved);
     let label = session_row_primary_label(session, label_width);
 
-    let base_style = if is_selected && is_focused {
-        Style::default().bg(Color::Blue).fg(Color::White)
-    } else {
-        Style::default()
-    };
+    let base_style = dim_style(
+        if is_selected && is_focused {
+            Style::default().bg(Color::Blue).fg(Color::White)
+        } else {
+            Style::default()
+        },
+        dim_background,
+    );
 
     Line::from(vec![
         Span::styled(format!("{}{} ", marker, label), base_style),
@@ -608,9 +652,9 @@ fn char_width(ch: char) -> usize {
     }
 }
 
-fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize) -> Line {
-    let muted_style = Style::default().fg(Color::Gray);
-    let accent_style = Style::default().fg(Color::White);
+fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize, dim_background: bool) -> Line {
+    let muted_style = dim_style(Style::default().fg(Color::Gray), dim_background);
+    let accent_style = dim_style(Style::default().fg(Color::White), dim_background);
 
     let mut spans = Vec::new();
 
