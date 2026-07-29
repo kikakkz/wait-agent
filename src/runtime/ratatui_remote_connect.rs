@@ -12,13 +12,9 @@ use crate::runtime::remote_host::remote_host_connect_runtime::{
 use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostHistoryStore, RemoteHostProfile, RemotePortPreference as HistoryRemotePortPreference,
 };
-use crate::runtime::remote_host::remote_install_proxy_store::{
-    proxy_candidates, wrap_install_command_with_proxy, RemoteInstallProxyStore,
-};
 use crate::runtime::remote_host::remote_port_probe::{RemotePortProbe, RemotePortProbePreference};
 use crate::runtime::remote_host::ssh_remote_host_bootstrapper::{
-    install_reachability_preflight_command, RemoteHostBootstrapPlan, RemoteHostBootstrapper,
-    SshRemoteHostBootstrapper,
+    RemoteHostBootstrapPlan, RemoteHostBootstrapper, SshRemoteHostBootstrapper,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -97,36 +93,13 @@ pub fn connect_remote_host(
         };
 
     if should_bootstrap {
-        let mut plan = RemoteHostBootstrapPlan::from_profile(
+        let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             remote_port,
             local_connect_endpoint.clone(),
             authority_node_id.clone(),
-        );
-        plan.install_reachability_preflight_command =
-            Some(install_reachability_preflight_command(&[]));
-
-        if profile.use_install_proxy {
-            let proxy_config = RemoteInstallProxyStore::default()
-                .load_active_config()
-                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-            if proxy_config.has_proxy() {
-                let proxy_env_prefixes = proxy_candidates(&proxy_config)
-                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?
-                    .iter()
-                    .map(|candidate| candidate.env_prefix(&profile.host, &local_connect_endpoint))
-                    .collect::<Vec<_>>();
-                plan.install_reachability_preflight_command =
-                    Some(install_reachability_preflight_command(&proxy_env_prefixes));
-            }
-            plan.install_or_update_command = wrap_install_command_with_proxy(
-                &plan.install_or_update_command,
-                &proxy_config,
-                &profile.host,
-                &local_connect_endpoint,
-            )
-            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-        }
+        )
+        .with_local_binary_deploy();
 
         SshRemoteHostBootstrapper::default()
             .ensure_waitagent_and_start(&plan)
