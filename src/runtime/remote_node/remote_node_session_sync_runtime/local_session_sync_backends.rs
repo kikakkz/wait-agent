@@ -1159,43 +1159,37 @@ fn spawn_ratatui_authority_listener(
     writer_ready: Arc<Condvar>,
 ) {
     thread::spawn(move || {
-        let _ = host_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
-        let _ = host_stream.set_write_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
-        let _ = listener_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
-
-        if let Err(error) = (|| -> Result<(), LifecycleError> {
-            // The local RatatuiRemoteSession waits for the authority server to
-            // send the first hello, so write client hello before reading the
-            // server hello reply.
-            write_client_hello(&mut host_stream, &node_id)
-                .map_err(remote_session_sync_error)?;
-            let _server_hello =
-                read_server_hello(&mut host_stream).map_err(remote_session_sync_error)?;
-            {
-                let mut writer_guard = match writer.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        ERROR_LOG.log(
-                            "[ratatui-session-sync] authority writer mutex poisoned in listener, recovering"
-                                .to_string(),
-                        );
-                        poisoned.into_inner()
-                    }
-                };
-                if let Some(previous) = writer_guard.take() {
-                    let _ = previous.shutdown(Shutdown::Both);
+        // The ratatui authority host is backed by an internal UnixStream::pair.
+        // There is no external viewer connecting to this pair, so the listener
+        // must immediately publish the writer and start forwarding PTY output.
+        {
+            let mut writer_guard = match writer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    ERROR_LOG.log(
+                        "[ratatui-session-sync] authority writer mutex poisoned in listener, recovering"
+                            .to_string(),
+                    );
+                    poisoned.into_inner()
                 }
-                *writer_guard = Some(host_stream.try_clone().map_err(remote_session_sync_error)?);
+            };
+            if let Some(previous) = writer_guard.take() {
+                let _ = previous.shutdown(Shutdown::Both);
             }
-            writer_ready.notify_all();
-            Ok(())
-        })() {
-            ERROR_LOG.log(format!(
-                "[ratatui-session-sync] authority listener handshake failed: {error}"
-            ));
-            running.store(false, Ordering::Relaxed);
-            return;
+            match host_stream.try_clone().map_err(remote_session_sync_error) {
+                Ok(stream) => *writer_guard = Some(stream),
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-session-sync] authority listener failed to clone host stream: {error}"
+                    ));
+                    running.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
         }
+        writer_ready.notify_all();
+
+        let _ = listener_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
 
         let result = forward_ratatui_host_output(
             listener_stream,
