@@ -405,12 +405,7 @@ fn render(
         .split(outer[0]);
 
     let main_block = Block::default()
-        .borders(if focus == Focus::Main {
-            Borders::ALL
-        } else {
-            Borders::NONE
-        })
-        .border_style(Style::default().fg(Color::Yellow))
+        .borders(Borders::NONE)
         .style(dim_style(Style::default(), dim_background));
     let main_text = render_main_text(snapshot, inner[0]);
     let main = Paragraph::new(main_text).block(main_block);
