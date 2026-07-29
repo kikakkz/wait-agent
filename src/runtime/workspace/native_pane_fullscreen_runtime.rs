@@ -119,12 +119,7 @@ impl NativePaneFullscreenRuntime {
             .pane_dimensions_on_socket(workspace.socket_name.as_str(), main_pane.as_str())
             .map_err(history_error)?;
         self.backend
-            .resize_pane_to_geometry(
-                workspace,
-                history_pane,
-                width as u16,
-                height as u16,
-            )
+            .resize_pane_to_geometry(workspace, history_pane, width as u16, height as u16)
             .map_err(history_error)
     }
 

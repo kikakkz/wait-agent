@@ -161,19 +161,11 @@ where
                 HISTORY_TOGGLE_KEY,
                 &[command.to_string()],
             )?;
-            self.tmux.bind_key_in_table(
-                workspace,
-                table,
-                "Escape",
-                &[command.to_string()],
-            )?;
+            self.tmux
+                .bind_key_in_table(workspace, table, "Escape", &[command.to_string()])?;
         }
-        self.tmux.bind_key_in_table(
-            workspace,
-            "copy-mode-vi",
-            "q",
-            &[command.to_string()],
-        )?;
+        self.tmux
+            .bind_key_in_table(workspace, "copy-mode-vi", "q", &[command.to_string()])?;
         Ok(())
     }
 
