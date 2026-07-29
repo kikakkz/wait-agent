@@ -256,7 +256,10 @@ impl LocalTargetHostRuntime {
                 socket_name, error
             ));
         }
-        let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
+        // Do NOT shut down the shared ingress owner here. The ingress owner is
+        // shared across workspaces and should only exit when no workspaces remain
+        // (see its lifecycle loop). A single workspace cleanup must not kill the
+        // listener for other workspaces or for production.
         if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
             ERROR_LOG.log(format!(
                 "[diag-exit] local_target_remote_runtime_owner_shutdown_failed socket={} error={}",
@@ -692,20 +695,12 @@ mod tests {
 
         let runtime = LocalTargetHostRuntime::new(
             backend.clone(),
-            RemoteTargetPublicationRuntime::from_build_env_with_network(RemoteNetworkConfig {
-                port: 7474,
-                connect: Some("10.1.29.130:7474".to_string()),
-                node_id: None,
-                public_endpoint: None,
-            })
+            RemoteTargetPublicationRuntime::from_build_env_with_network(
+                RemoteNetworkConfig::default(),
+            )
             .expect("publication runtime should build"),
             waitagent_test_executable(),
-            RemoteNetworkConfig {
-                port: 7474,
-                connect: Some("10.1.29.130:7474".to_string()),
-                node_id: None,
-                public_endpoint: None,
-            },
+            RemoteNetworkConfig::default(),
         );
 
         runtime
@@ -1106,20 +1101,12 @@ mod tests {
 
         let runtime = LocalTargetHostRuntime::new(
             backend.clone(),
-            RemoteTargetPublicationRuntime::from_build_env_with_network(RemoteNetworkConfig {
-                port: 7474,
-                connect: Some("10.1.29.130:7474".to_string()),
-                node_id: None,
-                public_endpoint: None,
-            })
+            RemoteTargetPublicationRuntime::from_build_env_with_network(
+                RemoteNetworkConfig::default(),
+            )
             .expect("publication runtime should build"),
             waitagent_test_executable(),
-            RemoteNetworkConfig {
-                port: 7474,
-                connect: Some("10.1.29.130:7474".to_string()),
-                node_id: None,
-                public_endpoint: None,
-            },
+            RemoteNetworkConfig::default(),
         );
 
         runtime

@@ -786,7 +786,8 @@ impl WorkspaceCommandRuntime {
                 socket_name, error
             ));
         }
-        let _ = RemoteNodeIngressServerRuntime::shutdown_owner(&self.network);
+        // The ingress owner is shared across workspaces; a single workspace close
+        // must not stop it. It exits on its own when no workspaces remain.
         if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner_if_unused(&self.network) {
             ERROR_LOG.log(format!(
                 "[diag-exit] remote_runtime_owner_shutdown_failed socket={} error={}",

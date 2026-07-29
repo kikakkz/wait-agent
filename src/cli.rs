@@ -3,16 +3,27 @@ use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+#[allow(dead_code)]
 pub const DEFAULT_REMOTE_NODE_PORT: u16 = 7474;
 
 /// Reads the default port from the `WAITAGENT_DEFAULT_PORT` environment variable,
-/// falling back to [`DEFAULT_REMOTE_NODE_PORT`] if the variable is unset or invalid.
-/// This lets tests run on a non-default port without modifying source constants.
+/// falling back to [`DEFAULT_REMOTE_NODE_PORT`] in production or a dedicated test
+/// port when compiled for tests. This prevents integration tests from colliding
+/// with a production waitagent listening on the default port.
 pub fn default_remote_node_port() -> u16 {
     std::env::var("WAITAGENT_DEFAULT_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_REMOTE_NODE_PORT)
+        .unwrap_or_else(|| {
+            #[cfg(test)]
+            {
+                17474
+            }
+            #[cfg(not(test))]
+            {
+                DEFAULT_REMOTE_NODE_PORT
+            }
+        })
 }
 
 #[derive(Debug, Clone)]
