@@ -16,6 +16,75 @@ pub struct ServerStatus {
     pub session_count: usize,
 }
 
+/// Structured response returned by control commands.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ControlResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub broadcast: bool,
+}
+
+impl ControlResponse {
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn ok_message(message: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            message: Some(message.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn ok_data(data: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            ..Default::default()
+        }
+    }
+
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: Some(message.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_broadcast(mut self) -> Self {
+        self.broadcast = true;
+        self
+    }
+}
+
+/// Top-level wire message sent from the node server to clients.
+///
+/// Using an explicit `type` tag keeps snapshots and command responses
+/// unambiguous without relying on field-count heuristics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum ServerMessageJson {
+    Snapshot(RatatuiSnapshot),
+    Response(ControlResponse),
+}
+
+pub(crate) fn snapshot_json(snapshot: &RatatuiSnapshot) -> String {
+    serde_json::to_string(&ServerMessageJson::Snapshot(snapshot.clone())).unwrap_or_default()
+}
+
+pub(crate) fn response_json(response: &ControlResponse) -> String {
+    serde_json::to_string(&ServerMessageJson::Response(response.clone())).unwrap_or_default()
+}
+
 /// Snapshot sent from the node server to a TUI client on attach and update.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RatatuiSnapshot {
@@ -174,7 +243,7 @@ pub(crate) fn broadcast_snapshot(
     shared: &SharedState,
 ) -> Result<(), LifecycleError> {
     let snapshot = build_snapshot(0, shared);
-    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+    let json = snapshot_json(&snapshot);
     let mut guard = clients.lock().unwrap();
     guard.retain(|handle| !handle.removed.load(Ordering::SeqCst));
     for handle in guard.iter() {

@@ -1,5 +1,6 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use super::snapshot::ControlResponse;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,7 +10,7 @@ use super::commands::{
     handle_control_command, is_one_shot_control_command, response_should_broadcast,
 };
 use super::runtime::SharedState;
-use super::snapshot::build_snapshot;
+use super::snapshot::{build_snapshot, response_json};
 
 pub(crate) struct ClientHandle {
     pub(crate) id: u64,
@@ -52,8 +53,8 @@ pub(crate) fn handle_client(
     // receive the initial snapshot.
     if is_one_shot_control_command(trimmed) {
         let response = handle_control_command(trimmed, &shared, &mut stream)
-            .unwrap_or_else(|| "ERR unknown command".to_string());
-        let _ = writeln!(stream, "{response}");
+            .unwrap_or_else(|| ControlResponse::err("unknown command"));
+        let _ = writeln!(stream, "{}", response_json(&response));
         let _ = stream.flush();
         return Ok(());
     }
@@ -71,7 +72,7 @@ pub(crate) fn handle_client(
     // The "ATTACH" command is a no-op beyond triggering the snapshot.
     let count = shared.client_count.load(Ordering::SeqCst);
     let snapshot = build_snapshot(count, &shared);
-    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+    let json = super::snapshot::snapshot_json(&snapshot);
     if writeln!(stream, "{json}").is_err() || stream.flush().is_err() {
         remove_client(client_id, &clients, &shared);
         return Ok(());
@@ -102,7 +103,7 @@ pub(crate) fn handle_client(
                         if let Some(response) =
                             handle_control_command(trimmed, &shared, &mut stream)
                         {
-                            let _ = writeln!(stream, "{response}");
+                            let _ = writeln!(stream, "{}", response_json(&response));
                             let _ = stream.flush();
                             if response_should_broadcast(&response) {
                                 let _ = super::snapshot::broadcast_snapshot(&clients, &shared);

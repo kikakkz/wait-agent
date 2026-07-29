@@ -5,6 +5,7 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
 use crate::runtime::ratatui_node_runtime::{
     node_is_running, ratatui_socket_dir, ratatui_socket_path, remove_node_socket, send_node_command,
+    ControlResponse, ServerMessageJson,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -158,12 +159,28 @@ impl RatatuiWorkspaceRuntime {
             ))
         })?;
 
-        let sessions: Vec<crate::runtime::ratatui_node_runtime::SessionView> =
-            serde_json::from_str(&response).map_err(|error| {
-                LifecycleError::Protocol(format!(
-                    "failed to parse session list for ratatui server on port {port}: {error}"
-                ))
-            })?;
+        let envelope: ServerMessageJson = serde_json::from_str(&response).map_err(|error| {
+            LifecycleError::Protocol(format!(
+                "failed to parse session list response for ratatui server on port {port}: {error}"
+            ))
+        })?;
+        let data = match envelope {
+            ServerMessageJson::Response(response) if response.ok => response.data,
+            ServerMessageJson::Response(response) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "server returned error for port {port}: {}",
+                    response.message.unwrap_or_default()
+                )))
+            }
+            ServerMessageJson::Snapshot(_) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "unexpected snapshot response for port {port}"
+                )))
+            }
+        };
+        let sessions: Vec<crate::runtime::ratatui_node_runtime::SessionView> = data
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
 
         if sessions.is_empty() {
             println!("no sessions in ratatui server on port {port}");
@@ -301,11 +318,26 @@ fn query_server_status(
     port: u16,
 ) -> Result<crate::runtime::ratatui_node_runtime::ServerStatus, LifecycleError> {
     let response = send_node_command(port, "STATUS")?;
-    serde_json::from_str(&response).map_err(|error| {
+    let envelope: ServerMessageJson = serde_json::from_str(&response).map_err(|error| {
         LifecycleError::Protocol(format!(
             "failed to parse status response for port {port}: {error}"
         ))
-    })
+    })?;
+    match envelope {
+        ServerMessageJson::Response(response) if response.ok => response
+            .data
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                LifecycleError::Protocol(format!("status response missing data for port {port}"))
+            }),
+        ServerMessageJson::Response(response) => Err(LifecycleError::Protocol(format!(
+            "server returned error for port {port}: {}",
+            response.message.unwrap_or_default()
+        ))),
+        ServerMessageJson::Snapshot(_) => Err(LifecycleError::Protocol(format!(
+            "unexpected snapshot response for port {port}"
+        ))),
+    }
 }
 
 fn resolve_target_to_port(target: Option<&str>) -> Result<u16, LifecycleError> {

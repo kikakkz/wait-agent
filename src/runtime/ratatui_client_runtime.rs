@@ -1,7 +1,9 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use crate::runtime::ratatui_node_runtime::{ratatui_socket_path, RatatuiSnapshot, SessionView};
+use crate::runtime::ratatui_node_runtime::{
+    ratatui_socket_path, ControlResponse, RatatuiSnapshot, ServerMessageJson, SessionView,
+};
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -17,7 +19,7 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Ratatui TUI client: connects to a server's node and renders the workspace chrome.
 pub struct RatatuiClientRuntime {
@@ -70,7 +72,10 @@ impl RatatuiClientRuntime {
         let mut line = String::new();
         let snapshot = match reader.read_line(&mut line) {
             Ok(0) | Err(_) => RatatuiSnapshot::default(),
-            Ok(_) => parse_snapshot(&line),
+            Ok(_) => match parse_server_message(&line) {
+                ServerMessage::Snapshot(snapshot) => snapshot,
+                _ => RatatuiSnapshot::default(),
+            },
         };
 
         ERROR_LOG.log(format!(
@@ -95,11 +100,7 @@ impl RatatuiClientRuntime {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let message = if trimmed.starts_with('{') {
-                            ServerMessage::Snapshot(parse_snapshot(trimmed))
-                        } else {
-                            ServerMessage::Log(trimmed.to_string())
-                        };
+                        let message = parse_server_message(trimmed);
                         if server_tx.send(message).is_err() {
                             break;
                         }
@@ -174,11 +175,21 @@ enum Focus {
 
 enum ServerMessage {
     Snapshot(RatatuiSnapshot),
+    Response(ControlResponse),
     Log(String),
 }
 
-fn parse_snapshot(line: &str) -> RatatuiSnapshot {
-    serde_json::from_str(line.trim()).unwrap_or_default()
+fn parse_server_message(line: &str) -> ServerMessage {
+    let trimmed = line.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(ServerMessageJson::Response(response)) = serde_json::from_str(trimmed) {
+            return ServerMessage::Response(response);
+        }
+        if let Ok(ServerMessageJson::Snapshot(snapshot)) = serde_json::from_str(trimmed) {
+            return ServerMessage::Snapshot(snapshot);
+        }
+    }
+    ServerMessage::Log(trimmed.to_string())
 }
 
 /// Apply a dim modifier to a style when the background should be muted behind a
@@ -202,9 +213,18 @@ fn run_event_loop(
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
     let mut selected_index = 0usize;
-    let mut status_message: Option<String> = None;
+    let mut status_message: Option<(String, Instant)> = None;
+    const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 
     loop {
+        // Clear expired status messages before drawing so the footer menu
+        // is not hidden indefinitely.
+        if let Some((_, created_at)) = status_message.as_ref() {
+            if created_at.elapsed() >= STATUS_MESSAGE_DURATION {
+                status_message = None;
+            }
+        }
+
         terminal
             .draw(|frame| {
                 render(
@@ -213,7 +233,7 @@ fn run_event_loop(
                     focus,
                     selected_index,
                     snapshot.active_target.as_deref(),
-                    status_message.as_deref(),
+                    status_message.as_ref().map(|(text, _)| text.as_str()),
                     false,
                 )
             })
@@ -230,9 +250,16 @@ fn run_event_loop(
                         selected_index = snapshot.sessions.len() - 1;
                     }
                 }
+                Ok(ServerMessage::Response(response)) => {
+                    if !response.ok {
+                        if let Some(message) = response.message {
+                            status_message = Some((message, Instant::now()));
+                        }
+                    }
+                }
                 Ok(ServerMessage::Log(text)) => {
                     ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
-                    status_message = Some(text);
+                    status_message = Some((text, Instant::now()));
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
@@ -304,7 +331,7 @@ fn run_event_loop(
                                         focus,
                                         selected_index,
                                         snapshot.active_target.as_deref(),
-                                        status_message.as_deref(),
+                                        status_message.as_ref().map(|(text, _)| text.as_str()),
                                         true,
                                     );
                                 };
@@ -314,7 +341,7 @@ fn run_event_loop(
                                     network,
                                     render_background,
                                 ) {
-                                    status_message = Some(error.to_string());
+                                    status_message = Some((error.to_string(), Instant::now()));
                                 }
                             }
                             _ if focus == Focus::Main => {
