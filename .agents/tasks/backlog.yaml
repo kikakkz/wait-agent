@@ -545,7 +545,10 @@ next:
     status: in_progress
   - id: task.ratatui-phase-3-main-pane
     title: implement main pane PTY with alacritty_terminal
-    status: ready
+    status: done
+  - id: task.ratatui-phase-3-remote-main-pane
+    title: render remote sessions in the ratatui main pane
+    status: in_progress
   - id: task.ratatui-phase-4-remove-tmux
     title: remove tmux backend once ratatui path is stable
     status: ready

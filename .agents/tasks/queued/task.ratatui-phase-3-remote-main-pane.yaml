@@ -12,8 +12,8 @@ design_ref:
     - Remote sessions already appear in the sidebar catalog via the existing session-sync/publication path.
     - The main pane must display the active remote session before Phase 4 tmux removal can be considered complete.
 source_of_truth:
-  file: .agents/tasks/current.yaml
-  reference: current
+  file: .agents/tasks/queued/task.ratatui-phase-3-remote-main-pane.yaml
+  reference: queued/remote-main-pane
 depends_on:
   - task.ratatui-phase-3-main-pane.done
 done_criteria:
@@ -38,4 +38,4 @@ touched_paths:
   - src/runtime/ratatui_client_runtime.rs
 notes:
   - Reuse RemoteMainSlotRuntime and RemoteObserverRuntime; do not reimplement the gRPC codec.
-  - Keep the tmux path untouched.
+  - Keep tmux path untouched.
