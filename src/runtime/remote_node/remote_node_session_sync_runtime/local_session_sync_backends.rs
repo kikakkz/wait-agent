@@ -15,21 +15,20 @@ use crate::infra::remote_transport_codec::{
 use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::ratatui_node::SharedState;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
     AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
 };
+use crate::runtime::remote_node_session_sync_runtime::sync_helpers::remote_session_sync_owner_socket_path;
 use crate::runtime::remote_node_session_sync_runtime::{
     remote_session_sync_error, SessionSyncAuthorityHost, SessionSyncAuthorityOutputRoute,
     SessionSyncAuthorityPublicationGateway, LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
 };
-use crate::runtime::remote_node_session_sync_runtime::sync_helpers::
-    remote_session_sync_owner_socket_path;
 use crate::runtime::remote_node_transport_runtime::{
     read_client_hello, read_server_hello, write_client_hello, write_server_hello,
 };
-use crate::runtime::ratatui_node::SharedState;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::io::{self, Write};
 use std::net::Shutdown;
@@ -158,7 +157,12 @@ impl LocalTargetFactory for TmuxLocalTargetFactory {
                 Some(rows).filter(|rows| *rows > 0),
                 Some(cols).filter(|cols| *cols > 0),
             ))
-            .map_err(|error| LifecycleError::Io("failed to ensure target host".to_string(), io::Error::new(io::ErrorKind::Other, error.to_string())))?;
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to ensure target host".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })?;
         let session_id = workspace.workspace_handle.session_name.as_str().to_string();
         Ok(CreatedLocalTarget {
             target_id: format!("remote-peer:{node_id}:{session_id}"),
@@ -277,7 +281,8 @@ impl LocalAuthorityHostBackend for TmuxLocalAuthorityHostBackend {
                 }
             }
             Err(poisoned) => {
-                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                ERROR_LOG
+                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
                 let guard = poisoned.into_inner();
                 if guard.is_some() {
                     AuthorityHostSignal::Ready
@@ -299,7 +304,8 @@ impl LocalAuthorityHostBackend for TmuxLocalAuthorityHostBackend {
         let mut guard = match host.writer.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                ERROR_LOG
+                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
                 poisoned.into_inner()
             }
         };
@@ -310,7 +316,8 @@ impl LocalAuthorityHostBackend for TmuxLocalAuthorityHostBackend {
                 .wait_timeout(guard, AUTHORITY_HOST_READY_TIMEOUT)
                 .map_err(|_| {
                     LifecycleError::Protocol(
-                        "authority writer mutex poisoned while waiting for ready signal".to_string(),
+                        "authority writer mutex poisoned while waiting for ready signal"
+                            .to_string(),
                     )
                 })?;
             guard = wait_result.0;
@@ -342,9 +349,8 @@ impl LocalAuthorityHostBackend for TmuxLocalAuthorityHostBackend {
         let writer = match host.writer.lock() {
             Ok(mut guard) => guard.take(),
             Err(poisoned) => {
-                ERROR_LOG.log(
-                    "[session-sync] authority writer mutex poisoned, recovering".to_string(),
-                );
+                ERROR_LOG
+                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
                 poisoned.into_inner().take()
             }
         };
@@ -826,7 +832,11 @@ impl LocalSessionCatalog for RatatuiLocalSessionCatalog {
     type Error = &'static str;
 
     fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        let guard = self.shared.sessions.lock().map_err(|_| "sessions mutex poisoned")?;
+        let guard = self
+            .shared
+            .sessions
+            .lock()
+            .map_err(|_| "sessions mutex poisoned")?;
         Ok(guard
             .values()
             .filter(|session| *session.address.transport() == SessionTransport::LocalTmux)
@@ -900,26 +910,29 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
             .ok()
             .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
             .unwrap_or_else(|| "bash".to_string());
-        match crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession::spawn(
-            id.clone(),
-            command_name,
-            cols,
-            rows,
-        ) {
-            Ok(session) => {
-                let mut host_guard = self.shared.authority_host_sessions.lock().map_err(|error| {
-                    LifecycleError::Io(
-                        "ratatui authority host sessions mutex poisoned".to_string(),
-                        io::Error::new(io::ErrorKind::Other, error.to_string()),
-                    )
-                })?;
-                host_guard.insert(id.clone(), session);
-            }
-            Err(error) => {
+        let session =
+            crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession::spawn(
+                id.clone(),
+                command_name,
+                cols,
+                rows,
+            )
+            .map_err(|error| {
                 ERROR_LOG.log(format!(
                     "[ratatui-local-target-factory] failed to spawn authority host session: {error}"
                 ));
-            }
+                let mut guard = self.shared.sessions.lock().unwrap();
+                guard.remove(&id);
+                error
+            })?;
+        {
+            let mut host_guard = self.shared.authority_host_sessions.lock().map_err(|error| {
+                LifecycleError::Io(
+                    "ratatui authority host sessions mutex poisoned".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })?;
+            host_guard.insert(id.clone(), session);
         }
 
         *self.shared.active_target.lock().map_err(|error| {
@@ -992,18 +1005,21 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             ))
         })?;
         let session = {
-            let guard = self.shared.authority_host_sessions.lock().map_err(|error| {
-                LifecycleError::Io(
-                    "ratatui authority host sessions mutex poisoned".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
-                )
-            })?;
-            guard
-                .get(&session_name)
-                .cloned()
-                .ok_or_else(|| LifecycleError::Protocol(format!(
+            let guard = self
+                .shared
+                .authority_host_sessions
+                .lock()
+                .map_err(|error| {
+                    LifecycleError::Io(
+                        "ratatui authority host sessions mutex poisoned".to_string(),
+                        io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    )
+                })?;
+            guard.get(&session_name).cloned().ok_or_else(|| {
+                LifecycleError::Protocol(format!(
                     "ratatui authority host session `{session_name}` does not exist"
-                )))?
+                ))
+            })?
         };
 
         let (host_end, listener_end) = UnixStream::pair().map_err(|error| {
@@ -1018,12 +1034,12 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         let bridge_session_id = Arc::new(RwLock::new(bound_session_instance_id.clone()));
 
         spawn_ratatui_authority_listener(
-            host_end
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to clone host stream".to_string(), error))?,
-            listener_end
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to clone listener stream".to_string(), error))?,
+            host_end.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to clone host stream".to_string(), error)
+            })?,
+            listener_end.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to clone listener stream".to_string(), error)
+            })?,
             node_id.clone(),
             bridge_session_id.clone(),
             output_route,
@@ -1062,7 +1078,8 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
                 }
             }
             Err(poisoned) => {
-                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                ERROR_LOG
+                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
                 let guard = poisoned.into_inner();
                 if guard.is_some() {
                     AuthorityHostSignal::Ready
@@ -1085,7 +1102,8 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         let mut guard = match host.writer.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                ERROR_LOG
+                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
                 poisoned.into_inner()
             }
         };
@@ -1096,7 +1114,8 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
                 .wait_timeout(guard, AUTHORITY_HOST_READY_TIMEOUT)
                 .map_err(|_| {
                     LifecycleError::Protocol(
-                        "authority writer mutex poisoned while waiting for ready signal".to_string(),
+                        "authority writer mutex poisoned while waiting for ready signal"
+                            .to_string(),
                     )
                 })?;
             guard = wait_result.0;
@@ -1141,13 +1160,17 @@ fn spawn_ratatui_authority_listener(
 ) {
     thread::spawn(move || {
         let _ = host_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
+        let _ = host_stream.set_write_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
         let _ = listener_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
 
         if let Err(error) = (|| -> Result<(), LifecycleError> {
-            let _client_node_id =
-                read_client_hello(&mut host_stream).map_err(remote_session_sync_error)?;
-            write_server_hello(&mut host_stream, LIVE_AUTHORITY_SERVER_ID)
+            // The local RatatuiRemoteSession waits for the authority server to
+            // send the first hello, so write client hello before reading the
+            // server hello reply.
+            write_client_hello(&mut host_stream, &node_id)
                 .map_err(remote_session_sync_error)?;
+            let _server_hello =
+                read_server_hello(&mut host_stream).map_err(remote_session_sync_error)?;
             {
                 let mut writer_guard = match writer.lock() {
                     Ok(guard) => guard,
@@ -1162,11 +1185,7 @@ fn spawn_ratatui_authority_listener(
                 if let Some(previous) = writer_guard.take() {
                     let _ = previous.shutdown(Shutdown::Both);
                 }
-                *writer_guard = Some(
-                    host_stream
-                        .try_clone()
-                        .map_err(remote_session_sync_error)?,
-                );
+                *writer_guard = Some(host_stream.try_clone().map_err(remote_session_sync_error)?);
             }
             writer_ready.notify_all();
             Ok(())
@@ -1206,19 +1225,9 @@ fn spawn_ratatui_authority_target_host(
 ) {
     thread::spawn(move || {
         let session_id = session.session_id.clone();
-        if let Err(error) = (|| -> Result<(), LifecycleError> {
-            write_client_hello(&mut listener_stream, &node_id)
-                .map_err(remote_session_sync_error)?;
-            let _server_hello =
-                read_server_hello(&mut listener_stream).map_err(remote_session_sync_error)?;
-            Ok(())
-        })() {
-            ERROR_LOG.log(format!(
-                "[ratatui-session-sync] authority target host handshake failed: {error}"
-            ));
-            running.store(false, Ordering::Relaxed);
-            return;
-        }
+        // The authority listener handles the external viewer handshake on
+        // host_stream. The target host only needs to read viewer commands from
+        // host_stream and write PTY output to listener_stream for forwarding.
 
         let mirror_active = Arc::new(AtomicBool::new(false));
         let mut output_stream = listener_stream
@@ -1266,24 +1275,22 @@ fn spawn_ratatui_authority_target_host(
         let mut _input_seq: u64 = 1;
         while running.load(Ordering::Relaxed) {
             match read_authority_transport_frame(&mut host_stream) {
-                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
-                    match envelope.payload {
-                        ControlPlanePayload::OpenMirrorRequest(payload) => {
-                            session.resize(payload.cols as u16, payload.rows as u16);
-                            mirror_active.store(true, Ordering::Relaxed);
-                        }
-                        ControlPlanePayload::RawPtyInput(payload) => {
-                            session.feed_input(payload.input_bytes);
-                        }
-                        ControlPlanePayload::ApplyResize(payload) => {
-                            session.resize(payload.cols as u16, payload.rows as u16);
-                        }
-                        ControlPlanePayload::CloseMirrorRequest(_) => {
-                            mirror_active.store(false, Ordering::Relaxed);
-                        }
-                        _ => {}
+                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
+                    ControlPlanePayload::OpenMirrorRequest(payload) => {
+                        session.resize(payload.cols as u16, payload.rows as u16);
+                        mirror_active.store(true, Ordering::Relaxed);
                     }
-                }
+                    ControlPlanePayload::RawPtyInput(payload) => {
+                        session.feed_input(payload.input_bytes);
+                    }
+                    ControlPlanePayload::ApplyResize(payload) => {
+                        session.resize(payload.cols as u16, payload.rows as u16);
+                    }
+                    ControlPlanePayload::CloseMirrorRequest(_) => {
+                        mirror_active.store(false, Ordering::Relaxed);
+                    }
+                    _ => {}
+                },
                 Ok(AuthorityTransportFrame::RawPtyInput(payload)) => {
                     session.feed_input(payload.input_bytes);
                     _input_seq += 1;

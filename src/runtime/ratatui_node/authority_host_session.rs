@@ -54,8 +54,7 @@ impl RatatuiAuthorityHostSession {
         // Prefer UTF-8 input handling on the master side.
         if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
             let mut termios = termios;
-            termios.input_modes |=
-                rustix_openpty::rustix::termios::InputModes::IUTF8;
+            termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
             let _ = rustix_openpty::rustix::termios::tcsetattr(
                 &master,
                 rustix_openpty::rustix::termios::OptionalActions::Now,
@@ -69,14 +68,14 @@ impl RatatuiAuthorityHostSession {
         let slave_fd = slave.as_raw_fd();
 
         cmd.stdin(
-            slave
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to dup pty slave".to_string(), error))?,
+            slave.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to dup pty slave".to_string(), error)
+            })?,
         );
         cmd.stderr(
-            slave
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to dup pty slave".to_string(), error))?,
+            slave.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to dup pty slave".to_string(), error)
+            })?,
         );
         cmd.stdout(slave);
 
@@ -90,12 +89,9 @@ impl RatatuiAuthorityHostSession {
             });
         }
 
-        let child = cmd.spawn().map_err(|error| {
-            LifecycleError::Io(
-                format!("failed to spawn shell {shell}"),
-                error,
-            )
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|error| LifecycleError::Io(format!("failed to spawn shell {shell}"), error))?;
         let child_arc = Arc::new(Mutex::new(child));
 
         let mut master_file = File::from(master);
@@ -107,16 +103,16 @@ impl RatatuiAuthorityHostSession {
         let shutdown = Arc::new(AtomicBool::new(false));
 
         spawn_pty_reader(
-            master_file
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to clone pty master".to_string(), error))?,
+            master_file.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to clone pty master".to_string(), error)
+            })?,
             output_tx,
             shutdown.clone(),
         );
         spawn_pty_writer(
-            master_file
-                .try_clone()
-                .map_err(|error| LifecycleError::Io("failed to clone pty master".to_string(), error))?,
+            master_file.try_clone().map_err(|error| {
+                LifecycleError::Io("failed to clone pty master".to_string(), error)
+            })?,
             input_rx,
             shutdown.clone(),
         );
@@ -191,11 +187,7 @@ fn set_nonblocking(file: &mut File) {
     }
 }
 
-fn spawn_pty_reader(
-    mut master: File,
-    output_tx: mpsc::Sender<Vec<u8>>,
-    shutdown: Arc<AtomicBool>,
-) {
+fn spawn_pty_reader(mut master: File, output_tx: mpsc::Sender<Vec<u8>>, shutdown: Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {

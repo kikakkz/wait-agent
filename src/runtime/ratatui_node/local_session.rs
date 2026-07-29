@@ -1,13 +1,13 @@
+use crate::infra::error_log::ERROR_LOG;
+use crate::lifecycle::LifecycleError;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
-use crate::infra::error_log::ERROR_LOG;
-use crate::lifecycle::LifecycleError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -64,9 +64,8 @@ impl RatatuiLocalSession {
             cell_width: 1,
             cell_height: 1,
         };
-        let pty = tty::new(&options, window_size, 0).map_err(|error| {
-            LifecycleError::Io("failed to create local PTY".to_string(), error)
-        })?;
+        let pty = tty::new(&options, window_size, 0)
+            .map_err(|error| LifecycleError::Io("failed to create local PTY".to_string(), error))?;
 
         let dimensions = TermSize {
             cols: cols as usize,
@@ -86,9 +85,10 @@ impl RatatuiLocalSession {
             proxy.clone(),
         )));
 
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false).map_err(|error| {
-            LifecycleError::Io("failed to create terminal event loop".to_string(), error)
-        })?;
+        let event_loop =
+            EventLoop::new(term.clone(), proxy, pty, true, false).map_err(|error| {
+                LifecycleError::Io("failed to create terminal event loop".to_string(), error)
+            })?;
 
         let sender = event_loop.channel();
         *sender_slot.lock().unwrap() = Some(sender.clone());
@@ -157,7 +157,10 @@ impl RatatuiLocalSession {
             lines.push(text);
         }
 
-        let cursor = if term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR) {
+        let cursor = if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
+        {
             let point = grid.cursor.point;
             let col = point.column.0 as u16;
             let row = (point.line.0 + display_offset) as u16;
@@ -191,17 +194,19 @@ impl EventListener for EventProxy {
                     .send_local_session_event(LocalSessionEvent::Wakeup);
             }
             Event::ChildExit(status) => {
-                let _ = self.shared.send_local_session_event(
-                    LocalSessionEvent::ChildExit {
+                let _ = self
+                    .shared
+                    .send_local_session_event(LocalSessionEvent::ChildExit {
                         session_id: self.session_id.clone(),
                         status,
-                    },
-                );
+                    });
             }
             Event::Exit => {
-                let _ = self.shared.send_local_session_event(LocalSessionEvent::Exit {
-                    session_id: self.session_id.clone(),
-                });
+                let _ = self
+                    .shared
+                    .send_local_session_event(LocalSessionEvent::Exit {
+                        session_id: self.session_id.clone(),
+                    });
             }
             Event::PtyWrite(text) => {
                 if let Some(sender) = self.sender.lock().unwrap().as_ref() {
@@ -209,10 +214,12 @@ impl EventListener for EventProxy {
                 }
             }
             Event::Title(title) => {
-                let _ = self.shared.send_local_session_event(LocalSessionEvent::Title {
-                    session_id: self.session_id.clone(),
-                    title,
-                });
+                let _ = self
+                    .shared
+                    .send_local_session_event(LocalSessionEvent::Title {
+                        session_id: self.session_id.clone(),
+                        title,
+                    });
             }
             _ => {}
         }

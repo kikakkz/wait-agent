@@ -1,17 +1,18 @@
 mod tests {
-    use super::super::{
-        compute_session_sync_delta, exportable_local_sessions_for_socket, local_sessions_by_local_id,
-        notify_remote_session_sync_owner, overlay_workspace_runtime_onto_active_local_target_hosts,
-        remote_session_exited_envelope, remote_session_published_envelope,
-        remote_session_sync_owner_args, remote_session_sync_owner_available,
-        remote_session_sync_owner_socket_path, signal_remote_session_sync_owner,
-        sync_local_sessions, AuthorityHostSignal, LocalCatalogChangeReason, LocalSessionCatalog,
-        LocalTargetExitObserver, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
-        SessionSyncAuthorityHost, SessionSyncAuthorityPublicationGateway, SessionSyncMode,
-        SourcePublicationAckOutcome, SourcePublicationTracker,
-    };
     use super::super::local_session_sync_backends::{
         authority_host_signal, deliver_command_to_ready_host,
+    };
+    use super::super::{
+        compute_session_sync_delta, exportable_local_sessions_for_socket,
+        local_sessions_by_local_id, notify_remote_session_sync_owner,
+        overlay_workspace_runtime_onto_active_local_target_hosts, remote_session_exited_envelope,
+        remote_session_published_envelope, remote_session_sync_owner_args,
+        remote_session_sync_owner_available, remote_session_sync_owner_socket_path,
+        signal_remote_session_sync_owner, sync_local_sessions, AuthorityHostSignal,
+        LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
+        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
+        SessionSyncAuthorityPublicationGateway, SessionSyncMode, SourcePublicationAckOutcome,
+        SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -73,10 +74,7 @@ mod tests {
             Err(LifecycleError::Protocol("dummy backend".to_string()))
         }
 
-        fn authority_host_signal(
-            &self,
-            _host: &SessionSyncAuthorityHost,
-        ) -> AuthorityHostSignal {
+        fn authority_host_signal(&self, _host: &SessionSyncAuthorityHost) -> AuthorityHostSignal {
             AuthorityHostSignal::Closed
         }
 

@@ -22,7 +22,9 @@ pub(crate) fn handle_control_command(
     _stream: &mut std::os::unix::net::UnixStream,
 ) -> Option<ControlResponse> {
     if command == "STATUS" {
-        let count = shared.client_count.load(std::sync::atomic::Ordering::SeqCst);
+        let count = shared
+            .client_count
+            .load(std::sync::atomic::Ordering::SeqCst);
         let uptime = shared.start_time.elapsed().as_secs();
         let session_count = shared.sessions.lock().unwrap().len();
         let status = ServerStatus {
@@ -156,9 +158,7 @@ pub(crate) fn handle_control_command(
                     return Some(ControlResponse::err(error.to_string()));
                 }
                 *shared.active_target.lock().unwrap() = Some(target.clone());
-                Some(
-                    ControlResponse::ok_message(format!("connected {target}")).with_broadcast(),
-                )
+                Some(ControlResponse::ok_message(format!("connected {target}")).with_broadcast())
             }
             Err(error) => Some(ControlResponse::err(error.to_string())),
         }

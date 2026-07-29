@@ -33,10 +33,8 @@ use crate::runtime::remote_node_session_sync_runtime::{
     LocalAuthorityHostBackend, LocalSessionCatalog, LocalTargetFactory,
     SessionSyncAuthorityManager, TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
 };
-use crate::runtime::remote_publication::remote_target_publication_backend::
-    RemoteTargetPublicationBackend;
-use crate::runtime::remote_publication::remote_target_publication_runtime::
-    RemoteTargetPublicationRuntime;
+use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_workspace_socket_registry_runtime::{
     workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
 };
@@ -393,7 +391,6 @@ impl RemoteNodeIngressServerRuntime {
         }
         shutdown_owner_with_control_socket(network)
     }
-
 }
 
 impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
@@ -1637,9 +1634,7 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
-fn mark_discovered_node_offline_if_last_ingress_session<
-    B: RemoteTargetPublicationBackend,
->(
+fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicationBackend>(
     publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &HashMap<String, ActiveNodeIngressSession>,
     node_id: &str,
@@ -2046,9 +2041,7 @@ fn target_published_fingerprint(payload: &GrpcTargetPublished) -> String {
     .join("\u{1f}")
 }
 
-fn route_transport_envelope<
-    B: RemoteTargetPublicationBackend,
->(
+fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
     publication_runtime: &RemoteTargetPublicationRuntime<B>,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,

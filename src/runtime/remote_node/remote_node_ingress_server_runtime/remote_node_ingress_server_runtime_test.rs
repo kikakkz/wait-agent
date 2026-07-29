@@ -17,8 +17,8 @@ mod tests {
         BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload, ProtocolEnvelope,
         RawPtyOutputPayload, REMOTE_PROTOCOL_VERSION,
     };
-    use crate::lifecycle::LifecycleError;
     use crate::infra::remote_transport_codec::write_control_plane_envelope;
+    use crate::lifecycle::LifecycleError;
     use crate::runtime::remote_authority_transport_runtime::{
         authority_transport_socket_path, RemoteAuthorityTransportRuntime,
     };
@@ -77,7 +77,8 @@ mod tests {
         fn authority_host_signal(
             &self,
             _host: &crate::runtime::remote_node::remote_node_session_sync_runtime::SessionSyncAuthorityHost,
-        ) -> crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal {
+        ) -> crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal
+        {
             crate::runtime::remote_node::remote_node_session_sync_runtime::AuthorityHostSignal::Closed
         }
 

@@ -12,10 +12,8 @@ use crate::runtime::remote_node::remote_node_session_sync_runtime::{
     RatatuiLocalAuthorityHostBackend, RatatuiLocalSessionCatalog, RatatuiLocalTargetExitObserver,
     RatatuiLocalTargetFactory, RemoteNodeSessionSyncRuntime,
 };
-use crate::runtime::remote_publication::ratatui_target_publication_backend::
-    RatatuiRemoteTargetPublicationBackend;
-use crate::runtime::remote_publication::remote_target_publication_runtime::
-    RemoteTargetPublicationRuntime;
+use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::os::unix::net::UnixListener;
@@ -79,34 +77,32 @@ impl SharedState {
         // Running on a separate thread guarantees we never hold `Term`'s lock
         // while locking `sessions` or `local_sessions`, which prevents deadlock.
         let weak = Arc::downgrade(&shared);
-        std::thread::spawn(move || {
-            loop {
-                let Ok(event) = event_rx.recv() else {
-                    break;
-                };
-                let Some(shared) = weak.upgrade() else {
-                    break;
-                };
+        std::thread::spawn(move || loop {
+            let Ok(event) = event_rx.recv() else {
+                break;
+            };
+            let Some(shared) = weak.upgrade() else {
+                break;
+            };
 
-                match event {
-                    LocalSessionEvent::Wakeup => {
-                        let _ = shared.broadcast_snapshot();
-                    }
-                    LocalSessionEvent::ChildExit { session_id, status } => {
-                        ERROR_LOG.log(format!(
+            match event {
+                LocalSessionEvent::Wakeup => {
+                    let _ = shared.broadcast_snapshot();
+                }
+                LocalSessionEvent::ChildExit { session_id, status } => {
+                    ERROR_LOG.log(format!(
                             "[ratatui-local-session] child exited session={session_id} status={status:?}"
                         ));
-                        shared.mark_local_session_exited(&session_id);
-                        let _ = shared.broadcast_snapshot();
-                    }
-                    LocalSessionEvent::Exit { session_id } => {
-                        shared.mark_local_session_exited(&session_id);
-                        let _ = shared.broadcast_snapshot();
-                    }
-                    LocalSessionEvent::Title { session_id, title } => {
-                        shared.set_local_session_title(&session_id, title);
-                        let _ = shared.broadcast_snapshot();
-                    }
+                    shared.mark_local_session_exited(&session_id);
+                    let _ = shared.broadcast_snapshot();
+                }
+                LocalSessionEvent::Exit { session_id } => {
+                    shared.mark_local_session_exited(&session_id);
+                    let _ = shared.broadcast_snapshot();
+                }
+                LocalSessionEvent::Title { session_id, title } => {
+                    shared.set_local_session_title(&session_id, title);
+                    let _ = shared.broadcast_snapshot();
                 }
             }
         });
@@ -174,7 +170,10 @@ impl SharedState {
         let target = {
             let mut guard = self.sessions.lock().unwrap();
             let record = ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(self.network.port.to_string(), session_id),
+                address: ManagedSessionAddress::local_tmux(
+                    self.network.port.to_string(),
+                    session_id,
+                ),
                 selector: None,
                 availability: SessionAvailability::Online,
                 workspace_dir: None,
@@ -358,9 +357,12 @@ impl RatatuiNodeRuntime {
         let _sync_guard = if self.network.connect.is_some() {
             let sync_network = self.network.clone();
             let shared = self.shared.clone();
-            let backend = RatatuiRemoteTargetPublicationBackend::new(shared.clone(), sync_network.clone());
-            let publication_runtime =
-                RemoteTargetPublicationRuntime::with_network_and_backend(sync_network.clone(), backend)?;
+            let backend =
+                RatatuiRemoteTargetPublicationBackend::new(shared.clone(), sync_network.clone());
+            let publication_runtime = RemoteTargetPublicationRuntime::with_network_and_backend(
+                sync_network.clone(),
+                backend,
+            )?;
             let sync_runtime = RemoteNodeSessionSyncRuntime::new_with_backends(
                 RatatuiLocalSessionCatalog::new(shared.clone()),
                 crate::infra::remote_grpc_transport::GrpcRemoteNodeTransport::new(),
@@ -388,9 +390,12 @@ impl RatatuiNodeRuntime {
         // peers can connect in and request local target sessions.
         let ingress_network = self.network.clone();
         let shared = self.shared.clone();
-        let ingress_backend = RatatuiRemoteTargetPublicationBackend::new(shared.clone(), ingress_network.clone());
-        let ingress_publication_runtime =
-            RemoteTargetPublicationRuntime::with_network_and_backend(ingress_network.clone(), ingress_backend)?;
+        let ingress_backend =
+            RatatuiRemoteTargetPublicationBackend::new(shared.clone(), ingress_network.clone());
+        let ingress_publication_runtime = RemoteTargetPublicationRuntime::with_network_and_backend(
+            ingress_network.clone(),
+            ingress_backend,
+        )?;
         let ingress_runtime = RemoteNodeIngressServerRuntime::new_with_backends(
             ingress_network,
             ingress_publication_runtime,
@@ -404,7 +409,8 @@ impl RatatuiNodeRuntime {
                 // can reach this single-process server.
                 let owner_socket_path = remote_node_ingress_owner_socket_path(&self.network);
                 let _ = std::fs::remove_file(&owner_socket_path);
-                if let Ok(owner_listener) = std::os::unix::net::UnixListener::bind(&owner_socket_path)
+                if let Ok(owner_listener) =
+                    std::os::unix::net::UnixListener::bind(&owner_socket_path)
                 {
                     if let Some(owner_tx) = guard.owner_event_sender() {
                         let (_lifecycle_tx, _lifecycle_rx) =
@@ -435,7 +441,8 @@ impl RatatuiNodeRuntime {
                     let clients = clients.clone();
                     let shared = self.shared.clone();
                     std::thread::spawn(move || {
-                        let client_id = super::client::NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
+                        let client_id =
+                            super::client::NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
                         if let Err(error) =
                             super::client::handle_client(stream, client_id, clients, shared)
                         {
@@ -463,5 +470,3 @@ impl RatatuiNodeRuntime {
         Ok(())
     }
 }
-
-

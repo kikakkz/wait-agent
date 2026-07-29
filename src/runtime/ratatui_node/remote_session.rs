@@ -53,11 +53,7 @@ impl RatatuiRemoteSession {
         let target_id = target.address.qualified_target();
         let session_id = target.address.session_id().to_string();
         let authority_node_id = target.address.authority_id().to_string();
-        let socket_path = authority_transport_socket_path(
-            socket_name,
-            &session_id,
-            &target_id,
-        );
+        let socket_path = authority_transport_socket_path(socket_name, &session_id, &target_id);
 
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
@@ -75,7 +71,8 @@ impl RatatuiRemoteSession {
             )
         })?;
 
-        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path) {
+        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path)
+        {
             ERROR_LOG.log(format!(
                 "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
             ));
@@ -294,10 +291,9 @@ fn handle_authority_transport_stream(
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     if let Err(error) = (|| -> Result<(), LifecycleError> {
-        let _client_node_id =
-            read_client_hello(&mut stream).map_err(|error| {
-                LifecycleError::Io("failed to read authority client hello".to_string(), error)
-            })?;
+        let _client_node_id = read_client_hello(&mut stream).map_err(|error| {
+            LifecycleError::Io("failed to read authority client hello".to_string(), error)
+        })?;
         write_server_hello(&mut stream, "waitagent-ratatui-remote-session").map_err(|error| {
             LifecycleError::Io("failed to write authority server hello".to_string(), error)
         })?;
@@ -312,7 +308,11 @@ fn handle_authority_transport_stream(
 
     {
         let mut writer_guard = session.writer.lock().unwrap();
-        *writer_guard = Some(stream.try_clone().expect("failed to clone authority stream"));
+        *writer_guard = Some(
+            stream
+                .try_clone()
+                .expect("failed to clone authority stream"),
+        );
     }
     session.flush_open_mirror();
 
@@ -324,27 +324,25 @@ fn handle_authority_transport_stream(
                 let mut observer = session.observer.lock().unwrap();
                 observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
             }
-            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
-                match &envelope.payload {
-                    ControlPlanePayload::OpenMirrorAccepted(_) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-remote-session] mirror opened for {target_id}"
-                        ));
-                    }
-                    ControlPlanePayload::OpenMirrorRejected(payload) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-remote-session] mirror rejected for {target_id}: {}",
-                            payload.message
-                        ));
-                    }
-                    ControlPlanePayload::RawPtyOutput(payload) => {
-                        output_seq = output_seq.max(payload.output_seq);
-                        let mut observer = session.observer.lock().unwrap();
-                        observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
-                    }
-                    _ => {}
+            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match &envelope.payload {
+                ControlPlanePayload::OpenMirrorAccepted(_) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-remote-session] mirror opened for {target_id}"
+                    ));
                 }
-            }
+                ControlPlanePayload::OpenMirrorRejected(payload) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-remote-session] mirror rejected for {target_id}: {}",
+                        payload.message
+                    ));
+                }
+                ControlPlanePayload::RawPtyOutput(payload) => {
+                    output_seq = output_seq.max(payload.output_seq);
+                    let mut observer = session.observer.lock().unwrap();
+                    observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
+                }
+                _ => {}
+            },
             Ok(AuthorityTransportFrame::Ping) => {
                 let mut guard = session.writer.lock().unwrap();
                 if let Some(writer) = guard.as_mut() {

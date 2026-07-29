@@ -67,7 +67,7 @@ pub fn connect_remote_host(
 
     // If we already have a live remote session for this host, reuse its
     // authority instead of starting a second daemon on a new port.
-    let (authority_node_id, remote_port, should_bootstrap) =
+    let (authority_node_id, remote_port) =
         match find_online_remote_target_for_profile(sessions, &profile) {
             Some(existing) => {
                 let authority = existing.address.authority_id().to_string();
@@ -79,7 +79,7 @@ pub fn connect_remote_host(
                             .last_remote_port
                             .unwrap_or_else(default_remote_node_port)
                     });
-                (authority, port, false)
+                (authority, port)
             }
             None => {
                 let preference = port_preference(&profile.preferred_remote_port);
@@ -88,11 +88,15 @@ pub fn connect_remote_host(
                     .choose_remote_port(&preference, &local_connect_endpoint)
                     .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
                 let authority_node_id = authority_id_for_profile_port(&profile, port.port);
-                (authority_node_id, port.port, true)
+                (authority_node_id, port.port)
             }
         };
 
-    if should_bootstrap {
+    // Always deploy the local binary to the remote host when using the ratatui
+    // connect path. This ensures the remote is running the same branch build as
+    // the local TUI during development; the deploy script kills any existing
+    // process on the same port before starting the new one.
+    {
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             remote_port,

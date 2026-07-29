@@ -484,8 +484,12 @@ fn render(
             Style::default().bg(Color::Blue).fg(Color::White),
             dim_background,
         );
-        Paragraph::new(render_footer_line(snapshot, outer[1].width as usize, dim_background))
-            .style(footer_style)
+        Paragraph::new(render_footer_line(
+            snapshot,
+            outer[1].width as usize,
+            dim_background,
+        ))
+        .style(footer_style)
     };
     frame.render_widget(footer, outer[1]);
 }

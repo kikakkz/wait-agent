@@ -1,7 +1,5 @@
 use crate::application::target_registry_service::merge_local_targets_by_identity;
-use crate::cli::{
-    prepend_global_network_args, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand,
-};
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand};
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
@@ -14,10 +12,8 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
-use crate::runtime::remote_publication::remote_target_publication_backend::
-    TmuxRemoteTargetPublicationBackend;
-use crate::runtime::remote_publication::remote_target_publication_runtime::
-    RemoteTargetPublicationRuntime;
+use crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_runtime_owner_runtime::{
     RemoteRuntimeOwnerRuntime, RemoteTargetSourceBindingResolver,
 };
@@ -216,8 +212,7 @@ pub(crate) struct SessionSyncAuthorityHost {
 }
 
 #[derive(Clone)]
-pub(crate) enum SessionSyncAuthorityOutputRoute
-{
+pub(crate) enum SessionSyncAuthorityOutputRoute {
     OwnerEvent(mpsc::Sender<SessionSyncEvent>),
     IngressEvent(
         mpsc::Sender<
@@ -252,7 +247,9 @@ impl RemoteNodeSessionSyncRuntime<TmuxLocalSessionCatalog> {
             SidecarLocalTargetExitObserver::from_build_env(network.clone())?,
             TmuxLocalTargetFactory::from_build_env_with_socket(network.clone(), socket_name)?,
             TmuxLocalAuthorityHostBackend::from_build_env(network.clone())?,
-            Some(RemoteTargetPublicationRuntime::from_build_env_with_network(network.clone())?),
+            Some(RemoteTargetPublicationRuntime::from_build_env_with_network(
+                network.clone(),
+            )?),
             network,
         ))
     }
@@ -837,8 +834,14 @@ where
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let cols = u16::try_from(payload.cols).ok().filter(|cols| *cols > 0).unwrap_or(80);
-        let rows = u16::try_from(payload.rows).ok().filter(|rows| *rows > 0).unwrap_or(24);
+        let cols = u16::try_from(payload.cols)
+            .ok()
+            .filter(|cols| *cols > 0)
+            .unwrap_or(80);
+        let rows = u16::try_from(payload.rows)
+            .ok()
+            .filter(|rows| *rows > 0)
+            .unwrap_or(24);
         self.target_factory
             .create_local_target(session_handle.node_id(), &cwd, cols, rows)
             .map_err(|error| {
@@ -879,9 +882,11 @@ where
             self.running_hosts.remove(target_id);
         }
 
-        let host = self
-            .authority_backend
-            .spawn_authority_host(session_handle, target_id, self.output_route.clone())?;
+        let host = self.authority_backend.spawn_authority_host(
+            session_handle,
+            target_id,
+            self.output_route.clone(),
+        )?;
         self.running_hosts.insert(target_id.to_string(), host);
         Ok(())
     }
@@ -927,7 +932,10 @@ where
         let host = self.running_hosts.get(target_id).ok_or_else(|| {
             LifecycleError::Protocol("authority host cache lost entry".to_string())
         })?;
-        match self.authority_backend.deliver_command(host, command.clone())? {
+        match self
+            .authority_backend
+            .deliver_command(host, command.clone())?
+        {
             AuthorityHostSignal::Ready => Ok(()),
             AuthorityHostSignal::Starting => Err(LifecycleError::Protocol(format!(
                 "authority host for `{target_id}` did not become ready"

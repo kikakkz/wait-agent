@@ -1,6 +1,6 @@
+use super::snapshot::ControlResponse;
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use super::snapshot::ControlResponse;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -127,10 +127,7 @@ pub(crate) fn handle_client(
     Ok(())
 }
 
-pub(crate) fn detach_all_clients(
-    clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    shared: &SharedState,
-) {
+pub(crate) fn detach_all_clients(clients: &Arc<Mutex<Vec<ClientHandle>>>, shared: &SharedState) {
     ERROR_LOG.log("[ratatui-node] detaching all clients".to_string());
     let mut guard = clients.lock().unwrap();
     for handle in guard.drain(..) {
