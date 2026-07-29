@@ -20,11 +20,12 @@ use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::client::ClientHandle;
-use super::local_session::RatatuiLocalSession;
+use super::local_session::{LocalSessionEvent, RatatuiLocalSession};
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "1";
 
@@ -49,9 +50,70 @@ pub(crate) struct SharedState {
     pub(crate) start_time: Instant,
     pub(crate) shutdown: AtomicBool,
     pub(crate) local_sessions: Mutex<HashMap<String, Arc<RatatuiLocalSession>>>,
+    event_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
 }
 
 impl SharedState {
+    pub(crate) fn new(network: RemoteNetworkConfig) -> Arc<Self> {
+        let (event_tx, event_rx) = mpsc::channel::<LocalSessionEvent>();
+
+        let shared = Arc::new(Self {
+            network,
+            sessions: Mutex::new(HashMap::new()),
+            active_target: Mutex::new(None),
+            client_count: AtomicUsize::new(0),
+            clients: Arc::new(Mutex::new(Vec::new())),
+            start_time: Instant::now(),
+            shutdown: AtomicBool::new(false),
+            local_sessions: Mutex::new(HashMap::new()),
+            event_tx: Mutex::new(event_tx),
+        });
+
+        // Dedicated worker that applies local-session events to shared state.
+        // Running on a separate thread guarantees we never hold `Term`'s lock
+        // while locking `sessions` or `local_sessions`, which prevents deadlock.
+        let weak = Arc::downgrade(&shared);
+        std::thread::spawn(move || {
+            loop {
+                let Ok(event) = event_rx.recv() else {
+                    break;
+                };
+                let Some(shared) = weak.upgrade() else {
+                    break;
+                };
+
+                match event {
+                    LocalSessionEvent::Wakeup => {
+                        let _ = shared.broadcast_snapshot();
+                    }
+                    LocalSessionEvent::ChildExit { session_id, status } => {
+                        ERROR_LOG.log(format!(
+                            "[ratatui-local-session] child exited session={session_id} status={status:?}"
+                        ));
+                        shared.mark_local_session_exited(&session_id);
+                        let _ = shared.broadcast_snapshot();
+                    }
+                    LocalSessionEvent::Exit { session_id } => {
+                        shared.mark_local_session_exited(&session_id);
+                        let _ = shared.broadcast_snapshot();
+                    }
+                    LocalSessionEvent::Title { session_id, title } => {
+                        shared.set_local_session_title(&session_id, title);
+                        let _ = shared.broadcast_snapshot();
+                    }
+                }
+            }
+        });
+
+        shared
+    }
+
+    pub(crate) fn send_local_session_event(&self, event: LocalSessionEvent) {
+        if let Ok(tx) = self.event_tx.lock() {
+            let _ = tx.send(event);
+        }
+    }
+
     pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
@@ -126,7 +188,7 @@ impl SharedState {
         };
 
         *self.active_target.lock().unwrap() = Some(target.clone());
-        let _ = self.broadcast_snapshot();
+        self.send_local_session_event(LocalSessionEvent::Wakeup);
         Ok(target)
     }
 
@@ -157,16 +219,7 @@ impl RatatuiNodeRuntime {
     pub fn from_network(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
         let remote_owner = RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
 
-        let shared = Arc::new(SharedState {
-            network: network.clone(),
-            sessions: Mutex::new(HashMap::new()),
-            active_target: Mutex::new(None),
-            client_count: AtomicUsize::new(0),
-            clients: Arc::new(Mutex::new(Vec::new())),
-            start_time: Instant::now(),
-            shutdown: AtomicBool::new(false),
-            local_sessions: Mutex::new(HashMap::new()),
-        });
+        let shared = SharedState::new(network.clone());
 
         // Create the default local session with a reasonable initial size.
         // The client will send a RESIZE once it knows the terminal dimensions.

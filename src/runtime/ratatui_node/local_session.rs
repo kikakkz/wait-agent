@@ -5,14 +5,26 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::tty::{self, Options, Pty, Shell};
+use alacritty_terminal::tty::{self, Options, Shell};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use std::collections::HashMap;
-use std::io;
 use std::sync::{Arc, Mutex};
 
 use super::runtime::SharedState;
+
+/// Events emitted by a local PTY session that must be applied to shared state.
+///
+/// These are sent out of the alacritty_terminal event loop so that they are
+/// never handled while the terminal's `Term` lock is held, avoiding deadlocks
+/// with `SharedState::local_sessions`.
+#[derive(Debug)]
+pub(crate) enum LocalSessionEvent {
+    Wakeup,
+    ChildExit { session_id: String, status: i32 },
+    Exit { session_id: String },
+    Title { session_id: String, title: String },
+}
 
 /// A local session backed by a real PTY + `alacritty_terminal` emulator.
 pub struct RatatuiLocalSession {
@@ -174,19 +186,22 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::Wakeup => {
-                let _ = self.shared.broadcast_snapshot();
+                let _ = self
+                    .shared
+                    .send_local_session_event(LocalSessionEvent::Wakeup);
             }
             Event::ChildExit(status) => {
-                ERROR_LOG.log(format!(
-                    "[ratatui-local-session] child exited session={} status={status:?}",
-                    self.session_id
-                ));
-                self.shared.mark_local_session_exited(&self.session_id);
-                let _ = self.shared.broadcast_snapshot();
+                let _ = self.shared.send_local_session_event(
+                    LocalSessionEvent::ChildExit {
+                        session_id: self.session_id.clone(),
+                        status,
+                    },
+                );
             }
             Event::Exit => {
-                self.shared.mark_local_session_exited(&self.session_id);
-                let _ = self.shared.broadcast_snapshot();
+                let _ = self.shared.send_local_session_event(LocalSessionEvent::Exit {
+                    session_id: self.session_id.clone(),
+                });
             }
             Event::PtyWrite(text) => {
                 if let Some(sender) = self.sender.lock().unwrap().as_ref() {
@@ -194,8 +209,10 @@ impl EventListener for EventProxy {
                 }
             }
             Event::Title(title) => {
-                self.shared.set_local_session_title(&self.session_id, title);
-                let _ = self.shared.broadcast_snapshot();
+                let _ = self.shared.send_local_session_event(LocalSessionEvent::Title {
+                    session_id: self.session_id.clone(),
+                    title,
+                });
             }
             _ => {}
         }
