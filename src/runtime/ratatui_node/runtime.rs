@@ -24,8 +24,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
 use super::local_session::{LocalSessionEvent, RatatuiLocalSession};
+use super::remote_session::RatatuiRemoteSession;
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "1";
 
@@ -50,6 +52,8 @@ pub(crate) struct SharedState {
     pub(crate) start_time: Instant,
     pub(crate) shutdown: AtomicBool,
     pub(crate) local_sessions: Mutex<HashMap<String, Arc<RatatuiLocalSession>>>,
+    pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
+    pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
     event_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
 }
 
@@ -66,6 +70,8 @@ impl SharedState {
             start_time: Instant::now(),
             shutdown: AtomicBool::new(false),
             local_sessions: Mutex::new(HashMap::new()),
+            authority_host_sessions: Mutex::new(HashMap::new()),
+            remote_sessions: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(event_tx),
         });
 
@@ -211,6 +217,80 @@ impl SharedState {
         let guard = self.local_sessions.lock().unwrap();
         if let Some(session) = guard.get(session_id) {
             session.feed_input(bytes);
+        }
+    }
+
+    /// Forward input bytes to an authority-host session.
+    pub(crate) fn feed_authority_host_session_input(&self, session_id: &str, bytes: Vec<u8>) {
+        let guard = self.authority_host_sessions.lock().unwrap();
+        if let Some(session) = guard.get(session_id) {
+            session.feed_input(bytes);
+        }
+    }
+
+    /// Resize an authority-host session.
+    pub(crate) fn resize_authority_host_session(&self, session_id: &str, cols: u16, rows: u16) {
+        let guard = self.authority_host_sessions.lock().unwrap();
+        if let Some(session) = guard.get(session_id) {
+            session.resize(cols, rows);
+        }
+    }
+
+    /// Remove an authority-host session from the catalog.
+    pub(crate) fn remove_authority_host_session(&self, session_id: &str) {
+        let mut guard = self.authority_host_sessions.lock().unwrap();
+        guard.remove(session_id);
+    }
+
+    /// Return the workspace id used for authority transport socket naming.
+    pub(crate) fn workspace_id(&self) -> String {
+        format!("ratatui-{}", self.network.port)
+    }
+
+    /// Open or reuse a remote session viewer for the given record.
+    pub(crate) fn ensure_remote_session(
+        self: &Arc<Self>,
+        record: &ManagedSessionRecord,
+    ) -> Result<String, LifecycleError> {
+        let target_id = record.address.qualified_target();
+        {
+            let guard = self.remote_sessions.lock().unwrap();
+            if let Some(session) = guard.get(&target_id) {
+                session.send_open_mirror(80, 24);
+                return Ok(target_id);
+            }
+        }
+        let session = RatatuiRemoteSession::open(record, &self.workspace_id())?;
+        session.send_open_mirror(80, 24);
+        {
+            let mut guard = self.remote_sessions.lock().unwrap();
+            guard.insert(target_id.clone(), session);
+        }
+        Ok(target_id)
+    }
+
+    /// Forward input bytes to the active remote session, if any.
+    pub(crate) fn feed_active_remote_session_input(&self, bytes: Vec<u8>) {
+        let active = self.active_target.lock().unwrap().clone();
+        let Some(target) = active else {
+            return;
+        };
+        let guard = self.remote_sessions.lock().unwrap();
+        if let Some(session) = guard.get(&target) {
+            session.feed_input(bytes);
+        }
+    }
+
+    /// Resize the active remote session, if any.
+    pub(crate) fn resize_active_remote_session(&self, cols: u16, rows: u16) {
+        let active = self.active_target.lock().unwrap().clone();
+        let Some(target) = active else {
+            return;
+        };
+        let guard = self.remote_sessions.lock().unwrap();
+        if let Some(session) = guard.get(&target) {
+            session.resize(cols, rows);
+            session.resize_local_screen(cols, rows);
         }
     }
 }

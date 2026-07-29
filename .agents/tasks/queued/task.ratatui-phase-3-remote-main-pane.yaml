@@ -30,12 +30,17 @@ verification:
   - cargo test --release -- ratatui
   - manual test on 192.168.31.178/182 pair
 touched_paths:
+  - Cargo.toml
+  - Cargo.lock
+  - src/runtime/ratatui_node/mod.rs
   - src/runtime/ratatui_node/runtime.rs
   - src/runtime/ratatui_node/snapshot.rs
   - src/runtime/ratatui_node/commands.rs
   - src/runtime/ratatui_node/local_session.rs
+  - src/runtime/ratatui_node/authority_host_session.rs
   - src/runtime/ratatui_node/remote_session.rs
   - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/local_session_sync_backends.rs
 notes:
   - Reuse RemoteMainSlotRuntime and RemoteObserverRuntime; do not reimplement the gRPC codec.
   - Keep tmux path untouched.

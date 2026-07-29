@@ -5,7 +5,9 @@ use crate::domain::session_catalog::{
 use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
-use crate::infra::remote_protocol::ControlPlanePayload;
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, ProtocolEnvelope, RawPtyOutputPayload, REMOTE_PROTOCOL_VERSION,
+};
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
     AuthorityTransportFrame,
@@ -24,6 +26,9 @@ use crate::runtime::remote_node_session_sync_runtime::{
 };
 use crate::runtime::remote_node_session_sync_runtime::sync_helpers::
     remote_session_sync_owner_socket_path;
+use crate::runtime::remote_node_transport_runtime::{
+    read_client_hello, read_server_hello, write_client_hello, write_server_hello,
+};
 use crate::runtime::ratatui_node::SharedState;
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::io::{self, Write};
@@ -858,8 +863,8 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
         &self,
         node_id: &str,
         _cwd: &Path,
-        _cols: u16,
-        _rows: u16,
+        cols: u16,
+        rows: u16,
     ) -> Result<CreatedLocalTarget, Self::Error> {
         let mut guard = self.shared.sessions.lock().map_err(|error| {
             LifecycleError::Io(
@@ -890,6 +895,33 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
         let target = record.address.qualified_target();
         guard.insert(id.clone(), record);
         drop(guard);
+
+        let command_name = std::env::var("SHELL")
+            .ok()
+            .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
+            .unwrap_or_else(|| "bash".to_string());
+        match crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession::spawn(
+            id.clone(),
+            command_name,
+            cols,
+            rows,
+        ) {
+            Ok(session) => {
+                let mut host_guard = self.shared.authority_host_sessions.lock().map_err(|error| {
+                    LifecycleError::Io(
+                        "ratatui authority host sessions mutex poisoned".to_string(),
+                        io::Error::new(io::ErrorKind::Other, error.to_string()),
+                    )
+                })?;
+                host_guard.insert(id.clone(), session);
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-local-target-factory] failed to spawn authority host session: {error}"
+                ));
+            }
+        }
+
         *self.shared.active_target.lock().map_err(|error| {
             LifecycleError::Io(
                 "ratatui active target mutex poisoned".to_string(),
@@ -923,10 +955,10 @@ impl LocalTargetExitObserver for RatatuiLocalTargetExitObserver {
 
 /// Ratatui-backed authority host backend.
 ///
-/// This is a structural stub: authority commands will eventually be routed to
-/// the target session's PTY input channel and PTY output will be forwarded back
-/// to the gRPC session. Until PTY I/O is wired into `SharedState`, all commands
-/// are logged and acknowledged as `Ready`.
+/// In the single-process model the authority listener and target-host sidecar
+/// are replaced by in-process threads. Commands from the remote viewer are
+/// delivered to the local PTY session and raw PTY output is forwarded back to
+/// the gRPC session via `SessionSyncAuthorityOutputRoute`.
 #[derive(Clone)]
 pub struct RatatuiLocalAuthorityHostBackend {
     shared: Arc<SharedState>,
@@ -950,44 +982,96 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         &self,
         session_handle: &RemoteNodeSessionHandle,
         target_id: &str,
-        _output_route: SessionSyncAuthorityOutputRoute,
+        output_route: SessionSyncAuthorityOutputRoute,
     ) -> Result<SessionSyncAuthorityHost, Self::Error> {
         let bound_session_instance_id = session_handle.session_instance_id().to_string();
+        let node_id = session_handle.node_id().to_string();
         let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
             LifecycleError::Protocol(format!(
                 "failed to derive local session from target id `{target_id}`"
             ))
         })?;
-        {
-            let guard = self.shared.sessions.lock().map_err(|error| {
+        let session = {
+            let guard = self.shared.authority_host_sessions.lock().map_err(|error| {
                 LifecycleError::Io(
-                    "ratatui sessions mutex poisoned".to_string(),
+                    "ratatui authority host sessions mutex poisoned".to_string(),
                     io::Error::new(io::ErrorKind::Other, error.to_string()),
                 )
             })?;
-            if !guard.contains_key(&session_name) {
-                return Err(LifecycleError::Protocol(format!(
-                    "ratatui session `{session_name}` does not exist"
-                )));
-            }
-        }
-        ERROR_LOG.log(format!(
-            "[ratatui-session-sync] spawned authority host for target={target_id}"
-        ));
+            guard
+                .get(&session_name)
+                .cloned()
+                .ok_or_else(|| LifecycleError::Protocol(format!(
+                    "ratatui authority host session `{session_name}` does not exist"
+                )))?
+        };
+
+        let (host_end, listener_end) = UnixStream::pair().map_err(|error| {
+            LifecycleError::Io(
+                "failed to create authority host socket pair".to_string(),
+                error,
+            )
+        })?;
+        let writer = Arc::new(Mutex::new(None));
+        let writer_ready = Arc::new(Condvar::new());
+        let running = Arc::new(AtomicBool::new(true));
+        let bridge_session_id = Arc::new(RwLock::new(bound_session_instance_id.clone()));
+
+        spawn_ratatui_authority_listener(
+            host_end
+                .try_clone()
+                .map_err(|error| LifecycleError::Io("failed to clone host stream".to_string(), error))?,
+            listener_end
+                .try_clone()
+                .map_err(|error| LifecycleError::Io("failed to clone listener stream".to_string(), error))?,
+            node_id.clone(),
+            bridge_session_id.clone(),
+            output_route,
+            running.clone(),
+            writer.clone(),
+            writer_ready.clone(),
+        );
+
+        spawn_ratatui_authority_target_host(
+            listener_end,
+            host_end,
+            session,
+            target_id.to_string(),
+            node_id,
+            running.clone(),
+        );
+
         Ok(SessionSyncAuthorityHost {
-            writer: Arc::new(Mutex::new(None)),
-            running: Arc::new(AtomicBool::new(true)),
-            writer_ready: Arc::new(Condvar::new()),
-            bound_session_instance_id: bound_session_instance_id.clone(),
-            bridge_session_id: Arc::new(RwLock::new(bound_session_instance_id)),
+            writer,
+            running,
+            writer_ready,
+            bound_session_instance_id,
+            bridge_session_id,
         })
     }
 
     fn authority_host_signal(&self, host: &SessionSyncAuthorityHost) -> AuthorityHostSignal {
-        if host.running.load(Ordering::Relaxed) {
-            AuthorityHostSignal::Ready
-        } else {
-            AuthorityHostSignal::Closed
+        match host.writer.lock() {
+            Ok(guard) => {
+                if guard.is_some() {
+                    AuthorityHostSignal::Ready
+                } else if host.running.load(Ordering::Relaxed) {
+                    AuthorityHostSignal::Starting
+                } else {
+                    AuthorityHostSignal::Closed
+                }
+            }
+            Err(poisoned) => {
+                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                let guard = poisoned.into_inner();
+                if guard.is_some() {
+                    AuthorityHostSignal::Ready
+                } else if host.running.load(Ordering::Relaxed) {
+                    AuthorityHostSignal::Starting
+                } else {
+                    AuthorityHostSignal::Closed
+                }
+            }
         }
     }
 
@@ -996,11 +1080,43 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         host: &SessionSyncAuthorityHost,
         command: RemoteAuthorityCommand,
     ) -> Result<AuthorityHostSignal, Self::Error> {
+        const AUTHORITY_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
         let target_id = authority_command_target_id(&command).to_string();
-        ERROR_LOG.log(format!(
-            "[ratatui-session-sync] delivering authority command to target={target_id} session={}",
-            host.bound_session_instance_id
-        ));
+        let mut guard = match host.writer.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                ERROR_LOG.log("[session-sync] authority writer mutex poisoned, recovering".to_string());
+                poisoned.into_inner()
+            }
+        };
+
+        while guard.is_none() && host.running.load(Ordering::Relaxed) {
+            let wait_result = host
+                .writer_ready
+                .wait_timeout(guard, AUTHORITY_HOST_READY_TIMEOUT)
+                .map_err(|_| {
+                    LifecycleError::Protocol(
+                        "authority writer mutex poisoned while waiting for ready signal".to_string(),
+                    )
+                })?;
+            guard = wait_result.0;
+            if wait_result.1.timed_out() {
+                return Ok(AuthorityHostSignal::Starting);
+            }
+        }
+
+        let Some(writer) = guard.as_mut() else {
+            return Ok(AuthorityHostSignal::Closed);
+        };
+        let envelope = authority_command_envelope(command);
+        if let Err(error) = write_control_plane_envelope(writer, &envelope) {
+            let _ = writer.shutdown(Shutdown::Both);
+            *guard = None;
+            ERROR_LOG.log(format!(
+                "[diag-timing] send_command_to_host: write failed for target={target_id}: {error}"
+            ));
+            return Ok(AuthorityHostSignal::Closed);
+        }
         Ok(AuthorityHostSignal::Ready)
     }
 
@@ -1011,6 +1127,246 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
         ));
         host.running.store(false, Ordering::Relaxed);
     }
+}
+
+fn spawn_ratatui_authority_listener(
+    mut host_stream: UnixStream,
+    listener_stream: UnixStream,
+    node_id: String,
+    bridge_session_id: Arc<RwLock<String>>,
+    output_route: SessionSyncAuthorityOutputRoute,
+    running: Arc<AtomicBool>,
+    writer: Arc<Mutex<Option<UnixStream>>>,
+    writer_ready: Arc<Condvar>,
+) {
+    thread::spawn(move || {
+        let _ = host_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
+        let _ = listener_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
+
+        if let Err(error) = (|| -> Result<(), LifecycleError> {
+            let _client_node_id =
+                read_client_hello(&mut host_stream).map_err(remote_session_sync_error)?;
+            write_server_hello(&mut host_stream, LIVE_AUTHORITY_SERVER_ID)
+                .map_err(remote_session_sync_error)?;
+            {
+                let mut writer_guard = match writer.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        ERROR_LOG.log(
+                            "[ratatui-session-sync] authority writer mutex poisoned in listener, recovering"
+                                .to_string(),
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                if let Some(previous) = writer_guard.take() {
+                    let _ = previous.shutdown(Shutdown::Both);
+                }
+                *writer_guard = Some(
+                    host_stream
+                        .try_clone()
+                        .map_err(remote_session_sync_error)?,
+                );
+            }
+            writer_ready.notify_all();
+            Ok(())
+        })() {
+            ERROR_LOG.log(format!(
+                "[ratatui-session-sync] authority listener handshake failed: {error}"
+            ));
+            running.store(false, Ordering::Relaxed);
+            return;
+        }
+
+        let result = forward_ratatui_host_output(
+            listener_stream,
+            node_id,
+            bridge_session_id,
+            output_route,
+            running.clone(),
+        );
+        ERROR_LOG.log(format!(
+            "[ratatui-session-sync] authority listener output forwarder exited: {result:?}"
+        ));
+        running.store(false, Ordering::Relaxed);
+        let _ = match writer.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+    });
+}
+
+fn spawn_ratatui_authority_target_host(
+    mut listener_stream: UnixStream,
+    mut host_stream: UnixStream,
+    session: Arc<crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession>,
+    target_id: String,
+    node_id: String,
+    running: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let session_id = session.session_id.clone();
+        if let Err(error) = (|| -> Result<(), LifecycleError> {
+            write_client_hello(&mut listener_stream, &node_id)
+                .map_err(remote_session_sync_error)?;
+            let _server_hello =
+                read_server_hello(&mut listener_stream).map_err(remote_session_sync_error)?;
+            Ok(())
+        })() {
+            ERROR_LOG.log(format!(
+                "[ratatui-session-sync] authority target host handshake failed: {error}"
+            ));
+            running.store(false, Ordering::Relaxed);
+            return;
+        }
+
+        let mirror_active = Arc::new(AtomicBool::new(false));
+        let mut output_stream = listener_stream
+            .try_clone()
+            .expect("failed to clone listener stream for output pump");
+        let output_session = session.clone();
+        let output_active = mirror_active.clone();
+        let output_running = running.clone();
+        let output_target_id = target_id.clone();
+        let output_session_id = session_id.clone();
+        thread::spawn(move || {
+            let mut output_seq: u64 = 1;
+            while output_running.load(Ordering::Relaxed) {
+                if !output_active.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                let mut chunk = Vec::new();
+                while let Some(bytes) = output_session.try_recv_output() {
+                    chunk.extend_from_slice(&bytes);
+                }
+                if !chunk.is_empty() {
+                    let payload = RawPtyOutputPayload {
+                        session_id: output_session_id.clone(),
+                        target_id: output_target_id.clone(),
+                        output_seq,
+                        output_bytes: chunk,
+                    };
+                    let frame = AuthorityTransportFrame::RawPtyOutput(payload);
+                    if write_authority_transport_frame(&mut output_stream, &frame).is_err() {
+                        break;
+                    }
+                    if output_stream.flush().is_err() {
+                        break;
+                    }
+                    output_seq += 1;
+                }
+                if output_session.try_recv_exit().is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let mut _input_seq: u64 = 1;
+        while running.load(Ordering::Relaxed) {
+            match read_authority_transport_frame(&mut host_stream) {
+                Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
+                    match envelope.payload {
+                        ControlPlanePayload::OpenMirrorRequest(payload) => {
+                            session.resize(payload.cols as u16, payload.rows as u16);
+                            mirror_active.store(true, Ordering::Relaxed);
+                        }
+                        ControlPlanePayload::RawPtyInput(payload) => {
+                            session.feed_input(payload.input_bytes);
+                        }
+                        ControlPlanePayload::ApplyResize(payload) => {
+                            session.resize(payload.cols as u16, payload.rows as u16);
+                        }
+                        ControlPlanePayload::CloseMirrorRequest(_) => {
+                            mirror_active.store(false, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(AuthorityTransportFrame::RawPtyInput(payload)) => {
+                    session.feed_input(payload.input_bytes);
+                    _input_seq += 1;
+                }
+                Ok(AuthorityTransportFrame::Ping) => {
+                    let _ = write_authority_transport_frame(
+                        &mut listener_stream,
+                        &AuthorityTransportFrame::Pong,
+                    );
+                    let _ = listener_stream.flush();
+                }
+                Ok(AuthorityTransportFrame::Pong) => {}
+                Ok(other) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-session-sync] authority target host unexpected frame: {other:?}"
+                    ));
+                }
+                Err(ref error) if error.is_read_timeout() => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-session-sync] authority target host read error: {error}"
+                    ));
+                    break;
+                }
+            }
+        }
+        running.store(false, Ordering::Relaxed);
+    });
+}
+
+fn forward_ratatui_host_output(
+    mut listener_stream: UnixStream,
+    node_id: String,
+    bridge_session_id: Arc<RwLock<String>>,
+    output_route: SessionSyncAuthorityOutputRoute,
+    running: Arc<AtomicBool>,
+) -> Result<(), LifecycleError> {
+    while running.load(Ordering::Relaxed) {
+        match read_authority_transport_frame(&mut listener_stream) {
+            Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
+                let session_instance_id = bridge_session_id
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
+            }
+            Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
+                let session_instance_id = bridge_session_id
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let envelope = ProtocolEnvelope {
+                    protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                    message_id: format!("{}-raw-pty-output-{}", node_id, payload.output_seq),
+                    message_type: "raw_pty_output",
+                    timestamp: String::new(),
+                    sender_id: node_id.clone(),
+                    correlation_id: None,
+                    session_id: Some(payload.session_id.clone()),
+                    target_id: Some(payload.target_id.clone()),
+                    attachment_id: None,
+                    console_id: None,
+                    payload: ControlPlanePayload::RawPtyOutput(payload),
+                };
+                forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
+            }
+            Ok(AuthorityTransportFrame::Ping) => {}
+            Ok(AuthorityTransportFrame::Pong) => {}
+            Ok(other) => {
+                return Err(remote_session_sync_error(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected authority frame {other:?}"),
+                )));
+            }
+            Err(ref error) if error.is_read_timeout() => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(remote_session_sync_error(error)),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

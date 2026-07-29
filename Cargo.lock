@@ -2900,6 +2900,8 @@ dependencies = [
  "protoc-bin-vendored",
  "ratatui",
  "russh",
+ "rustix",
+ "rustix-openpty",
  "serde",
  "serde_json",
  "sha1",

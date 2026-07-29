@@ -4,6 +4,15 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+fn is_remote_target(target: &str, shared: &SharedState) -> bool {
+    let guard = shared.sessions.lock().unwrap();
+    guard
+        .values()
+        .find(|s| s.address.qualified_target() == target)
+        .map(|s| s.address.transport() == &SessionTransport::RemotePeer)
+        .unwrap_or(false)
+}
+
 use super::client::ClientHandle;
 use super::runtime::SharedState;
 
@@ -209,10 +218,23 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
 
     let (main_lines, main_cursor) = active_target
         .as_deref()
-        .and_then(|target| target.split_once(':').map(|(_, id)| id.to_string()))
-        .and_then(|session_id| {
-            let local_guard = shared.local_sessions.lock().unwrap();
-            local_guard.get(&session_id).map(|s| s.snapshot())
+        .map(|target| {
+            if is_remote_target(target, shared) {
+                let remote_guard = shared.remote_sessions.lock().unwrap();
+                remote_guard
+                    .get(target)
+                    .map(|s| s.snapshot())
+                    .unwrap_or_else(|| (Vec::new(), None))
+            } else {
+                target
+                    .split_once(':')
+                    .map(|(_, id)| id.to_string())
+                    .and_then(|session_id| {
+                        let local_guard = shared.local_sessions.lock().unwrap();
+                        local_guard.get(&session_id).map(|s| s.snapshot())
+                    })
+                    .unwrap_or_else(|| (Vec::new(), None))
+            }
         })
         .unwrap_or_else(|| (Vec::new(), None));
 
