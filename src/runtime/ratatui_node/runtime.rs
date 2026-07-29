@@ -260,7 +260,7 @@ impl SharedState {
                 return Ok(target_id);
             }
         }
-        let session = RatatuiRemoteSession::open(record, &self.workspace_id())?;
+        let session = RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network)?;
         session.send_open_mirror(80, 24);
         {
             let mut guard = self.remote_sessions.lock().unwrap();

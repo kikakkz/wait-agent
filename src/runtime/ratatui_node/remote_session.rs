@@ -1,3 +1,4 @@
+use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
@@ -9,6 +10,7 @@ use crate::infra::remote_transport_codec::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
+use crate::runtime::remote_node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
@@ -35,13 +37,19 @@ pub struct RatatuiRemoteSession {
     socket_path: PathBuf,
     running: Arc<AtomicBool>,
     next_input_seq: AtomicU64,
+    initial_cols: Mutex<u16>,
+    initial_rows: Mutex<u16>,
 }
 
 impl RatatuiRemoteSession {
-    /// Start listening on the authority transport socket and return the session.
-    /// The caller should call `send_open_mirror` once the TUI knows the desired
-    /// terminal size.
-    pub fn open(target: &ManagedSessionRecord, socket_name: &str) -> Result<Arc<Self>, LifecycleError> {
+    /// Start listening on the authority transport socket, register it with the
+    /// local ingress owner, and return the session. The acceptor sends the
+    /// OpenMirrorRequest once the gRPC bridge connects.
+    pub fn open(
+        target: &ManagedSessionRecord,
+        socket_name: &str,
+        network: &RemoteNetworkConfig,
+    ) -> Result<Arc<Self>, LifecycleError> {
         let target_id = target.address.qualified_target();
         let session_id = target.address.session_id().to_string();
         let authority_node_id = target.address.authority_id().to_string();
@@ -67,6 +75,12 @@ impl RatatuiRemoteSession {
             )
         })?;
 
+        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path) {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
+            ));
+        }
+
         let observer = RemoteObserverRuntime::new(LocalNodeMailbox::default(), 80, 24);
         let session = Arc::new(Self {
             target_id: target_id.clone(),
@@ -77,6 +91,8 @@ impl RatatuiRemoteSession {
             socket_path,
             running: Arc::new(AtomicBool::new(true)),
             next_input_seq: AtomicU64::new(1),
+            initial_cols: Mutex::new(80),
+            initial_rows: Mutex::new(24),
         });
 
         spawn_authority_transport_acceptor(
@@ -91,7 +107,15 @@ impl RatatuiRemoteSession {
     }
 
     /// Send an OpenMirrorRequest once the local terminal size is known.
+    /// If the ingress bridge has not connected yet, the size is stored and
+    /// flushed automatically when the bridge is ready.
     pub fn send_open_mirror(&self, cols: u16, rows: u16) {
+        {
+            let mut initial_cols = self.initial_cols.lock().unwrap();
+            let mut initial_rows = self.initial_rows.lock().unwrap();
+            *initial_cols = cols;
+            *initial_rows = rows;
+        }
         let mut guard = self.writer.lock().unwrap();
         let Some(writer) = guard.as_mut() else {
             return;
@@ -123,6 +147,16 @@ impl RatatuiRemoteSession {
             &AuthorityTransportFrame::ControlPlane(envelope),
         );
         let _ = writer.flush();
+    }
+
+    /// Flush a pending OpenMirrorRequest using the last stored size.
+    fn flush_open_mirror(&self) {
+        let (cols, rows) = {
+            let cols = *self.initial_cols.lock().unwrap();
+            let rows = *self.initial_rows.lock().unwrap();
+            (cols, rows)
+        };
+        self.send_open_mirror(cols, rows);
     }
 
     /// Forward keyboard input to the remote session.
@@ -280,6 +314,7 @@ fn handle_authority_transport_stream(
         let mut writer_guard = session.writer.lock().unwrap();
         *writer_guard = Some(stream.try_clone().expect("failed to clone authority stream"));
     }
+    session.flush_open_mirror();
 
     let mut output_seq: u64 = 0;
     while session.running.load(Ordering::Relaxed) {

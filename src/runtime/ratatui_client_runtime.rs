@@ -313,6 +313,7 @@ fn run_event_loop(
                                     snapshot.active_target = Some(session.id.clone());
                                     let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
                                     let _ = stream.flush();
+                                    focus = Focus::Main;
                                     ERROR_LOG.log(format!(
                                         "[ratatui-client] activate session: {}",
                                         session.id
