@@ -1150,7 +1150,7 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
 
 fn spawn_ratatui_authority_listener(
     mut host_stream: UnixStream,
-    listener_stream: UnixStream,
+    _listener_stream: UnixStream,
     node_id: String,
     bridge_session_id: Arc<RwLock<String>>,
     output_route: SessionSyncAuthorityOutputRoute,
@@ -1160,8 +1160,8 @@ fn spawn_ratatui_authority_listener(
 ) {
     thread::spawn(move || {
         // The ratatui authority host is backed by an internal UnixStream::pair.
-        // There is no external viewer connecting to this pair, so the listener
-        // must immediately publish the writer and start forwarding PTY output.
+        // The listener owns one end of the pair and uses it for both writing
+        // viewer commands and reading PTY output from the target host.
         {
             let mut writer_guard = match writer.lock() {
                 Ok(guard) => guard,
@@ -1189,10 +1189,10 @@ fn spawn_ratatui_authority_listener(
         }
         writer_ready.notify_all();
 
-        let _ = listener_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
+        let _ = host_stream.set_read_timeout(Some(AUTHORITY_TRANSPORT_SOCKET_TIMEOUT));
 
         let result = forward_ratatui_host_output(
-            listener_stream,
+            host_stream,
             node_id,
             bridge_session_id,
             output_route,
@@ -1211,7 +1211,7 @@ fn spawn_ratatui_authority_listener(
 
 fn spawn_ratatui_authority_target_host(
     mut listener_stream: UnixStream,
-    mut host_stream: UnixStream,
+    _host_stream: UnixStream,
     session: Arc<crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession>,
     target_id: String,
     node_id: String,
@@ -1219,9 +1219,9 @@ fn spawn_ratatui_authority_target_host(
 ) {
     thread::spawn(move || {
         let session_id = session.session_id.clone();
-        // The authority listener handles the external viewer handshake on
-        // host_stream. The target host only needs to read viewer commands from
-        // host_stream and write PTY output to listener_stream for forwarding.
+        // The target host owns the other end of the UnixStream::pair. It reads
+        // viewer commands from this end and writes PTY output back to the same
+        // end; the listener receives the output on the paired end.
 
         let mirror_active = Arc::new(AtomicBool::new(false));
         let mut output_stream = listener_stream
@@ -1268,7 +1268,7 @@ fn spawn_ratatui_authority_target_host(
 
         let mut _input_seq: u64 = 1;
         while running.load(Ordering::Relaxed) {
-            match read_authority_transport_frame(&mut host_stream) {
+            match read_authority_transport_frame(&mut listener_stream) {
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
                     ControlPlanePayload::OpenMirrorRequest(payload) => {
                         session.resize(payload.cols as u16, payload.rows as u16);
