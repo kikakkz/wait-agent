@@ -1,5 +1,5 @@
 use crate::cli::RemoteNetworkConfig;
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability};
+use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::tmux::RemoteTargetPublicationBinding;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_node::SharedState;
@@ -123,16 +123,20 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         let Some((authority_id, transport_session_id)) = target.split_once(':') else {
             return Ok(());
         };
-        let mut guard = self.shared.sessions.lock().unwrap();
-        for session in guard.values_mut() {
-            if session.address.authority_id() == authority_id
-                && session.address.session_id() == transport_session_id
-            {
-                session.availability = SessionAvailability::Exited;
-            }
+        let exited_session_id = {
+            let guard = self.shared.sessions.lock().unwrap();
+            guard
+                .iter()
+                .find(|(_, session)| {
+                    session.address.authority_id() == authority_id
+                        && session.address.session_id() == transport_session_id
+                })
+                .map(|(session_id, _)| session_id.clone())
+        };
+        if let Some(session_id) = exited_session_id {
+            self.shared.handle_session_exit(&session_id);
         }
-        drop(guard);
-        self.shared.broadcast_snapshot()
+        Ok(())
     }
 
     fn signal_remote_target_exited_to_workspace(

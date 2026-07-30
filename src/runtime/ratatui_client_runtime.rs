@@ -276,7 +276,10 @@ fn run_event_loop(
                     status_message = Some((text, Instant::now()));
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // Server has shut down; the TUI has nothing left to render.
+                    return Ok(());
+                }
             }
         }
 

@@ -1,6 +1,7 @@
 use crate::cli::{RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+    SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
@@ -16,7 +17,7 @@ use crate::runtime::remote_publication::ratatui_target_publication_backend::Rata
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -93,12 +94,10 @@ impl SharedState {
                     ERROR_LOG.log(format!(
                             "[ratatui-local-session] child exited session={session_id} status={status:?}"
                         ));
-                    shared.mark_local_session_exited(&session_id);
-                    let _ = shared.broadcast_snapshot();
+                    shared.handle_session_exit(&session_id);
                 }
                 LocalSessionEvent::Exit { session_id } => {
-                    shared.mark_local_session_exited(&session_id);
-                    let _ = shared.broadcast_snapshot();
+                    shared.handle_session_exit(&session_id);
                 }
                 LocalSessionEvent::Title { session_id, title } => {
                     shared.set_local_session_title(&session_id, title);
@@ -124,18 +123,69 @@ impl SharedState {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
 
-    /// Mark a local session as exited in the session catalog.
-    pub(crate) fn mark_local_session_exited(&self, session_id: &str) {
-        let mut guard = self.sessions.lock().unwrap();
-        if let Some(record) = guard.get_mut(session_id) {
-            record.availability = SessionAvailability::Exited;
-            record.task_state = ManagedSessionTaskState::Unknown;
-        }
-        drop(guard);
+    /// Mark a session as exited, remove its runtime, switch to the next
+    /// available session, and shut down the server when the last session exits.
+    pub(crate) fn handle_session_exit(&self, session_id: &str) {
+        let (was_local, qualified_target) = {
+            let mut guard = self.sessions.lock().unwrap();
+            let record = guard.remove(session_id);
+            let was_local = record
+                .as_ref()
+                .map(|r| r.address.transport() == &SessionTransport::LocalTmux)
+                .unwrap_or(false);
+            let qualified_target = record.as_ref().map(|r| r.address.qualified_target());
+            drop(guard);
 
-        let mut local_guard = self.local_sessions.lock().unwrap();
-        local_guard.remove(session_id);
-        drop(local_guard);
+            if was_local {
+                let mut local_guard = self.local_sessions.lock().unwrap();
+                local_guard.remove(session_id);
+                drop(local_guard);
+            } else {
+                let mut remote_guard = self.remote_sessions.lock().unwrap();
+                if let Some(target) = qualified_target.as_deref() {
+                    remote_guard.remove(target);
+                }
+                drop(remote_guard);
+            }
+
+            (was_local, qualified_target)
+        };
+
+        let remaining: Vec<String> = {
+            let guard = self.sessions.lock().unwrap();
+            guard
+                .values()
+                .filter(|r| r.availability == SessionAvailability::Online)
+                .map(|r| r.address.qualified_target())
+                .collect()
+        };
+
+        if remaining.is_empty() {
+            // Only the local TUI server shuts down when its last session exits.
+            // Remote peer nodes stay alive so they can publish the exit event
+            // back to the authority and accept new sessions later.
+            if was_local && self.network.connect.is_none() {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] last local session {session_id} exited; shutting down"
+                ));
+                self.shutdown
+                    .store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+            }
+            *self.active_target.lock().unwrap() = None;
+        } else {
+            // Pick the next session. Prefer one that is not the just-exited
+            // session, falling back to the first remaining session.
+            let next = remaining
+                .iter()
+                .find(|t| Some(t.as_str()) != qualified_target.as_deref())
+                .or(remaining.first())
+                .cloned()
+                .unwrap_or_default();
+            *self.active_target.lock().unwrap() = Some(next);
+        }
+
+        let _ = self.broadcast_snapshot();
     }
 
     /// Update the displayed command name from the terminal title.
