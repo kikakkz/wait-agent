@@ -213,6 +213,7 @@ fn run_event_loop(
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
     let mut selected_index = 0usize;
+    let mut last_active_target: Option<String> = None;
     let mut status_message: Option<(String, Instant)> = None;
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 
@@ -248,6 +249,19 @@ fn run_event_loop(
                     snapshot = new_snapshot;
                     if selected_index >= snapshot.sessions.len() && !snapshot.sessions.is_empty() {
                         selected_index = snapshot.sessions.len() - 1;
+                    }
+                    // When the server changes the active target (e.g. after a
+                    // remote host connects), move the selection marker to that
+                    // row so the sidebar stays consistent with the main pane.
+                    if snapshot.active_target != last_active_target {
+                        last_active_target = snapshot.active_target.clone();
+                        if let Some(target) = snapshot.active_target.as_deref() {
+                            if let Some(idx) =
+                                snapshot.sessions.iter().position(|s| s.id == target)
+                            {
+                                selected_index = idx;
+                            }
+                        }
                     }
                 }
                 Ok(ServerMessage::Response(response)) => {
@@ -645,7 +659,7 @@ fn render_session_row(
     );
 
     Line::from(vec![
-        Span::styled(format!("{}{} ", marker, label), base_style),
+        Span::styled(format!("{} {}", marker, label), base_style),
         Span::styled(
             badge.to_string(),
             badge_style(&session.task_state).patch(base_style),
