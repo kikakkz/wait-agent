@@ -942,6 +942,9 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
             )
         })? = Some(target);
         let _ = self.shared.broadcast_snapshot();
+        self.shared.notify_local_catalog_changed(
+            super::LocalCatalogChangeReason::LocalRuntimeChanged,
+        );
         Ok(CreatedLocalTarget {
             session_id: id,
             target_id,

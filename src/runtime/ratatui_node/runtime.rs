@@ -10,8 +10,9 @@ use crate::runtime::remote_node::remote_node_ingress_server_runtime::{
     RemoteNodeIngressServerRuntime,
 };
 use crate::runtime::remote_node::remote_node_session_sync_runtime::{
-    RatatuiLocalAuthorityHostBackend, RatatuiLocalSessionCatalog, RatatuiLocalTargetExitObserver,
-    RatatuiLocalTargetFactory, RemoteNodeSessionSyncRuntime,
+    LocalCatalogChangeReason, LocalCatalogChangeRequest, RatatuiLocalAuthorityHostBackend,
+    RatatuiLocalSessionCatalog, RatatuiLocalTargetExitObserver, RatatuiLocalTargetFactory,
+    RemoteNodeSessionSyncRuntime,
 };
 use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -21,7 +22,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
@@ -54,6 +55,7 @@ pub(crate) struct SharedState {
     pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
     pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
     event_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
+    local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
 }
 
 impl SharedState {
@@ -72,6 +74,7 @@ impl SharedState {
             authority_host_sessions: Mutex::new(HashMap::new()),
             remote_sessions: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(event_tx),
+            local_catalog_tx: Mutex::new(None),
         });
 
         // Dedicated worker that applies local-session events to shared state.
@@ -119,6 +122,24 @@ impl SharedState {
         self.event_tx.lock().unwrap().clone()
     }
 
+    pub(crate) fn set_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
+        if let Ok(mut guard) = self.local_catalog_tx.lock() {
+            *guard = Some(tx);
+        }
+    }
+
+    pub(crate) fn notify_local_catalog_changed(&self, reason: LocalCatalogChangeReason) {
+        if let Ok(guard) = self.local_catalog_tx.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let request = LocalCatalogChangeRequest {
+                    reason,
+                    ack_tx: None,
+                };
+                let _ = tx.send(request);
+            }
+        }
+    }
+
     pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
@@ -146,6 +167,11 @@ impl SharedState {
                     remote_guard.remove(target);
                 }
                 drop(remote_guard);
+            }
+
+            {
+                let mut host_guard = self.authority_host_sessions.lock().unwrap();
+                host_guard.remove(session_id);
             }
 
             (was_local, qualified_target)
@@ -186,6 +212,9 @@ impl SharedState {
         }
 
         let _ = self.broadcast_snapshot();
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalTargetExited {
+            target_session_name: session_id.to_string(),
+        });
     }
 
     /// Update the displayed command name from the terminal title.
@@ -248,6 +277,7 @@ impl SharedState {
 
         *self.active_target.lock().unwrap() = Some(target.clone());
         self.send_local_session_event(LocalSessionEvent::Wakeup);
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
         Ok(target)
     }
 
@@ -426,7 +456,8 @@ impl RatatuiNodeRuntime {
                 Some(publication_runtime),
                 sync_network,
             );
-            let (_catalog_tx, catalog_rx) = std::sync::mpsc::channel();
+            let (catalog_tx, catalog_rx) = std::sync::mpsc::channel();
+            self.shared.set_local_catalog_tx(catalog_tx);
             match sync_runtime.start_with_local_catalog_changes(catalog_rx) {
                 Ok(guard) => Some(guard),
                 Err(error) => {
@@ -439,6 +470,30 @@ impl RatatuiNodeRuntime {
         } else {
             None
         };
+
+        // Watch authority-host sessions (remote peers hosted by this node) and
+        // clean them up when their PTY shell exits. This publishes TargetExited
+        // to the authority so viewing nodes remove the session from their sidebar.
+        let shared = self.shared.clone();
+        std::thread::spawn(move || loop {
+            if shared.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let exited: Vec<String> = {
+                let guard = shared.authority_host_sessions.lock().unwrap();
+                guard
+                    .iter()
+                    .filter_map(|(id, session)| session.try_recv_exit().map(|_| id.clone()))
+                    .collect()
+            };
+            for id in exited {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] authority host session {id} exited"
+                ));
+                shared.handle_session_exit(&id);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        });
 
         // Start the remote node ingress server inside the server process so
         // peers can connect in and request local target sessions.
