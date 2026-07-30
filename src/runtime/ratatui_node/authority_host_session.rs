@@ -85,6 +85,8 @@ impl RatatuiAuthorityHostSession {
         );
         cmd.stdout(slave);
 
+        // SAFETY: pre_exec runs in the child process between fork and exec.
+        // We only use async-signal-safe libc calls (setsid, ioctl, close).
         unsafe {
             cmd.pre_exec(move || {
                 let _ = libc::setsid();
@@ -145,6 +147,7 @@ impl RatatuiAuthorityHostSession {
 
 fn set_nonblocking(file: &mut File) {
     let fd = file.as_raw_fd();
+    // SAFETY: fcntl on a valid fd returned by std::fs::File is safe.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL, 0);
         if flags >= 0 {

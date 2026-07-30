@@ -223,8 +223,9 @@ fn is_local_session(shared: &SharedState, session_id: &str) -> bool {
 }
 
 fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
-    let active = shared.active_target.lock().unwrap().clone()?;
+    // Lock order: sessions -> active_target -> authority_host_sessions.
     let guard = shared.sessions.lock().unwrap();
+    let active = shared.active_target.lock().unwrap().clone()?;
     let record = guard
         .values()
         .find(|r| r.address.qualified_target() == active)?;

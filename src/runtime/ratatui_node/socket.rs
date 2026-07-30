@@ -18,11 +18,9 @@ pub fn ratatui_socket_path(port: u16) -> PathBuf {
 }
 
 fn effective_uid() -> u32 {
-    unsafe { geteuid() }
-}
-
-extern "C" {
-    fn geteuid() -> u32;
+    // SAFETY: geteuid has no arguments and is always safe to call; it returns
+    // the real user ID of the calling process.
+    unsafe { libc::geteuid() }
 }
 
 /// Returns true if a ratatui node server appears to be listening on the port.

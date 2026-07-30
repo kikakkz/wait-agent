@@ -76,14 +76,17 @@ pub(crate) fn handle_control_command(
         let mut parts = args.split_whitespace();
         let cols: u16 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(80);
         let rows: u16 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(24);
-        let active = shared.active_target.lock().unwrap().clone();
-        let transport = active.as_deref().and_then(|target| {
+        // Lock order: sessions -> active_target.
+        let transport = {
             let guard = shared.sessions.lock().unwrap();
-            guard
-                .values()
-                .find(|s| s.address.qualified_target() == target)
-                .map(|s| s.address.transport().clone())
-        });
+            let active = shared.active_target.lock().unwrap().clone();
+            active.and_then(|target| {
+                guard
+                    .values()
+                    .find(|s| s.address.qualified_target() == target)
+                    .map(|s| s.address.transport().clone())
+            })
+        };
         match transport {
             Some(SessionTransport::RemotePeer) => {
                 shared.resize_active_remote_session(cols, rows);

@@ -108,6 +108,8 @@ fn run_io_loop(
             io::Error::new(io::ErrorKind::Other, error),
         ));
     }
+    // SAFETY: sig_read outlives the poller; it is owned by this loop and
+    // unregistered only on loop exit.
     unsafe {
         poller
             .add_with_mode(
@@ -204,6 +206,8 @@ fn drain_requests(
                 set_nonblocking(&mut pty_master);
                 let token = *next_token;
                 *next_token += 1;
+                // SAFETY: pty_master is owned by this loop (stored in `sessions`)
+                // and lives until UnregisterSession is processed.
                 unsafe {
                     poller
                         .add_with_mode(
@@ -372,6 +376,8 @@ fn resize_pty(pty_master: &File, cols: u16, rows: u16) {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: ioctl on a valid PTY master fd with TIOCSWINSZ is the standard
+    // way to resize a pseudo-terminal.
     unsafe {
         let _ = libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
     }
@@ -379,6 +385,7 @@ fn resize_pty(pty_master: &File, cols: u16, rows: u16) {
 
 fn set_nonblocking(file: &mut File) {
     let fd = file.as_raw_fd();
+    // SAFETY: fcntl on a valid fd returned by std::fs::File is safe.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL, 0);
         if flags >= 0 {
