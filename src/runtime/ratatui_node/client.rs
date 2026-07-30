@@ -62,7 +62,7 @@ pub(crate) fn handle_client(
     // Register as a TUI client and send the initial snapshot.
     shared.client_count.fetch_add(1, Ordering::SeqCst);
     if let Ok(clone) = stream.try_clone() {
-        let mut guard = clients.lock().unwrap();
+        let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
         guard.push(ClientHandle {
             id: client_id,
             stream: clone,
@@ -99,7 +99,15 @@ pub(crate) fn handle_client(
                 match trimmed {
                     "DETACH" => break,
                     "DETACH_ALL" => {
-                        detach_all_clients(&clients, &shared);
+                        if let Some(response) =
+                            handle_control_command(trimmed, &shared, &mut stream)
+                        {
+                            let _ = writeln!(stream, "{}", response_json(&response));
+                            let _ = stream.flush();
+                            if response_should_broadcast(&response) {
+                                let _ = super::snapshot::broadcast_snapshot(&clients, &shared);
+                            }
+                        }
                         forcibly_detached = true;
                         break;
                     }
@@ -131,23 +139,13 @@ pub(crate) fn handle_client(
     Ok(())
 }
 
-pub(crate) fn detach_all_clients(clients: &Arc<Mutex<Vec<ClientHandle>>>, shared: &SharedState) {
-    ERROR_LOG.log("[ratatui-node] detaching all clients".to_string());
-    let mut guard = clients.lock().unwrap();
-    for handle in guard.drain(..) {
-        handle.removed.store(true, Ordering::SeqCst);
-        let _ = handle.stream.shutdown(std::net::Shutdown::Both);
-    }
-    shared.client_count.store(0, Ordering::SeqCst);
-}
-
 pub(crate) fn remove_client(
     client_id: u64,
     clients: &Arc<Mutex<Vec<ClientHandle>>>,
     shared: &SharedState,
 ) {
     let already_removed = {
-        let mut guard = clients.lock().unwrap();
+        let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = guard.iter().position(|handle| handle.id == client_id) {
             let handle = guard.remove(pos);
             handle.removed.store(true, Ordering::SeqCst);

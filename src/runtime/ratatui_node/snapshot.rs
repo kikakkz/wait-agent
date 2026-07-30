@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 fn is_remote_target(target: &str, shared: &SharedState) -> bool {
-    let guard = shared.sessions.lock().unwrap();
+    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .values()
         .find(|s| s.address.qualified_target() == target)
@@ -202,9 +202,13 @@ pub struct SessionSummary {
 }
 
 pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> RatatuiSnapshot {
-    let guard = shared.sessions.lock().unwrap();
+    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
     let sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
-    let active_target = shared.active_target.lock().unwrap().clone();
+    let active_target = shared
+        .active_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let active_session_id = active_target
         .as_deref()
         .and_then(|target| {
@@ -220,7 +224,10 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         .as_deref()
         .map(|target| {
             if is_remote_target(target, shared) {
-                let remote_guard = shared.remote_sessions.lock().unwrap();
+                let remote_guard = shared
+                    .remote_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 remote_guard
                     .get(target)
                     .map(|s| s.snapshot())
@@ -230,7 +237,10 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                     .split_once(':')
                     .map(|(_, id)| id.to_string())
                     .and_then(|session_id| {
-                        let local_guard = shared.local_sessions.lock().unwrap();
+                        let local_guard = shared
+                            .local_sessions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         local_guard.get(&session_id).map(|s| s.snapshot())
                     })
                     .unwrap_or_else(|| (Vec::new(), None))
@@ -266,7 +276,7 @@ pub(crate) fn broadcast_snapshot(
 ) -> Result<(), LifecycleError> {
     let snapshot = build_snapshot(0, shared);
     let json = snapshot_json(&snapshot);
-    let mut guard = clients.lock().unwrap();
+    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|handle| !handle.removed.load(Ordering::SeqCst));
     for handle in guard.iter() {
         let mut stream = &handle.stream;

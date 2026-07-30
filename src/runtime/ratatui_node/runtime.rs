@@ -91,7 +91,7 @@ impl SharedState {
     pub(crate) fn state_sender(&self) -> mpsc::Sender<StateEvent> {
         self.state_tx
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .cloned()
             .unwrap_or_else(|| {
@@ -116,7 +116,7 @@ impl SharedState {
     ) -> mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest> {
         self.authority_host_io_tx
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .cloned()
             .unwrap_or_else(|| {
@@ -143,6 +143,17 @@ impl SharedState {
         }
     }
 
+    pub(crate) fn detach_all_clients(&self) {
+        use std::net::Shutdown;
+        let mut guard = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        for handle in guard.drain(..) {
+            handle.removed.store(true, Ordering::SeqCst);
+            let _ = handle.stream.shutdown(Shutdown::Both);
+        }
+        drop(guard);
+        self.client_count.store(0, Ordering::SeqCst);
+    }
+
     pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
         super::snapshot::broadcast_snapshot(&self.clients, self)
     }
@@ -151,7 +162,7 @@ impl SharedState {
     /// available session, and shut down the server when the last session exits.
     pub(crate) fn handle_session_exit(&self, session_id: &str) {
         let (was_local, qualified_target) = {
-            let mut guard = self.sessions.lock().unwrap();
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = guard.remove(session_id);
             let was_local = record
                 .as_ref()
@@ -161,11 +172,17 @@ impl SharedState {
             drop(guard);
 
             if was_local {
-                let mut local_guard = self.local_sessions.lock().unwrap();
+                let mut local_guard = self
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 local_guard.remove(session_id);
                 drop(local_guard);
             } else {
-                let mut remote_guard = self.remote_sessions.lock().unwrap();
+                let mut remote_guard = self
+                    .remote_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if let Some(target) = qualified_target.as_deref() {
                     remote_guard.remove(target);
                 }
@@ -173,7 +190,10 @@ impl SharedState {
             }
 
             {
-                let mut host_guard = self.authority_host_sessions.lock().unwrap();
+                let mut host_guard = self
+                    .authority_host_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 host_guard.remove(session_id);
             }
 
@@ -181,7 +201,7 @@ impl SharedState {
         };
 
         let remaining: Vec<String> = {
-            let guard = self.sessions.lock().unwrap();
+            let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard
                 .values()
                 .filter(|r| r.availability == SessionAvailability::Online)
@@ -200,7 +220,7 @@ impl SharedState {
                 self.shutdown.store(true, Ordering::SeqCst);
                 let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
             }
-            *self.active_target.lock().unwrap() = None;
+            *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = None;
         } else {
             // Pick the next session. Prefer one that is not the just-exited
             // session, falling back to the first remaining session.
@@ -210,7 +230,7 @@ impl SharedState {
                 .or(remaining.first())
                 .cloned()
                 .unwrap_or_default();
-            *self.active_target.lock().unwrap() = Some(next);
+            *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
         }
 
         let _ = self.broadcast_snapshot();
@@ -221,7 +241,7 @@ impl SharedState {
 
     /// Update the displayed command name from the terminal title.
     pub(crate) fn set_local_session_title(&self, session_id: &str, title: String) {
-        let mut guard = self.sessions.lock().unwrap();
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(record) = guard.get_mut(session_id) {
             record.display_command_name = Some(title);
         }
@@ -248,12 +268,15 @@ impl SharedState {
         )?;
 
         {
-            let mut local_guard = self.local_sessions.lock().unwrap();
+            let mut local_guard = self
+                .local_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             local_guard.insert(session_id.to_string(), session);
         }
 
         let target = {
-            let mut guard = self.sessions.lock().unwrap();
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux(
                     self.network.port.to_string(),
@@ -277,7 +300,7 @@ impl SharedState {
             target
         };
 
-        *self.active_target.lock().unwrap() = Some(target.clone());
+        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
         Ok(target)
     }
@@ -293,7 +316,7 @@ impl SharedState {
         rows: u16,
     ) -> Result<(String, RatatuiAuthorityHostSession, String), LifecycleError> {
         let id = {
-            let guard = self.sessions.lock().unwrap();
+            let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             format!("{}", guard.len() + 1)
         };
 
@@ -306,7 +329,7 @@ impl SharedState {
             RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows)?;
 
         let target = {
-            let mut guard = self.sessions.lock().unwrap();
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = ManagedSessionRecord {
                 address: ManagedSessionAddress::local_tmux(self.network.port.to_string(), &id),
                 selector: None,
@@ -327,7 +350,7 @@ impl SharedState {
             target
         };
 
-        *self.active_target.lock().unwrap() = Some(target.clone());
+        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
 
         // The caller (StateEventLoop) is responsible for registering the PTY
         // master fd with `AuthorityHostIoLoop` and then inserting the session
@@ -337,12 +360,19 @@ impl SharedState {
 
     /// Resize the active local session, if any.
     pub(crate) fn resize_active_local_session(&self, cols: u16, rows: u16) {
-        let active = self.active_target.lock().unwrap().clone();
+        let active = self
+            .active_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let session_id = active
             .as_deref()
             .and_then(|target| target.split_once(':').map(|(_, id)| id.to_string()));
         if let Some(id) = session_id {
-            let guard = self.local_sessions.lock().unwrap();
+            let guard = self
+                .local_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(session) = guard.get(&id) {
                 session.resize(cols, rows);
             }
@@ -350,8 +380,11 @@ impl SharedState {
     }
 
     /// Forward input bytes to a specific local session.
-    pub(crate) fn feed_local_session_input(&self, session_id: &str, bytes: Vec<u8>) {
-        let guard = self.local_sessions.lock().unwrap();
+    pub(crate) fn feed_local_session_input(&self, session_id: &str, bytes: impl Into<Vec<u8>>) {
+        let guard = self
+            .local_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(session) = guard.get(session_id) {
             session.feed_input(bytes);
         }
@@ -369,7 +402,10 @@ impl SharedState {
     ) -> Result<String, LifecycleError> {
         let target_id = record.address.qualified_target();
         {
-            let guard = self.remote_sessions.lock().unwrap();
+            let guard = self
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(session) = guard.get(&target_id) {
                 session.send_open_mirror(80, 24);
                 return Ok(target_id);
@@ -379,19 +415,29 @@ impl SharedState {
             RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network, self)?;
         session.send_open_mirror(80, 24);
         {
-            let mut guard = self.remote_sessions.lock().unwrap();
+            let mut guard = self
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             guard.insert(target_id.clone(), session);
         }
         Ok(target_id)
     }
 
     /// Forward input bytes to the active remote session, if any.
-    pub(crate) fn feed_active_remote_session_input(&self, bytes: Vec<u8>) {
-        let active = self.active_target.lock().unwrap().clone();
+    pub(crate) fn feed_active_remote_session_input(&self, bytes: impl Into<Vec<u8>>) {
+        let active = self
+            .active_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let Some(target) = active else {
             return;
         };
-        let guard = self.remote_sessions.lock().unwrap();
+        let guard = self
+            .remote_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(session) = guard.get(&target) {
             session.feed_input(bytes);
         }
@@ -399,11 +445,18 @@ impl SharedState {
 
     /// Resize the active remote session, if any.
     pub(crate) fn resize_active_remote_session(&self, cols: u16, rows: u16) {
-        let active = self.active_target.lock().unwrap().clone();
+        let active = self
+            .active_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let Some(target) = active else {
             return;
         };
-        let guard = self.remote_sessions.lock().unwrap();
+        let guard = self
+            .remote_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(session) = guard.get(&target) {
             session.resize(cols, rows);
             session.resize_local_screen(cols, rows);

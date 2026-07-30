@@ -28,11 +28,29 @@ pub(crate) enum StateEvent {
     /// Keyboard input received from a client for a specific session.
     ClientInput { session_id: String, bytes: Vec<u8> },
     /// A client asked to activate a different session target.
-    ClientActivatedTarget { target_id: String },
+    ClientActivatedTarget {
+        target_id: String,
+        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    },
     /// A client reported a new terminal size.
     ClientResized { cols: u16, rows: u16 },
     /// A client asked to create a new local PTY session.
-    ClientCreateLocalSession,
+    ClientCreateLocalSession {
+        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    },
+    /// A client asked to stop the server.
+    ClientStop {
+        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    },
+    /// A client asked to connect to a saved remote host profile.
+    ClientConnectRemoteHost {
+        profile_name: String,
+        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    },
+    /// A client asked to detach all attached TUI clients.
+    ClientDetachAll {
+        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    },
     /// Session sync runtime asked this node to host a new authority-target
     /// session for a remote viewer.
     CreateAuthorityHostSession {
@@ -46,6 +64,16 @@ pub(crate) enum StateEvent {
     /// A remote session viewer closed, so the mirrored remote target should be
     /// removed from the local catalog.
     RemoteSessionClosed { target_id: String },
+}
+
+/// Reply returned by `StateEventLoop` for one-shot control commands that mutate
+/// `SharedState`.  Kept in this module so `state_event.rs` does not depend on
+/// `snapshot.rs`.
+#[derive(Debug, Clone)]
+pub(crate) enum CommandOutcome {
+    Ok,
+    Message(String),
+    Error(String),
 }
 
 /// Minimal reply payload returned by `StateEventLoop` when it creates an

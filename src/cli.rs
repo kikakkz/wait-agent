@@ -846,12 +846,9 @@ fn parse_global_network_config(
 }
 
 fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerCommand, CliError> {
-    for arg in args {
+    if let Some(arg) = args.into_iter().next() {
         if arg == "--help" || arg == "-h" {
             return Ok(RatatuiNodeServerCommand);
-        }
-        if arg.starts_with("--") {
-            return Err(CliError::UnexpectedArgument(arg));
         }
         return Err(CliError::UnexpectedArgument(arg));
     }
@@ -860,12 +857,9 @@ fn parse_ratatui_node_server(args: Vec<String>) -> Result<RatatuiNodeServerComma
 }
 
 fn parse_ratatui_client(args: Vec<String>) -> Result<RatatuiClientCommand, CliError> {
-    for arg in args {
+    if let Some(arg) = args.into_iter().next() {
         if arg == "--help" || arg == "-h" {
             return Ok(RatatuiClientCommand);
-        }
-        if arg.starts_with("--") {
-            return Err(CliError::UnexpectedArgument(arg));
         }
         return Err(CliError::UnexpectedArgument(arg));
     }

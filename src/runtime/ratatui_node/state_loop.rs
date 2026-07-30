@@ -1,11 +1,13 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::authority_host_io_loop::{AuthorityHostIoLoop, AuthorityHostIoRequest};
 use super::runtime::SharedState;
-use super::state_event::{CreatedAuthorityHostTarget, StateEvent};
+use super::state_event::{CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
+use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
+use crate::runtime::ratatui_remote_connect::connect_remote_host;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest,
 };
@@ -106,9 +108,15 @@ fn run_state_event_loop(
                 }
             }
 
-            StateEvent::ClientActivatedTarget { target_id } => {
-                *shared.active_target.lock().unwrap() = Some(target_id);
-                let _ = shared.broadcast_snapshot();
+            StateEvent::ClientActivatedTarget {
+                target_id,
+                reply_tx,
+            } => {
+                let outcome = activate_target(&shared, &target_id);
+                let _ = reply_tx.send(outcome.clone());
+                if matches!(outcome, CommandOutcome::Ok) {
+                    let _ = shared.broadcast_snapshot();
+                }
             }
 
             StateEvent::ClientResized { cols, rows } => {
@@ -122,16 +130,45 @@ fn run_state_event_loop(
                 }
             }
 
-            StateEvent::ClientCreateLocalSession => {
+            StateEvent::ClientCreateLocalSession { reply_tx } => {
                 let id = {
-                    let guard = shared.sessions.lock().unwrap();
+                    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
                     format!("{}", guard.len() + 1)
                 };
-                let _ = shared.create_local_session(&id, 80, 24);
-                let _ = catalog_tx.send(LocalCatalogChangeRequest {
-                    reason: LocalCatalogChangeReason::LocalRuntimeChanged,
-                    ack_tx: None,
-                });
+                let outcome = match shared.create_local_session(&id, 80, 24) {
+                    Ok(target) => {
+                        CommandOutcome::Message(format!("created local session {target}"))
+                    }
+                    Err(error) => CommandOutcome::Error(error.to_string()),
+                };
+                let _ = reply_tx.send(outcome);
+                let _ = shared.broadcast_snapshot();
+            }
+
+            StateEvent::ClientStop { reply_tx } => {
+                shared
+                    .shutdown
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = std::os::unix::net::UnixStream::connect(
+                    super::socket::ratatui_socket_path(shared.network.port),
+                );
+                let _ = reply_tx.send(CommandOutcome::Message("stopping".to_string()));
+            }
+
+            StateEvent::ClientConnectRemoteHost {
+                profile_name,
+                reply_tx,
+            } => {
+                let outcome = connect_remote_host_target(&shared, &profile_name);
+                let _ = reply_tx.send(outcome.clone());
+                if matches!(outcome, CommandOutcome::Message(_)) {
+                    let _ = shared.broadcast_snapshot();
+                }
+            }
+
+            StateEvent::ClientDetachAll { reply_tx } => {
+                shared.detach_all_clients();
+                let _ = reply_tx.send(CommandOutcome::Ok);
                 let _ = shared.broadcast_snapshot();
             }
 
@@ -163,7 +200,7 @@ fn run_state_event_loop(
 
             StateEvent::RemoteSessionClosed { target_id } => {
                 let session_id = {
-                    let guard = shared.sessions.lock().unwrap();
+                    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
                     guard
                         .iter()
                         .find(|(_, session)| session.address.qualified_target() == target_id)
@@ -202,7 +239,10 @@ fn create_authority_host_session(
         output_tx: None,
     });
     {
-        let mut host_guard = shared.authority_host_sessions.lock().unwrap();
+        let mut host_guard = shared
+            .authority_host_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         host_guard.insert(session_id.clone(), Arc::new(session));
     }
     Ok(CreatedAuthorityHostTarget {
@@ -212,7 +252,7 @@ fn create_authority_host_session(
 }
 
 fn is_local_session(shared: &SharedState, session_id: &str) -> bool {
-    let guard = shared.sessions.lock().unwrap();
+    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .get(session_id)
         .map(|record| {
@@ -224,8 +264,12 @@ fn is_local_session(shared: &SharedState, session_id: &str) -> bool {
 
 fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
     // Lock order: sessions -> active_target -> authority_host_sessions.
-    let guard = shared.sessions.lock().unwrap();
-    let active = shared.active_target.lock().unwrap().clone()?;
+    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let active = shared
+        .active_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
     let record = guard
         .values()
         .find(|r| r.address.qualified_target() == active)?;
@@ -233,11 +277,62 @@ fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
     let is_host = shared
         .authority_host_sessions
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .contains_key(&session_id);
     if is_host {
         Some(session_id)
     } else {
         None
+    }
+}
+
+fn activate_target(shared: &Arc<SharedState>, target_id: &str) -> CommandOutcome {
+    let record = {
+        let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .values()
+            .find(|s| s.address.qualified_target() == target_id)
+            .cloned()
+    };
+    if let Some(record) = record {
+        if *record.address.transport() == SessionTransport::RemotePeer {
+            if let Err(error) = shared.ensure_remote_session(&record) {
+                return CommandOutcome::Error(error.to_string());
+            }
+        }
+        *shared
+            .active_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(target_id.to_string());
+        CommandOutcome::Ok
+    } else {
+        CommandOutcome::Error("unknown target".to_string())
+    }
+}
+
+fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> CommandOutcome {
+    let sessions_vec: Vec<ManagedSessionRecord> = {
+        let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.values().cloned().collect()
+    };
+    let sessions_arc = Arc::new(Mutex::new(sessions_vec));
+    match connect_remote_host(profile_name, &sessions_arc, &shared.network) {
+        Ok(record) => {
+            let target = record.address.qualified_target();
+            {
+                let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                guard.retain(|_, session| session.address.id() != record.address.id());
+                guard.insert(record.address.session_id().to_string(), record.clone());
+            }
+            if let Err(error) = shared.ensure_remote_session(&record) {
+                return CommandOutcome::Error(error.to_string());
+            }
+            *shared
+                .active_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+            CommandOutcome::Message(format!("connected {target}"))
+        }
+        Err(error) => CommandOutcome::Error(error.to_string()),
     }
 }

@@ -118,10 +118,14 @@ impl RatatuiAuthorityHostSession {
     }
 
     /// Send bytes to the PTY as if typed by the user.
-    pub fn feed_input(&self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>, bytes: Vec<u8>) {
+    pub fn feed_input(
+        &self,
+        io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+        bytes: impl Into<Vec<u8>>,
+    ) {
         let _ = io_tx.send(AuthorityHostIoRequest::WriteInput {
             session_id: self.session_id.clone(),
-            bytes,
+            bytes: bytes.into(),
         });
     }
 

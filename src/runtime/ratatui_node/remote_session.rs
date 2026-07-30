@@ -19,7 +19,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -35,7 +35,6 @@ pub struct RatatuiRemoteSession {
     pub authority_node_id: String,
     observer: Mutex<RemoteObserverRuntime>,
     writer: Mutex<Option<UnixStream>>,
-    socket_path: PathBuf,
     running: Arc<AtomicBool>,
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
@@ -88,7 +87,6 @@ impl RatatuiRemoteSession {
             authority_node_id: authority_node_id.clone(),
             observer: Mutex::new(observer),
             writer: Mutex::new(None),
-            socket_path,
             running: Arc::new(AtomicBool::new(true)),
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
@@ -112,12 +110,12 @@ impl RatatuiRemoteSession {
     /// flushed automatically when the bridge is ready.
     pub fn send_open_mirror(&self, cols: u16, rows: u16) {
         {
-            let mut initial_cols = self.initial_cols.lock().unwrap();
-            let mut initial_rows = self.initial_rows.lock().unwrap();
+            let mut initial_cols = self.initial_cols.lock().unwrap_or_else(|e| e.into_inner());
+            let mut initial_rows = self.initial_rows.lock().unwrap_or_else(|e| e.into_inner());
             *initial_cols = cols;
             *initial_rows = rows;
         }
-        let mut guard = self.writer.lock().unwrap();
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
             return;
         };
@@ -153,8 +151,8 @@ impl RatatuiRemoteSession {
     /// Flush a pending OpenMirrorRequest using the last stored size.
     fn flush_open_mirror(&self) {
         let (cols, rows) = {
-            let cols = *self.initial_cols.lock().unwrap();
-            let rows = *self.initial_rows.lock().unwrap();
+            let cols = *self.initial_cols.lock().unwrap_or_else(|e| e.into_inner());
+            let rows = *self.initial_rows.lock().unwrap_or_else(|e| e.into_inner());
             (cols, rows)
         };
         self.send_open_mirror(cols, rows);
@@ -163,9 +161,10 @@ impl RatatuiRemoteSession {
     /// Forward keyboard input to the remote session and echo it locally so the
     /// typed character appears immediately, even when the remote peer uses a
     /// line-buffered discipline that does not echo until Enter is pressed.
-    pub fn feed_input(&self, bytes: Vec<u8>) {
+    pub fn feed_input(&self, bytes: impl Into<Vec<u8>>) {
+        let bytes = bytes.into();
         let seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self.writer.lock().unwrap();
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
             return;
         };
@@ -186,7 +185,7 @@ impl RatatuiRemoteSession {
         // Render the typed bytes on the local screen immediately. The remote
         // PTY will overwrite this with its own state once it responds.
         {
-            let mut observer = self.observer.lock().unwrap();
+            let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
             observer.feed_local_echo(&bytes);
         }
         let _ = self.shared.broadcast_snapshot();
@@ -194,7 +193,7 @@ impl RatatuiRemoteSession {
 
     /// Forward a terminal resize to the remote session.
     pub fn resize(&self, cols: u16, rows: u16) {
-        let mut guard = self.writer.lock().unwrap();
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
             return;
         };
@@ -228,7 +227,7 @@ impl RatatuiRemoteSession {
 
     /// Snapshot the rendered screen as plain text lines and the cursor position.
     pub fn snapshot(&self) -> (Vec<String>, Option<(u16, u16)>) {
-        let mut observer = self.observer.lock().unwrap();
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = observer.sync();
         let snap = observer.snapshot();
         let screen = snap.active_screen();
@@ -243,22 +242,13 @@ impl RatatuiRemoteSession {
 
     /// Resize the modeled screen without sending anything to the remote peer.
     pub fn resize_local_screen(&self, cols: u16, rows: u16) {
-        let mut observer = self.observer.lock().unwrap();
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
         observer.resize_terminal(crate::terminal::TerminalSize {
             cols,
             rows,
             pixel_width: 0,
             pixel_height: 0,
         });
-    }
-
-    pub fn shutdown(&self) {
-        self.running.store(false, Ordering::Relaxed);
-        let mut guard = self.writer.lock().unwrap();
-        if let Some(writer) = guard.take() {
-            let _ = writer.shutdown(Shutdown::Both);
-        }
-        let _ = fs::remove_file(&self.socket_path);
     }
 }
 
@@ -322,12 +312,18 @@ fn handle_authority_transport_stream(
     }
 
     {
-        let mut writer_guard = session.writer.lock().unwrap();
-        *writer_guard = Some(
-            stream
-                .try_clone()
-                .expect("failed to clone authority stream"),
-        );
+        let cloned = match stream.try_clone() {
+            Ok(cloned) => cloned,
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] failed to clone authority stream for {target_id}: {error}"
+                ));
+                session.running.store(false, Ordering::Relaxed);
+                return;
+            }
+        };
+        let mut writer_guard = session.writer.lock().unwrap_or_else(|e| e.into_inner());
+        *writer_guard = Some(cloned);
     }
     session.flush_open_mirror();
     ERROR_LOG.log(format!(
@@ -341,7 +337,7 @@ fn handle_authority_transport_stream(
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                 output_seq = output_seq.max(payload.output_seq);
                 {
-                    let mut observer = session.observer.lock().unwrap();
+                    let mut observer = session.observer.lock().unwrap_or_else(|e| e.into_inner());
                     observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                 }
                 let _ = session.shared.broadcast_snapshot();
@@ -361,7 +357,8 @@ fn handle_authority_transport_stream(
                 ControlPlanePayload::RawPtyOutput(payload) => {
                     output_seq = output_seq.max(payload.output_seq);
                     {
-                        let mut observer = session.observer.lock().unwrap();
+                        let mut observer =
+                            session.observer.lock().unwrap_or_else(|e| e.into_inner());
                         observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                     }
                     let _ = session.shared.broadcast_snapshot();
@@ -369,7 +366,7 @@ fn handle_authority_transport_stream(
                 _ => {}
             },
             Ok(AuthorityTransportFrame::Ping) => {
-                let mut guard = session.writer.lock().unwrap();
+                let mut guard = session.writer.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(writer) = guard.as_mut() {
                     let _ = write_authority_transport_frame(writer, &AuthorityTransportFrame::Pong);
                     let _ = writer.flush();

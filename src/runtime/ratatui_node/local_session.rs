@@ -8,6 +8,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +80,7 @@ impl RatatuiLocalSession {
             })?;
 
         let sender = event_loop.channel();
-        *sender_slot.lock().unwrap() = Some(sender.clone());
+        *sender_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
 
         let _join_handle = event_loop.spawn();
 
@@ -97,28 +98,31 @@ impl RatatuiLocalSession {
     }
 
     /// Send bytes to the PTY as if typed by the user.
-    pub fn feed_input(&self, bytes: Vec<u8>) {
-        if let Some(sender) = self.event_loop_sender.lock().unwrap().as_ref() {
-            let _ = sender.send(Msg::Input(bytes.into()));
+    pub fn feed_input(&self, bytes: impl Into<Vec<u8>>) {
+        if let Some(sender) = self
+            .event_loop_sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(Msg::Input(Cow::Owned(bytes.into())));
         }
     }
 
     /// Resize the PTY and terminal emulator.
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Some(sender) = self.event_loop_sender.lock().unwrap().as_ref() {
+        if let Some(sender) = self
+            .event_loop_sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             let _ = sender.send(Msg::Resize(WindowSize {
                 num_lines: rows,
                 num_cols: cols,
                 cell_width: 1,
                 cell_height: 1,
             }));
-        }
-    }
-
-    /// Request a graceful shutdown of the event loop.
-    pub fn shutdown(&self) {
-        if let Some(sender) = self.event_loop_sender.lock().unwrap().as_ref() {
-            let _ = sender.send(Msg::Shutdown);
         }
     }
 
@@ -207,7 +211,12 @@ impl EventListener for EventProxy {
                     });
             }
             Event::PtyWrite(text) => {
-                if let Some(sender) = self.sender.lock().unwrap().as_ref() {
+                if let Some(sender) = self
+                    .sender
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
                     let _ = sender.send(Msg::Input(text.into_bytes().into()));
                 }
             }
