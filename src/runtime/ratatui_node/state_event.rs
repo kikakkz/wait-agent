@@ -61,6 +61,11 @@ pub(crate) enum StateEvent {
             Result<CreatedAuthorityHostTarget, crate::lifecycle::LifecycleError>,
         >,
     },
+    /// A remote session produced output; the TUI clients should be refreshed.
+    RemoteSessionOutput { target_id: String },
+    /// A remote session rendered a local input echo; the TUI clients should be
+    /// refreshed.
+    RemoteSessionInputEcho { target_id: String },
     /// A remote session viewer closed, so the mirrored remote target should be
     /// removed from the local catalog.
     RemoteSessionClosed { target_id: String },

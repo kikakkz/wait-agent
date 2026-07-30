@@ -198,6 +198,10 @@ fn run_state_event_loop(
                 }
             }
 
+            StateEvent::RemoteSessionOutput { .. } | StateEvent::RemoteSessionInputEcho { .. } => {
+                let _ = shared.broadcast_snapshot();
+            }
+
             StateEvent::RemoteSessionClosed { target_id } => {
                 let session_id = {
                     let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());

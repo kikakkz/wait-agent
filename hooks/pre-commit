@@ -9,5 +9,12 @@ fi
 echo "==> Running cargo fmt --check..."
 cargo fmt --check
 
+echo "==> Running cargo clippy..."
+# TODO: switch to 'cargo clippy -- -D warnings' once all legacy warnings are fixed.
+cargo clippy
+
 echo "==> Running cargo build..."
 cargo build
+
+echo "==> Running ratatui / session_sync tests (release)..."
+cargo test --release ratatui session_sync

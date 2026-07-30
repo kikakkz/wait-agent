@@ -46,6 +46,16 @@ pub struct RatatuiNodeRuntime {
     remote_owner: RemoteRuntimeOwnerRuntime,
 }
 
+/// Lock hierarchy for all `SharedState` fields:
+///
+/// 1. `clients` (outermost, only held during `broadcast_snapshot`)
+/// 2. `sessions`
+/// 3. `active_target`
+/// 4. `local_sessions` / `remote_sessions` / `authority_host_sessions`
+///
+/// `StateEventLoop` is the single writer of `SharedState` and the only loop
+/// that calls `broadcast_snapshot`.  Other threads send events to trigger
+/// snapshot broadcasts instead of calling `broadcast_snapshot` directly.
 pub(crate) struct SharedState {
     pub(crate) network: RemoteNetworkConfig,
     pub(crate) sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
@@ -209,28 +219,32 @@ impl SharedState {
                 .collect()
         };
 
-        if remaining.is_empty() {
-            // Only the local TUI server shuts down when its last session exits.
-            // Remote peer nodes stay alive so they can publish the exit event
-            // back to the authority and accept new sessions later.
-            if was_local && self.network.connect.is_none() {
-                ERROR_LOG.log(format!(
-                    "[ratatui-node] last local session {session_id} exited; shutting down"
-                ));
-                self.shutdown.store(true, Ordering::SeqCst);
-                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+        {
+            let mut active_guard = self.active_target.lock().unwrap_or_else(|e| e.into_inner());
+            if remaining.is_empty() {
+                // Only the local TUI server shuts down when its last session exits.
+                // Remote peer nodes stay alive so they can publish the exit event
+                // back to the authority and accept new sessions later.
+                if was_local && self.network.connect.is_none() {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] last local session {session_id} exited; shutting down"
+                    ));
+                    self.shutdown.store(true, Ordering::SeqCst);
+                    let _ =
+                        UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+                }
+                *active_guard = None;
+            } else {
+                // Pick the next session. Prefer one that is not the just-exited
+                // session, falling back to the first remaining session.
+                let next = remaining
+                    .iter()
+                    .find(|t| Some(t.as_str()) != qualified_target.as_deref())
+                    .or(remaining.first())
+                    .cloned()
+                    .unwrap_or_default();
+                *active_guard = Some(next);
             }
-            *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        } else {
-            // Pick the next session. Prefer one that is not the just-exited
-            // session, falling back to the first remaining session.
-            let next = remaining
-                .iter()
-                .find(|t| Some(t.as_str()) != qualified_target.as_deref())
-                .or(remaining.first())
-                .cloned()
-                .unwrap_or_default();
-            *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
         }
 
         let _ = self.broadcast_snapshot();
@@ -425,20 +439,28 @@ impl SharedState {
     }
 
     /// Forward input bytes to the active remote session, if any.
+    ///
+    /// The `active_target` and `remote_sessions` locks are only held long enough
+    /// to clone the session handle; the actual write happens without them so
+    /// that `RatatuiRemoteSession::feed_input` cannot create a lock-order cycle
+    /// with `broadcast_snapshot`.
     pub(crate) fn feed_active_remote_session_input(&self, bytes: impl Into<Vec<u8>>) {
-        let active = self
-            .active_target
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let Some(target) = active else {
-            return;
+        let session = {
+            let active = self
+                .active_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let Some(target) = active else {
+                return;
+            };
+            let guard = self
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.get(&target).cloned()
         };
-        let guard = self
-            .remote_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = guard.get(&target) {
+        if let Some(session) = session {
             session.feed_input(bytes);
         }
     }

@@ -6,11 +6,24 @@
 - Do not use speculative qualifiers such as “maybe”, “possibly”, “likely”, “probably”, or “might” when explaining root causes or behavior.
 - State what the code does, what the failure is, and what the evidence is. If the root cause is not yet proven, say so explicitly and list the next concrete verification step instead of guessing.
 
+## Design-Time Skill Compliance
+
+Skills are not post-hoc checklists. They must be read **before** writing code and used to shape the design.
+
+- Identify the relevant skills for every change. At minimum:
+  - Concurrency / shared state → [m07-concurrency](.rust-skills/skills/m07-concurrency/SKILL.md) and the "Rust Concurrency and Shared State" section below.
+  - Error handling → [m06-error-handling](.rust-skills/skills/m06-error-handling/SKILL.md).
+  - API / style → [coding-guidelines](.rust-skills/skills/coding-guidelines/SKILL.md).
+- Turn the relevant skill constraints into concrete TodoList items before implementation.
+- Use plan mode for any non-trivial change. The plan must explicitly state how each applicable skill constraint is satisfied.
+- If the change affects concurrency, produce a lock-order table that lists every thread/loop and the order in which it acquires locks.
+
 ## Rust Concurrency and Shared State
 
 When modifying code that uses threads, mutexes, channels, or event loops in this project:
 
 - **`SharedState` has a single writer**. All mutations to `SharedState` must go through `StateEventLoop`. Do not mutate `SharedState` directly from `EventProxy`, client handlers, control commands, or any other thread.
+- **`broadcast_snapshot` has a single caller**. Only `StateEventLoop` may call `broadcast_snapshot`. Other threads/loops that need a UI refresh must send a state event (e.g., `LocalSessionOutput`, `RemoteSessionOutput`, `RemoteSessionInputEcho`) and let `StateEventLoop` broadcast.
 - **Lock order is part of the design**. Before adding or reordering locks, document the lock hierarchy in a code comment and verify that every code path acquires locks in the same order.
 - **Never hold a lock while calling a callback, broadcasting, or doing I/O**. In particular:
   - `clients` lock must not be held while calling `build_snapshot` or `broadcast_snapshot`.

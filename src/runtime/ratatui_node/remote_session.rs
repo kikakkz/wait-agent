@@ -10,6 +10,7 @@ use crate::infra::remote_transport_codec::{
 };
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_node::runtime::SharedState;
+use crate::runtime::ratatui_node::state_event::StateEvent;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
@@ -188,7 +189,12 @@ impl RatatuiRemoteSession {
             let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
             observer.feed_local_echo(&bytes);
         }
-        let _ = self.shared.broadcast_snapshot();
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::RemoteSessionInputEcho {
+                target_id: self.target_id.clone(),
+            });
     }
 
     /// Forward a terminal resize to the remote session.
@@ -340,7 +346,12 @@ fn handle_authority_transport_stream(
                     let mut observer = session.observer.lock().unwrap_or_else(|e| e.into_inner());
                     observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                 }
-                let _ = session.shared.broadcast_snapshot();
+                let _ = session
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::RemoteSessionOutput {
+                        target_id: target_id.to_string(),
+                    });
             }
             Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match &envelope.payload {
                 ControlPlanePayload::OpenMirrorAccepted(_) => {
@@ -361,7 +372,12 @@ fn handle_authority_transport_stream(
                             session.observer.lock().unwrap_or_else(|e| e.into_inner());
                         observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                     }
-                    let _ = session.shared.broadcast_snapshot();
+                    let _ = session
+                        .shared
+                        .state_sender()
+                        .send(StateEvent::RemoteSessionOutput {
+                            target_id: target_id.to_string(),
+                        });
                 }
                 _ => {}
             },
