@@ -23,3 +23,42 @@ When modifying code that uses threads, mutexes, channels, or event loops in this
   - If the change affects lock-free paths, add or run a `loom` model test.
 
 Reference skill: [actionbook/rust-skills m07-concurrency](.rust-skills/skills/m07-concurrency/SKILL.md).
+
+## Rust Project Guidelines
+
+For all Rust code in this project, follow [actionbook/rust-skills](.rust-skills/AGENTS.md) and [coding-guidelines](.rust-skills/skills/coding-guidelines/SKILL.md). The non-negotiable subset is:
+
+### Error Handling
+
+- Use `?` for propagation; do not silently `unwrap()`/`expect()` in library or runtime code.
+- `expect()` is only for invariants that indicate a bug, not for user input or I/O failures.
+- Prefer typed errors with `thiserror` for domain errors; use context chains where useful.
+
+### Unsafe Code
+
+- Every `unsafe` block must have a `// SAFETY:` comment explaining why it is sound.
+- Keep `unsafe` blocks minimal; do not wrap large amounts of safe code in `unsafe`.
+- Unsafe functions must document their safety contract in a `# Safety` section.
+
+### Style and API Design
+
+- Naming: `snake_case` for functions/variables, `CamelCase` for types/traits, `SCREAMING_SNAKE_CASE` for constants.
+- No `get_` prefix on simple getters (`fn name()` not `fn get_name()`).
+- Conversion methods: `as_` for cheap references, `to_` for expensive copies, `into_` for ownership-consuming conversions.
+- Use newtypes (`struct Email(String)`) to enforce domain semantics at the type level.
+- Prefer `&[T]` / `&str` over `&Vec<T>` / `&String` in public APIs.
+- Pre-allocate collections when the size is known (`Vec::with_capacity`, `String::with_capacity`).
+
+### Architecture
+
+- Keep `main.rs` minimal; put logic in `lib.rs` or modules.
+- Organize modules by feature, not by type.
+- Use builders or typestates for complex construction with invariants.
+- Prefer enums over boolean flags for mutually exclusive states.
+- Public APIs must be documented (`///`); modules use `//!`.
+
+### Modern Rust Defaults
+
+- Use `std::sync::OnceLock` / `std::sync::LazyLock` instead of `lazy_static!`.
+- Use the `?` operator instead of `try!()`.
+- Run `cargo fmt --check` and `cargo clippy -- -D warnings` before committing.
