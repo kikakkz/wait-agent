@@ -12,7 +12,6 @@ use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
-use crate::runtime::ratatui_node::local_session::LocalSessionEvent;
 use crate::runtime::ratatui_node::runtime::SharedState;
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
@@ -22,7 +21,6 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -42,7 +40,7 @@ pub struct RatatuiRemoteSession {
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
-    wakeup_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
+    shared: Arc<SharedState>,
 }
 
 impl RatatuiRemoteSession {
@@ -95,7 +93,7 @@ impl RatatuiRemoteSession {
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
-            wakeup_tx: Mutex::new(shared.event_sender()),
+            shared: shared.clone(),
         });
 
         spawn_authority_transport_acceptor(
@@ -191,11 +189,7 @@ impl RatatuiRemoteSession {
             let mut observer = self.observer.lock().unwrap();
             observer.feed_local_echo(&bytes);
         }
-        let _ = self
-            .wakeup_tx
-            .lock()
-            .unwrap()
-            .send(LocalSessionEvent::Wakeup);
+        let _ = self.shared.broadcast_snapshot();
     }
 
     /// Forward a terminal resize to the remote session.
@@ -350,11 +344,7 @@ fn handle_authority_transport_stream(
                     let mut observer = session.observer.lock().unwrap();
                     observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                 }
-                let _ = session
-                    .wakeup_tx
-                    .lock()
-                    .unwrap()
-                    .send(LocalSessionEvent::Wakeup);
+                let _ = session.shared.broadcast_snapshot();
             }
             Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match &envelope.payload {
                 ControlPlanePayload::OpenMirrorAccepted(_) => {
@@ -374,16 +364,7 @@ fn handle_authority_transport_stream(
                         let mut observer = session.observer.lock().unwrap();
                         observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
                     }
-                    let _ = session
-                        .wakeup_tx
-                        .lock()
-                        .unwrap()
-                        .send(LocalSessionEvent::Wakeup);
-                }
-                ControlPlanePayload::RawPtyOutput(payload) => {
-                    output_seq = output_seq.max(payload.output_seq);
-                    let mut observer = session.observer.lock().unwrap();
-                    observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
+                    let _ = session.shared.broadcast_snapshot();
                 }
                 _ => {}
             },

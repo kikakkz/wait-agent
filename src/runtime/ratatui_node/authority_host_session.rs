@@ -1,28 +1,27 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::mpsc;
 
 /// A simple PTY-backed session used when this node hosts a session for a remote
 /// viewer. Unlike `RatatuiLocalSession` it captures raw PTY bytes so they can be
 /// forwarded over the authority transport.
+///
+/// Phase 1 of the event-driven redesign removes all per-session threads; the
+/// PTY master fd and child process are owned by `AuthorityHostIoLoop`.
 pub struct RatatuiAuthorityHostSession {
     pub session_id: String,
-    pub command_name: String,
-    child: Arc<Mutex<Child>>,
     #[allow(dead_code)]
-    pty_master: File,
-    input_tx: mpsc::Sender<Vec<u8>>,
-    output_rx: Mutex<mpsc::Receiver<Vec<u8>>>,
-    exit_rx: Mutex<mpsc::Receiver<i32>>,
-    shutdown: Arc<AtomicBool>,
+    pub command_name: String,
+    pub pty_master: File,
+    /// The child process is moved to `AuthorityHostIoLoop` when the session is
+    /// registered.  After registration this is `None`.
+    pub child: Option<Child>,
 }
 
 impl RatatuiAuthorityHostSession {
@@ -32,7 +31,7 @@ impl RatatuiAuthorityHostSession {
         command_name: impl Into<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<Arc<Self>, LifecycleError> {
+    ) -> Result<Self, LifecycleError> {
         let session_id = session_id.into();
         let command_name = command_name.into();
 
@@ -99,86 +98,46 @@ impl RatatuiAuthorityHostSession {
         let child = cmd
             .spawn()
             .map_err(|error| LifecycleError::Io(format!("failed to spawn shell {shell}"), error))?;
-        let child_arc = Arc::new(Mutex::new(child));
 
         let mut master_file = File::from(master);
         set_nonblocking(&mut master_file);
 
-        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
-        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
-        let (exit_tx, exit_rx) = mpsc::channel::<i32>();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        ERROR_LOG.log(format!(
+            "[ratatui-authority-host-session] spawned session={} cols={} rows={}",
+            session_id, cols, rows
+        ));
 
-        spawn_pty_reader(
-            master_file.try_clone().map_err(|error| {
-                LifecycleError::Io("failed to clone pty master".to_string(), error)
-            })?,
-            output_tx,
-            shutdown.clone(),
-        );
-        spawn_pty_writer(
-            master_file.try_clone().map_err(|error| {
-                LifecycleError::Io("failed to clone pty master".to_string(), error)
-            })?,
-            input_rx,
-            shutdown.clone(),
-        );
-        spawn_child_waiter(child_arc.clone(), exit_tx, shutdown.clone());
-
-        Ok(Arc::new(Self {
+        Ok(Self {
             session_id,
             command_name,
-            child: child_arc,
             pty_master: master_file,
-            input_tx,
-            output_rx: Mutex::new(output_rx),
-            exit_rx: Mutex::new(exit_rx),
-            shutdown,
-        }))
+            child: Some(child),
+        })
     }
 
     /// Send bytes to the PTY as if typed by the user.
-    pub fn feed_input(&self, bytes: Vec<u8>) {
-        let _ = self.input_tx.send(bytes);
+    pub fn feed_input(&self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>, bytes: Vec<u8>) {
+        let _ = io_tx.send(AuthorityHostIoRequest::WriteInput {
+            session_id: self.session_id.clone(),
+            bytes,
+        });
     }
 
     /// Resize the PTY.
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            let _ = libc::ioctl(self.pty_master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
-        }
-    }
-
-    /// Try to drain raw PTY output bytes produced since the last call.
-    pub fn try_recv_output(&self) -> Option<Vec<u8>> {
-        let rx = self.output_rx.lock().unwrap();
-        match rx.try_recv() {
-            Ok(bytes) => Some(bytes),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => None,
-        }
-    }
-
-    /// Try to receive the shell exit code, if it has exited.
-    pub fn try_recv_exit(&self) -> Option<i32> {
-        let rx = self.exit_rx.lock().unwrap();
-        match rx.try_recv() {
-            Ok(status) => Some(status),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => None,
-        }
+    pub fn resize(&self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>, cols: u16, rows: u16) {
+        let _ = io_tx.send(AuthorityHostIoRequest::Resize {
+            session_id: self.session_id.clone(),
+            cols,
+            rows,
+        });
     }
 
     /// Request a graceful shutdown of the PTY session.
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Ok(mut child) = self.child.lock() {
+    pub fn shutdown(&mut self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>) {
+        let _ = io_tx.send(AuthorityHostIoRequest::UnregisterSession {
+            session_id: self.session_id.clone(),
+        });
+        if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
         }
     }
@@ -192,99 +151,4 @@ fn set_nonblocking(file: &mut File) {
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }
-}
-
-fn spawn_pty_reader(mut master: File, output_tx: mpsc::Sender<Vec<u8>>, shutdown: Arc<AtomicBool>) {
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            match master.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if output_tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => {
-                    ERROR_LOG.log(format!(
-                        "[ratatui-authority-host] pty reader error: {error}"
-                    ));
-                    break;
-                }
-            }
-        }
-        shutdown.store(true, Ordering::Relaxed);
-    });
-}
-
-fn spawn_pty_writer(
-    mut master: File,
-    input_rx: mpsc::Receiver<Vec<u8>>,
-    shutdown: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            match input_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(bytes) => {
-                    let mut offset = 0;
-                    while offset < bytes.len() {
-                        match master.write(&bytes[offset..]) {
-                            Ok(n) => offset += n,
-                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(5));
-                            }
-                            Err(error) => {
-                                ERROR_LOG.log(format!(
-                                    "[ratatui-authority-host] pty writer error: {error}"
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                    let _ = master.flush();
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        shutdown.store(true, Ordering::Relaxed);
-    });
-}
-
-fn spawn_child_waiter(
-    child: Arc<Mutex<Child>>,
-    exit_tx: mpsc::Sender<i32>,
-    shutdown: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        let status = loop {
-            match child.lock() {
-                Ok(mut child) => match child.try_wait() {
-                    Ok(Some(status)) => break status.code(),
-                    Ok(None) => {}
-                    Err(error) => {
-                        ERROR_LOG.log(format!(
-                            "[ratatui-authority-host] child wait error: {error}"
-                        ));
-                        break None;
-                    }
-                },
-                Err(_) => break None,
-            }
-            if shutdown.load(Ordering::Relaxed) {
-                break None;
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        let _ = exit_tx.send(status.unwrap_or(-1));
-    });
 }

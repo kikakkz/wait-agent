@@ -22,12 +22,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use super::authority_host_io_loop::AuthorityHostIoLoop;
 use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
-use super::local_session::{LocalSessionEvent, RatatuiLocalSession};
+use super::local_session::RatatuiLocalSession;
 use super::remote_session::RatatuiRemoteSession;
+use super::state_event::StateEvent;
+use super::state_loop::StateEventLoop;
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "1";
 
@@ -54,15 +57,14 @@ pub(crate) struct SharedState {
     pub(crate) local_sessions: Mutex<HashMap<String, Arc<RatatuiLocalSession>>>,
     pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
     pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
-    event_tx: Mutex<mpsc::Sender<LocalSessionEvent>>,
+    state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
+    authority_host_io_tx: Mutex<Option<mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>>>,
     local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
 }
 
 impl SharedState {
     pub(crate) fn new(network: RemoteNetworkConfig) -> Arc<Self> {
-        let (event_tx, event_rx) = mpsc::channel::<LocalSessionEvent>();
-
-        let shared = Arc::new(Self {
+        Arc::new(Self {
             network,
             sessions: Mutex::new(HashMap::new()),
             active_target: Mutex::new(None),
@@ -73,53 +75,53 @@ impl SharedState {
             local_sessions: Mutex::new(HashMap::new()),
             authority_host_sessions: Mutex::new(HashMap::new()),
             remote_sessions: Mutex::new(HashMap::new()),
-            event_tx: Mutex::new(event_tx),
+            state_tx: Mutex::new(None),
+            authority_host_io_tx: Mutex::new(None),
             local_catalog_tx: Mutex::new(None),
-        });
-
-        // Dedicated worker that applies local-session events to shared state.
-        // Running on a separate thread guarantees we never hold `Term`'s lock
-        // while locking `sessions` or `local_sessions`, which prevents deadlock.
-        let weak = Arc::downgrade(&shared);
-        std::thread::spawn(move || loop {
-            let Ok(event) = event_rx.recv() else {
-                break;
-            };
-            let Some(shared) = weak.upgrade() else {
-                break;
-            };
-
-            match event {
-                LocalSessionEvent::Wakeup => {
-                    let _ = shared.broadcast_snapshot();
-                }
-                LocalSessionEvent::ChildExit { session_id, status } => {
-                    ERROR_LOG.log(format!(
-                            "[ratatui-local-session] child exited session={session_id} status={status:?}"
-                        ));
-                    shared.handle_session_exit(&session_id);
-                }
-                LocalSessionEvent::Exit { session_id } => {
-                    shared.handle_session_exit(&session_id);
-                }
-                LocalSessionEvent::Title { session_id, title } => {
-                    shared.set_local_session_title(&session_id, title);
-                    let _ = shared.broadcast_snapshot();
-                }
-            }
-        });
-
-        shared
+        })
     }
 
-    pub(crate) fn send_local_session_event(&self, event: LocalSessionEvent) {
-        if let Ok(tx) = self.event_tx.lock() {
-            let _ = tx.send(event);
+    pub(crate) fn set_state_tx(&self, tx: mpsc::Sender<StateEvent>) {
+        if let Ok(mut guard) = self.state_tx.lock() {
+            *guard = Some(tx);
         }
     }
 
-    pub(crate) fn event_sender(&self) -> mpsc::Sender<LocalSessionEvent> {
-        self.event_tx.lock().unwrap().clone()
+    pub(crate) fn state_sender(&self) -> mpsc::Sender<StateEvent> {
+        self.state_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| {
+                // Return a dangling sender so callers do not panic. Events sent
+                // before the loop is started are simply dropped.
+                let (tx, _) = mpsc::channel();
+                tx
+            })
+    }
+
+    pub(crate) fn set_authority_host_io_tx(
+        &self,
+        tx: mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>,
+    ) {
+        if let Ok(mut guard) = self.authority_host_io_tx.lock() {
+            *guard = Some(tx);
+        }
+    }
+
+    pub(crate) fn authority_host_io_sender(
+        &self,
+    ) -> mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest> {
+        self.authority_host_io_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| {
+                let (tx, _) = mpsc::channel();
+                tx
+            })
     }
 
     pub(crate) fn set_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
@@ -276,9 +278,68 @@ impl SharedState {
         };
 
         *self.active_target.lock().unwrap() = Some(target.clone());
-        self.send_local_session_event(LocalSessionEvent::Wakeup);
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
         Ok(target)
+    }
+
+    /// Create an authority-host session (a raw PTY session for a remote viewer)
+    /// and register it in the catalog.
+    ///
+    /// The caller is responsible for registering the PTY master fd with
+    /// `AuthorityHostIoLoop`.
+    pub(crate) fn create_authority_host_session(
+        self: &Arc<Self>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(String, RatatuiAuthorityHostSession, String), LifecycleError> {
+        let id = {
+            let guard = self.sessions.lock().unwrap();
+            format!("{}", guard.len() + 1)
+        };
+
+        let command_name = std::env::var("SHELL")
+            .ok()
+            .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
+            .unwrap_or_else(|| "bash".to_string());
+
+        let session = RatatuiAuthorityHostSession::spawn(
+            id.clone(),
+            command_name.clone(),
+            cols,
+            rows,
+        )?;
+
+        let target = {
+            let mut guard = self.sessions.lock().unwrap();
+            let record = ManagedSessionRecord {
+                address: ManagedSessionAddress::local_tmux(
+                    self.network.port.to_string(),
+                    &id,
+                ),
+                selector: None,
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some(command_name),
+                display_command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Running,
+            };
+            let target = record.address.qualified_target();
+            guard.insert(id.clone(), record);
+            target
+        };
+
+        *self.active_target.lock().unwrap() = Some(target.clone());
+
+        // The caller (StateEventLoop) is responsible for registering the PTY
+        // master fd with `AuthorityHostIoLoop` and then inserting the session
+        // into `authority_host_sessions`.
+        Ok((id, session, target))
     }
 
     /// Resize the active local session, if any.
@@ -301,28 +362,6 @@ impl SharedState {
         if let Some(session) = guard.get(session_id) {
             session.feed_input(bytes);
         }
-    }
-
-    /// Forward input bytes to an authority-host session.
-    pub(crate) fn feed_authority_host_session_input(&self, session_id: &str, bytes: Vec<u8>) {
-        let guard = self.authority_host_sessions.lock().unwrap();
-        if let Some(session) = guard.get(session_id) {
-            session.feed_input(bytes);
-        }
-    }
-
-    /// Resize an authority-host session.
-    pub(crate) fn resize_authority_host_session(&self, session_id: &str, cols: u16, rows: u16) {
-        let guard = self.authority_host_sessions.lock().unwrap();
-        if let Some(session) = guard.get(session_id) {
-            session.resize(cols, rows);
-        }
-    }
-
-    /// Remove an authority-host session from the catalog.
-    pub(crate) fn remove_authority_host_session(&self, session_id: &str) {
-        let mut guard = self.authority_host_sessions.lock().unwrap();
-        guard.remove(session_id);
     }
 
     /// Return the workspace id used for authority transport socket naming.
@@ -422,6 +461,19 @@ impl RatatuiNodeRuntime {
 
         ERROR_LOG.log("[ratatui-node] listening".to_string());
 
+        // Start the event-driven IO loops before any session can be created.
+        let (catalog_tx, catalog_rx) = std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
+        let authority_host_io = AuthorityHostIoLoop::start(self.shared.state_sender())?;
+        let state_event_loop = StateEventLoop::start(
+            self.shared.clone(),
+            catalog_tx.clone(),
+            &authority_host_io,
+        )?;
+        self.shared.set_state_tx(state_event_loop.sender());
+        self.shared
+            .set_authority_host_io_tx(authority_host_io.sender());
+        self.shared.set_local_catalog_tx(catalog_tx);
+
         // Start the remote runtime owner inside the server process so that
         // discovered remote sessions are kept in-memory and shared with the
         // remote target publication / sync runtimes.
@@ -456,8 +508,6 @@ impl RatatuiNodeRuntime {
                 Some(publication_runtime),
                 sync_network,
             );
-            let (catalog_tx, catalog_rx) = std::sync::mpsc::channel();
-            self.shared.set_local_catalog_tx(catalog_tx);
             match sync_runtime.start_with_local_catalog_changes(catalog_rx) {
                 Ok(guard) => Some(guard),
                 Err(error) => {
@@ -470,30 +520,6 @@ impl RatatuiNodeRuntime {
         } else {
             None
         };
-
-        // Watch authority-host sessions (remote peers hosted by this node) and
-        // clean them up when their PTY shell exits. This publishes TargetExited
-        // to the authority so viewing nodes remove the session from their sidebar.
-        let shared = self.shared.clone();
-        std::thread::spawn(move || loop {
-            if shared.shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            let exited: Vec<String> = {
-                let guard = shared.authority_host_sessions.lock().unwrap();
-                guard
-                    .iter()
-                    .filter_map(|(id, session)| session.try_recv_exit().map(|_| id.clone()))
-                    .collect()
-            };
-            for id in exited {
-                ERROR_LOG.log(format!(
-                    "[ratatui-node] authority host session {id} exited"
-                ));
-                shared.handle_session_exit(&id);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        });
 
         // Start the remote node ingress server inside the server process so
         // peers can connect in and request local target sessions.

@@ -1,7 +1,5 @@
 use crate::cli::{RemoteAuthorityTargetHostCommand, RemoteNetworkConfig};
-use crate::domain::session_catalog::{
-    ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability, SessionTransport,
-};
+use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
@@ -26,15 +24,14 @@ use crate::runtime::remote_node_session_sync_runtime::{
     remote_session_sync_error, SessionSyncAuthorityHost, SessionSyncAuthorityOutputRoute,
     SessionSyncAuthorityPublicationGateway, LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
 };
-use crate::runtime::remote_node_transport_runtime::{
-    read_client_hello, read_server_hello, write_client_hello, write_server_hello,
-};
+
 use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -853,16 +850,11 @@ impl LocalSessionCatalog for RatatuiLocalSessionCatalog {
 #[derive(Clone)]
 pub struct RatatuiLocalTargetFactory {
     shared: Arc<SharedState>,
-    network: RemoteNetworkConfig,
 }
 
 impl RatatuiLocalTargetFactory {
-    pub fn new(shared: Arc<SharedState>, network: RemoteNetworkConfig) -> Self {
-        Self { shared, network }
-    }
-
-    fn workspace_id(&self) -> String {
-        format!("ratatui-{}", self.network.port)
+    pub fn new(shared: Arc<SharedState>, _network: RemoteNetworkConfig) -> Self {
+        Self { shared }
     }
 }
 
@@ -876,77 +868,38 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
         cols: u16,
         rows: u16,
     ) -> Result<CreatedLocalTarget, Self::Error> {
-        let mut guard = self.shared.sessions.lock().map_err(|error| {
-            LifecycleError::Io(
-                "ratatui sessions mutex poisoned".to_string(),
-                io::Error::new(io::ErrorKind::Other, error.to_string()),
-            )
-        })?;
-        let id = format!("{}", guard.len() + 1);
-        let record = ManagedSessionRecord {
-            address: crate::domain::session_catalog::ManagedSessionAddress::local_tmux(
-                self.workspace_id(),
-                &id,
-            ),
-            selector: None,
-            availability: SessionAvailability::Online,
-            workspace_dir: None,
-            workspace_key: None,
-            session_role: None,
-            opened_by: Vec::new(),
-            attached_clients: 0,
-            window_count: 1,
-            command_name: Some("bash".to_string()),
-            display_command_name: None,
-            current_path: None,
-            task_state: ManagedSessionTaskState::Running,
-        };
-        let target_id = format!("remote-peer:{node_id}:{id}");
-        let target = record.address.qualified_target();
-        guard.insert(id.clone(), record);
-        drop(guard);
-
-        let command_name = std::env::var("SHELL")
-            .ok()
-            .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
-            .unwrap_or_else(|| "bash".to_string());
-        let session =
-            crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession::spawn(
-                id.clone(),
-                command_name,
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.shared
+            .state_sender()
+            .send(crate::runtime::ratatui_node::state_event::StateEvent::CreateAuthorityHostSession {
+                request_id: node_id.to_string(),
                 cols,
                 rows,
-            )
+                reply_tx,
+            })
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to send create-authority-host-session event".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })?;
+        let created = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "state event loop did not reply to create-authority-host-session".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })?
             .map_err(|error| {
                 ERROR_LOG.log(format!(
                     "[ratatui-local-target-factory] failed to spawn authority host session: {error}"
                 ));
-                let mut guard = self.shared.sessions.lock().unwrap();
-                guard.remove(&id);
                 error
             })?;
-        {
-            let mut host_guard = self.shared.authority_host_sessions.lock().map_err(|error| {
-                LifecycleError::Io(
-                    "ratatui authority host sessions mutex poisoned".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
-                )
-            })?;
-            host_guard.insert(id.clone(), session);
-        }
-
-        *self.shared.active_target.lock().map_err(|error| {
-            LifecycleError::Io(
-                "ratatui active target mutex poisoned".to_string(),
-                io::Error::new(io::ErrorKind::Other, error.to_string()),
-            )
-        })? = Some(target);
-        let _ = self.shared.broadcast_snapshot();
-        self.shared.notify_local_catalog_changed(
-            super::LocalCatalogChangeReason::LocalRuntimeChanged,
-        );
+        let target_id = format!("remote-peer:{node_id}:{}", created.session_id);
         Ok(CreatedLocalTarget {
-            session_id: id,
+            session_id: created.session_id,
             target_id,
         })
     }
@@ -978,16 +931,11 @@ impl LocalTargetExitObserver for RatatuiLocalTargetExitObserver {
 #[derive(Clone)]
 pub struct RatatuiLocalAuthorityHostBackend {
     shared: Arc<SharedState>,
-    network: RemoteNetworkConfig,
 }
 
 impl RatatuiLocalAuthorityHostBackend {
-    pub fn new(shared: Arc<SharedState>, network: RemoteNetworkConfig) -> Self {
-        Self { shared, network }
-    }
-
-    fn workspace_id(&self) -> String {
-        format!("ratatui-{}", self.network.port)
+    pub fn new(shared: Arc<SharedState>, _network: RemoteNetworkConfig) -> Self {
+        Self { shared }
     }
 }
 
@@ -1031,6 +979,21 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
                 error,
             )
         })?;
+        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
+        self.shared
+            .authority_host_io_sender()
+            .send(crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest::SetOutputSender {
+                session_id: session_name.clone(),
+                output_tx,
+            })
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to set authority host output sender".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })?;
+        let io_tx = self.shared.authority_host_io_sender();
+
         let writer = Arc::new(Mutex::new(None));
         let writer_ready = Arc::new(Condvar::new());
         let running = Arc::new(AtomicBool::new(true));
@@ -1058,6 +1021,8 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             target_id.to_string(),
             node_id,
             running.clone(),
+            io_tx,
+            output_rx,
         );
 
         Ok(SessionSyncAuthorityHost {
@@ -1152,7 +1117,7 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
 }
 
 fn spawn_ratatui_authority_listener(
-    mut host_stream: UnixStream,
+    host_stream: UnixStream,
     _listener_stream: UnixStream,
     node_id: String,
     bridge_session_id: Arc<RwLock<String>>,
@@ -1217,20 +1182,22 @@ fn spawn_ratatui_authority_target_host(
     _host_stream: UnixStream,
     session: Arc<crate::runtime::ratatui_node::authority_host_session::RatatuiAuthorityHostSession>,
     target_id: String,
-    node_id: String,
+    _node_id: String,
     running: Arc<AtomicBool>,
+    io_tx: mpsc::Sender<crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest>,
+    output_rx: mpsc::Receiver<Vec<u8>>,
 ) {
     thread::spawn(move || {
         let session_id = session.session_id.clone();
         // The target host owns the other end of the UnixStream::pair. It reads
-        // viewer commands from this end and writes PTY output back to the same
-        // end; the listener receives the output on the paired end.
+        // viewer commands from this end and forwards them to AuthorityHostIoLoop.
+        // PTY output arrives on output_rx and is framed as RawPtyOutput back to
+        // the listener, which forwards it over the gRPC bridge.
 
         let mirror_active = Arc::new(AtomicBool::new(false));
         let mut output_stream = listener_stream
             .try_clone()
             .expect("failed to clone listener stream for output pump");
-        let output_session = session.clone();
         let output_active = mirror_active.clone();
         let output_running = running.clone();
         let output_target_id = target_id.clone();
@@ -1242,30 +1209,31 @@ fn spawn_ratatui_authority_target_host(
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 }
-                let mut chunk = Vec::new();
-                while let Some(bytes) = output_session.try_recv_output() {
-                    chunk.extend_from_slice(&bytes);
-                }
-                if !chunk.is_empty() {
-                    let payload = RawPtyOutputPayload {
-                        session_id: output_session_id.clone(),
-                        target_id: output_target_id.clone(),
-                        output_seq,
-                        output_bytes: chunk,
-                    };
-                    let frame = AuthorityTransportFrame::RawPtyOutput(payload);
-                    if write_authority_transport_frame(&mut output_stream, &frame).is_err() {
-                        break;
+                match output_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(bytes) => {
+                        let mut chunk = bytes;
+                        // Drain any additional buffered output to batch frames.
+                        while let Ok(more) = output_rx.try_recv() {
+                            chunk.extend_from_slice(&more);
+                        }
+                        let payload = RawPtyOutputPayload {
+                            session_id: output_session_id.clone(),
+                            target_id: output_target_id.clone(),
+                            output_seq,
+                            output_bytes: chunk,
+                        };
+                        let frame = AuthorityTransportFrame::RawPtyOutput(payload);
+                        if write_authority_transport_frame(&mut output_stream, &frame).is_err() {
+                            break;
+                        }
+                        if output_stream.flush().is_err() {
+                            break;
+                        }
+                        output_seq += 1;
                     }
-                    if output_stream.flush().is_err() {
-                        break;
-                    }
-                    output_seq += 1;
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                if output_session.try_recv_exit().is_some() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
             }
         });
 
@@ -1274,14 +1242,14 @@ fn spawn_ratatui_authority_target_host(
             match read_authority_transport_frame(&mut listener_stream) {
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
                     ControlPlanePayload::OpenMirrorRequest(payload) => {
-                        session.resize(payload.cols as u16, payload.rows as u16);
+                        session.resize(&io_tx, payload.cols as u16, payload.rows as u16);
                         mirror_active.store(true, Ordering::Relaxed);
                     }
                     ControlPlanePayload::RawPtyInput(payload) => {
-                        session.feed_input(payload.input_bytes);
+                        session.feed_input(&io_tx, payload.input_bytes);
                     }
                     ControlPlanePayload::ApplyResize(payload) => {
-                        session.resize(payload.cols as u16, payload.rows as u16);
+                        session.resize(&io_tx, payload.cols as u16, payload.rows as u16);
                     }
                     ControlPlanePayload::CloseMirrorRequest(_) => {
                         mirror_active.store(false, Ordering::Relaxed);
@@ -1289,7 +1257,7 @@ fn spawn_ratatui_authority_target_host(
                     _ => {}
                 },
                 Ok(AuthorityTransportFrame::RawPtyInput(payload)) => {
-                    session.feed_input(payload.input_bytes);
+                    session.feed_input(&io_tx, payload.input_bytes);
                     _input_seq += 1;
                 }
                 Ok(AuthorityTransportFrame::Ping) => {
