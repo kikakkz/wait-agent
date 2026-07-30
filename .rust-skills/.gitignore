@@ -1,0 +1,8 @@
+.DS_Store
+
+# Local Claude settings (do not distribute)
+.claude/settings.json
+.claude/settings.local.json
+!.claude/settings.example.json
+
+# Keep .claude/hooks/ for distribution

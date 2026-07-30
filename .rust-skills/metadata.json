@@ -1,0 +1,116 @@
+{
+  "name": "rust-skills",
+  "version": "2.0.9",
+  "description": "Comprehensive Rust learning and development skills for Claude",
+  "author": "ZhangHanDong",
+  "license": "MIT",
+  "repository": "https://github.com/actionbook/rust-skills",
+
+  "stats": {
+    "meta_skills": 14,
+    "domain_skills": 7,
+    "core_skills": 4,
+    "utility_skills": 6,
+    "experimental_skills": 1,
+    "total_skills": 32,
+    "unsafe_rules": 47,
+    "coding_guidelines": {
+      "p_rules": 80,
+      "g_rules_compressed": true
+    },
+    "agents": 8,
+    "commands": 16,
+    "templates": 5
+  },
+
+  "skills": {
+    "core": [
+      "rust-router",
+      "rust-learner",
+      "coding-guidelines",
+      "unsafe-checker"
+    ],
+    "layer1_language_mechanics": [
+      "m01-ownership",
+      "m02-resource",
+      "m03-mutability",
+      "m04-zero-cost",
+      "m05-type-driven",
+      "m06-error-handling",
+      "m07-concurrency"
+    ],
+    "layer2_design_choices": [
+      "m09-domain",
+      "m10-performance",
+      "m11-ecosystem",
+      "m12-lifecycle",
+      "m13-domain-error",
+      "m14-mental-model",
+      "m15-anti-pattern"
+    ],
+    "layer3_domain_constraints": [
+      "domain-fintech",
+      "domain-web",
+      "domain-cli",
+      "domain-embedded",
+      "domain-cloud-native",
+      "domain-iot",
+      "domain-ml"
+    ],
+    "utility": [
+      "rust-daily",
+      "rust-skill-creator",
+      "core-actionbook",
+      "core-agent-browser",
+      "core-dynamic-skills",
+      "core-fix-skill-docs"
+    ],
+    "experimental": [
+      "meta-cognition-parallel"
+    ]
+  },
+
+  "agents": [
+    "crate-researcher",
+    "rust-changelog",
+    "docs-researcher",
+    "clippy-researcher",
+    "std-docs-researcher",
+    "layer1-analyzer",
+    "layer2-analyzer",
+    "layer3-analyzer"
+  ],
+
+  "commands": [
+    "guideline",
+    "unsafe-check",
+    "unsafe-review",
+    "rust-review",
+    "audit",
+    "crate-info",
+    "rust-features",
+    "docs",
+    "skill-index",
+    "clean-crate-skills",
+    "sync-crate-skills",
+    "update-crate-skill",
+    "create-skills-via-llms",
+    "create-llms-for-skills",
+    "fix-skill-docs",
+    "meta-parallel"
+  ],
+
+  "compatibility": {
+    "claude_code_min_version": "1.0.0",
+    "rust_version_coverage": "1.0.0 - 1.85.0"
+  },
+
+  "last_updated": "2025-01-22",
+  "quality_checks": {
+    "skill_frontmatter": true,
+    "agent_tools_declared": true,
+    "deep_content_present": true,
+    "tests_available": true,
+    "test_coverage": "25/25"
+  }
+}

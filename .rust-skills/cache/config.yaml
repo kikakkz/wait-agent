@@ -1,0 +1,59 @@
+# Agent Cache Configuration
+# This file configures caching behavior for rust-skills agents
+
+cache:
+  enabled: true
+
+  # Time-to-live settings (in hours)
+  ttl:
+    crates: 24           # Crate info - changes frequently
+    rust_versions: 168   # Rust releases - weekly is sufficient
+    clippy_lints: 168    # Clippy lints - stable between Rust releases
+    docs: 72             # API docs - 3 days balance
+
+  # Cache size limits
+  limits:
+    max_entries_per_category: 100
+    max_total_size_mb: 50
+
+  # Auto-cleanup configuration
+  cleanup:
+    enabled: true
+    interval_hours: 24
+    remove_expired: true
+    keep_popular: true    # Keep frequently accessed even if expired
+
+# Categories and their storage paths
+categories:
+  crates:
+    path: cache/crates
+    filename_pattern: "{crate_name}.json"
+    sources:
+      - lib.rs
+      - crates.io
+      - cargo
+
+  rust_versions:
+    path: cache/rust-versions
+    filename_pattern: "{version}.json"
+    sources:
+      - releases.rs
+      - blog.rust-lang.org
+
+  clippy_lints:
+    path: cache/clippy-lints
+    filename_pattern: "lints.json"
+    sources:
+      - rust-lang.github.io/rust-clippy
+
+  docs:
+    path: cache/docs
+    filename_pattern: "{crate_name}/{module}.json"
+    sources:
+      - docs.rs
+
+# Stale-while-revalidate settings
+stale:
+  enabled: true
+  max_stale_hours: 48    # Return stale data up to 48 hours old if fetch fails
+  background_refresh: true  # Refresh in background while returning stale
