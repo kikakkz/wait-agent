@@ -531,8 +531,10 @@ impl RatatuiNodeRuntime {
         ERROR_LOG.log("[ratatui-node] listening".to_string());
 
         // Start the event-driven IO loops before any session can be created.
+        // AuthorityHostIoLoop uses SharedState::state_sender() lazily so it
+        // picks up the real sender once set_state_tx() is called below.
         let (catalog_tx, catalog_rx) = std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
-        let authority_host_io = AuthorityHostIoLoop::start(self.shared.state_sender())?;
+        let authority_host_io = AuthorityHostIoLoop::start(self.shared.clone())?;
         let state_event_loop =
             StateEventLoop::start(self.shared.clone(), catalog_tx.clone(), &authority_host_io)?;
         self.shared.set_state_tx(state_event_loop.sender());

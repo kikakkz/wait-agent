@@ -255,10 +255,9 @@ impl TmuxGlueBuildPlan {
 
     pub fn validate_source(&self) -> Result<(), TmuxGlueContractError> {
         if !self.layout.source_path.exists() {
-            return Err(TmuxGlueContractError::new(format!(
-                "{}",
-                vendored_tmux_submodule_hint(&self.layout.source_path)
-            )));
+            return Err(TmuxGlueContractError::new(
+                vendored_tmux_submodule_hint(&self.layout.source_path).to_string(),
+            ));
         }
         TmuxGlueSourceMetadata::discover(self.layout.source_path.clone())?;
         Ok(())

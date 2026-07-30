@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
 const SIGCHLD_TOKEN: usize = 0;
@@ -69,10 +70,10 @@ pub(crate) struct AuthorityHostIoLoop {
 }
 
 impl AuthorityHostIoLoop {
-    pub(crate) fn start(state_tx: mpsc::Sender<StateEvent>) -> Result<Self, LifecycleError> {
+    pub(crate) fn start(shared: Arc<SharedState>) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<AuthorityHostIoRequest>();
         std::thread::spawn(move || {
-            if let Err(error) = run_io_loop(state_tx, rx) {
+            if let Err(error) = run_io_loop(shared, rx) {
                 ERROR_LOG.log(format!(
                     "[ratatui-authority-host-io] loop exited with error: {error}"
                 ));
@@ -87,7 +88,7 @@ impl AuthorityHostIoLoop {
 }
 
 fn run_io_loop(
-    state_tx: mpsc::Sender<StateEvent>,
+    shared: Arc<SharedState>,
     rx: mpsc::Receiver<AuthorityHostIoRequest>,
 ) -> Result<(), LifecycleError> {
     let mut poller = polling::Poller::new().map_err(|error| {
@@ -158,7 +159,7 @@ fn run_io_loop(
             if event.key == SIGCHLD_TOKEN {
                 let mut buf = [0u8; 1];
                 let _ = sig_read.read(&mut buf);
-                check_child_exits(&mut sessions, &state_tx);
+                check_child_exits(&mut sessions, &shared);
                 continue;
             }
 
@@ -166,7 +167,18 @@ fn run_io_loop(
                 continue;
             };
             if event.readable {
-                read_pty(&session_id, &mut sessions, &state_tx);
+                let dead = read_pty(&session_id, &mut sessions);
+                if dead {
+                    if let Some(state) = sessions.remove(&session_id) {
+                        let _ = poller.delete(&state.pty_master);
+                        token_to_session.remove(&state.token);
+                    }
+                    let _ = shared
+                        .state_sender()
+                        .send(StateEvent::AuthorityHostSessionPtyClosed {
+                            session_id: session_id.to_string(),
+                        });
+                }
             }
         }
     }
@@ -254,24 +266,22 @@ fn drain_requests(
     Ok(())
 }
 
-fn read_pty(
-    session_id: &str,
-    sessions: &mut HashMap<String, SessionState>,
-    state_tx: &mpsc::Sender<StateEvent>,
-) {
+/// Reads available data from the session's PTY master.
+///
+/// Returns `true` if the PTY has reached EOF or encountered a fatal read
+/// error. The caller must then remove the session from the poller and from
+/// the internal maps and notify the state loop.
+fn read_pty(session_id: &str, sessions: &mut HashMap<String, SessionState>) -> bool {
     let mut buf = [0u8; PTY_READ_BUF_SIZE];
     let Some(state) = sessions.get_mut(session_id) else {
-        return;
+        return false;
     };
 
     let mut total_read = 0usize;
     loop {
         match state.pty_master.read(&mut buf) {
             Ok(0) => {
-                let _ = state_tx.send(StateEvent::AuthorityHostSessionPtyClosed {
-                    session_id: session_id.to_string(),
-                });
-                return;
+                return true;
             }
             Ok(n) => {
                 total_read += n;
@@ -285,10 +295,7 @@ fn read_pty(
                 ERROR_LOG.log(format!(
                     "[ratatui-authority-host-io] pty read error for {session_id}: {error}"
                 ));
-                let _ = state_tx.send(StateEvent::AuthorityHostSessionPtyClosed {
-                    session_id: session_id.to_string(),
-                });
-                return;
+                return true;
             }
         }
     }
@@ -296,6 +303,7 @@ fn read_pty(
     if total_read > 0 {
         flush_output_buffer(state);
     }
+    false
 }
 
 fn forward_output(state: &mut SessionState, bytes: &[u8]) {
@@ -327,18 +335,17 @@ fn flush_output_buffer(state: &mut SessionState) {
     }
 }
 
-fn check_child_exits(
-    sessions: &mut HashMap<String, SessionState>,
-    state_tx: &mpsc::Sender<StateEvent>,
-) {
+fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<SharedState>) {
     for (session_id, state) in sessions.iter_mut() {
         match state.child.try_wait() {
             Ok(Some(status)) => {
                 let exit_code = status.code().unwrap_or(-1);
-                let _ = state_tx.send(StateEvent::AuthorityHostSessionChildExited {
-                    session_id: session_id.clone(),
-                    exit_code,
-                });
+                let _ = shared
+                    .state_sender()
+                    .send(StateEvent::AuthorityHostSessionChildExited {
+                        session_id: session_id.clone(),
+                        exit_code,
+                    });
             }
             Ok(None) => {}
             Err(error) => {
