@@ -9,46 +9,28 @@
 #[allow(dead_code)]
 pub(crate) enum StateEvent {
     /// A local `alacritty_terminal` session's child process exited.
-    LocalSessionChildExit {
-        session_id: String,
-        exit_code: i32,
-    },
+    LocalSessionChildExit { session_id: String, exit_code: i32 },
     /// A local `alacritty_terminal` session changed its window title.
-    LocalSessionTitleChanged {
-        session_id: String,
-        title: String,
-    },
+    LocalSessionTitleChanged { session_id: String, title: String },
+    /// A local `alacritty_terminal` session produced output and the TUI
+    /// clients should be refreshed.  This is deliberately sent to the single
+    /// writer loop so that snapshots are broadcast without holding the
+    /// terminal lock.
+    LocalSessionOutput { session_id: String },
     /// An authority-host session's shell child exited.
-    AuthorityHostSessionChildExited {
-        session_id: String,
-        exit_code: i32,
-    },
+    AuthorityHostSessionChildExited { session_id: String, exit_code: i32 },
     /// An authority-host PTY master reached EOF or an unrecoverable read error.
-    AuthorityHostSessionPtyClosed {
-        session_id: String,
-    },
+    AuthorityHostSessionPtyClosed { session_id: String },
     /// A TUI client connected to the local Unix socket.
-    ClientConnected {
-        client_id: usize,
-    },
+    ClientConnected { client_id: usize },
     /// A TUI client disconnected from the local Unix socket.
-    ClientDisconnected {
-        client_id: usize,
-    },
+    ClientDisconnected { client_id: usize },
     /// Keyboard input received from a client for a specific session.
-    ClientInput {
-        session_id: String,
-        bytes: Vec<u8>,
-    },
+    ClientInput { session_id: String, bytes: Vec<u8> },
     /// A client asked to activate a different session target.
-    ClientActivatedTarget {
-        target_id: String,
-    },
+    ClientActivatedTarget { target_id: String },
     /// A client reported a new terminal size.
-    ClientResized {
-        cols: u16,
-        rows: u16,
-    },
+    ClientResized { cols: u16, rows: u16 },
     /// A client asked to create a new local PTY session.
     ClientCreateLocalSession,
     /// Session sync runtime asked this node to host a new authority-target
@@ -57,13 +39,13 @@ pub(crate) enum StateEvent {
         request_id: String,
         cols: u16,
         rows: u16,
-        reply_tx: std::sync::mpsc::Sender<Result<CreatedAuthorityHostTarget, crate::lifecycle::LifecycleError>>,
+        reply_tx: std::sync::mpsc::Sender<
+            Result<CreatedAuthorityHostTarget, crate::lifecycle::LifecycleError>,
+        >,
     },
     /// A remote session viewer closed, so the mirrored remote target should be
     /// removed from the local catalog.
-    RemoteSessionClosed {
-        target_id: String,
-    },
+    RemoteSessionClosed { target_id: String },
 }
 
 /// Minimal reply payload returned by `StateEventLoop` when it creates an

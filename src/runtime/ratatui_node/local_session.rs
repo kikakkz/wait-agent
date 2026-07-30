@@ -181,19 +181,30 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::Wakeup => {
-                let _ = self.shared.broadcast_snapshot();
+                let _ = self
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::LocalSessionOutput {
+                        session_id: self.session_id.clone(),
+                    });
             }
             Event::ChildExit(status) => {
-                let _ = self.shared.state_sender().send(StateEvent::LocalSessionChildExit {
-                    session_id: self.session_id.clone(),
-                    exit_code: status,
-                });
+                let _ = self
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::LocalSessionChildExit {
+                        session_id: self.session_id.clone(),
+                        exit_code: status,
+                    });
             }
             Event::Exit => {
-                let _ = self.shared.state_sender().send(StateEvent::LocalSessionChildExit {
-                    session_id: self.session_id.clone(),
-                    exit_code: -1,
-                });
+                let _ = self
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::LocalSessionChildExit {
+                        session_id: self.session_id.clone(),
+                        exit_code: -1,
+                    });
             }
             Event::PtyWrite(text) => {
                 if let Some(sender) = self.sender.lock().unwrap().as_ref() {
@@ -201,10 +212,13 @@ impl EventListener for EventProxy {
                 }
             }
             Event::Title(title) => {
-                let _ = self.shared.state_sender().send(StateEvent::LocalSessionTitleChanged {
-                    session_id: self.session_id.clone(),
-                    title,
-                });
+                let _ = self
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::LocalSessionTitleChanged {
+                        session_id: self.session_id.clone(),
+                        title,
+                    });
             }
             _ => {}
         }

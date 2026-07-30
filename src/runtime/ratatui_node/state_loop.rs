@@ -30,7 +30,9 @@ impl StateEventLoop {
         let authority_host_io_tx = authority_host_io.sender();
         std::thread::spawn(move || {
             if let Err(error) = run_state_event_loop(shared, rx, catalog_tx, authority_host_io_tx) {
-                ERROR_LOG.log(format!("[ratatui-state-loop] loop exited with error: {error}"));
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] loop exited with error: {error}"
+                ));
             }
         });
         Ok(Self { tx })
@@ -76,14 +78,22 @@ fn run_state_event_loop(
                 let _ = shared.broadcast_snapshot();
             }
 
+            StateEvent::LocalSessionOutput { .. } => {
+                let _ = shared.broadcast_snapshot();
+            }
+
             StateEvent::ClientConnected { client_id } => {
-                shared.client_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                shared
+                    .client_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = shared.broadcast_snapshot();
                 let _ = client_id;
             }
 
             StateEvent::ClientDisconnected { client_id } => {
-                shared.client_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                shared
+                    .client_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = client_id;
             }
 
@@ -91,10 +101,8 @@ fn run_state_event_loop(
                 if is_local_session(&shared, &session_id) {
                     shared.feed_local_session_input(&session_id, bytes);
                 } else {
-                    let _ = authority_host_io_tx.send(AuthorityHostIoRequest::WriteInput {
-                        session_id,
-                        bytes,
-                    });
+                    let _ = authority_host_io_tx
+                        .send(AuthorityHostIoRequest::WriteInput { session_id, bytes });
                 }
             }
 
@@ -133,15 +141,11 @@ fn run_state_event_loop(
                 rows,
                 reply_tx,
             } => {
-                let reply = create_authority_host_session(
-                    &shared,
-                    &authority_host_io_tx,
-                    cols,
-                    rows,
-                );
+                let reply =
+                    create_authority_host_session(&shared, &authority_host_io_tx, cols, rows);
                 let reply_for_log = reply
                     .as_ref()
-                    .map(|created| format!("{}->{}" , created.session_id, created.target_id))
+                    .map(|created| format!("{}->{}", created.session_id, created.target_id))
                     .unwrap_or_else(|error| format!("error:{error}"));
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] create authority host session request_id={request_id} result={reply_for_log}"
@@ -189,9 +193,7 @@ fn create_authority_host_session(
         )
     })?;
     let child = session.child.take().ok_or_else(|| {
-        LifecycleError::Protocol(
-            "authority host session missing child process".to_string(),
-        )
+        LifecycleError::Protocol("authority host session missing child process".to_string())
     })?;
     let _ = authority_host_io_tx.send(AuthorityHostIoRequest::RegisterSession {
         session_id: session_id.clone(),
@@ -213,14 +215,19 @@ fn is_local_session(shared: &SharedState, session_id: &str) -> bool {
     let guard = shared.sessions.lock().unwrap();
     guard
         .get(session_id)
-        .map(|record| *record.address.transport() == crate::domain::session_catalog::SessionTransport::LocalTmux)
+        .map(|record| {
+            *record.address.transport()
+                == crate::domain::session_catalog::SessionTransport::LocalTmux
+        })
         .unwrap_or(false)
 }
 
 fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
     let active = shared.active_target.lock().unwrap().clone()?;
     let guard = shared.sessions.lock().unwrap();
-    let record = guard.values().find(|r| r.address.qualified_target() == active)?;
+    let record = guard
+        .values()
+        .find(|r| r.address.qualified_target() == active)?;
     let session_id = record.address.session_id().to_string();
     let is_host = shared
         .authority_host_sessions

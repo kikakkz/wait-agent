@@ -256,8 +256,7 @@ fn run_event_loop(
                     if snapshot.active_target != last_active_target {
                         last_active_target = snapshot.active_target.clone();
                         if let Some(target) = snapshot.active_target.as_deref() {
-                            if let Some(idx) =
-                                snapshot.sessions.iter().position(|s| s.id == target)
+                            if let Some(idx) = snapshot.sessions.iter().position(|s| s.id == target)
                             {
                                 selected_index = idx;
                             }

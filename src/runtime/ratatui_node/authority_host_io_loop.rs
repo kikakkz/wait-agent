@@ -98,15 +98,11 @@ fn run_io_loop(
     })?;
 
     let (mut sig_read, sig_write) = UnixStream::pair().map_err(|error| {
-        LifecycleError::Io(
-            "failed to create SIGCHLD signal pipe".to_string(),
-            error,
-        )
+        LifecycleError::Io("failed to create SIGCHLD signal pipe".to_string(), error)
     })?;
-    if let Err(error) = signal_hook::low_level::pipe::register(
-        signal_hook::consts::signal::SIGCHLD,
-        sig_write,
-    ) {
+    if let Err(error) =
+        signal_hook::low_level::pipe::register(signal_hook::consts::signal::SIGCHLD, sig_write)
+    {
         return Err(LifecycleError::Io(
             "failed to register SIGCHLD handler".to_string(),
             io::Error::new(io::ErrorKind::Other, error),
@@ -190,7 +186,11 @@ fn drain_requests(
                     write_pty_nonblocking(&mut state.pty_master, &bytes);
                 }
             }
-            AuthorityHostIoRequest::Resize { session_id, cols, rows } => {
+            AuthorityHostIoRequest::Resize {
+                session_id,
+                cols,
+                rows,
+            } => {
                 if let Some(state) = sessions.get_mut(&session_id) {
                     resize_pty(&state.pty_master, cols, rows);
                 }
@@ -213,9 +213,7 @@ fn drain_requests(
                         )
                         .map_err(|error| {
                             LifecycleError::Io(
-                                format!(
-                                    "failed to add authority host pty {session_id} to poller"
-                                ),
+                                format!("failed to add authority host pty {session_id} to poller"),
                                 io::Error::new(io::ErrorKind::Other, error),
                             )
                         })?;

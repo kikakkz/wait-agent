@@ -871,12 +871,14 @@ impl LocalTargetFactory for RatatuiLocalTargetFactory {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.shared
             .state_sender()
-            .send(crate::runtime::ratatui_node::state_event::StateEvent::CreateAuthorityHostSession {
-                request_id: node_id.to_string(),
-                cols,
-                rows,
-                reply_tx,
-            })
+            .send(
+                crate::runtime::ratatui_node::state_event::StateEvent::CreateAuthorityHostSession {
+                    request_id: node_id.to_string(),
+                    cols,
+                    rows,
+                    reply_tx,
+                },
+            )
             .map_err(|error| {
                 LifecycleError::Io(
                     "failed to send create-authority-host-session event".to_string(),
@@ -1184,7 +1186,9 @@ fn spawn_ratatui_authority_target_host(
     target_id: String,
     _node_id: String,
     running: Arc<AtomicBool>,
-    io_tx: mpsc::Sender<crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest>,
+    io_tx: mpsc::Sender<
+        crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest,
+    >,
     output_rx: mpsc::Receiver<Vec<u8>>,
 ) {
     thread::spawn(move || {

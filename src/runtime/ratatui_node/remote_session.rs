@@ -9,10 +9,10 @@ use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_node::runtime::SharedState;
 use crate::runtime::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::runtime::remote_node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
-use crate::runtime::ratatui_node::runtime::SharedState;
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
 use std::fs;

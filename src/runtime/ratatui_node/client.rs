@@ -62,14 +62,18 @@ pub(crate) fn handle_client(
     // Register as a TUI client and send the initial snapshot.
     shared.client_count.fetch_add(1, Ordering::SeqCst);
     if let Ok(clone) = stream.try_clone() {
-        clients.lock().unwrap().push(ClientHandle {
+        let mut guard = clients.lock().unwrap();
+        guard.push(ClientHandle {
             id: client_id,
             stream: clone,
             removed: removed.clone(),
         });
+        drop(guard);
     }
 
     // The "ATTACH" command is a no-op beyond triggering the snapshot.
+    // Build the snapshot without holding the clients lock to avoid a
+    // lock-order inversion with the terminal/event-loop threads.
     let count = shared.client_count.load(Ordering::SeqCst);
     let snapshot = build_snapshot(count, &shared);
     let json = super::snapshot::snapshot_json(&snapshot);

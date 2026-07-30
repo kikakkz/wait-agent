@@ -58,7 +58,8 @@ pub(crate) struct SharedState {
     pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
     pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
     state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
-    authority_host_io_tx: Mutex<Option<mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>>>,
+    authority_host_io_tx:
+        Mutex<Option<mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>>>,
     local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
 }
 
@@ -196,8 +197,7 @@ impl SharedState {
                 ERROR_LOG.log(format!(
                     "[ratatui-node] last local session {session_id} exited; shutting down"
                 ));
-                self.shutdown
-                    .store(true, Ordering::SeqCst);
+                self.shutdown.store(true, Ordering::SeqCst);
                 let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
             }
             *self.active_target.lock().unwrap() = None;
@@ -302,20 +302,13 @@ impl SharedState {
             .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
             .unwrap_or_else(|| "bash".to_string());
 
-        let session = RatatuiAuthorityHostSession::spawn(
-            id.clone(),
-            command_name.clone(),
-            cols,
-            rows,
-        )?;
+        let session =
+            RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows)?;
 
         let target = {
             let mut guard = self.sessions.lock().unwrap();
             let record = ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(
-                    self.network.port.to_string(),
-                    &id,
-                ),
+                address: ManagedSessionAddress::local_tmux(self.network.port.to_string(), &id),
                 selector: None,
                 availability: SessionAvailability::Online,
                 workspace_dir: None,
@@ -382,7 +375,8 @@ impl SharedState {
                 return Ok(target_id);
             }
         }
-        let session = RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network, self)?;
+        let session =
+            RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network, self)?;
         session.send_open_mirror(80, 24);
         {
             let mut guard = self.remote_sessions.lock().unwrap();
@@ -464,11 +458,8 @@ impl RatatuiNodeRuntime {
         // Start the event-driven IO loops before any session can be created.
         let (catalog_tx, catalog_rx) = std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
         let authority_host_io = AuthorityHostIoLoop::start(self.shared.state_sender())?;
-        let state_event_loop = StateEventLoop::start(
-            self.shared.clone(),
-            catalog_tx.clone(),
-            &authority_host_io,
-        )?;
+        let state_event_loop =
+            StateEventLoop::start(self.shared.clone(), catalog_tx.clone(), &authority_host_io)?;
         self.shared.set_state_tx(state_event_loop.sender());
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
