@@ -51,10 +51,17 @@ impl RatatuiAuthorityHostSession {
         let master: OwnedFd = pty.controller;
         let slave: OwnedFd = pty.user;
 
-        // Prefer UTF-8 input handling on the master side.
+        // Prefer UTF-8 input handling on the master side. Disable remote echo:
+        // the viewing side renders input locally, so the peer PTY must not echo
+        // or the screen would show every typed character twice.
         if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
             let mut termios = termios;
             termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
+            let local = &mut termios.local_modes;
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHO);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOE);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOK);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHONL);
             let _ = rustix_openpty::rustix::termios::tcsetattr(
                 &master,
                 rustix_openpty::rustix::termios::OptionalActions::Now,

@@ -162,7 +162,9 @@ impl RatatuiRemoteSession {
         self.send_open_mirror(cols, rows);
     }
 
-    /// Forward keyboard input to the remote session.
+    /// Forward keyboard input to the remote session and echo it locally so the
+    /// typed character appears immediately, even when the remote peer uses a
+    /// line-buffered discipline that does not echo until Enter is pressed.
     pub fn feed_input(&self, bytes: Vec<u8>) {
         let seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.writer.lock().unwrap();
@@ -176,11 +178,24 @@ impl RatatuiRemoteSession {
             console_id: format!("ratatui-console-{}", std::process::id()),
             console_host_id: self.authority_node_id.clone(),
             input_seq: seq,
-            input_bytes: bytes,
+            input_bytes: bytes.clone(),
         };
         let frame = AuthorityTransportFrame::RawPtyInput(payload);
         let _ = write_authority_transport_frame(writer, &frame);
         let _ = writer.flush();
+        drop(guard);
+
+        // Render the typed bytes on the local screen immediately. The remote
+        // PTY will overwrite this with its own state once it responds.
+        {
+            let mut observer = self.observer.lock().unwrap();
+            observer.feed_local_echo(&bytes);
+        }
+        let _ = self
+            .wakeup_tx
+            .lock()
+            .unwrap()
+            .send(LocalSessionEvent::Wakeup);
     }
 
     /// Forward a terminal resize to the remote session.
