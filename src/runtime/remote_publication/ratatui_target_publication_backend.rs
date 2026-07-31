@@ -144,7 +144,9 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
                 qualified_target.to_string()
             }
         };
-        self.shared.handle_session_exit(&local_target);
+        let _ = self.shared.state_sender().send(StateEvent::SessionClosed {
+            target_id: local_target,
+        });
         Ok(())
     }
 

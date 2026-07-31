@@ -45,9 +45,11 @@ pub(crate) enum StateEvent {
     /// A remote session rendered a local input echo; the TUI clients should be
     /// refreshed.
     RemoteSessionInputEcho { target_id: String },
-    /// A remote session viewer closed, so the mirrored remote target should be
-    /// removed from the local catalog.
-    RemoteSessionClosed { target_id: String },
+    /// A session has exited and should be removed from the local catalog.
+    ///
+    /// This covers both a remote session viewer closing and a local
+    /// authority-host session being closed by a remote peer.
+    SessionClosed { target_id: String },
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.

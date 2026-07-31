@@ -177,7 +177,7 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
-            StateEvent::RemoteSessionClosed { target_id } => {
+            StateEvent::SessionClosed { target_id } => {
                 shared.handle_session_exit(&target_id);
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }

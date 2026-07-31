@@ -153,7 +153,7 @@ impl SharedState {
         }
     }
 
-    pub(crate) fn detach_all_clients(&self) {
+    pub(super) fn detach_all_clients(&self) {
         // Mark every known client as removed.  The actual sockets are owned by
         // `ClientWriter`; callers must also send `Unregister` requests for each
         // client id.
@@ -167,7 +167,7 @@ impl SharedState {
 
     /// Mark a session as exited, remove its runtime, switch to the next
     /// available session, and shut down the server when the last session exits.
-    pub(crate) fn handle_session_exit(&self, target_id: &str) {
+    pub(super) fn handle_session_exit(&self, target_id: &str) {
         let record = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard.remove(target_id)
@@ -243,7 +243,7 @@ impl SharedState {
     }
 
     /// Update the displayed command name from the terminal title.
-    pub(crate) fn set_local_session_title(&self, target_id: &str, title: String) {
+    pub(super) fn set_local_session_title(&self, target_id: &str, title: String) {
         let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(record) = guard.get_mut(target_id) {
             record.display_command_name = Some(title);
@@ -256,7 +256,11 @@ impl SharedState {
     }
 
     /// Spawn a real local PTY session and register it in the catalog.
-    pub(crate) fn create_local_session(
+    /// Called once during server startup before `StateEventLoop` is running.
+    /// This is the only allowed direct mutation of `SharedState` outside the
+    /// single-writer loop; all later session creation must go through
+    /// `StateEvent::CreateAuthorityHostSession` or `ClientCommand::CreateLocalSession`.
+    pub(super) fn create_local_session(
         self: &Arc<Self>,
         session_id: &str,
         cols: u16,
@@ -318,7 +322,7 @@ impl SharedState {
     ///
     /// The caller is responsible for registering the PTY master fd with
     /// `AuthorityHostIoLoop`.
-    pub(crate) fn create_authority_host_session(
+    pub(super) fn create_authority_host_session(
         self: &Arc<Self>,
         cols: u16,
         rows: u16,
