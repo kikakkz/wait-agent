@@ -30,8 +30,8 @@ use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
 use crate::runtime::remote_node_session_sync_runtime::{
-    LocalAuthorityHostBackend, LocalSessionCatalog, LocalTargetFactory,
-    SessionSyncAuthorityManager, TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
+    LocalAuthorityHostBackend, LocalTargetFactory, SessionSyncAuthorityManager,
+    TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
 };
 use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
@@ -42,16 +42,15 @@ use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Cursor, ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const BRIDGE_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const BRIDGE_DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const BRIDGE_DISCOVERY_RETRY_ATTEMPTS: u8 = 20;
 const REMOTE_NODE_INGRESS_OWNER_IDLE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1154,7 +1153,7 @@ fn start_workspace_registry_polling_watcher(
     Ok(thread::spawn(move || {
         let mut previous = live_workspace_sockets(&network).unwrap_or_default();
         loop {
-            thread::sleep(BRIDGE_REFRESH_INTERVAL);
+            thread::sleep(Duration::from_millis(50));
             let current = live_workspace_sockets(&network).unwrap_or_default();
             if current == previous {
                 continue;
@@ -1170,6 +1169,13 @@ fn start_workspace_registry_polling_watcher(
     }))
 }
 
+/// Handle returned by `start_socket_watcher`. The caller owns the inotify fd
+/// and must close it to wake a blocking watcher thread before joining it.
+struct SocketWatcherHandle {
+    fd: RawFd,
+    worker: thread::JoinHandle<()>,
+}
+
 /// Watches the temp directory for new authority socket files and sends
 /// [`InternalEvent::SocketDirChanged`] through the channel when one appears.
 ///
@@ -1177,16 +1183,15 @@ fn start_workspace_registry_polling_watcher(
 /// kernel filesystem events, not periodic refresh scans.
 fn start_socket_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
-    shutdown: Arc<AtomicBool>,
-) -> io::Result<thread::JoinHandle<()>> {
+) -> io::Result<SocketWatcherHandle> {
     #[cfg(target_os = "linux")]
     {
-        start_inotify_watcher(internal_tx, shutdown)
+        start_inotify_watcher(internal_tx)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (internal_tx, shutdown);
+        let _ = internal_tx;
         Err(io::Error::other(
             "remote node ingress server requires Linux inotify for event-driven authority discovery",
         ))
@@ -1197,9 +1202,8 @@ fn start_socket_watcher(
 #[cfg(target_os = "linux")]
 fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
-    shutdown: Arc<AtomicBool>,
-) -> io::Result<thread::JoinHandle<()>> {
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+) -> io::Result<SocketWatcherHandle> {
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
     if fd == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -1216,21 +1220,13 @@ fn start_inotify_watcher(
         return Err(io::Error::last_os_error());
     }
 
-    Ok(thread::spawn(move || {
+    let worker = thread::spawn(move || {
         let event_size = std::mem::size_of::<libc::inotify_event>();
         let mut buf = [0u8; 4096];
 
         loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    thread::sleep(BRIDGE_REFRESH_INTERVAL);
-                    continue;
-                }
                 break;
             }
 
@@ -1254,9 +1250,9 @@ fn start_inotify_watcher(
                 off += event_size + name_len;
             }
         }
+    });
 
-        unsafe { libc::close(fd) };
-    }))
+    Ok(SocketWatcherHandle { fd, worker })
 }
 
 impl RemoteNodeIngressServerGuard {
@@ -1338,9 +1334,8 @@ fn run_node_ingress_server_loop<
         })
     };
     drop(event_tx);
-    let watcher_shutdown = Arc::new(AtomicBool::new(false));
     let watcher = if start_authority_socket_watcher {
-        match start_socket_watcher(internal_tx.clone(), watcher_shutdown.clone()) {
+        match start_socket_watcher(internal_tx.clone()) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -1436,9 +1431,9 @@ fn run_node_ingress_server_loop<
             }
         }
     }
-    watcher_shutdown.store(true, Ordering::Relaxed);
-    if let Some(watcher) = watcher {
-        let _ = watcher.join();
+    if let Some(handle) = watcher {
+        unsafe { libc::close(handle.fd) };
+        let _ = handle.worker.join();
     }
 }
 

@@ -1186,9 +1186,7 @@ fn spawn_ratatui_authority_target_host(
     target_id: String,
     _node_id: String,
     running: Arc<AtomicBool>,
-    io_tx: mpsc::Sender<
-        crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest,
-    >,
+    io_tx: crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoHandle,
     output_rx: mpsc::Receiver<Vec<u8>>,
 ) {
     thread::spawn(move || {

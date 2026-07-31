@@ -12,8 +12,7 @@ use crate::runtime::remote_host::remote_install_proxy_store::{
     no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
     RemoteInstallProxyStore,
 };
-use crossbeam_channel::Receiver as CrossbeamReceiver;
-use crossbeam_channel::RecvTimeoutError;
+use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
@@ -25,8 +24,6 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct ConnectRemoteHostPaneRuntime {
@@ -62,6 +59,18 @@ impl ConnectRemoteHostPaneRuntime {
         let mut terminal = Terminal::new(backend).map_err(write_error)?;
         terminal.clear().map_err(write_error)?;
 
+        let (crossterm_tx, crossterm_rx) = unbounded::<Event>();
+        std::thread::spawn(move || loop {
+            match event::read() {
+                Ok(event) => {
+                    if crossterm_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        });
+
         let (mut state, initial_secret_request) =
             ConnectRemoteHostState::load_with_initial_secret_request();
         let mut render_background = |_frame: &mut Frame| {};
@@ -71,7 +80,7 @@ impl ConnectRemoteHostPaneRuntime {
             command,
             initial_secret_request,
             &mut render_background,
-            None,
+            &crossterm_rx,
         );
 
         crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
@@ -84,9 +93,8 @@ impl ConnectRemoteHostPaneRuntime {
     /// Run the popup inside an existing ratatui terminal without taking over
     /// raw mode or the alternate screen. Used by the ratatui client for Ctrl+W.
     ///
-    /// When `crossterm_rx` is provided, events are read from that channel
-    /// instead of directly from crossterm, so the popup cooperates with an
-    /// external event-driven TUI loop.
+    /// Events are read from `crossterm_rx` so the popup cooperates with the
+    /// external event-driven TUI loop instead of polling crossterm.
     pub fn run_embedded<F>(
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -107,7 +115,7 @@ impl ConnectRemoteHostPaneRuntime {
             command,
             initial_secret_request,
             &mut render_background,
-            Some(crossterm_rx),
+            crossterm_rx,
         );
         let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
         result
@@ -120,9 +128,9 @@ impl ConnectRemoteHostPaneRuntime {
         command: ConnectRemoteHostPaneCommand,
         initial_secret_request: Option<SecretLoadRequest>,
         render_background: &mut dyn FnMut(&mut Frame),
-        crossterm_rx: Option<&CrossbeamReceiver<Event>>,
+        crossterm_rx: &CrossbeamReceiver<Event>,
     ) -> Result<(), LifecycleError> {
-        let (secret_tx, secret_rx) = mpsc::channel();
+        let (secret_tx, secret_rx) = unbounded::<SecretLoadResult>();
         if let Some(request) = initial_secret_request {
             spawn_secret_loader(request, secret_tx.clone());
         }
@@ -133,133 +141,105 @@ impl ConnectRemoteHostPaneRuntime {
             })
             .map_err(write_error)?;
         loop {
-            let mut needs_draw = self.apply_secret_results(state, &secret_rx);
-            let event = Self::next_crossterm_event(crossterm_rx)?;
-            let action = match event {
-                Some(Event::Key(key)) => {
-                    needs_draw = true;
-                    state.apply_key(key)
-                }
-                Some(Event::Mouse(mouse)) => {
-                    needs_draw = true;
-                    state.apply_mouse(mouse)
-                }
-                Some(Event::Resize(_, _)) => {
-                    needs_draw = true;
-                    PaneAction::Redraw
-                }
-                Some(_) => PaneAction::None,
-                None => PaneAction::None,
-            };
-            match action {
-                PaneAction::None | PaneAction::Redraw => {}
-                PaneAction::Close => return Ok(()),
-                PaneAction::LoadSecrets(request) => {
-                    if let Some(request) = request {
-                        spawn_secret_loader(request, secret_tx.clone());
-                    }
-                }
-                PaneAction::SaveProxyConfig => match state.save_proxy_settings() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Saved proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::ActivateProxyConfig => match state.activate_proxy_profile() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Activated proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::DeleteProxyConfig => match state.delete_proxy_profile() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Deleted proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::DeleteSelectedHost { profile_name } => {
-                    match delete_selected_host(state, &profile_name) {
-                        Ok(request) => {
+            crossbeam_channel::select! {
+                recv(crossterm_rx) -> result => {
+                    let event = match result {
+                        Ok(event) => event,
+                        Err(_) => return Ok(()),
+                    };
+                    let action = match event {
+                        Event::Key(key) => state.apply_key(key),
+                        Event::Mouse(mouse) => state.apply_mouse(mouse),
+                        Event::Resize(_, _) => PaneAction::Redraw,
+                        _ => PaneAction::None,
+                    };
+                    match action {
+                        PaneAction::None | PaneAction::Redraw => {}
+                        PaneAction::Close => return Ok(()),
+                        PaneAction::LoadSecrets(request) => {
                             if let Some(request) = request {
                                 spawn_secret_loader(request, secret_tx.clone());
                             }
                         }
-                        Err(message) => {
-                            state.delete_confirm = DeleteConfirmState::Idle;
-                            state.status = Status::Error(message);
+                        PaneAction::SaveProxyConfig => match state.save_proxy_settings() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Saved proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::ActivateProxyConfig => match state.activate_proxy_profile() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Activated proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::DeleteProxyConfig => match state.delete_proxy_profile() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Deleted proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::DeleteSelectedHost { profile_name } => {
+                            match delete_selected_host(state, &profile_name) {
+                                Ok(request) => {
+                                    if let Some(request) = request {
+                                        spawn_secret_loader(request, secret_tx.clone());
+                                    }
+                                }
+                                Err(message) => {
+                                    state.delete_confirm = DeleteConfirmState::Idle;
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::Connect => {
+                            if matches!(state.status, Status::Working(_)) || state.credentials_loading() {
+                                continue;
+                            }
+                            state.status = Status::Working("Connecting...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match run_connect(
+                                state,
+                                &command,
+                                &self.network,
+                                self.ratatui_port,
+                                self.ratatui_socket_path.as_deref(),
+                            ) {
+                                Ok(_) => return Ok(()),
+                                Err(message) => state.status = Status::Error(message),
+                            }
                         }
                     }
                 }
-                PaneAction::Connect => {
-                    if matches!(state.status, Status::Working(_)) || state.credentials_loading() {
-                        continue;
+                recv(secret_rx) -> result => {
+                    if let Ok(result) = result {
+                        state.apply_secret_result(result);
                     }
-                    state.status = Status::Working("Connecting...".to_string());
-                    terminal
-                        .draw(|frame| {
-                            render_background(frame);
-                            render(frame, state);
-                        })
-                        .map_err(write_error)?;
-                    match run_connect(
-                        state,
-                        &command,
-                        &self.network,
-                        self.ratatui_port,
-                        self.ratatui_socket_path.as_deref(),
-                    ) {
-                        Ok(_) => return Ok(()),
-                        Err(message) => state.status = Status::Error(message),
+                    // Drain any additional results that arrived while we were
+                    // blocked so the UI reflects the final state.
+                    while let Ok(result) = secret_rx.try_recv() {
+                        state.apply_secret_result(result);
                     }
                 }
             }
-            if needs_draw {
-                terminal
-                    .draw(|frame| {
-                        render_background(frame);
-                        render(frame, state);
-                    })
-                    .map_err(write_error)?;
-            }
+            terminal
+                .draw(|frame| {
+                    render_background(frame);
+                    render(frame, state);
+                })
+                .map_err(write_error)?;
         }
-    }
-
-    fn next_crossterm_event(
-        crossterm_rx: Option<&CrossbeamReceiver<Event>>,
-    ) -> Result<Option<Event>, LifecycleError> {
-        match crossterm_rx {
-            Some(rx) => match rx.recv_timeout(Duration::from_millis(25)) {
-                Ok(event) => Ok(Some(event)),
-                Err(RecvTimeoutError::Timeout) => Ok(None),
-                Err(RecvTimeoutError::Disconnected) => Ok(None),
-            },
-            None => {
-                if event::poll(Duration::from_millis(25)).map_err(write_error)? {
-                    Ok(Some(event::read().map_err(write_error)?))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    fn apply_secret_results(
-        &self,
-        state: &mut ConnectRemoteHostState,
-        secret_rx: &Receiver<SecretLoadResult>,
-    ) -> bool {
-        let mut changed = false;
-        while let Ok(result) = secret_rx.try_recv() {
-            state.apply_secret_result(result);
-            changed = true;
-        }
-        changed
     }
 }
 
@@ -2758,7 +2738,7 @@ fn edit_focus(field: EditField) -> Focus {
     }
 }
 
-fn spawn_secret_loader(request: SecretLoadRequest, tx: Sender<SecretLoadResult>) {
+fn spawn_secret_loader(request: SecretLoadRequest, tx: CrossbeamSender<SecretLoadResult>) {
     std::thread::spawn(move || {
         let ssh = request.ssh_secret_id.as_ref().map(load_secret_value);
         let sudo = request.sudo_secret_id.as_ref().map(load_secret_value);

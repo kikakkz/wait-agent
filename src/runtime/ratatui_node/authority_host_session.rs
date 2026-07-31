@@ -1,12 +1,13 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use crate::runtime::ratatui_node::authority_host_io_loop::AuthorityHostIoRequest;
+use crate::runtime::ratatui_node::authority_host_io_loop::{
+    AuthorityHostIoHandle, AuthorityHostIoRequest,
+};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
-use std::sync::mpsc;
 
 /// A simple PTY-backed session used when this node hosts a session for a remote
 /// viewer. Unlike `RatatuiLocalSession` it captures raw PTY bytes so they can be
@@ -120,11 +121,7 @@ impl RatatuiAuthorityHostSession {
     }
 
     /// Send bytes to the PTY as if typed by the user.
-    pub fn feed_input(
-        &self,
-        io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
-        bytes: impl Into<Vec<u8>>,
-    ) {
+    pub fn feed_input(&self, io_tx: &AuthorityHostIoHandle, bytes: impl Into<Vec<u8>>) {
         let _ = io_tx.send(AuthorityHostIoRequest::WriteInput {
             session_id: self.session_id.clone(),
             bytes: bytes.into(),
@@ -132,7 +129,7 @@ impl RatatuiAuthorityHostSession {
     }
 
     /// Resize the PTY.
-    pub fn resize(&self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>, cols: u16, rows: u16) {
+    pub fn resize(&self, io_tx: &AuthorityHostIoHandle, cols: u16, rows: u16) {
         let _ = io_tx.send(AuthorityHostIoRequest::Resize {
             session_id: self.session_id.clone(),
             cols,
@@ -141,7 +138,7 @@ impl RatatuiAuthorityHostSession {
     }
 
     /// Request a graceful shutdown of the PTY session.
-    pub fn shutdown(&mut self, io_tx: &mpsc::Sender<AuthorityHostIoRequest>) {
+    pub fn shutdown(&mut self, io_tx: &AuthorityHostIoHandle) {
         let _ = io_tx.send(AuthorityHostIoRequest::UnregisterSession {
             session_id: self.session_id.clone(),
         });

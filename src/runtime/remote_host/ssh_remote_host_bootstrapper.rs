@@ -338,7 +338,7 @@ where
         if output.status.success() {
             Ok(())
         } else {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            let _stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(RemoteHostBootstrapError::new(format!(
                 "deploy script exited with status {}{}",

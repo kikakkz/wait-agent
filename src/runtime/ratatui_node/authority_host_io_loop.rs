@@ -6,16 +6,16 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
 const SIGCHLD_TOKEN: usize = 0;
-const INITIAL_SESSION_TOKEN: usize = 1;
+const SHUTDOWN_TOKEN: usize = 1;
+const REQUEST_WAKE_TOKEN: usize = 2;
+const INITIAL_SESSION_TOKEN: usize = 3;
 const PTY_READ_BUF_SIZE: usize = 4096;
 
 /// Requests sent to `AuthorityHostIoLoop` to perform PTY I/O or change the
@@ -47,6 +47,42 @@ pub(crate) enum AuthorityHostIoRequest {
     },
 }
 
+/// Handle used by other threads to send requests to `AuthorityHostIoLoop`.
+///
+/// Every successful send also writes to an internal wake pipe so the IO loop
+/// never blocks in `poll` while requests are pending.
+#[derive(Clone)]
+pub(crate) struct AuthorityHostIoHandle {
+    tx: mpsc::Sender<AuthorityHostIoRequest>,
+    wake: Arc<Mutex<Option<UnixStream>>>,
+}
+
+impl AuthorityHostIoHandle {
+    /// Send a request to the IO loop and wake it if it is blocked in poll.
+    pub(crate) fn send(
+        &self,
+        request: AuthorityHostIoRequest,
+    ) -> Result<(), mpsc::SendError<AuthorityHostIoRequest>> {
+        self.tx.send(request)?;
+        if let Ok(mut guard) = self.wake.lock() {
+            if let Some(wake) = guard.as_mut() {
+                let _ = wake.write_all(&[1]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return a handle whose sends are silently dropped. Used before the IO
+    /// loop has been started so callers do not panic.
+    pub(crate) fn dangling() -> Self {
+        let (tx, _) = mpsc::channel();
+        Self {
+            tx,
+            wake: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
 struct SessionState {
     pty_master: File,
     child: Child,
@@ -55,6 +91,10 @@ struct SessionState {
     /// Buffered PTY output produced before an output sender was installed.
     /// Kept small; once a sender is attached the buffer is flushed.
     output_buffer: VecDeque<u8>,
+    /// Buffered input bytes that could not be written to the PTY immediately
+    /// because the kernel buffer was full. Drained when the PTY becomes
+    /// writable again.
+    pending_write: Vec<u8>,
 }
 
 /// Single thread that owns all authority-host PTY master fd I/O.
@@ -67,29 +107,68 @@ struct SessionState {
 ///   managed children with `try_wait()` and reports exits to `StateEventLoop`.
 pub(crate) struct AuthorityHostIoLoop {
     tx: mpsc::Sender<AuthorityHostIoRequest>,
+    shutdown_write: Option<UnixStream>,
+    request_wake: Arc<Mutex<Option<UnixStream>>>,
 }
 
 impl AuthorityHostIoLoop {
     pub(crate) fn start(shared: Arc<SharedState>) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<AuthorityHostIoRequest>();
+        let (shutdown_read, shutdown_write) = UnixStream::pair().map_err(|error| {
+            LifecycleError::Io(
+                "failed to create authority host IO shutdown pipe".to_string(),
+                error,
+            )
+        })?;
+        let (request_read, request_write) = UnixStream::pair().map_err(|error| {
+            LifecycleError::Io(
+                "failed to create authority host IO request wake pipe".to_string(),
+                error,
+            )
+        })?;
+        let request_wake = Arc::new(Mutex::new(Some(request_write)));
         std::thread::spawn(move || {
-            if let Err(error) = run_io_loop(shared, rx) {
+            if let Err(error) = run_io_loop(shared, rx, shutdown_read, request_read) {
                 ERROR_LOG.log(format!(
                     "[ratatui-authority-host-io] loop exited with error: {error}"
                 ));
             }
         });
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            shutdown_write: Some(shutdown_write),
+            request_wake,
+        })
     }
 
-    pub(crate) fn sender(&self) -> mpsc::Sender<AuthorityHostIoRequest> {
-        self.tx.clone()
+    pub(crate) fn sender(&self) -> AuthorityHostIoHandle {
+        AuthorityHostIoHandle {
+            tx: self.tx.clone(),
+            wake: self.request_wake.clone(),
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(mut shutdown_write) = self.shutdown_write.take() {
+            let _ = shutdown_write.write_all(&[1]);
+        }
+        if let Ok(mut guard) = self.request_wake.lock() {
+            let _ = guard.take();
+        }
+    }
+}
+
+impl Drop for AuthorityHostIoLoop {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 fn run_io_loop(
     shared: Arc<SharedState>,
     rx: mpsc::Receiver<AuthorityHostIoRequest>,
+    mut shutdown_read: UnixStream,
+    mut request_read: UnixStream,
 ) -> Result<(), LifecycleError> {
     let mut poller = polling::Poller::new().map_err(|error| {
         LifecycleError::Io(
@@ -125,14 +204,45 @@ fn run_io_loop(
                 )
             })?;
     }
+    // SAFETY: shutdown_read outlives the poller; it is owned by this loop and
+    // unregistered only on loop exit.
+    unsafe {
+        poller
+            .add_with_mode(
+                &shutdown_read,
+                polling::Event::readable(SHUTDOWN_TOKEN),
+                polling::PollMode::Level,
+            )
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to add authority host IO shutdown pipe to poller".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error),
+                )
+            })?;
+    }
+    // SAFETY: request_read outlives the poller; it is owned by this loop and
+    // unregistered only on loop exit.
+    unsafe {
+        poller
+            .add_with_mode(
+                &request_read,
+                polling::Event::readable(REQUEST_WAKE_TOKEN),
+                polling::PollMode::Level,
+            )
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to add authority host IO request wake pipe to poller".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error),
+                )
+            })?;
+    }
 
     let mut sessions: HashMap<String, SessionState> = HashMap::new();
     let mut token_to_session: HashMap<usize, String> = HashMap::new();
     let mut next_token: usize = INITIAL_SESSION_TOKEN;
     let mut events = polling::Events::new();
-    let shutdown = Arc::new(AtomicBool::new(false));
 
-    while !shutdown.load(Ordering::Relaxed) {
+    loop {
         // Drain pending requests before/after each poll so the loop stays
         // responsive even when PTY traffic is steady.
         drain_requests(
@@ -144,7 +254,7 @@ fn run_io_loop(
         )?;
 
         events.clear();
-        match poller.wait(&mut events, Some(Duration::from_millis(100))) {
+        match poller.wait(&mut events, None) {
             Ok(0) => continue,
             Ok(_) => {}
             Err(error) => {
@@ -163,11 +273,24 @@ fn run_io_loop(
                 continue;
             }
 
+            if event.key == SHUTDOWN_TOKEN {
+                let mut buf = [0u8; 1];
+                let _ = shutdown_read.read(&mut buf);
+                return Ok(());
+            }
+
+            if event.key == REQUEST_WAKE_TOKEN {
+                drain_request_wake(&mut request_read);
+                // Requests are drained at the top of the next loop iteration.
+                continue;
+            }
+
             let Some(session_id) = token_to_session.get(&event.key).cloned() else {
                 continue;
             };
+            let mut dead = false;
             if event.readable {
-                let dead = read_pty(&session_id, &mut sessions);
+                dead = read_pty(&session_id, &mut sessions);
                 if dead {
                     if let Some(state) = sessions.remove(&session_id) {
                         let _ = poller.delete(&state.pty_master);
@@ -180,10 +303,13 @@ fn run_io_loop(
                         });
                 }
             }
+            if event.writable && !dead {
+                if let Some(state) = sessions.get_mut(&session_id) {
+                    drain_pending_write(state, &mut poller);
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 fn drain_requests(
@@ -197,7 +323,8 @@ fn drain_requests(
         match request {
             AuthorityHostIoRequest::WriteInput { session_id, bytes } => {
                 if let Some(state) = sessions.get_mut(&session_id) {
-                    write_pty_nonblocking(&mut state.pty_master, &bytes);
+                    append_input_to_pending_write(state, &bytes);
+                    drain_pending_write(state, poller);
                 }
             }
             AuthorityHostIoRequest::Resize {
@@ -243,6 +370,7 @@ fn drain_requests(
                         token,
                         output_tx,
                         output_buffer: VecDeque::new(),
+                        pending_write: Vec::new(),
                     },
                 );
             }
@@ -357,23 +485,77 @@ fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<
     }
 }
 
-fn write_pty_nonblocking(pty_master: &mut File, bytes: &[u8]) {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match pty_master.write(&bytes[offset..]) {
-            Ok(n) => offset += n,
+/// Drain the request-wake pipe so level-triggered polling does not fire
+/// repeatedly. Reads until the pipe is empty or an error occurs.
+fn drain_request_wake(request_read: &mut UnixStream) {
+    let mut buf = [0u8; 64];
+    loop {
+        match request_read.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) if n < buf.len() => break,
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+}
+
+fn append_input_to_pending_write(state: &mut SessionState, bytes: &[u8]) {
+    if state.pending_write.is_empty() {
+        // Attempt an immediate non-blocking write. If it succeeds fully we
+        // avoid buffering; otherwise queue the remainder for the writable event.
+        match state.pty_master.write(bytes) {
+            Ok(n) if n == bytes.len() => return,
+            Ok(n) => state.pending_write.extend_from_slice(&bytes[n..]),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(5));
+                state.pending_write.extend_from_slice(bytes);
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
                     "[ratatui-authority-host-io] pty write error: {error}"
                 ));
-                break;
+                return;
+            }
+        }
+    } else {
+        state.pending_write.extend_from_slice(bytes);
+    }
+    let _ = state.pty_master.flush();
+}
+
+fn drain_pending_write(state: &mut SessionState, poller: &mut polling::Poller) {
+    if state.pending_write.is_empty() {
+        // We are only interested in readability when there is nothing to write.
+        let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+        return;
+    }
+
+    let mut offset = 0;
+    while offset < state.pending_write.len() {
+        match state.pty_master.write(&state.pending_write[offset..]) {
+            Ok(n) => offset += n,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-authority-host-io] pty write error: {error}"
+                ));
+                state.pending_write.clear();
+                let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+                return;
             }
         }
     }
-    let _ = pty_master.flush();
+
+    if offset > 0 {
+        state.pending_write.drain(..offset);
+    }
+
+    if state.pending_write.is_empty() {
+        let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+    } else {
+        let _ = poller.modify(&state.pty_master, polling::Event::all(state.token));
+    }
+    let _ = state.pty_master.flush();
 }
 
 fn resize_pty(pty_master: &File, cols: u16, rows: u16) {

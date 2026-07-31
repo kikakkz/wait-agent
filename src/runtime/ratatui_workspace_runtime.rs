@@ -5,7 +5,7 @@ use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
 use crate::runtime::ratatui_node_runtime::{
     node_is_running, ratatui_socket_dir, ratatui_socket_path, remove_node_socket,
-    send_node_command, ControlResponse, ServerMessageJson,
+    send_node_command, ServerMessageJson,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

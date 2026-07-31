@@ -6,7 +6,9 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use super::authority_host_io_loop::{AuthorityHostIoLoop, AuthorityHostIoRequest};
+use super::authority_host_io_loop::{
+    AuthorityHostIoHandle, AuthorityHostIoLoop, AuthorityHostIoRequest,
+};
 use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
@@ -61,7 +63,7 @@ fn run_state_event_loop(
     shared: Arc<SharedState>,
     rx: mpsc::Receiver<StateEvent>,
     catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
-    authority_host_io_tx: mpsc::Sender<AuthorityHostIoRequest>,
+    authority_host_io_tx: AuthorityHostIoHandle,
     client_writer: ClientWriterHandle,
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
@@ -204,7 +206,7 @@ fn broadcast_snapshot(
 
 fn handle_client_command(
     shared: &Arc<SharedState>,
-    authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+    authority_host_io_tx: &AuthorityHostIoHandle,
     catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
@@ -333,7 +335,7 @@ fn handle_client_command(
 
 fn create_authority_host_session(
     shared: &Arc<SharedState>,
-    authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+    authority_host_io_tx: &AuthorityHostIoHandle,
     cols: u16,
     rows: u16,
 ) -> Result<CreatedAuthorityHostTarget, LifecycleError> {
@@ -368,7 +370,7 @@ fn create_authority_host_session(
 
 fn route_input(
     shared: &SharedState,
-    authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+    authority_host_io_tx: &AuthorityHostIoHandle,
     target_id: &str,
     key: LogicalKey,
 ) {

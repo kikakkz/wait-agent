@@ -98,7 +98,6 @@ impl EventDrivenUiPaneRuntime {
                                 ChromeEvent::SidebarSelectionChanged { target },
                             )),
                         );
-                    } else {
                     }
                 }
                 SidebarInputAction::Next => {
@@ -109,7 +108,6 @@ impl EventDrivenUiPaneRuntime {
                                 ChromeEvent::SidebarSelectionChanged { target },
                             )),
                         );
-                    } else {
                     }
                 }
                 SidebarInputAction::Submit => {

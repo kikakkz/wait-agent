@@ -68,8 +68,7 @@ pub(crate) struct SharedState {
     pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
     pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
     state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
-    authority_host_io_tx:
-        Mutex<Option<mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>>>,
+    authority_host_io_tx: Mutex<Option<super::authority_host_io_loop::AuthorityHostIoHandle>>,
     local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
 }
 
@@ -114,7 +113,7 @@ impl SharedState {
 
     pub(crate) fn set_authority_host_io_tx(
         &self,
-        tx: mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest>,
+        tx: super::authority_host_io_loop::AuthorityHostIoHandle,
     ) {
         if let Ok(mut guard) = self.authority_host_io_tx.lock() {
             *guard = Some(tx);
@@ -123,16 +122,13 @@ impl SharedState {
 
     pub(crate) fn authority_host_io_sender(
         &self,
-    ) -> mpsc::Sender<super::authority_host_io_loop::AuthorityHostIoRequest> {
+    ) -> super::authority_host_io_loop::AuthorityHostIoHandle {
         self.authority_host_io_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .cloned()
-            .unwrap_or_else(|| {
-                let (tx, _) = mpsc::channel();
-                tx
-            })
+            .unwrap_or_else(super::authority_host_io_loop::AuthorityHostIoHandle::dangling)
     }
 
     pub(crate) fn set_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {

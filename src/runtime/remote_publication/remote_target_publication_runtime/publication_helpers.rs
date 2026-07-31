@@ -1224,7 +1224,6 @@ pub(crate) fn signal_publication_sender_command(
 
 /// Decoupled publication operations using only TmuxSessionGateway trait methods.
 /// These replace the methods that were previously on EmbeddedTmuxBackend.
-
 pub(crate) fn bind_publication_on_socket(
     gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
     socket_name: &str,
