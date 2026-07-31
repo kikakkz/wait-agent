@@ -169,6 +169,7 @@ fn run_connect_popup<F>(
     port: u16,
     network: &RemoteNetworkConfig,
     render_background: F,
+    crossterm_rx: &Receiver<Event>,
 ) -> Result<(), LifecycleError>
 where
     F: FnMut(&mut Frame),
@@ -181,7 +182,7 @@ where
         current_socket_name: String::new(),
         current_session_name: "1".to_string(),
     };
-    runtime.run_embedded(terminal, command, render_background)
+    runtime.run_embedded(terminal, command, render_background, crossterm_rx)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +272,7 @@ fn handle_crossterm_event(
     status_message: &mut Option<(String, Instant)>,
     port: u16,
     network: &RemoteNetworkConfig,
+    crossterm_rx: &Receiver<Event>,
 ) -> Result<bool, LifecycleError> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -335,9 +337,13 @@ fn handle_crossterm_event(
                                 true,
                             )
                         };
-                        if let Err(error) =
-                            run_connect_popup(terminal, port, network, render_background)
-                        {
+                        if let Err(error) = run_connect_popup(
+                            terminal,
+                            port,
+                            network,
+                            render_background,
+                            crossterm_rx,
+                        ) {
                             *status_message = Some((error.to_string(), Instant::now()));
                         }
                     }
@@ -414,6 +420,7 @@ fn run_event_loop(
                     &mut status_message,
                     port,
                     network,
+                    &crossterm_rx,
                 )? {
                     break;
                 }
@@ -450,6 +457,7 @@ fn run_event_loop(
                         &mut status_message,
                         port,
                         network,
+                        &crossterm_rx,
                     )? {
                         return Ok(());
                     }

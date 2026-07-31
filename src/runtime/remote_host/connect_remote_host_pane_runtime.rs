@@ -12,6 +12,8 @@ use crate::runtime::remote_host::remote_install_proxy_store::{
     no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
     RemoteInstallProxyStore,
 };
+use crossbeam_channel::Receiver as CrossbeamReceiver;
+use crossbeam_channel::RecvTimeoutError;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
@@ -69,6 +71,7 @@ impl ConnectRemoteHostPaneRuntime {
             command,
             initial_secret_request,
             &mut render_background,
+            None,
         );
 
         crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
@@ -80,11 +83,16 @@ impl ConnectRemoteHostPaneRuntime {
 
     /// Run the popup inside an existing ratatui terminal without taking over
     /// raw mode or the alternate screen. Used by the ratatui client for Ctrl+W.
+    ///
+    /// When `crossterm_rx` is provided, events are read from that channel
+    /// instead of directly from crossterm, so the popup cooperates with an
+    /// external event-driven TUI loop.
     pub fn run_embedded<F>(
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         command: ConnectRemoteHostPaneCommand,
         mut render_background: F,
+        crossterm_rx: &CrossbeamReceiver<Event>,
     ) -> Result<(), LifecycleError>
     where
         F: FnMut(&mut Frame),
@@ -99,6 +107,7 @@ impl ConnectRemoteHostPaneRuntime {
             command,
             initial_secret_request,
             &mut render_background,
+            Some(crossterm_rx),
         );
         let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
         result
@@ -111,6 +120,7 @@ impl ConnectRemoteHostPaneRuntime {
         command: ConnectRemoteHostPaneCommand,
         initial_secret_request: Option<SecretLoadRequest>,
         render_background: &mut dyn FnMut(&mut Frame),
+        crossterm_rx: Option<&CrossbeamReceiver<Event>>,
     ) -> Result<(), LifecycleError> {
         let (secret_tx, secret_rx) = mpsc::channel();
         if let Some(request) = initial_secret_request {
@@ -124,27 +134,22 @@ impl ConnectRemoteHostPaneRuntime {
             .map_err(write_error)?;
         loop {
             let mut needs_draw = self.apply_secret_results(state, &secret_rx);
-            if !needs_draw && !event::poll(Duration::from_millis(25)).map_err(write_error)? {
-                continue;
-            }
-            let action = if event::poll(Duration::from_millis(0)).map_err(write_error)? {
-                match event::read().map_err(write_error)? {
-                    Event::Key(key) => {
-                        needs_draw = true;
-                        state.apply_key(key)
-                    }
-                    Event::Mouse(mouse) => {
-                        needs_draw = true;
-                        state.apply_mouse(mouse)
-                    }
-                    Event::Resize(_, _) => {
-                        needs_draw = true;
-                        PaneAction::Redraw
-                    }
-                    _ => PaneAction::None,
+            let event = Self::next_crossterm_event(crossterm_rx)?;
+            let action = match event {
+                Some(Event::Key(key)) => {
+                    needs_draw = true;
+                    state.apply_key(key)
                 }
-            } else {
-                PaneAction::None
+                Some(Event::Mouse(mouse)) => {
+                    needs_draw = true;
+                    state.apply_mouse(mouse)
+                }
+                Some(Event::Resize(_, _)) => {
+                    needs_draw = true;
+                    PaneAction::Redraw
+                }
+                Some(_) => PaneAction::None,
+                None => PaneAction::None,
             };
             match action {
                 PaneAction::None | PaneAction::Redraw => {}
@@ -221,6 +226,25 @@ impl ConnectRemoteHostPaneRuntime {
                         render(frame, state);
                     })
                     .map_err(write_error)?;
+            }
+        }
+    }
+
+    fn next_crossterm_event(
+        crossterm_rx: Option<&CrossbeamReceiver<Event>>,
+    ) -> Result<Option<Event>, LifecycleError> {
+        match crossterm_rx {
+            Some(rx) => match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(event) => Ok(Some(event)),
+                Err(RecvTimeoutError::Timeout) => Ok(None),
+                Err(RecvTimeoutError::Disconnected) => Ok(None),
+            },
+            None => {
+                if event::poll(Duration::from_millis(25)).map_err(write_error)? {
+                    Ok(Some(event::read().map_err(write_error)?))
+                } else {
+                    Ok(None)
+                }
             }
         }
     }
