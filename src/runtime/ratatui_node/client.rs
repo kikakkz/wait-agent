@@ -1,5 +1,6 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use base64::{engine::general_purpose, Engine as _};
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -141,9 +142,13 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                 let mut parts = args.splitn(2, ' ');
                 let target_id = parts.next().unwrap_or("").to_string();
                 let encoded = parts.next().unwrap_or("");
-                match base64::decode(encoded) {
-                    Ok(bytes) => Some(ClientCommand::Input { target_id, bytes }),
-                    Err(_) => None,
+                match general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                {
+                    Some(key) => Some(ClientCommand::Input { target_id, key }),
+                    None => None,
                 }
             } else {
                 None

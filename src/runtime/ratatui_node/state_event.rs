@@ -1,3 +1,5 @@
+use super::logical_key::LogicalKey;
+
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.
 ///
 /// All lifecycle mutations (local child exit, authority-host child exit,
@@ -73,8 +75,8 @@ pub(crate) enum ClientCommand {
     DetachAll,
     /// Resize the active session.
     Resize { cols: u16, rows: u16 },
-    /// Forward keyboard input to a specific session.
-    Input { target_id: String, bytes: Vec<u8> },
+    /// Forward a logical keyboard key to a specific session.
+    Input { target_id: String, key: LogicalKey },
 }
 
 /// Reply returned by `StateEventLoop` for control commands.

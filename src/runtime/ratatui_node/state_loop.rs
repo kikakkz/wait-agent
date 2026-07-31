@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use super::authority_host_io_loop::{AuthorityHostIoLoop, AuthorityHostIoRequest};
 use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
+use super::key_translation::{translate_key, KeyTranslationMode};
+use super::logical_key::LogicalKey;
 use super::runtime::SharedState;
 use super::snapshot::{
     build_snapshot, response_json, snapshot_json, ControlResponse, ServerStatus, SessionView,
@@ -322,8 +324,8 @@ fn handle_client_command(
             CommandOutcome::Ok
         }
 
-        ClientCommand::Input { target_id, bytes } => {
-            route_input(shared, authority_host_io_tx, &target_id, bytes);
+        ClientCommand::Input { target_id, key } => {
+            route_input(shared, authority_host_io_tx, &target_id, key);
             CommandOutcome::Ok
         }
     }
@@ -368,7 +370,7 @@ fn route_input(
     shared: &SharedState,
     authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
     target_id: &str,
-    bytes: Vec<u8>,
+    key: LogicalKey,
 ) {
     let record = {
         let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -380,33 +382,65 @@ fn route_input(
     match record.address.transport() {
         SessionTransport::Local => {
             // Local PTY sessions are keyed by qualified target.
-            if shared
-                .local_sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(target_id)
-            {
-                shared.feed_local_session_input(target_id, bytes);
+            let local_session = {
+                let guard = shared
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(target_id).cloned()
+            };
+            if let Some(session) = local_session {
+                let mode = local_translation_mode(&session);
+                let bytes = translate_key(&key, mode);
+                session.feed_input(bytes);
                 return;
             }
             // Authority-host sessions are keyed by short session id inside the
-            // IO loop.
+            // IO loop. They forward raw PTY bytes to a remote viewer, so we do
+            // not have a local terminal mode; translate in normal mode.
             if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
-                if shared
-                    .authority_host_sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains_key(&session_id)
-                {
+                let is_host = {
+                    let guard = shared
+                        .authority_host_sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.contains_key(&session_id)
+                };
+                if is_host {
+                    let bytes = translate_key(&key, KeyTranslationMode::default());
                     let _ = authority_host_io_tx
                         .send(AuthorityHostIoRequest::WriteInput { session_id, bytes });
                 }
             }
         }
         SessionTransport::RemotePeer => {
+            let mode = remote_translation_mode(shared, target_id);
+            let bytes = translate_key(&key, mode);
             shared.feed_remote_session_input(target_id, bytes);
         }
     }
+}
+
+fn local_translation_mode(
+    session: &super::local_session::RatatuiLocalSession,
+) -> KeyTranslationMode {
+    let term = session.term.lock();
+    let mode = term.mode();
+    KeyTranslationMode {
+        application_cursor_keys: mode.contains(alacritty_terminal::term::TermMode::APP_CURSOR),
+        application_keypad: mode.contains(alacritty_terminal::term::TermMode::APP_KEYPAD),
+    }
+}
+
+fn remote_translation_mode(shared: &SharedState, target_id: &str) -> KeyTranslationMode {
+    let session = {
+        let guard = shared
+            .remote_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(target_id).cloned()
+    };
+    session.map(|s| s.translation_mode()).unwrap_or_default()
 }
 
 fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {

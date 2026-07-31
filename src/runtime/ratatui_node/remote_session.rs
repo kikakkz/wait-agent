@@ -245,6 +245,18 @@ impl RatatuiRemoteSession {
         (screen.lines.clone(), cursor)
     }
 
+    /// Return the terminal-mode flags needed to translate logical keys into
+    /// the byte sequences expected by the remote PTY.
+    pub fn translation_mode(
+        &self,
+    ) -> crate::runtime::ratatui_node::key_translation::KeyTranslationMode {
+        let observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
+        crate::runtime::ratatui_node::key_translation::KeyTranslationMode {
+            application_cursor_keys: observer.application_cursor_keys(),
+            application_keypad: false,
+        }
+    }
+
     /// Resize the modeled screen without sending anything to the remote peer.
     pub fn resize_local_screen(&self, cols: u16, rows: u16) {
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());

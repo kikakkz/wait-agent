@@ -1,10 +1,12 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_node::logical_key::LogicalKey;
 use crate::runtime::ratatui_node_runtime::{
     ratatui_socket_path, ControlResponse, RatatuiSnapshot, ServerMessageJson, SessionView,
 };
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
+use base64::{engine::general_purpose, Engine as _};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -362,9 +364,10 @@ fn run_event_loop(
                                 }
                             }
                             _ if focus == Focus::Main => {
-                                if let Some(bytes) = key_event_to_bytes(&key) {
+                                if let Some(logical_key) = key_event_to_logical_key(&key) {
                                     if let Some(target_id) = snapshot.active_target.as_deref() {
-                                        let encoded = base64::encode(&bytes);
+                                        let encoded =
+                                            general_purpose::STANDARD.encode(logical_key.to_json());
                                         let _ = writeln!(stream, "INPUT {target_id} {encoded}");
                                         let _ = stream.flush();
                                     }
@@ -386,40 +389,10 @@ fn run_event_loop(
     Ok(())
 }
 
-fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
-    // For now, forward printable characters and a minimal set of control keys.
-    // This is enough to interact with a shell; we can expand to full CSI/SS3
-    // sequences later.
-    match key.code {
-        KeyCode::Char(c) => {
-            let mut bytes = Vec::new();
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                let ctrl = c.to_ascii_lowercase();
-                if ('a'..='z').contains(&ctrl) {
-                    bytes.push(ctrl as u8 - b'a' + 1);
-                    return Some(bytes);
-                }
-            }
-            let mut buf = [0u8; 4];
-            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            Some(bytes)
-        }
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(vec![0x1b, b'[', b'A']),
-        KeyCode::Down => Some(vec![0x1b, b'[', b'B']),
-        KeyCode::Right => Some(vec![0x1b, b'[', b'C']),
-        KeyCode::Left => Some(vec![0x1b, b'[', b'D']),
-        KeyCode::Home => Some(vec![0x1b, b'[', b'H']),
-        KeyCode::End => Some(vec![0x1b, b'[', b'F']),
-        KeyCode::PageUp => Some(vec![0x1b, b'[', b'5', b'~']),
-        KeyCode::PageDown => Some(vec![0x1b, b'[', b'6', b'~']),
-        KeyCode::Delete => Some(vec![0x1b, b'[', b'3', b'~']),
-        KeyCode::Insert => Some(vec![0x1b, b'[', b'2', b'~']),
-        _ => None,
-    }
+fn key_event_to_logical_key(key: &KeyEvent) -> Option<LogicalKey> {
+    // Ignore key-release events; crossterm already filters by KeyEventKind::Press
+    // in the caller, so any key reaching here is a press we want to forward.
+    Some(LogicalKey::from(key))
 }
 
 fn render(

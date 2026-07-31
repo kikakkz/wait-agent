@@ -388,17 +388,6 @@ impl SharedState {
         }
     }
 
-    /// Forward input bytes to a specific local session keyed by qualified target.
-    pub(crate) fn feed_local_session_input(&self, target_id: &str, bytes: impl Into<Vec<u8>>) {
-        let guard = self
-            .local_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = guard.get(target_id) {
-            session.feed_input(bytes);
-        }
-    }
-
     /// Return the workspace id used for authority transport socket naming.
     pub(crate) fn workspace_id(&self) -> String {
         format!("ratatui-{}", self.network.port)
