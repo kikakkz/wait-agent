@@ -51,18 +51,13 @@ impl RatatuiAuthorityHostSession {
         let slave: OwnedFd = pty.user;
 
         // Prepare the PTY for a remote viewer.  Keep IUTF8 so multi-byte input
-        // is handled correctly.  Disable echo: the viewing side renders input
-        // locally, so enabling it would show every typed character twice.  The
-        // shell itself (via readline) will switch to raw mode once it starts,
-        // so we leave the initial termios in the default state except for echo.
+        // is handled correctly.  Leave echo enabled so the remote shell's
+        // readline handles all character echo and line redraw; disabling it and
+        // doing local echo caused the modeled screen to drift out of sync with
+        // the remote PTY state.
         if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
             let mut termios = termios;
             termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
-            let local = &mut termios.local_modes;
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHO);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOE);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOK);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHONL);
             let _ = rustix_openpty::rustix::termios::tcsetattr(
                 &master,
                 rustix_openpty::rustix::termios::OptionalActions::Now,

@@ -158,9 +158,10 @@ impl RatatuiRemoteSession {
         self.send_open_mirror(cols, rows);
     }
 
-    /// Forward keyboard input to the remote session and echo it locally so the
-    /// typed character appears immediately, even when the remote peer uses a
-    /// line-buffered discipline that does not echo until Enter is pressed.
+    /// Forward keyboard input to the remote session.
+    ///
+    /// The remote PTY handles echo, so the modeled screen stays in sync with
+    /// the remote readline state.
     pub fn feed_input(&self, bytes: impl Into<Vec<u8>>) {
         let bytes = bytes.into();
         let seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed);
@@ -182,15 +183,9 @@ impl RatatuiRemoteSession {
         let _ = writer.flush();
         drop(guard);
 
-        // Render the typed bytes on the local screen immediately.  Only echo
-        // visible characters and a few safe editing keys; escape sequences
-        // (cursor keys, function keys) and most control characters must not be
-        // echoed or they corrupt the modeled screen before the remote peer
-        // redraws it.
-        if is_local_echoable(&bytes) {
-            let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
-            observer.feed_local_echo(&bytes);
-        }
+        // Do not render the typed bytes locally.  The remote PTY echoes them
+        // (echo is left enabled), so the viewing side stays in sync with the
+        // remote readline state and history/arrow-key redraw works correctly.
         let _ = self
             .shared
             .state_sender()
@@ -423,18 +418,6 @@ fn handle_authority_transport_stream(
         "[ratatui-remote-session] authority reader exiting for {target_id}"
     ));
     session.running.store(false, Ordering::Relaxed);
-}
-
-/// Return true if a byte sequence should be rendered as local echo.
-///
-/// We only echo visible ASCII/UTF-8 bytes plus Tab, Enter/Return and
-/// Backspace.  Escape sequences (cursor keys, function keys, etc.) and other
-/// control characters are left for the remote peer to render, otherwise the
-/// local modeled screen would drift out of sync with the remote PTY state.
-fn is_local_echoable(bytes: &[u8]) -> bool {
-    bytes.iter().all(|b| {
-        matches!(b, b'\t' | b'\n' | b'\r' | 0x7f) || *b >= b' '
-    })
 }
 
 fn now_millis() -> u128 {
