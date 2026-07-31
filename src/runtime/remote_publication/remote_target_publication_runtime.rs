@@ -477,6 +477,17 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             result.is_ok(),
             t_remove.elapsed()
         ));
+        if result.is_ok() {
+            let target = format!("{authority_id}:{transport_session_id}");
+            if let Err(error) = self.signal_remote_target_exited_to_live_workspaces(
+                &self.live_workspace_socket_names()?,
+                &target,
+            ) {
+                ERROR_LOG.log(format!(
+                    "[diag-exit] failed to signal workspace exit for {target}: {error}"
+                ));
+            }
+        }
         result
     }
 

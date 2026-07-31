@@ -171,7 +171,7 @@ impl SharedState {
     /// Mark a session as exited, remove its runtime, switch to the next
     /// available session, and shut down the server when the last session exits.
     pub(crate) fn handle_session_exit(&self, session_id: &str) {
-        let (was_local, qualified_target) = {
+        let qualified_target = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = guard.remove(session_id);
             let was_local = record
@@ -207,7 +207,7 @@ impl SharedState {
                 host_guard.remove(session_id);
             }
 
-            (was_local, qualified_target)
+            qualified_target
         };
 
         let remaining: Vec<String> = {
@@ -222,17 +222,15 @@ impl SharedState {
         {
             let mut active_guard = self.active_target.lock().unwrap_or_else(|e| e.into_inner());
             if remaining.is_empty() {
-                // Only the local TUI server shuts down when its last session exits.
-                // Remote peer nodes stay alive so they can publish the exit event
-                // back to the authority and accept new sessions later.
-                if was_local && self.network.connect.is_none() {
-                    ERROR_LOG.log(format!(
-                        "[ratatui-node] last local session {session_id} exited; shutting down"
-                    ));
-                    self.shutdown.store(true, Ordering::SeqCst);
-                    let _ =
-                        UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
-                }
+                // When the last session exits there is nothing left to show or
+                // host. Shutdown the node server. The local-catalog change
+                // notification is sent below so peers receive the exit event
+                // before the process terminates.
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] last session {session_id} exited; shutting down"
+                ));
+                self.shutdown.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
                 *active_guard = None;
             } else {
                 // Pick the next session. Prefer one that is not the just-exited
@@ -494,7 +492,11 @@ impl RatatuiNodeRuntime {
 
         // Create the default local session with a reasonable initial size.
         // The client will send a RESIZE once it knows the terminal dimensions.
-        let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
+        // Peer node servers (with --connect) should not create a default local
+        // session; they only host sessions requested by remote viewers.
+        if network.connect.is_none() {
+            let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
+        }
 
         Ok(Self {
             network: network.clone(),
