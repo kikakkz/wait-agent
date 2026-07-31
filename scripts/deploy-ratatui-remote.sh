@@ -208,12 +208,9 @@ start_daemon() {
   # Build the start command. We run the ratatui node server on the remote host
   # so it connects back to the local WaitAgent using the ratatui session backend
   # instead of the tmux-based __remote-daemon.
-  local start_cmd
-  start_cmd="exec $(shq "$REMOTE_BIN") --ratatui --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server"
-
   remote "
     set -e
-    nohup sh -c $start_cmd >> $(shq "$LOG_FILE") 2>&1 </dev/null &
+    nohup $(shq "$REMOTE_BIN") --ratatui --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server >> $(shq "$LOG_FILE") 2>&1 </dev/null &
     sleep 0.5
     pgrep -f $(shq "waitagent.*--port $REMOTE_PORT.*__ratatui-node-server") >/dev/null
   "
