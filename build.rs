@@ -38,9 +38,13 @@ fn emit_version_info() {
     println!("cargo:rerun-if-env-changed=WAITAGENT_GIT_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     // Re-run the build script when the HEAD moves so the embedded git hash
-    // stays in sync with the current checkout.
+    // stays in sync with the current checkout. On a branch, .git/HEAD itself
+    // does not change when a new commit is made; the branch ref file does.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=build.rs");
+    if let Some(ref_path) = current_branch_ref_path() {
+        println!("cargo:rerun-if-changed={ref_path}");
+    }
 
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into());
 
@@ -87,6 +91,16 @@ fn git_worktree_dirty() -> bool {
         .ok()
         .and_then(|status| status.code())
         .is_some_and(|code| code == 1)
+}
+
+fn current_branch_ref_path() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| format!(".git/{}", s.trim()))
 }
 
 fn short_hash(value: String) -> Option<String> {
