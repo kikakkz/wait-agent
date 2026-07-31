@@ -1,8 +1,4 @@
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
-use crate::lifecycle::LifecycleError;
-use std::io::Write;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
 fn is_remote_target(target: &str, shared: &SharedState) -> bool {
     let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -12,7 +8,6 @@ fn is_remote_target(target: &str, shared: &SharedState) -> bool {
         .unwrap_or(false)
 }
 
-use super::client::ClientHandle;
 use super::runtime::SharedState;
 
 /// Status returned by the STATUS one-shot command.
@@ -66,11 +61,6 @@ impl ControlResponse {
             message: Some(message.into()),
             ..Default::default()
         }
-    }
-
-    pub fn with_broadcast(mut self) -> Self {
-        self.broadcast = true;
-        self
     }
 }
 
@@ -260,20 +250,4 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         sessions,
         active_target,
     }
-}
-
-pub(crate) fn broadcast_snapshot(
-    clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    shared: &SharedState,
-) -> Result<(), LifecycleError> {
-    let snapshot = build_snapshot(0, shared);
-    let json = snapshot_json(&snapshot);
-    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|handle| !handle.removed.load(Ordering::SeqCst));
-    for handle in guard.iter() {
-        let mut stream = &handle.stream;
-        let _ = writeln!(stream, "{json}");
-        let _ = stream.flush();
-    }
-    Ok(())
 }

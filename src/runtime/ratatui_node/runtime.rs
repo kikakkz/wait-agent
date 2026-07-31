@@ -27,6 +27,7 @@ use std::time::Instant;
 use super::authority_host_io_loop::AuthorityHostIoLoop;
 use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
+use super::client_writer::ClientWriter;
 use super::local_session::RatatuiLocalSession;
 use super::remote_session::RatatuiRemoteSession;
 use super::state_event::StateEvent;
@@ -48,14 +49,13 @@ pub struct RatatuiNodeRuntime {
 
 /// Lock hierarchy for all `SharedState` fields:
 ///
-/// 1. `clients` (outermost, only held during `broadcast_snapshot`)
-/// 2. `sessions`
-/// 3. `active_target`
-/// 4. `local_sessions` / `remote_sessions` / `authority_host_sessions`
+/// 1. `sessions`
+/// 2. `active_target`
+/// 3. `local_sessions` / `remote_sessions` / `authority_host_sessions`
 ///
-/// `StateEventLoop` is the single writer of `SharedState` and the only loop
-/// that calls `broadcast_snapshot`.  Other threads send events to trigger
-/// snapshot broadcasts instead of calling `broadcast_snapshot` directly.
+/// TUI client sockets are owned by `ClientWriter` and are not protected by any
+/// `SharedState` lock.  `StateEventLoop` is the single writer of `SharedState`
+/// and the only thread that decides when to broadcast snapshots.
 pub(crate) struct SharedState {
     pub(crate) network: RemoteNetworkConfig,
     pub(crate) sessions: Mutex<HashMap<String, ManagedSessionRecord>>,
@@ -154,18 +154,15 @@ impl SharedState {
     }
 
     pub(crate) fn detach_all_clients(&self) {
-        use std::net::Shutdown;
+        // Mark every known client as removed.  The actual sockets are owned by
+        // `ClientWriter`; callers must also send `Unregister` requests for each
+        // client id.
         let mut guard = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         for handle in guard.drain(..) {
             handle.removed.store(true, Ordering::SeqCst);
-            let _ = handle.stream.shutdown(Shutdown::Both);
         }
         drop(guard);
         self.client_count.store(0, Ordering::SeqCst);
-    }
-
-    pub(crate) fn broadcast_snapshot(&self) -> Result<(), LifecycleError> {
-        super::snapshot::broadcast_snapshot(&self.clients, self)
     }
 
     /// Mark a session as exited, remove its runtime, switch to the next
@@ -240,7 +237,6 @@ impl SharedState {
             }
         }
 
-        let _ = self.broadcast_snapshot();
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalTargetExited {
             target_session_name: target_id.to_string(),
         });
@@ -521,8 +517,13 @@ impl RatatuiNodeRuntime {
         // picks up the real sender once set_state_tx() is called below.
         let (catalog_tx, catalog_rx) = std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
         let authority_host_io = AuthorityHostIoLoop::start(self.shared.clone())?;
-        let state_event_loop =
-            StateEventLoop::start(self.shared.clone(), catalog_tx.clone(), &authority_host_io)?;
+        let client_writer = ClientWriter::start();
+        let state_event_loop = StateEventLoop::start(
+            self.shared.clone(),
+            catalog_tx.clone(),
+            &authority_host_io,
+            client_writer.clone(),
+        )?;
         self.shared.set_state_tx(state_event_loop.sender());
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
@@ -619,6 +620,7 @@ impl RatatuiNodeRuntime {
         };
 
         let clients = self.shared.clients.clone();
+        let client_writer_for_accept = client_writer.clone();
 
         for stream in listener.incoming() {
             if self.shared.shutdown.load(Ordering::SeqCst) {
@@ -629,12 +631,17 @@ impl RatatuiNodeRuntime {
                 Ok(stream) => {
                     let clients = clients.clone();
                     let shared = self.shared.clone();
+                    let client_writer = client_writer_for_accept.clone();
                     std::thread::spawn(move || {
                         let client_id =
                             super::client::NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
-                        if let Err(error) =
-                            super::client::handle_client(stream, client_id, clients, shared)
-                        {
+                        if let Err(error) = super::client::handle_client(
+                            stream,
+                            client_id,
+                            clients,
+                            shared,
+                            client_writer,
+                        ) {
                             ERROR_LOG
                                 .log(format!("[ratatui-node] client handler error: {error:?}"));
                         }

@@ -2,6 +2,7 @@ use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::tmux::RemoteTargetPublicationBinding;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_node::state_event::StateEvent;
 use crate::runtime::ratatui_node::SharedState;
 use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use std::path::Path;
@@ -165,7 +166,15 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         if !self.socket_is_live(socket_name) {
             return Ok(());
         }
-        self.shared.broadcast_snapshot()
+        // Ask the single writer loop to broadcast a snapshot.  The target id is
+        // ignored for this refresh event.
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::LocalSessionOutput {
+                target_id: String::new(),
+            });
+        Ok(())
     }
 
     fn ensure_publication_server_running(

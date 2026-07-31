@@ -22,34 +22,13 @@ pub(crate) enum StateEvent {
     /// An authority-host PTY master reached EOF or an unrecoverable read error.
     AuthorityHostSessionPtyClosed { target_id: String },
     /// A TUI client connected to the local Unix socket.
-    ClientConnected { client_id: usize },
+    ClientConnected { client_id: u64 },
     /// A TUI client disconnected from the local Unix socket.
-    ClientDisconnected { client_id: usize },
-    /// Keyboard input received from a client for a specific session.
-    ClientInput { target_id: String, bytes: Vec<u8> },
-    /// A client asked to activate a different session target.
-    ClientActivatedTarget {
-        target_id: String,
-        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
-    },
-    /// A client reported a new terminal size.
-    ClientResized { cols: u16, rows: u16 },
-    /// A client asked to create a new local PTY session.
-    ClientCreateLocalSession {
-        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
-    },
-    /// A client asked to stop the server.
-    ClientStop {
-        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
-    },
-    /// A client asked to connect to a saved remote host profile.
-    ClientConnectRemoteHost {
-        profile_name: String,
-        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
-    },
-    /// A client asked to detach all attached TUI clients.
-    ClientDetachAll {
-        reply_tx: std::sync::mpsc::Sender<CommandOutcome>,
+    ClientDisconnected { client_id: u64 },
+    /// A command received from a TUI client.
+    ClientCommand {
+        client_id: u64,
+        command: ClientCommand,
     },
     /// Session sync runtime asked this node to host a new authority-target
     /// session for a remote viewer.
@@ -71,14 +50,38 @@ pub(crate) enum StateEvent {
     RemoteSessionClosed { target_id: String },
 }
 
-/// Reply returned by `StateEventLoop` for one-shot control commands that mutate
-/// `SharedState`.  Kept in this module so `state_event.rs` does not depend on
-/// `snapshot.rs`.
+/// A command sent by a TUI client and processed by `StateEventLoop`.
+#[derive(Debug)]
+pub(crate) enum ClientCommand {
+    /// Attach request: triggers an initial snapshot for the client.
+    Attach,
+    /// STATUS one-shot command.
+    Status,
+    /// STOP one-shot command.
+    Stop,
+    /// LIST_SESSIONS one-shot command.
+    ListSessions,
+    /// Create a new local PTY session.
+    CreateLocalSession,
+    /// Activate a specific session target.
+    ActivateTarget { target_id: String },
+    /// Connect to a saved remote host profile.
+    ConnectRemoteHost { profile_name: String },
+    /// Detach all attached clients.
+    DetachAll,
+    /// Resize the active session.
+    Resize { cols: u16, rows: u16 },
+    /// Forward keyboard input to a specific session.
+    Input { target_id: String, bytes: Vec<u8> },
+}
+
+/// Reply returned by `StateEventLoop` for control commands.
 #[derive(Debug, Clone)]
 pub(crate) enum CommandOutcome {
     Ok,
     Message(String),
     Error(String),
+    Data(serde_json::Value),
 }
 
 /// Minimal reply payload returned by `StateEventLoop` when it creates an

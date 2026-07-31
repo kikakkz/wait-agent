@@ -1,30 +1,31 @@
-use super::snapshot::ControlResponse;
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::commands::{
-    handle_control_command, is_one_shot_control_command, response_should_broadcast,
-};
+use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::runtime::SharedState;
-use super::snapshot::{build_snapshot, response_json};
-
-pub(crate) struct ClientHandle {
-    pub(crate) id: u64,
-    pub(crate) stream: UnixStream,
-    pub(crate) removed: Arc<AtomicBool>,
-}
+use super::state_event::{ClientCommand, StateEvent};
 
 pub(crate) static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Lightweight registry entry used only for cleanup signaling.
+///
+/// Actual socket streams are owned by `ClientWriter`; this handle just lets the
+/// server know a client is still attached without holding any I/O resources.
+pub(crate) struct ClientHandle {
+    pub(crate) id: u64,
+    pub(crate) removed: Arc<AtomicBool>,
+}
+
 pub(crate) fn handle_client(
-    mut stream: UnixStream,
+    stream: UnixStream,
     client_id: u64,
     clients: Arc<Mutex<Vec<ClientHandle>>>,
     shared: Arc<SharedState>,
+    client_writer: ClientWriterHandle,
 ) -> Result<(), LifecycleError> {
     ERROR_LOG.log(format!("[ratatui-node] client {client_id} connected"));
     let removed = Arc::new(AtomicBool::new(false));
@@ -49,40 +50,32 @@ pub(crate) fn handle_client(
         "[ratatui-node] client {client_id} first message: {trimmed}"
     ));
 
-    // One-shot control commands do not join the client list and do not
-    // receive the initial snapshot.
-    if is_one_shot_control_command(trimmed) {
-        let response = handle_control_command(trimmed, &shared, &mut stream)
-            .unwrap_or_else(|| ControlResponse::err("unknown command"));
-        let _ = writeln!(stream, "{}", response_json(&response));
-        let _ = stream.flush();
+    // Register the socket with the single writer thread and, for TUI clients,
+    // add a handle to the registry so disconnect can be tracked.
+    let is_attach = trimmed == "ATTACH";
+    if is_attach {
+        client_writer.send(ClientWriterRequest::Register { client_id, stream });
+        register_client_handle(client_id, removed.clone(), &clients);
+        let _ = shared
+            .state_sender()
+            .send(StateEvent::ClientConnected { client_id });
+    } else {
+        // One-shot commands keep the original stream because the writer thread
+        // does not know about this short-lived client yet.
+        client_writer.send(ClientWriterRequest::Register { client_id, stream });
+    }
+
+    if let Some(command) = parse_command(trimmed) {
+        let _ = shared
+            .state_sender()
+            .send(StateEvent::ClientCommand { client_id, command });
+    }
+
+    // One-shot control commands do not join the long-lived client list and do
+    // not read further messages.
+    if !is_attach {
         return Ok(());
     }
-
-    // Register as a TUI client and send the initial snapshot.
-    shared.client_count.fetch_add(1, Ordering::SeqCst);
-    if let Ok(clone) = stream.try_clone() {
-        let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
-        guard.push(ClientHandle {
-            id: client_id,
-            stream: clone,
-            removed: removed.clone(),
-        });
-        drop(guard);
-    }
-
-    // The "ATTACH" command is a no-op beyond triggering the snapshot.
-    // Build the snapshot without holding the clients lock to avoid a
-    // lock-order inversion with the terminal/event-loop threads.
-    let count = shared.client_count.load(Ordering::SeqCst);
-    let snapshot = build_snapshot(count, &shared);
-    let json = super::snapshot::snapshot_json(&snapshot);
-    if writeln!(stream, "{json}").is_err() || stream.flush().is_err() {
-        remove_client(client_id, &clients, &shared);
-        return Ok(());
-    }
-
-    let mut forcibly_detached = false;
 
     loop {
         line.clear();
@@ -96,32 +89,13 @@ pub(crate) fn handle_client(
                 ERROR_LOG.log(format!(
                     "[ratatui-node] client {client_id} received: {trimmed}"
                 ));
-                match trimmed {
-                    "DETACH" => break,
-                    "DETACH_ALL" => {
-                        if let Some(response) =
-                            handle_control_command(trimmed, &shared, &mut stream)
-                        {
-                            let _ = writeln!(stream, "{}", response_json(&response));
-                            let _ = stream.flush();
-                            if response_should_broadcast(&response) {
-                                let _ = super::snapshot::broadcast_snapshot(&clients, &shared);
-                            }
-                        }
-                        forcibly_detached = true;
-                        break;
-                    }
-                    _ => {
-                        if let Some(response) =
-                            handle_control_command(trimmed, &shared, &mut stream)
-                        {
-                            let _ = writeln!(stream, "{}", response_json(&response));
-                            let _ = stream.flush();
-                            if response_should_broadcast(&response) {
-                                let _ = super::snapshot::broadcast_snapshot(&clients, &shared);
-                            }
-                        }
-                    }
+                if trimmed == "DETACH" {
+                    break;
+                }
+                if let Some(command) = parse_command(trimmed) {
+                    let _ = shared
+                        .state_sender()
+                        .send(StateEvent::ClientCommand { client_id, command });
                 }
             }
             Err(error) => {
@@ -133,30 +107,67 @@ pub(crate) fn handle_client(
         }
     }
 
-    if !forcibly_detached {
-        remove_client(client_id, &clients, &shared);
-    }
+    remove_client(client_id, &clients);
+    let _ = shared
+        .state_sender()
+        .send(StateEvent::ClientDisconnected { client_id });
     Ok(())
 }
 
-pub(crate) fn remove_client(
-    client_id: u64,
-    clients: &Arc<Mutex<Vec<ClientHandle>>>,
-    shared: &SharedState,
-) {
-    let already_removed = {
-        let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pos) = guard.iter().position(|handle| handle.id == client_id) {
-            let handle = guard.remove(pos);
-            handle.removed.store(true, Ordering::SeqCst);
-            let _ = handle.stream.shutdown(std::net::Shutdown::Both);
-            false
-        } else {
-            true
+fn parse_command(line: &str) -> Option<ClientCommand> {
+    let trimmed = line.trim();
+    match trimmed {
+        "ATTACH" => Some(ClientCommand::Attach),
+        "STATUS" => Some(ClientCommand::Status),
+        "STOP" => Some(ClientCommand::Stop),
+        "LIST_SESSIONS" => Some(ClientCommand::ListSessions),
+        "CREATE_LOCAL_SESSION" => Some(ClientCommand::CreateLocalSession),
+        "DETACH_ALL" => Some(ClientCommand::DetachAll),
+        _ => {
+            if let Some(args) = trimmed.strip_prefix("ACTIVATE_TARGET ") {
+                Some(ClientCommand::ActivateTarget {
+                    target_id: args.to_string(),
+                })
+            } else if let Some(args) = trimmed.strip_prefix("CONNECT_REMOTE_HOST ") {
+                Some(ClientCommand::ConnectRemoteHost {
+                    profile_name: args.to_string(),
+                })
+            } else if let Some(args) = trimmed.strip_prefix("RESIZE ") {
+                let mut parts = args.split_whitespace();
+                let cols = parts.next().and_then(|v| v.parse().ok()).unwrap_or(80);
+                let rows = parts.next().and_then(|v| v.parse().ok()).unwrap_or(24);
+                Some(ClientCommand::Resize { cols, rows })
+            } else if let Some(args) = trimmed.strip_prefix("INPUT ") {
+                let mut parts = args.splitn(2, ' ');
+                let target_id = parts.next().unwrap_or("").to_string();
+                let encoded = parts.next().unwrap_or("");
+                match base64::decode(encoded) {
+                    Ok(bytes) => Some(ClientCommand::Input { target_id, bytes }),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
         }
-    };
+    }
+}
 
-    if !already_removed {
-        shared.client_count.fetch_sub(1, Ordering::SeqCst);
+fn register_client_handle(
+    client_id: u64,
+    removed: Arc<AtomicBool>,
+    clients: &Arc<Mutex<Vec<ClientHandle>>>,
+) {
+    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
+    guard.push(ClientHandle {
+        id: client_id,
+        removed,
+    });
+}
+
+pub(crate) fn remove_client(client_id: u64, clients: &Arc<Mutex<Vec<ClientHandle>>>) {
+    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(pos) = guard.iter().position(|handle| handle.id == client_id) {
+        let handle = guard.remove(pos);
+        handle.removed.store(true, Ordering::SeqCst);
     }
 }

@@ -1,23 +1,30 @@
+use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::authority_host_io_loop::{AuthorityHostIoLoop, AuthorityHostIoRequest};
+use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::runtime::SharedState;
-use super::state_event::{CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
+use super::snapshot::{
+    build_snapshot, response_json, snapshot_json, ControlResponse, ServerStatus, SessionView,
+};
+use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest,
 };
 
-/// Single thread that owns all writes to `SharedState`.
+/// Single thread that owns all writes to `SharedState` and all decisions about
+/// when to broadcast snapshots.
 ///
 /// Local session lifecycle events, authority-host child exits, session sync
-/// creation requests, and remote viewer close notifications all converge here.
-/// Raw PTY data is forwarded by `AuthorityHostIoLoop` and does not pass through
-/// this channel.
+/// creation requests, remote viewer close notifications, and TUI client
+/// commands all converge here.  Raw PTY data is forwarded by
+/// `AuthorityHostIoLoop` and does not pass through this channel.
 pub(crate) struct StateEventLoop {
     tx: mpsc::Sender<StateEvent>,
 }
@@ -27,11 +34,14 @@ impl StateEventLoop {
         shared: Arc<SharedState>,
         catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
         authority_host_io: &AuthorityHostIoLoop,
+        client_writer: ClientWriterHandle,
     ) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<StateEvent>();
         let authority_host_io_tx = authority_host_io.sender();
         std::thread::spawn(move || {
-            if let Err(error) = run_state_event_loop(shared, rx, catalog_tx, authority_host_io_tx) {
+            if let Err(error) =
+                run_state_event_loop(shared, rx, catalog_tx, authority_host_io_tx, client_writer)
+            {
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] loop exited with error: {error}"
                 ));
@@ -50,7 +60,10 @@ fn run_state_event_loop(
     rx: mpsc::Receiver<StateEvent>,
     catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
     authority_host_io_tx: mpsc::Sender<AuthorityHostIoRequest>,
+    client_writer: ClientWriterHandle,
 ) -> Result<(), LifecycleError> {
+    let mut connected_clients: HashSet<u64> = HashSet::new();
+
     while let Ok(event) = rx.recv() {
         match event {
             StateEvent::LocalSessionChildExit { target_id, .. } => {
@@ -71,7 +84,7 @@ fn run_state_event_loop(
                     },
                     ack_tx: None,
                 });
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::AuthorityHostSessionChildExited { target_id, .. }
@@ -92,99 +105,46 @@ fn run_state_event_loop(
                     },
                     ack_tx: None,
                 });
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::LocalSessionTitleChanged { target_id, title } => {
                 shared.set_local_session_title(&target_id, title);
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::LocalSessionOutput { .. } => {
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::ClientConnected { client_id } => {
-                shared
-                    .client_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = shared.broadcast_snapshot();
-                let _ = client_id;
+                connected_clients.insert(client_id);
+                shared.client_count.fetch_add(1, Ordering::SeqCst);
+                // The client's stream is already registered with ClientWriter, so
+                // a broadcast will deliver the initial snapshot to the new client
+                // and refresh the footer count for everyone else.
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::ClientDisconnected { client_id } => {
-                shared
-                    .client_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = client_id;
+                connected_clients.remove(&client_id);
+                shared.client_count.fetch_sub(1, Ordering::SeqCst);
+                client_writer.send(ClientWriterRequest::Unregister { client_id });
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
-            StateEvent::ClientInput { target_id, bytes } => {
-                route_input(&shared, &authority_host_io_tx, &target_id, bytes);
-            }
-
-            StateEvent::ClientActivatedTarget {
-                target_id,
-                reply_tx,
-            } => {
-                let outcome = activate_target(&shared, &target_id);
-                let _ = reply_tx.send(outcome.clone());
-                if matches!(outcome, CommandOutcome::Ok) {
-                    let _ = shared.broadcast_snapshot();
-                }
-            }
-
-            StateEvent::ClientResized { cols, rows } => {
-                shared.resize_active_local_session(cols, rows);
-                if let Some(id) = active_authority_host_session_id(&shared) {
-                    let _ = authority_host_io_tx.send(AuthorityHostIoRequest::Resize {
-                        session_id: id,
-                        cols,
-                        rows,
-                    });
-                }
-            }
-
-            StateEvent::ClientCreateLocalSession { reply_tx } => {
-                let id = {
-                    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                    format!("{}", guard.len() + 1)
-                };
-                let outcome = match shared.create_local_session(&id, 80, 24) {
-                    Ok(target) => {
-                        CommandOutcome::Message(format!("created local session {target}"))
-                    }
-                    Err(error) => CommandOutcome::Error(error.to_string()),
-                };
-                let _ = reply_tx.send(outcome);
-                let _ = shared.broadcast_snapshot();
-            }
-
-            StateEvent::ClientStop { reply_tx } => {
-                shared
-                    .shutdown
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = std::os::unix::net::UnixStream::connect(
-                    super::socket::ratatui_socket_path(shared.network.port),
+            StateEvent::ClientCommand { client_id, command } => {
+                let outcome = handle_client_command(
+                    &shared,
+                    &authority_host_io_tx,
+                    &catalog_tx,
+                    &client_writer,
+                    &connected_clients,
+                    command,
                 );
-                let _ = reply_tx.send(CommandOutcome::Message("stopping".to_string()));
-            }
-
-            StateEvent::ClientConnectRemoteHost {
-                profile_name,
-                reply_tx,
-            } => {
-                let outcome = connect_remote_host_target(&shared, &profile_name);
-                let _ = reply_tx.send(outcome.clone());
-                if matches!(outcome, CommandOutcome::Message(_)) {
-                    let _ = shared.broadcast_snapshot();
-                }
-            }
-
-            StateEvent::ClientDetachAll { reply_tx } => {
-                shared.detach_all_clients();
-                let _ = reply_tx.send(CommandOutcome::Ok);
-                let _ = shared.broadcast_snapshot();
+                let response: ControlResponse = outcome.into();
+                let payload = response_json(&response);
+                client_writer.send(ClientWriterRequest::Write { client_id, payload });
             }
 
             StateEvent::CreateAuthorityHostSession {
@@ -209,21 +169,164 @@ fn run_state_event_loop(
                         reason: LocalCatalogChangeReason::LocalRuntimeChanged,
                         ack_tx: None,
                     });
-                    let _ = shared.broadcast_snapshot();
+                    broadcast_snapshot(&shared, &client_writer, &connected_clients);
                 }
             }
 
             StateEvent::RemoteSessionOutput { .. } | StateEvent::RemoteSessionInputEcho { .. } => {
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
             StateEvent::RemoteSessionClosed { target_id } => {
                 shared.handle_session_exit(&target_id);
-                let _ = shared.broadcast_snapshot();
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
         }
     }
     Ok(())
+}
+
+fn broadcast_snapshot(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+) {
+    if connected_clients.is_empty() {
+        return;
+    }
+    let count = shared.client_count.load(Ordering::SeqCst);
+    let snapshot = build_snapshot(count, shared);
+    let payload = snapshot_json(&snapshot);
+    client_writer.send(ClientWriterRequest::Broadcast { payload });
+}
+
+fn handle_client_command(
+    shared: &Arc<SharedState>,
+    authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+    catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+    command: ClientCommand,
+) -> CommandOutcome {
+    match command {
+        ClientCommand::Attach => CommandOutcome::Ok,
+
+        ClientCommand::Status => {
+            let count = shared.client_count.load(Ordering::SeqCst);
+            let uptime = shared.start_time.elapsed().as_secs();
+            let session_count = shared
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            let status = ServerStatus {
+                port: shared.network.port,
+                client_count: count,
+                uptime_secs: uptime,
+                session_count,
+            };
+            CommandOutcome::Data(serde_json::to_value(&status).unwrap_or_default())
+        }
+
+        ClientCommand::Stop => {
+            shared.shutdown.store(true, Ordering::SeqCst);
+            let _ = std::os::unix::net::UnixStream::connect(super::socket::ratatui_socket_path(
+                shared.network.port,
+            ));
+            CommandOutcome::Message("stopping".to_string())
+        }
+
+        ClientCommand::ListSessions => {
+            let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
+            drop(guard);
+            CommandOutcome::Data(serde_json::to_value(&sessions).unwrap_or_default())
+        }
+
+        ClientCommand::CreateLocalSession => {
+            let id = {
+                let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                format!("{}", guard.len() + 1)
+            };
+            match shared.create_local_session(&id, 80, 24) {
+                Ok(target) => {
+                    let _ = catalog_tx.send(LocalCatalogChangeRequest {
+                        reason: LocalCatalogChangeReason::LocalRuntimeChanged,
+                        ack_tx: None,
+                    });
+                    broadcast_snapshot(shared, client_writer, connected_clients);
+                    CommandOutcome::Message(format!("created local session {target}"))
+                }
+                Err(error) => CommandOutcome::Error(error.to_string()),
+            }
+        }
+
+        ClientCommand::ActivateTarget { target_id } => {
+            let outcome = activate_target(shared, &target_id);
+            if matches!(outcome, CommandOutcome::Ok) {
+                broadcast_snapshot(shared, client_writer, connected_clients);
+            }
+            outcome
+        }
+
+        ClientCommand::ConnectRemoteHost { profile_name } => {
+            let outcome = connect_remote_host_target(shared, &profile_name);
+            if matches!(outcome, CommandOutcome::Message(_)) {
+                broadcast_snapshot(shared, client_writer, connected_clients);
+            }
+            outcome
+        }
+
+        ClientCommand::DetachAll => {
+            shared.detach_all_clients();
+            // Ask the client writer to unregister every known client.
+            for client_id in connected_clients.iter() {
+                client_writer.send(ClientWriterRequest::Unregister {
+                    client_id: *client_id,
+                });
+            }
+            CommandOutcome::Ok
+        }
+
+        ClientCommand::Resize { cols, rows } => {
+            let transport = {
+                let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let active = shared
+                    .active_target
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                active.and_then(|target| {
+                    guard
+                        .values()
+                        .find(|s| s.address.qualified_target() == target)
+                        .map(|s| s.address.transport().clone())
+                })
+            };
+            match transport {
+                Some(SessionTransport::RemotePeer) => {
+                    shared.resize_active_remote_session(cols, rows);
+                }
+                _ => {
+                    shared.resize_active_local_session(cols, rows);
+                    if let Some(id) = active_authority_host_session_id(shared) {
+                        let _ = authority_host_io_tx.send(AuthorityHostIoRequest::Resize {
+                            session_id: id,
+                            cols,
+                            rows,
+                        });
+                    }
+                }
+            }
+            broadcast_snapshot(shared, client_writer, connected_clients);
+            CommandOutcome::Ok
+        }
+
+        ClientCommand::Input { target_id, bytes } => {
+            route_input(shared, authority_host_io_tx, &target_id, bytes);
+            CommandOutcome::Ok
+        }
+    }
 }
 
 fn create_authority_host_session(
@@ -359,7 +462,7 @@ fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> 
         let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
         guard.values().cloned().collect()
     };
-    let sessions_arc = Arc::new(Mutex::new(sessions_vec));
+    let sessions_arc = Arc::new(std::sync::Mutex::new(sessions_vec));
     match connect_remote_host(profile_name, &sessions_arc, &shared.network) {
         Ok(record) => {
             let target = record.address.qualified_target();
@@ -378,5 +481,16 @@ fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> 
             CommandOutcome::Message(format!("connected {target}"))
         }
         Err(error) => CommandOutcome::Error(error.to_string()),
+    }
+}
+
+impl From<CommandOutcome> for ControlResponse {
+    fn from(outcome: CommandOutcome) -> Self {
+        match outcome {
+            CommandOutcome::Ok => ControlResponse::ok(),
+            CommandOutcome::Message(message) => ControlResponse::ok_message(message),
+            CommandOutcome::Error(message) => ControlResponse::err(message),
+            CommandOutcome::Data(data) => ControlResponse::ok_data(data),
+        }
     }
 }

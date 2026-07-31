@@ -18,7 +18,6 @@ use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
 use std::fs;
 use std::io::{self, Write};
-use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

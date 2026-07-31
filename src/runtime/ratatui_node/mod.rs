@@ -1,7 +1,7 @@
 pub mod authority_host_io_loop;
 pub mod authority_host_session;
 pub mod client;
-pub mod commands;
+pub mod client_writer;
 pub mod local_session;
 pub mod remote_session;
 pub mod runtime;
