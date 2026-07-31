@@ -50,17 +50,14 @@ impl RatatuiAuthorityHostSession {
         let master: OwnedFd = pty.controller;
         let slave: OwnedFd = pty.user;
 
-        // Prefer UTF-8 input handling on the master side. Disable remote echo:
-        // the viewing side renders input locally, so the peer PTY must not echo
-        // or the screen would show every typed character twice.
+        // Put the PTY in raw mode so the shell's line editor (readline) sees a
+        // real interactive terminal.  Keep IUTF8 so multi-byte input is handled
+        // correctly.  Echo is disabled because the viewing side renders input
+        // locally; enabling it would show every typed character twice.
         if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
             let mut termios = termios;
+            termios.make_raw();
             termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
-            let local = &mut termios.local_modes;
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHO);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOE);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOK);
-            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHONL);
             let _ = rustix_openpty::rustix::termios::tcsetattr(
                 &master,
                 rustix_openpty::rustix::termios::OptionalActions::Now,
@@ -70,6 +67,11 @@ impl RatatuiAuthorityHostSession {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let mut cmd = Command::new(&shell);
+        cmd.env(
+            "TERM",
+            std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
+        );
+        cmd.env("COLORTERM", "truecolor");
         let master_fd = master.as_raw_fd();
         let slave_fd = slave.as_raw_fd();
 
