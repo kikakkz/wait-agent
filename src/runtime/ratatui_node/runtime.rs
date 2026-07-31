@@ -194,6 +194,16 @@ impl SharedState {
                 host_guard.remove(session_id);
             }
         } else {
+            let session = {
+                let remote_guard = self
+                    .remote_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                remote_guard.get(target_id).cloned()
+            };
+            if let Some(session) = session {
+                session.stop();
+            }
             let mut remote_guard = self
                 .remote_sessions
                 .lock()

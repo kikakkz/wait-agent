@@ -39,9 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const AUTHORITY_FORWARDER_READ_TIMEOUT: Duration = Duration::from_millis(200);
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait RemoteNodeIngressGuard: Send {}
 
@@ -880,11 +878,9 @@ fn forward_local_authority_outbound(
     session: RemoteNodeSessionHandle,
     stop: Arc<AtomicBool>,
 ) -> Result<(), io::Error> {
-    local_stream.set_read_timeout(Some(AUTHORITY_FORWARDER_READ_TIMEOUT))?;
     while !stop.load(Ordering::Relaxed) {
         let frame = match read_authority_transport_frame(&mut local_stream) {
             Ok(frame) => frame,
-            Err(error) if error.is_read_timeout() => continue,
             Err(error) => return Err(io::Error::new(io::ErrorKind::Other, error.to_string())),
         };
         match frame {

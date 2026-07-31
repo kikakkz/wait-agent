@@ -7,6 +7,7 @@ use crate::runtime::ratatui_node_runtime::{
 };
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use base64::{engine::general_purpose, Engine as _};
+use crossbeam_channel::{unbounded, Receiver};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,7 +21,6 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// Ratatui TUI client: connects to a server's node and renders the workspace chrome.
@@ -90,7 +90,7 @@ impl RatatuiClientRuntime {
         ));
 
         // Spawn a background reader so the server can push snapshot updates.
-        let (server_tx, server_rx) = mpsc::channel::<ServerMessage>();
+        let (server_tx, server_rx) = unbounded::<ServerMessage>();
         std::thread::spawn(move || {
             let mut line = String::new();
             loop {
@@ -111,6 +111,20 @@ impl RatatuiClientRuntime {
             }
         });
 
+        // Spawn a background reader for crossterm events so the main loop can
+        // wait event-driven on both server messages and keyboard/resize events.
+        let (crossterm_tx, crossterm_rx) = unbounded::<Event>();
+        std::thread::spawn(move || loop {
+            match event::read() {
+                Ok(event) => {
+                    if crossterm_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        });
+
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = restore_terminal();
@@ -125,6 +139,7 @@ impl RatatuiClientRuntime {
             &mut stream,
             snapshot,
             server_rx,
+            crossterm_rx,
             self.port,
             &self.network,
         );
@@ -204,11 +219,157 @@ fn dim_style(style: Style, dim: bool) -> Style {
     }
 }
 
+fn apply_server_message(
+    snapshot: &mut RatatuiSnapshot,
+    selected_index: &mut usize,
+    last_active_target: &mut Option<String>,
+    status_message: &mut Option<(String, Instant)>,
+    message: ServerMessage,
+) {
+    match message {
+        ServerMessage::Snapshot(new_snapshot) => {
+            *snapshot = new_snapshot;
+            if *selected_index >= snapshot.sessions.len() && !snapshot.sessions.is_empty() {
+                *selected_index = snapshot.sessions.len() - 1;
+            }
+            // When the server changes the active target (e.g. after a
+            // remote host connects), move the selection marker to that
+            // row so the sidebar stays consistent with the main pane.
+            if snapshot.active_target != *last_active_target {
+                *last_active_target = snapshot.active_target.clone();
+                if let Some(target) = snapshot.active_target.as_deref() {
+                    if let Some(idx) = snapshot.sessions.iter().position(|s| s.id == target) {
+                        *selected_index = idx;
+                    }
+                }
+            }
+        }
+        ServerMessage::Response(response) => {
+            if !response.ok {
+                if let Some(message) = response.message {
+                    *status_message = Some((message, Instant::now()));
+                }
+            }
+        }
+        ServerMessage::Log(text) => {
+            ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
+            *status_message = Some((text, Instant::now()));
+        }
+    }
+}
+
+/// Handle a single crossterm event. Returns `true` to continue the loop,
+/// `false` to break (e.g. user detached).
+fn handle_crossterm_event(
+    event: Event,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    stream: &mut UnixStream,
+    snapshot: &mut RatatuiSnapshot,
+    prefix_pressed: &mut bool,
+    focus: &mut Focus,
+    selected_index: &mut usize,
+    status_message: &mut Option<(String, Instant)>,
+    port: u16,
+    network: &RemoteNetworkConfig,
+) -> Result<bool, LifecycleError> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if *prefix_pressed {
+                *prefix_pressed = false;
+                match key.code {
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        let _ = writeln!(stream, "DETACH");
+                        let _ = stream.flush();
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *prefix_pressed = true;
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *focus = Focus::Sidebar;
+                        if *selected_index >= snapshot.sessions.len()
+                            && !snapshot.sessions.is_empty()
+                        {
+                            *selected_index = snapshot.sessions.len() - 1;
+                        }
+                    }
+                    KeyCode::Left if *focus == Focus::Sidebar => {
+                        *focus = Focus::Main;
+                    }
+                    KeyCode::Up if *focus == Focus::Sidebar && *selected_index > 0 => {
+                        *selected_index -= 1;
+                    }
+                    KeyCode::Down
+                        if *focus == Focus::Sidebar
+                            && *selected_index + 1 < snapshot.sessions.len() =>
+                    {
+                        *selected_index += 1;
+                    }
+                    KeyCode::Enter if *focus == Focus::Sidebar => {
+                        if let Some(session) = snapshot.sessions.get(*selected_index) {
+                            snapshot.active_target = Some(session.id.clone());
+                            let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
+                            let _ = stream.flush();
+                            *focus = Focus::Main;
+                            ERROR_LOG
+                                .log(format!("[ratatui-client] activate session: {}", session.id));
+                        }
+                    }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
+                        let _ = stream.flush();
+                    }
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let render_background = |frame: &mut Frame| {
+                            render(
+                                frame,
+                                snapshot,
+                                *focus,
+                                *selected_index,
+                                snapshot.active_target.as_deref(),
+                                status_message.as_ref().map(|(text, _)| text.as_str()),
+                                true,
+                            )
+                        };
+                        if let Err(error) =
+                            run_connect_popup(terminal, port, network, render_background)
+                        {
+                            *status_message = Some((error.to_string(), Instant::now()));
+                        }
+                    }
+                    _ if *focus == Focus::Main => {
+                        if let Some(logical_key) = key_event_to_logical_key(&key) {
+                            if let Some(target_id) = snapshot.active_target.as_deref() {
+                                let encoded =
+                                    general_purpose::STANDARD.encode(logical_key.to_json());
+                                let _ = writeln!(stream, "INPUT {target_id} {encoded}");
+                                let _ = stream.flush();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Event::Resize(cols, rows) => {
+            let _ = writeln!(stream, "RESIZE {cols} {rows}");
+            let _ = stream.flush();
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
     stream: &mut UnixStream,
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
+    crossterm_rx: Receiver<Event>,
     port: u16,
     network: &RemoteNetworkConfig,
 ) -> Result<(), LifecycleError> {
@@ -220,6 +381,84 @@ fn run_event_loop(
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 
     loop {
+        // Wait event-driven for the next input from either source.
+        crossbeam_channel::select! {
+            recv(server_rx) -> result => {
+                match result {
+                    Ok(message) => apply_server_message(
+                        &mut snapshot,
+                        &mut selected_index,
+                        &mut last_active_target,
+                        &mut status_message,
+                        message,
+                    ),
+                    Err(_) => {
+                        // Server has shut down; the TUI has nothing left to render.
+                        return Ok(());
+                    }
+                }
+            }
+            recv(crossterm_rx) -> result => {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(_) => continue,
+                };
+                if !handle_crossterm_event(
+                    event,
+                    &mut terminal,
+                    stream,
+                    &mut snapshot,
+                    &mut prefix_pressed,
+                    &mut focus,
+                    &mut selected_index,
+                    &mut status_message,
+                    port,
+                    network,
+                )? {
+                    break;
+                }
+            }
+        }
+
+        // Drain any server-pushed snapshots that arrived while we processed.
+        loop {
+            match server_rx.try_recv() {
+                Ok(message) => apply_server_message(
+                    &mut snapshot,
+                    &mut selected_index,
+                    &mut last_active_target,
+                    &mut status_message,
+                    message,
+                ),
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => return Ok(()),
+            }
+        }
+
+        // Drain any crossterm events that arrived while we processed.
+        loop {
+            match crossterm_rx.try_recv() {
+                Ok(event) => {
+                    if !handle_crossterm_event(
+                        event,
+                        &mut terminal,
+                        stream,
+                        &mut snapshot,
+                        &mut prefix_pressed,
+                        &mut focus,
+                        &mut selected_index,
+                        &mut status_message,
+                        port,
+                        network,
+                    )? {
+                        return Ok(());
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            }
+        }
+
         // Clear expired status messages before drawing so the footer menu
         // is not hidden indefinitely.
         if let Some((_, created_at)) = status_message.as_ref() {
@@ -243,147 +482,6 @@ fn run_event_loop(
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
-
-        // Drain any server-pushed snapshots before waiting for input.
-        loop {
-            match server_rx.try_recv() {
-                Ok(ServerMessage::Snapshot(new_snapshot)) => {
-                    snapshot = new_snapshot;
-                    if selected_index >= snapshot.sessions.len() && !snapshot.sessions.is_empty() {
-                        selected_index = snapshot.sessions.len() - 1;
-                    }
-                    // When the server changes the active target (e.g. after a
-                    // remote host connects), move the selection marker to that
-                    // row so the sidebar stays consistent with the main pane.
-                    if snapshot.active_target != last_active_target {
-                        last_active_target = snapshot.active_target.clone();
-                        if let Some(target) = snapshot.active_target.as_deref() {
-                            if let Some(idx) = snapshot.sessions.iter().position(|s| s.id == target)
-                            {
-                                selected_index = idx;
-                            }
-                        }
-                    }
-                }
-                Ok(ServerMessage::Response(response)) => {
-                    if !response.ok {
-                        if let Some(message) = response.message {
-                            status_message = Some((message, Instant::now()));
-                        }
-                    }
-                }
-                Ok(ServerMessage::Log(text)) => {
-                    ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
-                    status_message = Some((text, Instant::now()));
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    // Server has shut down; the TUI has nothing left to render.
-                    return Ok(());
-                }
-            }
-        }
-
-        if event::poll(Duration::from_millis(50)).map_err(|error| {
-            LifecycleError::Io("failed to poll crossterm events".to_string(), error)
-        })? {
-            match event::read().map_err(|error| {
-                LifecycleError::Io("failed to read crossterm event".to_string(), error)
-            })? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if prefix_pressed {
-                        prefix_pressed = false;
-                        match key.code {
-                            KeyCode::Char('d') | KeyCode::Char('D') => {
-                                let _ = writeln!(stream, "DETACH");
-                                let _ = stream.flush();
-                                break;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                prefix_pressed = true;
-                            }
-                            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                focus = Focus::Sidebar;
-                                if selected_index >= snapshot.sessions.len()
-                                    && !snapshot.sessions.is_empty()
-                                {
-                                    selected_index = snapshot.sessions.len() - 1;
-                                }
-                            }
-                            KeyCode::Left if focus == Focus::Sidebar => {
-                                focus = Focus::Main;
-                            }
-                            KeyCode::Up if focus == Focus::Sidebar && selected_index > 0 => {
-                                selected_index -= 1;
-                            }
-                            KeyCode::Down
-                                if focus == Focus::Sidebar
-                                    && selected_index + 1 < snapshot.sessions.len() =>
-                            {
-                                selected_index += 1;
-                            }
-                            KeyCode::Enter if focus == Focus::Sidebar => {
-                                if let Some(session) = snapshot.sessions.get(selected_index) {
-                                    snapshot.active_target = Some(session.id.clone());
-                                    let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
-                                    let _ = stream.flush();
-                                    focus = Focus::Main;
-                                    ERROR_LOG.log(format!(
-                                        "[ratatui-client] activate session: {}",
-                                        session.id
-                                    ));
-                                }
-                            }
-                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
-                                let _ = stream.flush();
-                            }
-                            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                let render_background = |frame: &mut Frame| {
-                                    render(
-                                        frame,
-                                        &snapshot,
-                                        focus,
-                                        selected_index,
-                                        snapshot.active_target.as_deref(),
-                                        status_message.as_ref().map(|(text, _)| text.as_str()),
-                                        true,
-                                    );
-                                };
-                                if let Err(error) = run_connect_popup(
-                                    &mut terminal,
-                                    port,
-                                    network,
-                                    render_background,
-                                ) {
-                                    status_message = Some((error.to_string(), Instant::now()));
-                                }
-                            }
-                            _ if focus == Focus::Main => {
-                                if let Some(logical_key) = key_event_to_logical_key(&key) {
-                                    if let Some(target_id) = snapshot.active_target.as_deref() {
-                                        let encoded =
-                                            general_purpose::STANDARD.encode(logical_key.to_json());
-                                        let _ = writeln!(stream, "INPUT {target_id} {encoded}");
-                                        let _ = stream.flush();
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Event::Resize(cols, rows) => {
-                    let _ = writeln!(stream, "RESIZE {cols} {rows}");
-                    let _ = stream.flush();
-                }
-                _ => {}
-            }
-        }
     }
 
     Ok(())

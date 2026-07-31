@@ -175,7 +175,7 @@ fn run_state_event_loop(
                 }
             }
 
-            StateEvent::RemoteSessionOutput { .. } | StateEvent::RemoteSessionInputEcho { .. } => {
+            StateEvent::RemoteSessionOutput { .. } => {
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 

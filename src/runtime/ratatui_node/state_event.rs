@@ -44,9 +44,6 @@ pub(crate) enum StateEvent {
     },
     /// A remote session produced output; the TUI clients should be refreshed.
     RemoteSessionOutput { target_id: String },
-    /// A remote session rendered a local input echo; the TUI clients should be
-    /// refreshed.
-    RemoteSessionInputEcho { target_id: String },
     /// A session has exited and should be removed from the local catalog.
     ///
     /// This covers both a remote session viewer closing and a local

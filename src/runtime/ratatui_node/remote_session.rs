@@ -17,13 +17,13 @@ use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_ser
 use crate::runtime::remote_observer_runtime::RemoteObserverRuntime;
 use crate::runtime::remote_publication::remote_transport_runtime::LocalNodeMailbox;
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 /// A remote session viewed by the local ratatui node.
 ///
@@ -35,6 +35,7 @@ pub struct RatatuiRemoteSession {
     pub authority_node_id: String,
     observer: Mutex<RemoteObserverRuntime>,
     writer: Mutex<Option<UnixStream>>,
+    listener: Mutex<Option<UnixListener>>,
     running: Arc<AtomicBool>,
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
@@ -87,6 +88,7 @@ impl RatatuiRemoteSession {
             authority_node_id: authority_node_id.clone(),
             observer: Mutex::new(observer),
             writer: Mutex::new(None),
+            listener: Mutex::new(Some(listener)),
             running: Arc::new(AtomicBool::new(true)),
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
@@ -95,7 +97,6 @@ impl RatatuiRemoteSession {
         });
 
         spawn_authority_transport_acceptor(
-            listener,
             session.clone(),
             target_id,
             session_id,
@@ -103,6 +104,27 @@ impl RatatuiRemoteSession {
         );
 
         Ok(session)
+    }
+
+    /// Interrupt the authority acceptor and reader threads and close the
+    /// underlying socket so the session stops immediately.
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::Relaxed);
+
+        // Dropping the listener unblocks the acceptor thread if it is blocked
+        // on accept().
+        let _ = self
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+
+        // Shutting down the writer stream unblocks the reader thread if it is
+        // blocked on read_authority_transport_frame().
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(writer) = guard.take() {
+            let _ = writer.shutdown(Shutdown::Both);
+        }
     }
 
     /// Send an OpenMirrorRequest once the local terminal size is known.
@@ -181,17 +203,6 @@ impl RatatuiRemoteSession {
         let frame = AuthorityTransportFrame::RawPtyInput(payload);
         let _ = write_authority_transport_frame(writer, &frame);
         let _ = writer.flush();
-        drop(guard);
-
-        // Do not render the typed bytes locally.  The remote PTY echoes them
-        // (echo is left enabled), so the viewing side stays in sync with the
-        // remote readline state and history/arrow-key redraw works correctly.
-        let _ = self
-            .shared
-            .state_sender()
-            .send(StateEvent::RemoteSessionInputEcho {
-                target_id: self.target_id.clone(),
-            });
     }
 
     /// Forward a terminal resize to the remote session.
@@ -268,35 +279,34 @@ impl RatatuiRemoteSession {
 }
 
 fn spawn_authority_transport_acceptor(
-    listener: UnixListener,
     session: Arc<RatatuiRemoteSession>,
     target_id: String,
     session_id: String,
     authority_node_id: String,
 ) {
     thread::spawn(move || {
-        let _ = listener.set_nonblocking(true);
-        while session.running.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    handle_authority_transport_stream(
-                        stream,
-                        session.clone(),
-                        &target_id,
-                        &session_id,
-                        &authority_node_id,
-                    );
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => {
-                    ERROR_LOG.log(format!(
-                        "[ratatui-remote-session] authority accept error: {error}"
-                    ));
-                    break;
-                }
+        let listener = session
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(listener) = listener else {
+            return;
+        };
+        match listener.accept() {
+            Ok((stream, _)) => {
+                handle_authority_transport_stream(
+                    stream,
+                    session.clone(),
+                    &target_id,
+                    &session_id,
+                    &authority_node_id,
+                );
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] authority accept error: {error}"
+                ));
             }
         }
     });
@@ -309,7 +319,6 @@ fn handle_authority_transport_stream(
     _session_id: &str,
     _authority_node_id: &str,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     if let Err(error) = (|| -> Result<(), LifecycleError> {
         let _client_node_id = read_client_hello(&mut stream).map_err(|error| {
             LifecycleError::Io("failed to read authority client hello".to_string(), error)
@@ -402,9 +411,6 @@ fn handle_authority_transport_stream(
                 ERROR_LOG.log(format!(
                     "[ratatui-remote-session] unexpected authority frame: {other:?}"
                 ));
-            }
-            Err(ref error) if error.is_read_timeout() => {
-                thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
