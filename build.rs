@@ -37,6 +37,10 @@ fn compile_agent_signal_sender() {
 fn emit_version_info() {
     println!("cargo:rerun-if-env-changed=WAITAGENT_GIT_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    // Re-run the build script when the HEAD moves so the embedded git hash
+    // stays in sync with the current checkout.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=build.rs");
 
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into());
 
