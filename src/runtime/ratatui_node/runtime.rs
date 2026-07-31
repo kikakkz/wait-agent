@@ -208,35 +208,41 @@ impl SharedState {
             drop(remote_guard);
         }
 
-        let remaining: Vec<String> = {
+        // Server lifetime is tied to local sessions. Remote sessions are views
+        // into other hosts and should not keep this server alive when the last
+        // local session exits. On restart, clients are expected to reconnect.
+        let remaining_local: Vec<String> = {
             let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard
                 .values()
-                .filter(|r| r.availability == SessionAvailability::Online)
+                .filter(|r| {
+                    r.address.transport() == &SessionTransport::Local
+                        && r.availability == SessionAvailability::Online
+                })
                 .map(|r| r.address.qualified_target())
                 .collect()
         };
 
         {
             let mut active_guard = self.active_target.lock().unwrap_or_else(|e| e.into_inner());
-            if remaining.is_empty() {
-                // When the last session exits there is nothing left to show or
+            if remaining_local.is_empty() {
+                // When the last local session exits there is nothing left to
                 // host. Shutdown the node server. The local-catalog change
                 // notification is sent below so peers receive the exit event
                 // before the process terminates.
                 ERROR_LOG.log(format!(
-                    "[ratatui-node] last session {target_id} exited; shutting down"
+                    "[ratatui-node] last local session {target_id} exited; shutting down"
                 ));
                 self.shutdown.store(true, Ordering::SeqCst);
                 let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
                 *active_guard = None;
             } else {
-                // Pick the next session. Prefer one that is not the just-exited
-                // session, falling back to the first remaining session.
-                let next = remaining
+                // Pick the next local session. Prefer one that is not the
+                // just-exited session, falling back to the first remaining one.
+                let next = remaining_local
                     .iter()
                     .find(|t| *t != target_id)
-                    .or(remaining.first())
+                    .or(remaining_local.first())
                     .cloned()
                     .unwrap_or_default();
                 *active_guard = Some(next);

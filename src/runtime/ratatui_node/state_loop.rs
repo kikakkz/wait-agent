@@ -11,7 +11,7 @@ use super::authority_host_io_loop::{
 };
 use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::key_translation::{translate_key, KeyTranslationMode};
-use super::logical_key::{KeyCode, LogicalKey};
+use super::logical_key::LogicalKey;
 use super::runtime::SharedState;
 use super::snapshot::{
     build_snapshot, response_json, snapshot_json, ControlResponse, ServerStatus, SessionView,
@@ -418,14 +418,6 @@ fn route_input(
         SessionTransport::RemotePeer => {
             let mode = remote_translation_mode(shared, target_id);
             let bytes = translate_key(&key, mode);
-            if matches!(
-                key.code,
-                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Char('r')
-            ) {
-                ERROR_LOG.log(format!(
-                    "[route-input-remote] target={target_id} mode={mode:?} key={key:?} bytes={bytes:?}"
-                ));
-            }
             shared.feed_remote_session_input(target_id, bytes);
         }
     }

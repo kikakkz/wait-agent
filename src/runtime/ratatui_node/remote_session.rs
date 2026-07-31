@@ -37,6 +37,7 @@ pub struct RatatuiRemoteSession {
     writer: Mutex<Option<UnixStream>>,
     listener: Mutex<Option<UnixListener>>,
     running: Arc<AtomicBool>,
+    closed: AtomicBool,
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
@@ -90,6 +91,7 @@ impl RatatuiRemoteSession {
             writer: Mutex::new(None),
             listener: Mutex::new(Some(listener)),
             running: Arc::new(AtomicBool::new(true)),
+            closed: AtomicBool::new(false),
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
@@ -424,6 +426,18 @@ fn handle_authority_transport_stream(
         "[ratatui-remote-session] authority reader exiting for {target_id}"
     ));
     session.running.store(false, Ordering::Relaxed);
+    if session
+        .closed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        let _ = session
+            .shared
+            .state_sender()
+            .send(StateEvent::SessionClosed {
+                target_id: target_id.to_string(),
+            });
+    }
 }
 
 fn now_millis() -> u128 {
