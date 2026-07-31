@@ -1,4 +1,4 @@
-use super::types::{ScreenCell, TerminalSize, TextStyle, WIDE_CONTINUATION};
+use super::types::{ColorValue, ScreenCell, TerminalSize, TextStyle, WIDE_CONTINUATION};
 
 pub(crate) fn decode_utf8_chars(bytes: &[u8], pending_utf8: &mut Vec<u8>) -> Vec<char> {
     let mut output = Vec::new();
@@ -83,6 +83,149 @@ pub(crate) fn render_styled_row(row: &[ScreenCell]) -> String {
     }
 
     rendered
+}
+
+/// Parse a single ANSI-styled line into runs of `(text, style)`.
+///
+/// Only SGR (`ESC [ ... m`) sequences are interpreted; other escape sequences
+/// are dropped.  The supported attributes mirror those produced by
+/// `TextStyle::to_ansi` plus the common 256-color/truecolor forms.
+pub(crate) fn parse_ansi_styled_line(line: &str) -> Vec<(String, TextStyle)> {
+    let mut spans = Vec::new();
+    let mut current_text = String::new();
+    let mut style = TextStyle::default();
+
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            current_text.push(ch);
+            continue;
+        }
+
+        if chars.peek() != Some(&'[') {
+            // Not a CSI sequence; ignore the stray escape.
+            continue;
+        }
+        chars.next();
+
+        let mut params = String::new();
+        let mut letter = None;
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_alphabetic() {
+                letter = Some(c);
+                chars.next();
+                break;
+            }
+            params.push(c);
+            chars.next();
+        }
+
+        if letter != Some('m') {
+            // Non-SGR CSI sequences are ignored.
+            continue;
+        }
+
+        let segments = parse_sgr_segments(&params);
+        let new_style = apply_sgr_segments(style, &segments);
+        if new_style != style {
+            flush_styled_span(&mut spans, &mut current_text, &style);
+            style = new_style;
+        }
+    }
+
+    flush_styled_span(&mut spans, &mut current_text, &style);
+    spans
+}
+
+fn flush_styled_span(spans: &mut Vec<(String, TextStyle)>, text: &mut String, style: &TextStyle) {
+    if !text.is_empty() {
+        spans.push((std::mem::take(text), *style));
+    }
+}
+
+fn apply_sgr_segments(style: TextStyle, segments: &[SgrSegment]) -> TextStyle {
+    let mut style = style;
+    let mut i = 0;
+    while i < segments.len() {
+        let segment = &segments[i];
+        i += 1;
+        match segment.code {
+            0 => style = TextStyle::default(),
+            1 => style.bold = true,
+            2 => style.dim = true,
+            3 => style.italic = true,
+            4 => style.underline = true,
+            5 => style.blink = true,
+            7 => style.inverse = true,
+            9 => style.strikethrough = true,
+            22 => {
+                style.bold = false;
+                style.dim = false;
+            }
+            23 => style.italic = false,
+            24 => style.underline = false,
+            25 => style.blink = false,
+            27 => style.inverse = false,
+            29 => style.strikethrough = false,
+            30..=37 => style.foreground = Some(ColorValue::Indexed(segment.code as u8 - 30)),
+            38 => {
+                if let Some((color, next)) = parse_sgr_color(segments, i - 1) {
+                    style.foreground = Some(color);
+                    i = next;
+                }
+            }
+            39 => style.foreground = None,
+            40..=47 => style.background = Some(ColorValue::Indexed(segment.code as u8 - 40)),
+            48 => {
+                if let Some((color, next)) = parse_sgr_color(segments, i - 1) {
+                    style.background = Some(color);
+                    i = next;
+                }
+            }
+            49 => style.background = None,
+            90..=97 => style.foreground = Some(ColorValue::Indexed(segment.code as u8 - 82)),
+            100..=107 => style.background = Some(ColorValue::Indexed(segment.code as u8 - 92)),
+            _ => {}
+        }
+    }
+    style
+}
+
+fn parse_sgr_color(segments: &[SgrSegment], start: usize) -> Option<(ColorValue, usize)> {
+    let segment = segments.get(start)?;
+
+    // Colon-separated form (ISO 8613-6), e.g. 38:2::r:g:b or 38:5:n.
+    if !segment.subparams.is_empty() {
+        match segment.subparams[0] {
+            5 if segment.subparams.len() >= 2 => {
+                return Some((ColorValue::Indexed(segment.subparams[1] as u8), start + 1));
+            }
+            2 if segment.subparams.len() >= 4 => {
+                let len = segment.subparams.len();
+                let r = segment.subparams[len - 3] as u8;
+                let g = segment.subparams[len - 2] as u8;
+                let b = segment.subparams[len - 1] as u8;
+                return Some((ColorValue::Rgb(r, g, b), start + 1));
+            }
+            _ => {}
+        }
+    }
+
+    // Semicolon-separated form, e.g. 38;5;n or 38;2;r;g;b.
+    let mode = segments.get(start + 1)?.code;
+    match mode {
+        5 => {
+            let index = segments.get(start + 2)?.code as u8;
+            Some((ColorValue::Indexed(index), start + 3))
+        }
+        2 => {
+            let r = segments.get(start + 2)?.code as u8;
+            let g = segments.get(start + 3)?.code as u8;
+            let b = segments.get(start + 4)?.code as u8;
+            Some((ColorValue::Rgb(r, g, b), start + 5))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_csi_numbers(params: &str) -> Vec<u16> {

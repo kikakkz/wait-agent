@@ -12,5 +12,9 @@ pub use types::{
     MouseEncoding, MouseReportingMode, ScreenSnapshot, ScreenState, TerminalError, TerminalSize,
 };
 
+pub(crate) use types::{ColorValue, TextStyle};
+
+pub(crate) use ansi::parse_ansi_styled_line;
+
 #[cfg(test)]
 mod tests;

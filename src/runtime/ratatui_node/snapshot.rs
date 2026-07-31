@@ -90,6 +90,7 @@ pub struct RatatuiSnapshot {
     pub client_count: usize,
     pub main: String,
     pub main_lines: Vec<String>,
+    pub main_styled_lines: Vec<String>,
     pub main_cursor: Option<(u16, u16)>,
     pub sidebar: String,
     pub footer: FooterState,
@@ -205,7 +206,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         .unwrap_or_else(|| super::runtime::DEFAULT_SESSION_ID.to_string());
     drop(guard);
 
-    let (main_lines, main_cursor) = active_target
+    let (main_lines, main_styled_lines, main_cursor) = active_target
         .as_deref()
         .map(|target| {
             if is_remote_target(target, shared) {
@@ -216,7 +217,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 remote_guard
                     .get(target)
                     .map(|s| s.snapshot())
-                    .unwrap_or_else(|| (Vec::new(), None))
+                    .unwrap_or_else(|| (Vec::new(), Vec::new(), None))
             } else {
                 let local_guard = shared
                     .local_sessions
@@ -225,16 +226,17 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 local_guard
                     .get(target)
                     .map(|s| s.snapshot())
-                    .unwrap_or_else(|| (Vec::new(), None))
+                    .unwrap_or_else(|| (Vec::new(), Vec::new(), None))
             }
         })
-        .unwrap_or_else(|| (Vec::new(), None));
+        .unwrap_or_else(|| (Vec::new(), Vec::new(), None));
 
     RatatuiSnapshot {
         session_name: active_session_id.clone(),
         client_count,
         main: main_lines.join("\n"),
         main_lines,
+        main_styled_lines,
         main_cursor,
         sidebar: "Sessions".to_string(),
         footer: FooterState {

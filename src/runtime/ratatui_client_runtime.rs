@@ -484,13 +484,17 @@ fn render(
     frame.render_widget(footer, outer[1]);
 }
 
-fn render_main_text<'a>(snapshot: &'a RatatuiSnapshot, area: Rect) -> Vec<Line<'a>> {
+fn render_main_text(snapshot: &RatatuiSnapshot, area: Rect) -> Vec<Line<'static>> {
     let width = area.width as usize;
     let height = area.height as usize;
     let mut lines = Vec::new();
 
-    for line in snapshot.main_lines.iter() {
-        lines.push(Line::from(truncate_display_width(line, width)));
+    for line in snapshot.main_styled_lines.iter() {
+        let spans: Vec<Span<'static>> = crate::terminal::parse_ansi_styled_line(line)
+            .into_iter()
+            .map(|(text, style)| Span::styled(text, text_style_to_ratatui(&style)))
+            .collect();
+        lines.push(truncate_spans_to_width(spans, width));
     }
 
     while lines.len() < height {
@@ -498,6 +502,47 @@ fn render_main_text<'a>(snapshot: &'a RatatuiSnapshot, area: Rect) -> Vec<Line<'
     }
 
     lines
+}
+
+fn text_style_to_ratatui(style: &crate::terminal::TextStyle) -> Style {
+    use ratatui::style::Modifier;
+
+    let mut rat_style = Style::default();
+    if style.bold {
+        rat_style = rat_style.add_modifier(Modifier::BOLD);
+    }
+    if style.dim {
+        rat_style = rat_style.add_modifier(Modifier::DIM);
+    }
+    if style.italic {
+        rat_style = rat_style.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        rat_style = rat_style.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.blink {
+        rat_style = rat_style.add_modifier(Modifier::SLOW_BLINK);
+    }
+    if style.inverse {
+        rat_style = rat_style.add_modifier(Modifier::REVERSED);
+    }
+    if style.strikethrough {
+        rat_style = rat_style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    if let Some(fg) = style.foreground {
+        rat_style = rat_style.fg(color_value_to_ratatui(fg));
+    }
+    if let Some(bg) = style.background {
+        rat_style = rat_style.bg(color_value_to_ratatui(bg));
+    }
+    rat_style
+}
+
+fn color_value_to_ratatui(color: crate::terminal::ColorValue) -> Color {
+    match color {
+        crate::terminal::ColorValue::Indexed(index) => Color::Indexed(index),
+        crate::terminal::ColorValue::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
 }
 
 fn render_sidebar_header(width: usize, dim_background: bool) -> Line<'static> {
@@ -734,6 +779,30 @@ fn truncate_display_width(text: &str, width: usize) -> String {
         used += ch_width;
     }
     output
+}
+
+/// Truncate a collection of styled spans to a target display width.
+fn truncate_spans_to_width(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let mut out_spans = Vec::new();
+    let mut used = 0;
+    for span in spans {
+        let mut truncated = String::new();
+        for ch in span.content.chars() {
+            let ch_width = char_width(ch);
+            if used + ch_width > width {
+                break;
+            }
+            truncated.push(ch);
+            used += ch_width;
+        }
+        if !truncated.is_empty() {
+            out_spans.push(Span::styled(truncated, span.style));
+        }
+        if used >= width {
+            break;
+        }
+    }
+    Line::from(out_spans)
 }
 
 fn display_width(text: &str) -> usize {

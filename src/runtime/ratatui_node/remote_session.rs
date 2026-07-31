@@ -228,8 +228,8 @@ impl RatatuiRemoteSession {
         let _ = writer.flush();
     }
 
-    /// Snapshot the rendered screen as plain text lines and the cursor position.
-    pub fn snapshot(&self) -> (Vec<String>, Option<(u16, u16)>) {
+    /// Snapshot the rendered screen as plain/styled text lines and the cursor position.
+    pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = observer.sync();
         let snap = observer.snapshot();
@@ -240,7 +240,7 @@ impl RatatuiRemoteSession {
         } else {
             None
         };
-        (screen.lines.clone(), cursor)
+        (screen.lines.clone(), screen.styled_lines.clone(), cursor)
     }
 
     /// Return the terminal-mode flags needed to translate logical keys into

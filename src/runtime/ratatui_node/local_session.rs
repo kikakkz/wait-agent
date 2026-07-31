@@ -121,8 +121,8 @@ impl RatatuiLocalSession {
         }
     }
 
-    /// Snapshot the visible screen as plain text lines and the cursor position.
-    pub fn snapshot(&self) -> (Vec<String>, Option<(u16, u16)>) {
+    /// Snapshot the visible screen as plain/styled text lines and the cursor position.
+    pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
         let term = self.term.lock();
         let grid = term.grid();
         let screen_lines = grid.screen_lines();
@@ -130,18 +130,34 @@ impl RatatuiLocalSession {
         let display_offset = grid.display_offset() as i32;
 
         let mut lines = Vec::with_capacity(screen_lines);
+        let mut styled_lines = Vec::with_capacity(screen_lines);
         for row in 0..screen_lines {
             let line = Line(row as i32 - display_offset);
             let grid_row = &grid[line];
             let mut text = String::with_capacity(columns);
+            let mut styled = String::with_capacity(columns * 2);
+            let mut last_style = crate::terminal::TextStyle::default();
             for col in 0..columns {
                 let cell = &grid_row[Column(col)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
+                let style = alacritty_style_to_text_style(&cell);
+                if style != last_style {
+                    if col > 0 {
+                        styled.push_str("\x1b[0m");
+                    }
+                    styled.push_str(&style.to_ansi());
+                    last_style = style;
+                }
+                styled.push(cell.c);
                 text.push(cell.c);
             }
+            if last_style != crate::terminal::TextStyle::default() {
+                styled.push_str("\x1b[0m");
+            }
             lines.push(text);
+            styled_lines.push(styled);
         }
 
         let cursor = if term
@@ -160,8 +176,68 @@ impl RatatuiLocalSession {
             None
         };
 
-        (lines, cursor)
+        (lines, styled_lines, cursor)
     }
+}
+
+fn alacritty_style_to_text_style(
+    cell: &alacritty_terminal::term::cell::Cell,
+) -> crate::terminal::TextStyle {
+    use crate::terminal::ColorValue;
+    use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vte::ansi::{Color, NamedColor};
+
+    let mut style = crate::terminal::TextStyle {
+        bold: cell.flags.contains(Flags::BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
+        underline: cell.flags.contains(Flags::UNDERLINE),
+        inverse: cell.flags.contains(Flags::INVERSE),
+        dim: cell.flags.contains(Flags::DIM),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+        ..Default::default()
+    };
+
+    let color_to_value = |color: &Color| -> Option<ColorValue> {
+        match color {
+            Color::Named(NamedColor::Black) => Some(ColorValue::Indexed(0)),
+            Color::Named(NamedColor::Red) => Some(ColorValue::Indexed(1)),
+            Color::Named(NamedColor::Green) => Some(ColorValue::Indexed(2)),
+            Color::Named(NamedColor::Yellow) => Some(ColorValue::Indexed(3)),
+            Color::Named(NamedColor::Blue) => Some(ColorValue::Indexed(4)),
+            Color::Named(NamedColor::Magenta) => Some(ColorValue::Indexed(5)),
+            Color::Named(NamedColor::Cyan) => Some(ColorValue::Indexed(6)),
+            Color::Named(NamedColor::White) => Some(ColorValue::Indexed(7)),
+            Color::Named(NamedColor::BrightBlack) => Some(ColorValue::Indexed(8)),
+            Color::Named(NamedColor::BrightRed) => Some(ColorValue::Indexed(9)),
+            Color::Named(NamedColor::BrightGreen) => Some(ColorValue::Indexed(10)),
+            Color::Named(NamedColor::BrightYellow) => Some(ColorValue::Indexed(11)),
+            Color::Named(NamedColor::BrightBlue) => Some(ColorValue::Indexed(12)),
+            Color::Named(NamedColor::BrightMagenta) => Some(ColorValue::Indexed(13)),
+            Color::Named(NamedColor::BrightCyan) => Some(ColorValue::Indexed(14)),
+            Color::Named(NamedColor::BrightWhite) => Some(ColorValue::Indexed(15)),
+            Color::Named(
+                NamedColor::Foreground
+                | NamedColor::Background
+                | NamedColor::Cursor
+                | NamedColor::BrightForeground
+                | NamedColor::DimForeground,
+            ) => None,
+            Color::Named(NamedColor::DimBlack) => Some(ColorValue::Indexed(0)),
+            Color::Named(NamedColor::DimRed) => Some(ColorValue::Indexed(1)),
+            Color::Named(NamedColor::DimGreen) => Some(ColorValue::Indexed(2)),
+            Color::Named(NamedColor::DimYellow) => Some(ColorValue::Indexed(3)),
+            Color::Named(NamedColor::DimBlue) => Some(ColorValue::Indexed(4)),
+            Color::Named(NamedColor::DimMagenta) => Some(ColorValue::Indexed(5)),
+            Color::Named(NamedColor::DimCyan) => Some(ColorValue::Indexed(6)),
+            Color::Named(NamedColor::DimWhite) => Some(ColorValue::Indexed(7)),
+            Color::Indexed(index) => Some(ColorValue::Indexed(*index)),
+            Color::Spec(rgb) => Some(ColorValue::Rgb(rgb.r, rgb.g, rgb.b)),
+        }
+    };
+
+    style.foreground = color_to_value(&cell.fg);
+    style.background = color_to_value(&cell.bg);
+    style
 }
 
 /// Bridge terminal emulator events back into the WaitAgent server.
