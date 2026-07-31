@@ -388,7 +388,7 @@ impl WorkspaceCommandRuntime {
                     "selected target `{selected_target}` is no longer available"
                 ))
             })?;
-        if selected_session.address.transport() == &SessionTransport::LocalTmux {
+        if selected_session.address.transport() == &SessionTransport::Local {
             return Err(LifecycleError::Protocol(
                 "selected target is local; use Ctrl-N for a local session".to_string(),
             ));
@@ -673,7 +673,7 @@ impl WorkspaceCommandRuntime {
             .find_target(&target)
             .map_err(tmux_runtime_error)?
             .ok_or_else(|| LifecycleError::Protocol(format!("unknown tmux target `{target}`")))?;
-        if session.address.transport() != &SessionTransport::LocalTmux {
+        if session.address.transport() != &SessionTransport::Local {
             return Err(LifecycleError::Protocol(format!(
                 "target `{target}` is remote and cannot be attached directly; open it from the workspace sidebar or footer instead"
             )));

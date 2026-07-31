@@ -176,7 +176,7 @@ fn run_io_loop(
                     let _ = shared
                         .state_sender()
                         .send(StateEvent::AuthorityHostSessionPtyClosed {
-                            session_id: session_id.to_string(),
+                            target_id: session_id.to_string(),
                         });
                 }
             }
@@ -343,7 +343,7 @@ fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<
                 let _ = shared
                     .state_sender()
                     .send(StateEvent::AuthorityHostSessionChildExited {
-                        session_id: session_id.clone(),
+                        target_id: session_id.clone(),
                         exit_code,
                     });
             }

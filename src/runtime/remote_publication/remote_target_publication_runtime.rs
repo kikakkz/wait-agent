@@ -593,7 +593,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
                 .into_iter()
                 .find(|session| {
                     session.address.session_id() == command.target_session_name
-                        && session.address.transport() == &SessionTransport::LocalTmux
+                        && session.address.transport() == &SessionTransport::Local
                         && session.is_target_host()
                 });
 
@@ -859,7 +859,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             .into_iter()
             .find(|session| {
                 session.address.session_id() == binding.target_session_name
-                    && session.address.transport() == &SessionTransport::LocalTmux
+                    && session.address.transport() == &SessionTransport::Local
                     && session.is_target_host()
             })
             .ok_or_else(|| {
@@ -988,7 +988,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         for binding in bindings {
             let Some(local_target) = local_targets.iter().find(|session| {
                 session.address.session_id() == binding.target_session_name
-                    && session.address.transport() == &SessionTransport::LocalTmux
+                    && session.address.transport() == &SessionTransport::Local
                     && session.is_target_host()
             }) else {
                 continue;

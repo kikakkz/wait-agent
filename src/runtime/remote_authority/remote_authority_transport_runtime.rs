@@ -596,6 +596,7 @@ fn split_target_identity(target: &str) -> Option<(&str, &str)> {
     let target = target
         .strip_prefix("remote-peer:")
         .or_else(|| target.strip_prefix("local-tmux:"))
+        .or_else(|| target.strip_prefix("local:"))
         .or_else(|| target.strip_prefix("remote:"))
         .unwrap_or(target);
     let (authority_id, session_id) = target.rsplit_once(':')?;

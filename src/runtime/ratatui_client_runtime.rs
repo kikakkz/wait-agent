@@ -363,10 +363,11 @@ fn run_event_loop(
                             }
                             _ if focus == Focus::Main => {
                                 if let Some(bytes) = key_event_to_bytes(&key) {
-                                    let session_id = snapshot.session_name.clone();
-                                    let encoded = base64::encode(&bytes);
-                                    let _ = writeln!(stream, "INPUT {session_id} {encoded}");
-                                    let _ = stream.flush();
+                                    if let Some(target_id) = snapshot.active_target.as_deref() {
+                                        let encoded = base64::encode(&bytes);
+                                        let _ = writeln!(stream, "INPUT {target_id} {encoded}");
+                                        let _ = stream.flush();
+                                    }
                                 }
                             }
                             _ => {}

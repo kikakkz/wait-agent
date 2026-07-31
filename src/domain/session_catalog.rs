@@ -3,14 +3,14 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionTransport {
-    LocalTmux,
+    Local,
     RemotePeer,
 }
 
 impl SessionTransport {
     fn stable_prefix(&self) -> &'static str {
         match self {
-            Self::LocalTmux => "local-tmux",
+            Self::Local => "local",
             Self::RemotePeer => "remote-peer",
         }
     }
@@ -43,10 +43,10 @@ pub struct ManagedSessionAddress {
 }
 
 impl ManagedSessionAddress {
-    pub fn local_tmux(server_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+    pub fn local(server_id: impl Into<String>, session_id: impl Into<String>) -> Self {
         let authority_id = server_id.into();
         let session_id = session_id.into();
-        let transport = SessionTransport::LocalTmux;
+        let transport = SessionTransport::Local;
         Self {
             id: TargetId::for_transport(&transport, &authority_id, &session_id),
             transport,
@@ -94,7 +94,7 @@ impl ManagedSessionAddress {
     #[cfg(test)]
     pub fn display_location(&self) -> &str {
         match self.transport {
-            SessionTransport::LocalTmux => "local",
+            SessionTransport::Local => "local",
             SessionTransport::RemotePeer => "remote",
         }
     }
@@ -310,7 +310,7 @@ impl ManagedSessionRecord {
 
     fn display_scope(&self) -> String {
         match self.address.transport() {
-            SessionTransport::LocalTmux => {
+            SessionTransport::Local => {
                 if self.is_workspace_chrome() {
                     "local [main]".to_string()
                 } else {
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn managed_session_matches_native_tmux_targets() {
         let record = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            address: ManagedSessionAddress::local("wa-1234", "waitagent-1234"),
             selector: Some("wa-1234:waitagent-1234".to_string()),
             availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -358,11 +358,8 @@ mod tests {
             task_state: ManagedSessionTaskState::Input,
         };
 
-        assert_eq!(record.address.transport(), &SessionTransport::LocalTmux);
-        assert_eq!(
-            record.address.id().as_str(),
-            "local-tmux:wa-1234:waitagent-1234"
-        );
+        assert_eq!(record.address.transport(), &SessionTransport::Local);
+        assert_eq!(record.address.id().as_str(), "local:wa-1234:waitagent-1234");
         assert!(record.matches_target("1234"));
         assert!(record.matches_target("waitagent-1234"));
         assert!(record.matches_target("wa-1234"));
@@ -374,7 +371,7 @@ mod tests {
     #[test]
     fn managed_session_summary_line_matches_tmux_like_shape() {
         let record = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            address: ManagedSessionAddress::local("wa-1234", "waitagent-1234"),
             selector: Some("wa-1234:waitagent-1234".to_string()),
             availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -396,7 +393,7 @@ mod tests {
     #[test]
     fn managed_session_display_label_uses_transport_aware_location() {
         let record = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            address: ManagedSessionAddress::local("wa-1234", "waitagent-1234"),
             selector: Some("wa-1234:waitagent-1234".to_string()),
             availability: SessionAvailability::Online,
             workspace_dir: None,
@@ -461,7 +458,7 @@ mod tests {
     #[test]
     fn managed_session_exposes_workspace_role_helpers() {
         let chrome = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-1234"),
+            address: ManagedSessionAddress::local("wa-1234", "waitagent-1234"),
             selector: Some("wa-1234:waitagent-1234".to_string()),
             availability: SessionAvailability::Online,
             workspace_dir: None,
@@ -476,7 +473,7 @@ mod tests {
             task_state: ManagedSessionTaskState::Unknown,
         };
         let target = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1234", "waitagent-5678"),
+            address: ManagedSessionAddress::local("wa-1234", "waitagent-5678"),
             selector: Some("wa-1234:waitagent-5678".to_string()),
             availability: SessionAvailability::Online,
             workspace_dir: None,

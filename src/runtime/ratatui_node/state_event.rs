@@ -9,24 +9,24 @@
 #[allow(dead_code)]
 pub(crate) enum StateEvent {
     /// A local `alacritty_terminal` session's child process exited.
-    LocalSessionChildExit { session_id: String, exit_code: i32 },
+    LocalSessionChildExit { target_id: String, exit_code: i32 },
     /// A local `alacritty_terminal` session changed its window title.
-    LocalSessionTitleChanged { session_id: String, title: String },
+    LocalSessionTitleChanged { target_id: String, title: String },
     /// A local `alacritty_terminal` session produced output and the TUI
     /// clients should be refreshed.  This is deliberately sent to the single
     /// writer loop so that snapshots are broadcast without holding the
     /// terminal lock.
-    LocalSessionOutput { session_id: String },
+    LocalSessionOutput { target_id: String },
     /// An authority-host session's shell child exited.
-    AuthorityHostSessionChildExited { session_id: String, exit_code: i32 },
+    AuthorityHostSessionChildExited { target_id: String, exit_code: i32 },
     /// An authority-host PTY master reached EOF or an unrecoverable read error.
-    AuthorityHostSessionPtyClosed { session_id: String },
+    AuthorityHostSessionPtyClosed { target_id: String },
     /// A TUI client connected to the local Unix socket.
     ClientConnected { client_id: usize },
     /// A TUI client disconnected from the local Unix socket.
     ClientDisconnected { client_id: usize },
     /// Keyboard input received from a client for a specific session.
-    ClientInput { session_id: String, bytes: Vec<u8> },
+    ClientInput { target_id: String, bytes: Vec<u8> },
     /// A client asked to activate a different session target.
     ClientActivatedTarget {
         target_id: String,

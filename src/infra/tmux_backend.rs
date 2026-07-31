@@ -811,7 +811,7 @@ impl EmbeddedTmuxBackend {
                 Err(error) => return Err(error),
             };
             records.push(ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(
+                address: ManagedSessionAddress::local(
                     socket_name.as_str(),
                     session_name.to_string(),
                 ),

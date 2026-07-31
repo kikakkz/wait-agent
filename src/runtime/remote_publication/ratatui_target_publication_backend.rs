@@ -98,7 +98,9 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
             return Ok(false);
         }
         let guard = self.shared.sessions.lock().unwrap();
-        Ok(guard.contains_key(session_name))
+        Ok(guard
+            .values()
+            .any(|session| session.address.session_id() == session_name))
     }
 
     fn ensure_publication_hooks(
@@ -120,22 +122,28 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         if !self.socket_is_live(socket_name) {
             return Ok(());
         }
-        let Some((authority_id, transport_session_id)) = target.split_once(':') else {
+        // The target carries the remote-peer transport prefix used by the sync
+        // protocol (e.g. `remote-peer:10.1.29.9#7575:1`).  The local catalog
+        // keys authority-host sessions under `local#<port>:<id>`, so map the
+        // server's own node id back to the local form before removing.
+        let qualified_target = target
+            .strip_prefix("remote-peer:")
+            .or_else(|| target.strip_prefix("local:"))
+            .unwrap_or(target);
+        if qualified_target.is_empty() {
             return Ok(());
-        };
-        let exited_session_id = {
-            let guard = self.shared.sessions.lock().unwrap();
-            guard
-                .iter()
-                .find(|(_, session)| {
-                    session.address.authority_id() == authority_id
-                        && session.address.session_id() == transport_session_id
-                })
-                .map(|(session_id, _)| session_id.clone())
-        };
-        if let Some(session_id) = exited_session_id {
-            self.shared.handle_session_exit(&session_id);
         }
+        let local_target = {
+            let (authority_id, session_id) = qualified_target
+                .rsplit_once(':')
+                .unwrap_or((qualified_target, ""));
+            if authority_id == self.shared.network.advertised_node_id() {
+                format!("{}:{session_id}", self.shared.local_authority_id())
+            } else {
+                qualified_target.to_string()
+            }
+        };
+        self.shared.handle_session_exit(&local_target);
         Ok(())
     }
 

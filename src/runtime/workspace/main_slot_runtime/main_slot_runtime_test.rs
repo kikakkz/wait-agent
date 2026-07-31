@@ -4059,7 +4059,7 @@ mod tests {
 
     fn session(socket: &str, session: &str, role: WorkspaceSessionRole) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket, session),
+            address: ManagedSessionAddress::local(socket, session),
             selector: Some(format!("{socket}:{session}")),
             availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),

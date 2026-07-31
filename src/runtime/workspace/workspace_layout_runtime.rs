@@ -2271,7 +2271,7 @@ mod tests {
     #[test]
     fn chrome_refresh_all_only_tracks_workspace_chrome_sessions() {
         let chrome = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1", "session-1"),
+            address: ManagedSessionAddress::local("wa-1", "session-1"),
             selector: Some("wa-1:session-1".to_string()),
             availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -2286,7 +2286,7 @@ mod tests {
             task_state: ManagedSessionTaskState::Input,
         };
         let target = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1", "session-2"),
+            address: ManagedSessionAddress::local("wa-1", "session-2"),
             selector: Some("wa-1:session-2".to_string()),
             availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),

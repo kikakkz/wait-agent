@@ -385,7 +385,7 @@ mod tests {
             Path::new("/tmp/waitagent"),
             Some("wa-1:1"),
             &[ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "1"),
+                address: ManagedSessionAddress::local("wa-1", "1"),
                 selector: Some("wa-1:1".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),

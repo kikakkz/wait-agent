@@ -281,7 +281,7 @@ mod tests {
     fn live_workspace_socket_names_only_include_local_workspace_sessions() {
         let sockets = live_workspace_socket_names_from_sessions(&[
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-2", "workspace-2"),
+                address: ManagedSessionAddress::local("wa-2", "workspace-2"),
                 selector: Some("wa-2:workspace-2".to_string()),
                 availability: SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/workspace-2")),
@@ -296,7 +296,7 @@ mod tests {
                 task_state: ManagedSessionTaskState::Running,
             },
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
+                address: ManagedSessionAddress::local("wa-1", "target-1"),
                 selector: Some("wa-1:target-1".to_string()),
                 availability: SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/target-1")),
@@ -326,7 +326,7 @@ mod tests {
                 task_state: ManagedSessionTaskState::Running,
             },
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "workspace-1"),
+                address: ManagedSessionAddress::local("wa-1", "workspace-1"),
                 selector: Some("wa-1:workspace-1".to_string()),
                 availability: SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/workspace-1")),
@@ -341,7 +341,7 @@ mod tests {
                 task_state: ManagedSessionTaskState::Running,
             },
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "workspace-1b"),
+                address: ManagedSessionAddress::local("wa-1", "workspace-1b"),
                 selector: Some("wa-1:workspace-1b".to_string()),
                 availability: SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/workspace-1b")),
@@ -382,7 +382,7 @@ mod tests {
             ..remote_target.clone()
         };
         let local_target = ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux("wa-1", "target-1"),
+            address: ManagedSessionAddress::local("wa-1", "target-1"),
             session_role: Some(WorkspaceSessionRole::TargetHost),
             ..remote_target.clone()
         };
@@ -486,7 +486,7 @@ mod tests {
                 selector: Some("wa-local:shell-host".to_string()),
             },
             &ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-local", "shell-host"),
+                address: ManagedSessionAddress::local("wa-local", "shell-host"),
                 selector: Some("wa-local:shell-host".to_string()),
                 availability: SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),

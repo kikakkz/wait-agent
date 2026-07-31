@@ -170,45 +170,40 @@ impl SharedState {
 
     /// Mark a session as exited, remove its runtime, switch to the next
     /// available session, and shut down the server when the last session exits.
-    pub(crate) fn handle_session_exit(&self, session_id: &str) {
-        let qualified_target = {
+    pub(crate) fn handle_session_exit(&self, target_id: &str) {
+        let record = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            let record = guard.remove(session_id);
-            let was_local = record
-                .as_ref()
-                .map(|r| r.address.transport() == &SessionTransport::LocalTmux)
-                .unwrap_or(false);
-            let qualified_target = record.as_ref().map(|r| r.address.qualified_target());
-            drop(guard);
+            guard.remove(target_id)
+        };
+        let was_local = record
+            .as_ref()
+            .map(|r| r.address.transport() == &SessionTransport::Local)
+            .unwrap_or(false);
 
-            if was_local {
-                let mut local_guard = self
-                    .local_sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                local_guard.remove(session_id);
-                drop(local_guard);
-            } else {
-                let mut remote_guard = self
-                    .remote_sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(target) = qualified_target.as_deref() {
-                    remote_guard.remove(target);
-                }
-                drop(remote_guard);
-            }
+        if was_local {
+            let mut local_guard = self
+                .local_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            local_guard.remove(target_id);
+            drop(local_guard);
 
-            {
+            // Authority-host sessions are keyed by their short session id.
+            if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id) {
                 let mut host_guard = self
                     .authority_host_sessions
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 host_guard.remove(session_id);
             }
-
-            qualified_target
-        };
+        } else {
+            let mut remote_guard = self
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            remote_guard.remove(target_id);
+            drop(remote_guard);
+        }
 
         let remaining: Vec<String> = {
             let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -227,7 +222,7 @@ impl SharedState {
                 // notification is sent below so peers receive the exit event
                 // before the process terminates.
                 ERROR_LOG.log(format!(
-                    "[ratatui-node] last session {session_id} exited; shutting down"
+                    "[ratatui-node] last session {target_id} exited; shutting down"
                 ));
                 self.shutdown.store(true, Ordering::SeqCst);
                 let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
@@ -237,7 +232,7 @@ impl SharedState {
                 // session, falling back to the first remaining session.
                 let next = remaining
                     .iter()
-                    .find(|t| Some(t.as_str()) != qualified_target.as_deref())
+                    .find(|t| *t != target_id)
                     .or(remaining.first())
                     .cloned()
                     .unwrap_or_default();
@@ -247,16 +242,21 @@ impl SharedState {
 
         let _ = self.broadcast_snapshot();
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalTargetExited {
-            target_session_name: session_id.to_string(),
+            target_session_name: target_id.to_string(),
         });
     }
 
     /// Update the displayed command name from the terminal title.
-    pub(crate) fn set_local_session_title(&self, session_id: &str, title: String) {
+    pub(crate) fn set_local_session_title(&self, target_id: &str, title: String) {
         let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(session_id) {
+        if let Some(record) = guard.get_mut(target_id) {
             record.display_command_name = Some(title);
         }
+    }
+
+    /// Return the authority id used for local sessions hosted by this server.
+    pub(crate) fn local_authority_id(&self) -> String {
+        format!("local#{}", self.network.port)
     }
 
     /// Spawn a real local PTY session and register it in the catalog.
@@ -271,8 +271,13 @@ impl SharedState {
             .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
             .unwrap_or_else(|| "bash".to_string());
 
+        let target_id = {
+            let authority_id = self.local_authority_id();
+            ManagedSessionAddress::local(&authority_id, session_id).qualified_target()
+        };
+
         let session = RatatuiLocalSession::spawn(
-            session_id.to_string(),
+            target_id.clone(),
             command_name.clone(),
             cols,
             rows,
@@ -284,16 +289,13 @@ impl SharedState {
                 .local_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            local_guard.insert(session_id.to_string(), session);
+            local_guard.insert(target_id.clone(), session);
         }
 
-        let target = {
+        {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(
-                    self.network.port.to_string(),
-                    session_id,
-                ),
+                address: ManagedSessionAddress::local(self.local_authority_id(), session_id),
                 selector: None,
                 availability: SessionAvailability::Online,
                 workspace_dir: None,
@@ -307,14 +309,12 @@ impl SharedState {
                 current_path: None,
                 task_state: ManagedSessionTaskState::Input,
             };
-            let target = record.address.qualified_target();
-            guard.insert(session_id.to_string(), record);
-            target
-        };
+            guard.insert(target_id.clone(), record);
+        }
 
-        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target_id.clone());
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
-        Ok(target)
+        Ok(target_id)
     }
 
     /// Create an authority-host session (a raw PTY session for a remote viewer)
@@ -327,10 +327,12 @@ impl SharedState {
         cols: u16,
         rows: u16,
     ) -> Result<(String, RatatuiAuthorityHostSession, String), LifecycleError> {
+        let authority_id = self.local_authority_id();
         let id = {
             let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             format!("{}", guard.len() + 1)
         };
+        let target_id = ManagedSessionAddress::local(&authority_id, &id).qualified_target();
 
         let command_name = std::env::var("SHELL")
             .ok()
@@ -340,10 +342,10 @@ impl SharedState {
         let session =
             RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows)?;
 
-        let target = {
+        {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             let record = ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(self.network.port.to_string(), &id),
+                address: ManagedSessionAddress::local(authority_id, &id),
                 selector: None,
                 availability: SessionAvailability::Online,
                 workspace_dir: None,
@@ -357,17 +359,15 @@ impl SharedState {
                 current_path: None,
                 task_state: ManagedSessionTaskState::Running,
             };
-            let target = record.address.qualified_target();
-            guard.insert(id.clone(), record);
-            target
-        };
+            guard.insert(target_id.clone(), record);
+        }
 
-        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        *self.active_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target_id.clone());
 
         // The caller (StateEventLoop) is responsible for registering the PTY
         // master fd with `AuthorityHostIoLoop` and then inserting the session
         // into `authority_host_sessions`.
-        Ok((id, session, target))
+        Ok((id, session, target_id))
     }
 
     /// Resize the active local session, if any.
@@ -377,27 +377,24 @@ impl SharedState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let session_id = active
-            .as_deref()
-            .and_then(|target| target.split_once(':').map(|(_, id)| id.to_string()));
-        if let Some(id) = session_id {
+        if let Some(target) = active {
             let guard = self
                 .local_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = guard.get(&id) {
+            if let Some(session) = guard.get(&target) {
                 session.resize(cols, rows);
             }
         }
     }
 
-    /// Forward input bytes to a specific local session.
-    pub(crate) fn feed_local_session_input(&self, session_id: &str, bytes: impl Into<Vec<u8>>) {
+    /// Forward input bytes to a specific local session keyed by qualified target.
+    pub(crate) fn feed_local_session_input(&self, target_id: &str, bytes: impl Into<Vec<u8>>) {
         let guard = self
             .local_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = guard.get(session_id) {
+        if let Some(session) = guard.get(target_id) {
             session.feed_input(bytes);
         }
     }
@@ -436,27 +433,14 @@ impl SharedState {
         Ok(target_id)
     }
 
-    /// Forward input bytes to the active remote session, if any.
-    ///
-    /// The `active_target` and `remote_sessions` locks are only held long enough
-    /// to clone the session handle; the actual write happens without them so
-    /// that `RatatuiRemoteSession::feed_input` cannot create a lock-order cycle
-    /// with `broadcast_snapshot`.
-    pub(crate) fn feed_active_remote_session_input(&self, bytes: impl Into<Vec<u8>>) {
+    /// Forward input bytes to a specific remote session keyed by qualified target.
+    pub(crate) fn feed_remote_session_input(&self, target_id: &str, bytes: impl Into<Vec<u8>>) {
         let session = {
-            let active = self
-                .active_target
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let Some(target) = active else {
-                return;
-            };
             let guard = self
                 .remote_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            guard.get(&target).cloned()
+            guard.get(target_id).cloned()
         };
         if let Some(session) = session {
             session.feed_input(bytes);

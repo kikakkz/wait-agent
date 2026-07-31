@@ -1014,7 +1014,7 @@ where
     };
     let local_sessions: Vec<ManagedSessionRecord> = local_sessions
         .into_iter()
-        .filter(|s| *s.address.transport() == SessionTransport::LocalTmux)
+        .filter(|s| *s.address.transport() == SessionTransport::Local)
         .collect();
     ERROR_LOG.log(format!(
         "[diag-timing] sync_local_sessions: after filter {} local sessions",

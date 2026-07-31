@@ -836,7 +836,7 @@ impl LocalSessionCatalog for RatatuiLocalSessionCatalog {
             .map_err(|_| "sessions mutex poisoned")?;
         Ok(guard
             .values()
-            .filter(|session| *session.address.transport() == SessionTransport::LocalTmux)
+            .filter(|session| *session.address.transport() == SessionTransport::Local)
             .cloned()
             .collect())
     }

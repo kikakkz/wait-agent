@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 fn is_remote_target(target: &str, shared: &SharedState) -> bool {
     let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
     guard
-        .values()
-        .find(|s| s.address.qualified_target() == target)
+        .get(target)
         .map(|s| s.address.transport() == &SessionTransport::RemotePeer)
         .unwrap_or(false)
 }
@@ -135,7 +134,7 @@ impl SessionView {
         Self {
             id: record.address.qualified_target(),
             transport: match record.address.transport() {
-                SessionTransport::LocalTmux => "local".to_string(),
+                SessionTransport::Local => "local".to_string(),
                 SessionTransport::RemotePeer => "remote".to_string(),
             },
             command_name,
@@ -211,11 +210,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         .clone();
     let active_session_id = active_target
         .as_deref()
-        .and_then(|target| {
-            guard
-                .values()
-                .find(|s| s.address.qualified_target() == target)
-        })
+        .and_then(|target| guard.get(target))
         .map(|s| s.address.session_id().to_string())
         .unwrap_or_else(|| super::runtime::DEFAULT_SESSION_ID.to_string());
     drop(guard);
@@ -233,16 +228,13 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                     .map(|s| s.snapshot())
                     .unwrap_or_else(|| (Vec::new(), None))
             } else {
-                target
-                    .split_once(':')
-                    .map(|(_, id)| id.to_string())
-                    .and_then(|session_id| {
-                        let local_guard = shared
-                            .local_sessions
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        local_guard.get(&session_id).map(|s| s.snapshot())
-                    })
+                let local_guard = shared
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                local_guard
+                    .get(target)
+                    .map(|s| s.snapshot())
                     .unwrap_or_else(|| (Vec::new(), None))
             }
         })

@@ -17,8 +17,6 @@ use super::state_event::StateEvent;
 
 /// A local session backed by a real PTY + `alacritty_terminal` emulator.
 pub struct RatatuiLocalSession {
-    pub session_id: String,
-    pub command_name: String,
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     event_loop_sender: Arc<Mutex<Option<EventLoopSender>>>,
 }
@@ -27,13 +25,12 @@ impl RatatuiLocalSession {
     /// Spawn a new shell in a PTY and start the alacritty terminal event loop.
     pub fn spawn(
         session_id: impl Into<String>,
-        command_name: impl Into<String>,
+        _command_name: impl Into<String>,
         cols: u16,
         rows: u16,
         shared: Arc<SharedState>,
     ) -> Result<Arc<Self>, LifecycleError> {
         let session_id = session_id.into();
-        let command_name = command_name.into();
 
         tty::setup_env();
 
@@ -64,7 +61,7 @@ impl RatatuiLocalSession {
         let sender_slot: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
         let proxy = EventProxy {
             shared: shared.clone(),
-            session_id: session_id.clone(),
+            target_id: session_id.clone(),
             sender: sender_slot.clone(),
         };
 
@@ -90,8 +87,6 @@ impl RatatuiLocalSession {
         ));
 
         Ok(Arc::new(Self {
-            session_id,
-            command_name,
             term,
             event_loop_sender: sender_slot,
         }))
@@ -177,7 +172,7 @@ impl RatatuiLocalSession {
 #[derive(Clone)]
 pub struct EventProxy {
     shared: Arc<SharedState>,
-    session_id: String,
+    target_id: String,
     sender: Arc<Mutex<Option<EventLoopSender>>>,
 }
 
@@ -189,7 +184,7 @@ impl EventListener for EventProxy {
                     .shared
                     .state_sender()
                     .send(StateEvent::LocalSessionOutput {
-                        session_id: self.session_id.clone(),
+                        target_id: self.target_id.clone(),
                     });
             }
             Event::ChildExit(status) => {
@@ -197,7 +192,7 @@ impl EventListener for EventProxy {
                     .shared
                     .state_sender()
                     .send(StateEvent::LocalSessionChildExit {
-                        session_id: self.session_id.clone(),
+                        target_id: self.target_id.clone(),
                         exit_code: status,
                     });
             }
@@ -206,7 +201,7 @@ impl EventListener for EventProxy {
                     .shared
                     .state_sender()
                     .send(StateEvent::LocalSessionChildExit {
-                        session_id: self.session_id.clone(),
+                        target_id: self.target_id.clone(),
                         exit_code: -1,
                     });
             }
@@ -225,7 +220,7 @@ impl EventListener for EventProxy {
                     .shared
                     .state_sender()
                     .send(StateEvent::LocalSessionTitleChanged {
-                        session_id: self.session_id.clone(),
+                        target_id: self.target_id.clone(),
                         title,
                     });
             }

@@ -222,7 +222,7 @@ fn interaction_surface_kind_for_target(
     target: &ManagedSessionRecord,
 ) -> ServerConsoleInteractionSurfaceKind {
     match target.address.transport() {
-        SessionTransport::LocalTmux => ServerConsoleInteractionSurfaceKind::LocalAttach,
+        SessionTransport::Local => ServerConsoleInteractionSurfaceKind::LocalAttach,
         SessionTransport::RemotePeer => ServerConsoleInteractionSurfaceKind::RemoteInteract,
     }
 }
@@ -814,7 +814,7 @@ mod tests {
 
     fn local_target(socket_name: &str, session_name: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket_name, session_name),
+            address: ManagedSessionAddress::local(socket_name, session_name),
             selector: Some(format!("{socket_name}:{session_name}")),
             availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/local")),

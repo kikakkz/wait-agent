@@ -977,8 +977,7 @@ pub(crate) fn live_workspace_socket_names_from_sessions(
 ) -> Vec<String> {
     let mut socket_names = BTreeSet::new();
     for session in sessions {
-        if session.address.transport() != &SessionTransport::LocalTmux
-            || !session.is_workspace_chrome()
+        if session.address.transport() != &SessionTransport::Local || !session.is_workspace_chrome()
         {
             continue;
         }

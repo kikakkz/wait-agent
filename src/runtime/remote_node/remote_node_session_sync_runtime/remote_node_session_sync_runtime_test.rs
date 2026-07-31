@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn session_sync_delta_publishes_new_and_removed_sessions() {
         let previous = HashMap::from([(
-            "local-tmux:wa-1:shell-old".to_string(),
+            "local:wa-1:shell-old".to_string(),
             session("wa-1", "shell-old"),
         )]);
         let current = local_sessions_by_local_id(vec![
@@ -1109,7 +1109,7 @@ mod tests {
         );
 
         assert!(!should_reconnect);
-        assert!(synced_sessions.contains_key("local-tmux:wa-1:shell-2"));
+        assert!(synced_sessions.contains_key("local:wa-1:shell-2"));
         let envelope = receiver
             .try_recv()
             .expect("newly created target should be published immediately");
@@ -1677,7 +1677,7 @@ mod tests {
         session_role: WorkspaceSessionRole,
     ) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket_name, session_id),
+            address: ManagedSessionAddress::local(socket_name, session_id),
             selector: Some(format!("{socket_name}:{session_id}")),
             availability: SessionAvailability::Online,
             workspace_dir: None,

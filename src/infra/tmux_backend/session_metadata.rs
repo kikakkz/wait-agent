@@ -381,7 +381,7 @@ impl EmbeddedTmuxBackend {
                 source,
             );
             records.push(ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux(target_socket, target_session),
+                address: ManagedSessionAddress::local(target_socket, target_session),
                 selector: Some(pane.target_id),
                 availability: if runtime.is_dead {
                     SessionAvailability::Exited

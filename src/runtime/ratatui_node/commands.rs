@@ -102,21 +102,22 @@ pub(crate) fn handle_control_command(
 
     if let Some(args) = command.strip_prefix("INPUT ") {
         let mut parts = args.splitn(2, ' ');
-        let session_id = parts.next().unwrap_or("").to_string();
+        let target_id = parts.next().unwrap_or("").to_string();
         let encoded = parts.next().unwrap_or("");
         match base64::decode(encoded) {
             Ok(bytes) => {
                 let record = {
                     let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.get(&session_id).cloned()
+                    guard.get(&target_id).cloned()
                 };
                 match record.map(|r| r.address.transport().clone()) {
                     Some(SessionTransport::RemotePeer) => {
-                        shared.feed_active_remote_session_input(bytes);
+                        shared.feed_remote_session_input(&target_id, bytes);
                     }
-                    _ => {
-                        shared.feed_local_session_input(&session_id, bytes);
+                    Some(SessionTransport::Local) => {
+                        shared.feed_local_session_input(&target_id, bytes);
                     }
+                    None => {}
                 }
                 return Some(ControlResponse::ok());
             }

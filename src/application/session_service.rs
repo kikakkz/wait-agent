@@ -111,7 +111,7 @@ mod tests {
             Self {
                 calls: Rc::new(RefCell::new(Vec::new())),
                 sessions: Rc::new(RefCell::new(vec![ManagedSessionRecord {
-                    address: ManagedSessionAddress::local_tmux("wa-1234", "1234"),
+                    address: ManagedSessionAddress::local("wa-1234", "1234"),
                     selector: Some("wa-1234:1234".to_string()),
                     availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -363,7 +363,7 @@ mod tests {
         let gateway = FakeGateway::new();
         gateway.set_sessions(vec![
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "1111"),
+                address: ManagedSessionAddress::local("wa-1", "1111"),
                 selector: Some("wa-1:1111".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: None,
@@ -378,7 +378,7 @@ mod tests {
                 task_state: ManagedSessionTaskState::Unknown,
             },
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-2", "2222"),
+                address: ManagedSessionAddress::local("wa-2", "2222"),
                 selector: Some("wa-2:2222".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: None,
@@ -409,7 +409,7 @@ mod tests {
         let gateway = FakeGateway::new();
         gateway.set_sessions(vec![
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "workspace"),
+                address: ManagedSessionAddress::local("wa-1", "workspace"),
                 selector: Some("wa-1:workspace".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/ws")),
@@ -424,7 +424,7 @@ mod tests {
                 task_state: ManagedSessionTaskState::Input,
             },
             ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "target-a"),
+                address: ManagedSessionAddress::local("wa-1", "target-a"),
                 selector: Some("wa-1:target-a".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/ws")),

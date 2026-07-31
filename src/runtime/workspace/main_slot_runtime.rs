@@ -133,7 +133,7 @@ impl MainSlotRuntime {
         .ok_or_else(|| LifecycleError::Protocol(format!("unknown target `{}`", command.target)))?;
 
         match session.address.transport() {
-            SessionTransport::LocalTmux => {}
+            SessionTransport::Local => {}
             SessionTransport::RemotePeer => {
                 ERROR_LOG.log(format!(
                     "[diag-timing] run_activate_target: dispatching to remote ({:?})",
@@ -174,7 +174,7 @@ impl MainSlotRuntime {
             SessionTransport::RemotePeer => {
                 self.activate_remote_target_in_workspace(&current_workspace, session)
             }
-            SessionTransport::LocalTmux => Err(LifecycleError::Protocol(
+            SessionTransport::Local => Err(LifecycleError::Protocol(
                 "direct session-record activation is only supported for remote targets".to_string(),
             )),
         }
@@ -2013,7 +2013,7 @@ impl MainSlotRuntime {
                 continue;
             }
             return Ok(Some(ManagedSessionRecord {
-                address: crate::domain::session_catalog::ManagedSessionAddress::local_tmux(
+                address: crate::domain::session_catalog::ManagedSessionAddress::local(
                     target_socket,
                     target_session,
                 ),
@@ -3369,7 +3369,7 @@ impl MainSlotRuntime {
                     .is_some()
                 {
                     return Ok(Some(ManagedSessionRecord {
-                        address: crate::domain::session_catalog::ManagedSessionAddress::local_tmux(
+                        address: crate::domain::session_catalog::ManagedSessionAddress::local(
                             socket_name.as_str(),
                             target_session_name,
                         ),

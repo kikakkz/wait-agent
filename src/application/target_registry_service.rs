@@ -616,7 +616,7 @@ pub fn project_visible_targets(
     let workspace_runtime = targets
         .iter()
         .find(|target| {
-            target.address.transport() == &SessionTransport::LocalTmux
+            target.address.transport() == &SessionTransport::Local
                 && target.address.authority_id() == authority_id
                 && target.address.session_id() == workspace_session_id
         })
@@ -625,7 +625,7 @@ pub fn project_visible_targets(
         .iter()
         .filter(|target| {
             target.availability != SessionAvailability::Exited
-                && ((target.address.transport() == &SessionTransport::LocalTmux
+                && ((target.address.transport() == &SessionTransport::Local
                     && target.address.authority_id() == authority_id
                     && target.is_target_host())
                     || target.address.transport() == &SessionTransport::RemotePeer)
@@ -643,7 +643,7 @@ pub fn project_visible_targets(
 
 pub fn is_activation_target(target: &ManagedSessionRecord) -> bool {
     target.availability != SessionAvailability::Exited
-        && ((target.address.transport() == &SessionTransport::LocalTmux && target.is_target_host())
+        && ((target.address.transport() == &SessionTransport::Local && target.is_target_host())
             || target.address.transport() == &SessionTransport::RemotePeer)
 }
 
@@ -668,7 +668,7 @@ fn sort_targets_for_display(targets: &mut [ManagedSessionRecord]) {
 
 fn transport_sort_key(target: &ManagedSessionRecord) -> u8 {
     match target.address.transport() {
-        SessionTransport::LocalTmux => 0,
+        SessionTransport::Local => 0,
         SessionTransport::RemotePeer => 1,
     }
 }
@@ -1062,7 +1062,7 @@ mod tests {
         role: WorkspaceSessionRole,
     ) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(authority_id, session_id),
+            address: ManagedSessionAddress::local(authority_id, session_id),
             selector: Some(format!("{authority_id}:{session_id}")),
             availability: SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),

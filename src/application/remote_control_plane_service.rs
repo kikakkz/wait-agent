@@ -942,7 +942,7 @@ enum CloseOutcome {
 fn validate_remote_target(target: &ManagedSessionRecord) -> Result<(), RemoteControlPlaneError> {
     match target.address.transport() {
         SessionTransport::RemotePeer => {}
-        SessionTransport::LocalTmux => return Err(RemoteControlPlaneError::NotRemoteTarget),
+        SessionTransport::Local => return Err(RemoteControlPlaneError::NotRemoteTarget),
     }
     if target.availability != SessionAvailability::Online {
         return Err(RemoteControlPlaneError::TargetUnavailable);

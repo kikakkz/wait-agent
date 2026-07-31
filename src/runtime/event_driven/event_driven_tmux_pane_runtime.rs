@@ -297,7 +297,7 @@ fn local_runtime_signatures(
     visible_sessions
         .iter()
         .filter(|session| {
-            session.address.transport() == &SessionTransport::LocalTmux
+            session.address.transport() == &SessionTransport::Local
                 && session.address.server_id() == socket_name
                 && session.is_target_host()
         })
@@ -823,7 +823,7 @@ mod tests {
         session_role: WorkspaceSessionRole,
     ) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket, session),
+            address: ManagedSessionAddress::local(socket, session),
             selector: Some(format!("{socket}:{session}")),
             availability: crate::domain::session_catalog::SessionAvailability::Online,
             workspace_dir: Some(PathBuf::from("/tmp/demo")),

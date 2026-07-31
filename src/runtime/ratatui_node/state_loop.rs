@@ -53,30 +53,50 @@ fn run_state_event_loop(
 ) -> Result<(), LifecycleError> {
     while let Ok(event) = rx.recv() {
         match event {
-            StateEvent::LocalSessionChildExit { session_id, .. }
-            | StateEvent::AuthorityHostSessionChildExited { session_id, .. }
-            | StateEvent::AuthorityHostSessionPtyClosed { session_id } => {
+            StateEvent::LocalSessionChildExit { target_id, .. } => {
                 ERROR_LOG.log(format!(
-                    "[ratatui-state-loop] session exit event session={session_id}"
+                    "[ratatui-state-loop] local session exit target_id={target_id}"
                 ));
-                // Make sure AuthorityHostIoLoop stops polling this session's fd
-                // and child.  Local sessions ignore the unregister request because
-                // they are managed by alacritty_terminal's event loop.
-                let _ = authority_host_io_tx.send(AuthorityHostIoRequest::UnregisterSession {
-                    session_id: session_id.clone(),
-                });
-                shared.handle_session_exit(&session_id);
+                // AuthorityHostIoLoop uses short session ids; local sessions are
+                // managed by alacritty_terminal and ignore the unregister request.
+                if let Some((_, session_id)) = target_id.rsplit_once(':') {
+                    let _ = authority_host_io_tx.send(AuthorityHostIoRequest::UnregisterSession {
+                        session_id: session_id.to_string(),
+                    });
+                }
+                shared.handle_session_exit(&target_id);
                 let _ = catalog_tx.send(LocalCatalogChangeRequest {
                     reason: LocalCatalogChangeReason::LocalTargetExited {
-                        target_session_name: session_id,
+                        target_session_name: target_id,
                     },
                     ack_tx: None,
                 });
                 let _ = shared.broadcast_snapshot();
             }
 
-            StateEvent::LocalSessionTitleChanged { session_id, title } => {
-                shared.set_local_session_title(&session_id, title);
+            StateEvent::AuthorityHostSessionChildExited { target_id, .. }
+            | StateEvent::AuthorityHostSessionPtyClosed { target_id } => {
+                // AuthorityHostIoLoop reports the short session id; turn it into
+                // the local qualified target before touching SharedState.
+                let qualified_target = format!("{}:{target_id}", shared.local_authority_id());
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] authority host session exit target_id={qualified_target}"
+                ));
+                let _ = authority_host_io_tx.send(AuthorityHostIoRequest::UnregisterSession {
+                    session_id: target_id,
+                });
+                shared.handle_session_exit(&qualified_target);
+                let _ = catalog_tx.send(LocalCatalogChangeRequest {
+                    reason: LocalCatalogChangeReason::LocalTargetExited {
+                        target_session_name: qualified_target,
+                    },
+                    ack_tx: None,
+                });
+                let _ = shared.broadcast_snapshot();
+            }
+
+            StateEvent::LocalSessionTitleChanged { target_id, title } => {
+                shared.set_local_session_title(&target_id, title);
                 let _ = shared.broadcast_snapshot();
             }
 
@@ -99,13 +119,8 @@ fn run_state_event_loop(
                 let _ = client_id;
             }
 
-            StateEvent::ClientInput { session_id, bytes } => {
-                if is_local_session(&shared, &session_id) {
-                    shared.feed_local_session_input(&session_id, bytes);
-                } else {
-                    let _ = authority_host_io_tx
-                        .send(AuthorityHostIoRequest::WriteInput { session_id, bytes });
-                }
+            StateEvent::ClientInput { target_id, bytes } => {
+                route_input(&shared, &authority_host_io_tx, &target_id, bytes);
             }
 
             StateEvent::ClientActivatedTarget {
@@ -203,16 +218,7 @@ fn run_state_event_loop(
             }
 
             StateEvent::RemoteSessionClosed { target_id } => {
-                let session_id = {
-                    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                    guard
-                        .iter()
-                        .find(|(_, session)| session.address.qualified_target() == target_id)
-                        .map(|(session_id, _)| session_id.clone())
-                };
-                if let Some(session_id) = session_id {
-                    shared.handle_session_exit(&session_id);
-                }
+                shared.handle_session_exit(&target_id);
                 let _ = shared.broadcast_snapshot();
             }
         }
@@ -255,15 +261,49 @@ fn create_authority_host_session(
     })
 }
 
-fn is_local_session(shared: &SharedState, session_id: &str) -> bool {
-    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .get(session_id)
-        .map(|record| {
-            *record.address.transport()
-                == crate::domain::session_catalog::SessionTransport::LocalTmux
-        })
-        .unwrap_or(false)
+fn route_input(
+    shared: &SharedState,
+    authority_host_io_tx: &mpsc::Sender<AuthorityHostIoRequest>,
+    target_id: &str,
+    bytes: Vec<u8>,
+) {
+    let record = {
+        let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(target_id).cloned()
+    };
+    let Some(record) = record else {
+        return;
+    };
+    match record.address.transport() {
+        SessionTransport::Local => {
+            // Local PTY sessions are keyed by qualified target.
+            if shared
+                .local_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(target_id)
+            {
+                shared.feed_local_session_input(target_id, bytes);
+                return;
+            }
+            // Authority-host sessions are keyed by short session id inside the
+            // IO loop.
+            if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
+                if shared
+                    .authority_host_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&session_id)
+                {
+                    let _ = authority_host_io_tx
+                        .send(AuthorityHostIoRequest::WriteInput { session_id, bytes });
+                }
+            }
+        }
+        SessionTransport::RemotePeer => {
+            shared.feed_remote_session_input(target_id, bytes);
+        }
+    }
 }
 
 fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
@@ -326,7 +366,7 @@ fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> 
             {
                 let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
                 guard.retain(|_, session| session.address.id() != record.address.id());
-                guard.insert(record.address.session_id().to_string(), record.clone());
+                guard.insert(target.clone(), record.clone());
             }
             if let Err(error) = shared.ensure_remote_session(&record) {
                 return CommandOutcome::Error(error.to_string());

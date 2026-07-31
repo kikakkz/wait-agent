@@ -206,7 +206,7 @@ mod tests {
             "waitagent-1",
             Some("wa-1:waitagent-1"),
             &[ManagedSessionRecord {
-                address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
+                address: ManagedSessionAddress::local("wa-1", "waitagent-1"),
                 selector: Some("wa-1:waitagent-1".to_string()),
                 availability: crate::domain::session_catalog::SessionAvailability::Online,
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -277,7 +277,7 @@ mod tests {
             Some("wa-1:waitagent-1"),
             &[
                 ManagedSessionRecord {
-                    address: ManagedSessionAddress::local_tmux("wa-1", "waitagent-1"),
+                    address: ManagedSessionAddress::local("wa-1", "waitagent-1"),
                     selector: Some("wa-1:waitagent-1".to_string()),
                     availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/demo")),
@@ -292,7 +292,7 @@ mod tests {
                     task_state: ManagedSessionTaskState::Input,
                 },
                 ManagedSessionRecord {
-                    address: ManagedSessionAddress::local_tmux("wa-2", "waitagent-2"),
+                    address: ManagedSessionAddress::local("wa-2", "waitagent-2"),
                     selector: Some("wa-2:waitagent-2".to_string()),
                     availability: crate::domain::session_catalog::SessionAvailability::Online,
                     workspace_dir: Some(PathBuf::from("/tmp/other")),
