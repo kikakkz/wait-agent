@@ -50,14 +50,19 @@ impl RatatuiAuthorityHostSession {
         let master: OwnedFd = pty.controller;
         let slave: OwnedFd = pty.user;
 
-        // Put the PTY in raw mode so the shell's line editor (readline) sees a
-        // real interactive terminal.  Keep IUTF8 so multi-byte input is handled
-        // correctly.  Echo is disabled because the viewing side renders input
-        // locally; enabling it would show every typed character twice.
+        // Prepare the PTY for a remote viewer.  Keep IUTF8 so multi-byte input
+        // is handled correctly.  Disable echo: the viewing side renders input
+        // locally, so enabling it would show every typed character twice.  The
+        // shell itself (via readline) will switch to raw mode once it starts,
+        // so we leave the initial termios in the default state except for echo.
         if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
             let mut termios = termios;
-            termios.make_raw();
             termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
+            let local = &mut termios.local_modes;
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHO);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOE);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHOK);
+            local.remove(rustix_openpty::rustix::termios::LocalModes::ECHONL);
             let _ = rustix_openpty::rustix::termios::tcsetattr(
                 &master,
                 rustix_openpty::rustix::termios::OptionalActions::Now,
