@@ -106,7 +106,7 @@ impl RemoteHostBootstrapPlan {
     /// remote host using the repository deployment script instead of the curl
     /// release installer. The script copies target/release/waitagent to the
     /// remote host, kills any existing daemon on the same port, and starts a
-    /// fresh ratatui node server in a detached tmux session.
+    /// fresh ratatui node server in the background with nohup.
     pub fn with_local_binary_deploy(mut self) -> Self {
         self.deploy_script_path = Some(default_deploy_script_path());
         self.install_or_update_command = deploy_command(&self);

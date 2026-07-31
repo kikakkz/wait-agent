@@ -7,8 +7,7 @@ set -euo pipefail
 # This script is invoked by the SSH bootstrapper instead of downloading the
 # release installer from the network. It copies target/release/waitagent to the
 # remote host, kills any existing remote node server for the same port, and
-# starts a fresh one in a detached tmux session so the process has a stable TTY
-# and can be inspected later with `tmux attach -t waitagent-<port>`.
+# starts a fresh one with nohup in the background.
 #
 # Usage:
 #   ./scripts/deploy-ratatui-remote.sh \
@@ -178,7 +177,7 @@ else
 fi
 
 REMOTE="$USER@$HOST"
-SESSION_NAME="waitagent-$REMOTE_PORT"
+LOG_FILE="/tmp/waitagent-$REMOTE_PORT.log"
 
 remote() {
   "${SSH[@]}" "${SSH_OPTS[@]}" "$REMOTE" "$1"
@@ -202,9 +201,6 @@ kill_existing() {
   remote "
     set -e
     pkill -f $(shq "waitagent.*--port $REMOTE_PORT.*__ratatui-node-server") 2>/dev/null || true
-    if tmux has-session -t $(shq "$SESSION_NAME") 2>/dev/null; then
-      tmux kill-session -t $(shq "$SESSION_NAME")
-    fi
   "
 }
 
@@ -215,17 +211,11 @@ start_daemon() {
   local start_cmd
   start_cmd="exec $(shq "$REMOTE_BIN") --ratatui --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server"
 
-  local start_script
-  start_script="/tmp/waitagent-start-$REMOTE_PORT-$$.sh"
-
-  # Upload a small start script and execute it inside a detached tmux session.
-  "${SSH[@]}" "${SSH_OPTS[@]}" "$REMOTE" "cat > $(shq "$start_script")" <<EOF
-#!/bin/bash
-$start_cmd
-EOF
   remote "
-    chmod 755 $(shq "$start_script")
-    tmux new-session -d -s $(shq "$SESSION_NAME") $(shq "$start_script")
+    set -e
+    nohup sh -c $start_cmd >> $(shq "$LOG_FILE") 2>&1 </dev/null &
+    sleep 0.5
+    pgrep -f $(shq "waitagent.*--port $REMOTE_PORT.*__ratatui-node-server") >/dev/null
   "
 }
 
@@ -235,7 +225,7 @@ main() {
   kill_existing
   start_daemon
   echo "Deployed $LOCAL_BIN -> $REMOTE:$REMOTE_BIN"
-  echo "Started tmux session '$SESSION_NAME' on $REMOTE"
+  echo "Started ratatui node server on $REMOTE (port $REMOTE_PORT, log $LOG_FILE)"
 }
 
 main
