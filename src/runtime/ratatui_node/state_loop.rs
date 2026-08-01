@@ -339,6 +339,9 @@ fn handle_client_command(
         }
 
         ClientCommand::Resize { cols, rows } => {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] resize command cols={cols} rows={rows}"
+            ));
             *shared
                 .last_client_resize
                 .lock()

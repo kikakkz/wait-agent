@@ -635,6 +635,9 @@ fn apply_console_resize(
             ));
             state.active_console = Some(console_id);
         }
+        ERROR_LOG.log(format!(
+            "[ratatui-authority-host-io] resize PTY session={session_id} cols={cols} rows={rows}"
+        ));
         resize_pty(&state.pty_master, cols, rows);
     }
 }

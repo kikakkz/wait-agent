@@ -12,7 +12,8 @@ use crossbeam_channel::{unbounded, Receiver};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -178,13 +179,14 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
 }
 
 /// Send a RESIZE command with the current main-pane size to the server.
-fn send_main_pane_resize(
-    stream: &mut UnixStream,
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
-    sidebar_hidden: bool,
-) {
-    let size = terminal.size().unwrap_or(Rect::default());
-    let (cols, rows) = main_pane_size(size.width, size.height, sidebar_hidden);
+fn send_main_pane_resize(stream: &mut UnixStream, sidebar_hidden: bool) {
+    let (cols, rows) = match terminal_size() {
+        Ok((cols, rows)) => main_pane_size(cols, rows, sidebar_hidden),
+        Err(_) => (80, 24),
+    };
+    ERROR_LOG.log(format!(
+        "[ratatui-client] send resize sidebar_hidden={sidebar_hidden} cols={cols} rows={rows}"
+    ));
     let _ = writeln!(stream, "RESIZE {cols} {rows}");
     let _ = stream.flush();
 }
@@ -360,7 +362,7 @@ fn handle_crossterm_event(
                         {
                             *selected_index = snapshot.sessions.len() - 1;
                         }
-                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
+                        send_main_pane_resize(stream, *sidebar_hidden);
                     }
                     KeyCode::Left if *focus == Focus::Sidebar => {
                         *focus = Focus::Main;
@@ -382,7 +384,7 @@ fn handle_crossterm_event(
                             *focus = Focus::Main;
                             ERROR_LOG
                                 .log(format!("[ratatui-client] activate session: {}", session.id));
-                            send_main_pane_resize(stream, terminal, *sidebar_hidden);
+                            send_main_pane_resize(stream, *sidebar_hidden);
                         }
                     }
                     KeyCode::Char('g') | KeyCode::Char('G')
@@ -397,7 +399,7 @@ fn handle_crossterm_event(
                                 *selected_index = snapshot.sessions.len() - 1;
                             }
                         }
-                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
+                        send_main_pane_resize(stream, *sidebar_hidden);
                     }
                     KeyCode::Char('o') | KeyCode::Char('O')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -471,7 +473,7 @@ fn handle_crossterm_event(
                         }
                         // The popup may have consumed resize events; refresh the
                         // server with the current main-pane size.
-                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
+                        send_main_pane_resize(stream, *sidebar_hidden);
                     }
                     _ if *focus == Focus::Main => {
                         if let Some(logical_key) = key_event_to_logical_key(&key) {
@@ -518,7 +520,7 @@ fn run_event_loop(
 
     // Tell the server the initial main-pane size so the PTY/observer screen
     // matches what we are about to draw.
-    send_main_pane_resize(stream, &terminal, sidebar_hidden);
+    send_main_pane_resize(stream, sidebar_hidden);
 
     loop {
         // Wait event-driven for the next input from either source.

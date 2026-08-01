@@ -237,6 +237,9 @@ impl RatatuiRemoteSession {
 
     /// Forward a terminal resize to the remote session.
     pub fn resize(&self, cols: u16, rows: u16) {
+        ERROR_LOG.log(format!(
+            "[ratatui-remote-session] send apply_resize cols={cols} rows={rows}"
+        ));
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
             return;

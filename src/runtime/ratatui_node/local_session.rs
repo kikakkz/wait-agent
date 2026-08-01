@@ -105,6 +105,9 @@ impl RatatuiLocalSession {
 
     /// Resize the PTY and terminal emulator.
     pub fn resize(&self, cols: u16, rows: u16) {
+        ERROR_LOG.log(format!(
+            "[ratatui-local-session] resize PTY cols={cols} rows={rows}"
+        ));
         if let Some(sender) = self
             .event_loop_sender
             .lock()
