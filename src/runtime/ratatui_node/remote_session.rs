@@ -191,8 +191,23 @@ impl RatatuiRemoteSession {
         let seq = self.next_input_seq.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] feed_input dropped for {}: writer not ready",
+                self.target_id
+            ));
             return;
         };
+        ERROR_LOG.log(format!(
+            "[ratatui-remote-session] feed_input target={} seq={} bytes={} hex={}",
+            self.target_id,
+            seq,
+            bytes.len(),
+            bytes
+                .iter()
+                .map(|b| format!("\\x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        ));
         let payload = RawPtyInputPayload {
             session_id: self.session_id.clone(),
             target_id: self.target_id.clone(),
@@ -203,8 +218,21 @@ impl RatatuiRemoteSession {
             input_bytes: bytes.clone(),
         };
         let frame = AuthorityTransportFrame::RawPtyInput(payload);
-        let _ = write_authority_transport_frame(writer, &frame);
-        let _ = writer.flush();
+        match write_authority_transport_frame(writer, &frame) {
+            Ok(_) => {
+                let flush_result = writer.flush();
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] feed_input target={} seq={} write_ok flush={flush_result:?}",
+                    self.target_id, seq
+                ));
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] feed_input target={} seq={} write_failed: {error}",
+                    self.target_id, seq
+                ));
+            }
+        }
     }
 
     /// Forward a terminal resize to the remote session.
@@ -353,7 +381,7 @@ fn handle_authority_transport_stream(
     }
     session.flush_open_mirror();
     ERROR_LOG.log(format!(
-        "[ratatui-remote-session] authority reader started for {}",
+        "[ratatui-remote-session] authority reader started for {} writer_ready=true",
         target_id
     ));
 
@@ -362,6 +390,11 @@ fn handle_authority_transport_stream(
         match read_authority_transport_frame(&mut stream) {
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                 output_seq = output_seq.max(payload.output_seq);
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] received raw pty output for {target_id} seq={} bytes={}",
+                    payload.output_seq,
+                    payload.output_bytes.len()
+                ));
                 {
                     let mut observer = session.observer.lock().unwrap_or_else(|e| e.into_inner());
                     observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
@@ -387,6 +420,11 @@ fn handle_authority_transport_stream(
                 }
                 ControlPlanePayload::RawPtyOutput(payload) => {
                     output_seq = output_seq.max(payload.output_seq);
+                    ERROR_LOG.log(format!(
+                        "[ratatui-remote-session] received control raw pty output for {target_id} seq={} bytes={}",
+                        payload.output_seq,
+                        payload.output_bytes.len()
+                    ));
                     {
                         let mut observer =
                             session.observer.lock().unwrap_or_else(|e| e.into_inner());

@@ -162,6 +162,14 @@ pub trait RemoteTargetPublicationBackend: Clone + Send + Sync + 'static {
         network: &RemoteNetworkConfig,
         executable: &Path,
     ) -> Result<(), LifecycleError>;
+
+    /// Notify the local catalog that a remote peer went offline.  The ratatui
+    /// implementation removes stale remote-peer sessions for that node because
+    /// they are views into a server that is no longer reachable; the tmux
+    /// implementation has no equivalent in-memory catalog and does nothing.
+    fn signal_remote_node_offline(&self, _node_id: &str) -> Result<(), LifecycleError> {
+        Ok(())
+    }
 }
 
 /// Tmux-backed implementation of `RemoteTargetPublicationBackend`.

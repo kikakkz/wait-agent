@@ -226,16 +226,24 @@ impl SharedState {
         {
             let mut active_guard = self.active_target.lock().unwrap_or_else(|e| e.into_inner());
             if remaining_local.is_empty() {
-                // When the last local session exits there is nothing left to
-                // host. Shutdown the node server. The local-catalog change
-                // notification is sent below so peers receive the exit event
-                // before the process terminates.
-                ERROR_LOG.log(format!(
-                    "[ratatui-node] last local session {target_id} exited; shutting down"
-                ));
-                self.shutdown.store(true, Ordering::SeqCst);
-                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
-                *active_guard = None;
+                // Peer node servers (started with --connect) are long-lived:
+                // they only host sessions on behalf of remote viewers and must
+                // stay alive so future sessions can be created.  The local node
+                // server (no --connect) exits when its last local session ends.
+                if self.network.connect.is_none() {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] last local session {target_id} exited; shutting down"
+                    ));
+                    self.shutdown.store(true, Ordering::SeqCst);
+                    let _ =
+                        UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+                    *active_guard = None;
+                } else {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] peer node session {target_id} exited; keeping server alive"
+                    ));
+                    *active_guard = None;
+                }
             } else {
                 // Pick the next local session. Prefer one that is not the
                 // just-exited session, falling back to the first remaining one.
@@ -445,6 +453,26 @@ impl SharedState {
         };
         if let Some(session) = session {
             session.feed_input(bytes);
+        }
+    }
+
+    /// Remove all remote-peer sessions whose authority id matches the given
+    /// node.  Called when a remote peer reconnects with a new node instance,
+    /// which means any previous sessions hosted by that peer are stale.
+    pub(crate) fn remove_remote_sessions_for_node(&self, node_id: &str) {
+        let to_remove: Vec<String> = {
+            let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .values()
+                .filter(|record| {
+                    *record.address.transport() == SessionTransport::RemotePeer
+                        && record.address.authority_id() == node_id
+                })
+                .map(|record| record.address.qualified_target())
+                .collect()
+        };
+        for target_id in to_remove {
+            self.handle_session_exit(&target_id);
         }
     }
 

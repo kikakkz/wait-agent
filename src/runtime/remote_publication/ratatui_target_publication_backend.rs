@@ -160,6 +160,16 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         Ok(1)
     }
 
+    fn signal_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError> {
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::RemoteNodeOffline {
+                node_id: node_id.to_string(),
+            });
+        Ok(())
+    }
+
     fn refresh_workspace_socket(
         &self,
         socket_name: &str,

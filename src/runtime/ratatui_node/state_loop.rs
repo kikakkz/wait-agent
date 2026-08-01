@@ -185,6 +185,14 @@ fn run_state_event_loop(
                 shared.handle_session_exit(&target_id);
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
+
+            StateEvent::RemoteNodeOffline { node_id } => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] remote node offline node={node_id}"
+                ));
+                shared.remove_remote_sessions_for_node(&node_id);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
         }
     }
     Ok(())

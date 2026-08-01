@@ -51,20 +51,11 @@ impl RatatuiAuthorityHostSession {
         let master: OwnedFd = pty.controller;
         let slave: OwnedFd = pty.user;
 
-        // Prepare the PTY for a remote viewer.  Keep IUTF8 so multi-byte input
-        // is handled correctly.  Leave echo enabled so the remote shell's
-        // readline handles all character echo and line redraw; disabling it and
-        // doing local echo caused the modeled screen to drift out of sync with
-        // the remote PTY state.
-        if let Ok(termios) = rustix_openpty::rustix::termios::tcgetattr(&master) {
-            let mut termios = termios;
-            termios.input_modes |= rustix_openpty::rustix::termios::InputModes::IUTF8;
-            let _ = rustix_openpty::rustix::termios::tcsetattr(
-                &master,
-                rustix_openpty::rustix::termios::OptionalActions::Now,
-                &termios,
-            );
-        }
+        // Leave the PTY in its default termios for shell startup.  Bash will
+        // switch the slave into the raw/readline mode it needs once it has
+        // finished initialization.  We only make the master non-blocking so
+        // the IO loop can poll it; the kernel line discipline is otherwise
+        // left alone.
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let mut cmd = Command::new(&shell);

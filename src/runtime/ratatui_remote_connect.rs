@@ -5,6 +5,7 @@ use crate::application::remote_session_creation_service::{
 use crate::application::target_registry_service::{TargetCatalogGateway, TargetRegistryService};
 use crate::cli::{default_remote_node_port, RemoteNetworkConfig};
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability};
+use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_host::remote_host_connect_runtime::{
     RemotePortProbeFactory, SshRemotePortProbeFactory,
@@ -65,38 +66,53 @@ pub fn connect_remote_host(
 
     let local_connect_endpoint = network.advertised_public_endpoint_label();
 
-    // If we already have a live remote session for this host, reuse its
-    // authority instead of starting a second daemon on a new port.
-    let (authority_node_id, remote_port) =
-        match find_online_remote_target_for_profile(sessions, &profile) {
-            Some(existing) => {
-                let authority = existing.address.authority_id().to_string();
-                let port = authority
-                    .rsplit_once('#')
-                    .and_then(|(_, port)| port.parse().ok())
-                    .unwrap_or_else(|| {
-                        profile
-                            .last_remote_port
-                            .unwrap_or_else(default_remote_node_port)
-                    });
-                (authority, port)
-            }
-            None => {
+    // Determine the port we intend to use for this connection.  The preference
+    // order is: explicit preferred port, last known port, default port.  We
+    // only reuse an existing remote session when it is on the exact same
+    // `host#port`; matching by host prefix alone would reuse a stale session on
+    // a different port and prevent the user from reaching a new server.
+    let intended_port = profile
+        .preferred_remote_port
+        .explicit_port()
+        .or(profile.last_remote_port)
+        .unwrap_or_else(default_remote_node_port);
+    let intended_authority = authority_id_for_profile_port(&profile, intended_port);
+    let existing_target = find_online_remote_target_for_authority(sessions, &intended_authority);
+
+    let (authority_node_id, remote_port) = match &existing_target {
+        Some(existing) => {
+            let authority = existing.address.authority_id().to_string();
+            let port = authority
+                .rsplit_once('#')
+                .and_then(|(_, port)| port.parse().ok())
+                .unwrap_or(intended_port);
+            (authority, port)
+        }
+        None => {
+            // If the profile already names a port (preferred or last-known), use
+            // that port directly.  Only probe for a free port when the user has
+            // not pinned a port, which keeps reconnections stable and respects
+            // the "one port == one server" model.
+            let chosen_port = if profile.preferred_remote_port.explicit_port().is_some()
+                || profile.last_remote_port.is_some()
+            {
+                intended_port
+            } else {
                 let preference = port_preference(&profile.preferred_remote_port);
                 let port_probe = SshRemotePortProbeFactory.create(&profile);
-                let port = port_probe
+                port_probe
                     .choose_remote_port(&preference, &local_connect_endpoint)
-                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-                let authority_node_id = authority_id_for_profile_port(&profile, port.port);
-                (authority_node_id, port.port)
-            }
-        };
+                    .map_err(|error| LifecycleError::Protocol(error.to_string()))?
+                    .port
+            };
+            (
+                authority_id_for_profile_port(&profile, chosen_port),
+                chosen_port,
+            )
+        }
+    };
 
-    // Always deploy the local binary to the remote host when using the ratatui
-    // connect path. This ensures the remote is running the same branch build as
-    // the local TUI during development; the deploy script kills any existing
-    // process on the same port before starting the new one.
-    {
+    if existing_target.is_none() {
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             remote_port,
@@ -105,9 +121,21 @@ pub fn connect_remote_host(
         )
         .with_local_binary_deploy();
 
-        SshRemoteHostBootstrapper::default()
-            .ensure_waitagent_and_start(&plan)
+        let bootstrapper = SshRemoteHostBootstrapper::default();
+        let daemon_already_running = bootstrapper
+            .remote_waitagent_daemon_is_running(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+
+        if daemon_already_running {
+            ERROR_LOG.log(format!(
+                "[connect-remote-host] daemon already running on {}:{remote_port}; waiting for reconnect",
+                profile.host
+            ));
+        } else {
+            bootstrapper
+                .ensure_waitagent_and_start(&plan)
+                .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+        }
     }
 
     let gateway = RatatuiTargetCatalogGateway::new(sessions.clone());
@@ -150,19 +178,16 @@ fn authority_id_for_profile_port(profile: &RemoteHostProfile, remote_port: u16) 
     format!("{}#{}", profile.host, remote_port)
 }
 
-fn find_online_remote_target_for_profile(
+fn find_online_remote_target_for_authority(
     sessions: &Arc<Mutex<Vec<ManagedSessionRecord>>>,
-    profile: &RemoteHostProfile,
+    authority_id: &str,
 ) -> Option<ManagedSessionRecord> {
     let guard = sessions.lock().unwrap();
     guard
         .iter()
         .find(|target| {
             target.availability == SessionAvailability::Online
-                && target
-                    .address
-                    .authority_id()
-                    .starts_with(&format!("{}#", profile.host))
+                && target.address.authority_id() == authority_id
         })
         .cloned()
 }

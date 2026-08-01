@@ -23,6 +23,7 @@ pub struct RemoteWaitAgentStartPlan {
     pub authority_id: String,
     pub endpoint_preflight_command: String,
     pub command: String,
+    pub subcommand: String,
 }
 
 impl RemoteWaitAgentStartPlan {
@@ -43,6 +44,7 @@ impl RemoteWaitAgentStartPlan {
             ),
             local_connect_endpoint,
             authority_id,
+            subcommand: "__remote-daemon".to_string(),
         }
     }
 }
@@ -110,11 +112,13 @@ impl RemoteHostBootstrapPlan {
     pub fn with_local_binary_deploy(mut self) -> Self {
         self.deploy_script_path = Some(default_deploy_script_path());
         self.install_or_update_command = deploy_command(&self);
+        self.start_plan.subcommand = "__ratatui-node-server".to_string();
         self.start_plan.command = format!(
-            "nohup waitagent --port {} --connect {} --node-id {} __ratatui-node-server >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+            "nohup waitagent --port {} --connect {} --node-id {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
             self.start_plan.remote_port,
             shell_single_quote(&self.start_plan.local_connect_endpoint),
             shell_single_quote(&self.start_plan.authority_id),
+            shell_single_quote(&self.start_plan.subcommand),
             self.start_plan.remote_port,
         );
         self
@@ -247,7 +251,7 @@ where
         Ok(output.status == 0)
     }
 
-    fn remote_waitagent_daemon_is_running(
+    pub fn remote_waitagent_daemon_is_running(
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<bool, RemoteHostBootstrapError> {
@@ -492,7 +496,7 @@ fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
         shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
         shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
         shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
-        shell_single_quote("__remote-daemon"),
+        shell_single_quote(&plan.start_plan.subcommand),
     )
 }
 

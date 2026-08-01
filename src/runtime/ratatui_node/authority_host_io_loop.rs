@@ -526,7 +526,13 @@ fn append_input_to_pending_write(state: &mut SessionState, bytes: &[u8]) {
 fn drain_pending_write(state: &mut SessionState, poller: &mut polling::Poller) {
     if state.pending_write.is_empty() {
         // We are only interested in readability when there is nothing to write.
-        let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+        // Keep the PTY in level-triggered mode; `Poller::modify` defaults to
+        // oneshot, which would drop subsequent output events between writes.
+        let _ = poller.modify_with_mode(
+            &state.pty_master,
+            polling::Event::readable(state.token),
+            polling::PollMode::Level,
+        );
         return;
     }
 
@@ -540,7 +546,11 @@ fn drain_pending_write(state: &mut SessionState, poller: &mut polling::Poller) {
                     "[ratatui-authority-host-io] pty write error: {error}"
                 ));
                 state.pending_write.clear();
-                let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+                let _ = poller.modify_with_mode(
+                    &state.pty_master,
+                    polling::Event::readable(state.token),
+                    polling::PollMode::Level,
+                );
                 return;
             }
         }
@@ -551,9 +561,17 @@ fn drain_pending_write(state: &mut SessionState, poller: &mut polling::Poller) {
     }
 
     if state.pending_write.is_empty() {
-        let _ = poller.modify(&state.pty_master, polling::Event::readable(state.token));
+        let _ = poller.modify_with_mode(
+            &state.pty_master,
+            polling::Event::readable(state.token),
+            polling::PollMode::Level,
+        );
     } else {
-        let _ = poller.modify(&state.pty_master, polling::Event::all(state.token));
+        let _ = poller.modify_with_mode(
+            &state.pty_master,
+            polling::Event::all(state.token),
+            polling::PollMode::Level,
+        );
     }
     let _ = state.pty_master.flush();
 }

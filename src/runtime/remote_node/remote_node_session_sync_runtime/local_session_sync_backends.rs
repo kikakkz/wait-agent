@@ -1069,6 +1069,10 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
     ) -> Result<AuthorityHostSignal, Self::Error> {
         const AUTHORITY_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
         let target_id = authority_command_target_id(&command).to_string();
+        ERROR_LOG.log(format!(
+            "[ratatui-session-sync] deliver_command target={target_id} command={command:?} writer_ready={}",
+            host.writer.lock().map_or(false, |g| g.is_some())
+        ));
         let mut guard = match host.writer.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1248,6 +1252,10 @@ fn spawn_ratatui_authority_target_host(
                         mirror_active.store(true, Ordering::Relaxed);
                     }
                     ControlPlanePayload::RawPtyInput(payload) => {
+                        ERROR_LOG.log(format!(
+                            "[ratatui-session-sync] target host received RawPtyInput session={} target={} bytes={}",
+                            payload.session_id, payload.target_id, payload.input_bytes.len()
+                        ));
                         session.feed_input(&io_tx, payload.input_bytes);
                     }
                     ControlPlanePayload::ApplyResize(payload) => {
@@ -1259,6 +1267,10 @@ fn spawn_ratatui_authority_target_host(
                     _ => {}
                 },
                 Ok(AuthorityTransportFrame::RawPtyInput(payload)) => {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-session-sync] target host received raw frame RawPtyInput session={} target={} bytes={}",
+                        payload.session_id, payload.target_id, payload.input_bytes.len()
+                    ));
                     session.feed_input(&io_tx, payload.input_bytes);
                     _input_seq += 1;
                 }

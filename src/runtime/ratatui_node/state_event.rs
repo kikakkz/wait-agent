@@ -49,6 +49,10 @@ pub(crate) enum StateEvent {
     /// This covers both a remote session viewer closing and a local
     /// authority-host session being closed by a remote peer.
     SessionClosed { target_id: String },
+    /// A remote peer went offline (the last ingress session to it closed).
+    /// Any remote-peer sessions that were views into that node are stale and
+    /// should be removed from the local catalog.
+    RemoteNodeOffline { node_id: String },
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.

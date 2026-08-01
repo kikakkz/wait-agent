@@ -1501,14 +1501,15 @@ fn handle_transport_event<
 {
     match event {
         RemoteNodeTransportEvent::SessionOpened { session } => {
-            let node_id = session.node_id().to_string();
             let session_instance_id = session.session_instance_id().to_string();
             closed_session_instances.remove(&session_instance_id);
+
             let mut active = ActiveNodeIngressSession {
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
             };
+            let node_id = active.session.node_id().to_string();
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
                 schedule_socket_discovery_retry(
@@ -1640,6 +1641,11 @@ fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicati
     if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(node_id) {
         ERROR_LOG.log(format!(
             "[diag] ingress server: failed to mark discovered node offline {node_id}: {error}"
+        ));
+    }
+    if let Err(error) = publication_runtime.signal_remote_node_offline(node_id) {
+        ERROR_LOG.log(format!(
+            "[diag] ingress server: failed to signal remote node offline {node_id}: {error}"
         ));
     }
 }
@@ -1852,6 +1858,10 @@ fn handle_internal_event(
             socket_path,
             command,
         } => {
+            ERROR_LOG.log(format!(
+                "[remote-node-ingress] authority command received node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
+                socket_path.display()
+            ));
             let Some(active) = sessions.get(&session_instance_id) else {
                 ERROR_LOG.log(format!(
                     "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} socket={} because no active session is open",
@@ -2259,6 +2269,10 @@ fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
             let Some(session) = session else {
                 return Ok(());
             };
+            ERROR_LOG.log(format!(
+                "[diag-timing] ingress route RawPtyOutput node={node_id} session={} target={} seq={} bytes={}",
+                payload.session_id, payload.target_id, payload.output_seq, payload.output_bytes.len()
+            ));
             bridge_output_to_authority_transports(
                 node_id,
                 session,
@@ -2713,7 +2727,13 @@ fn spawn_authority_bridge_reader(
     thread::spawn(move || {
         loop {
             let command = match reader.recv_command() {
-                Ok(command) => command,
+                Ok(command) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-node-ingress] bridge reader recv_command node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
+                        socket_path.display()
+                    ));
+                    command
+                }
                 Err(_) => break,
             };
             if internal_tx
