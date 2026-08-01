@@ -95,6 +95,7 @@ impl From<CrosstermKeyCode> for KeyCode {
 
 /// Modifier state carried with a logical key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,

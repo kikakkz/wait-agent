@@ -1169,10 +1169,12 @@ fn start_workspace_registry_polling_watcher(
     }))
 }
 
-/// Handle returned by `start_socket_watcher`. The caller owns the inotify fd
-/// and must close it to wake a blocking watcher thread before joining it.
+/// Handle returned by `start_socket_watcher`. The caller wakes the watcher by
+/// writing to a dedicated shutdown pipe so the blocking `poll` returns and the
+/// thread can exit cleanly.
 struct SocketWatcherHandle {
-    fd: RawFd,
+    inotify_fd: RawFd,
+    shutdown_write: RawFd,
     worker: thread::JoinHandle<()>,
 }
 
@@ -1203,8 +1205,8 @@ fn start_socket_watcher(
 fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> io::Result<SocketWatcherHandle> {
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
-    if fd == -1 {
+    let inotify_fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if inotify_fd == -1 {
         return Err(io::Error::last_os_error());
     }
 
@@ -1213,11 +1215,31 @@ fn start_inotify_watcher(
         .map_err(|_| io::Error::other("temp_dir contains interior null byte"))?;
 
     let wd = unsafe {
-        libc::inotify_add_watch(fd, dir_path.as_ptr(), libc::IN_CREATE | libc::IN_MOVED_TO)
+        libc::inotify_add_watch(
+            inotify_fd,
+            dir_path.as_ptr(),
+            libc::IN_CREATE | libc::IN_MOVED_TO,
+        )
     };
     if wd == -1 {
-        unsafe { libc::close(fd) };
+        unsafe { libc::close(inotify_fd) };
         return Err(io::Error::last_os_error());
+    }
+
+    let mut pipe_fds = [-1; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        unsafe { libc::close(inotify_fd) };
+        return Err(io::Error::last_os_error());
+    }
+    let shutdown_read = pipe_fds[0];
+    let shutdown_write = pipe_fds[1];
+
+    // Mark the write end close-on-exec so it is not inherited by sidecars.
+    unsafe {
+        let flags = libc::fcntl(shutdown_write, libc::F_GETFD, 0);
+        if flags >= 0 {
+            libc::fcntl(shutdown_write, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
     }
 
     let worker = thread::spawn(move || {
@@ -1225,7 +1247,42 @@ fn start_inotify_watcher(
         let mut buf = [0u8; 4096];
 
         loop {
-            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let mut fds = [
+                libc::pollfd {
+                    fd: inotify_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: shutdown_read,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+            if ready <= 0 {
+                break;
+            }
+
+            if fds[1].revents != 0 {
+                // Shutdown requested: drain the pipe and exit.
+                let mut drain = [0u8; 16];
+                unsafe {
+                    libc::read(
+                        shutdown_read,
+                        drain.as_mut_ptr() as *mut libc::c_void,
+                        drain.len(),
+                    )
+                };
+                break;
+            }
+
+            if fds[0].revents == 0 {
+                continue;
+            }
+
+            let n =
+                unsafe { libc::read(inotify_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
@@ -1250,9 +1307,18 @@ fn start_inotify_watcher(
                 off += event_size + name_len;
             }
         }
+
+        unsafe {
+            libc::close(inotify_fd);
+            libc::close(shutdown_read);
+        }
     });
 
-    Ok(SocketWatcherHandle { fd, worker })
+    Ok(SocketWatcherHandle {
+        inotify_fd,
+        shutdown_write,
+        worker,
+    })
 }
 
 impl RemoteNodeIngressServerGuard {
@@ -1432,8 +1498,19 @@ fn run_node_ingress_server_loop<
         }
     }
     if let Some(handle) = watcher {
-        unsafe { libc::close(handle.fd) };
+        let signal = [1u8];
+        unsafe {
+            libc::write(
+                handle.shutdown_write,
+                signal.as_ptr() as *const libc::c_void,
+                signal.len(),
+            );
+        }
         let _ = handle.worker.join();
+        unsafe {
+            libc::close(handle.shutdown_write);
+            libc::close(handle.inotify_fd);
+        }
     }
 }
 

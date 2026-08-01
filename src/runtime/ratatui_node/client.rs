@@ -184,3 +184,26 @@ pub(crate) fn remove_client(client_id: u64, clients: &Arc<Mutex<Vec<ClientHandle
         handle.removed.store(true, Ordering::SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_input_command_with_spaced_json() {
+        let encoded =
+            "eyJjb2RlIjogeyJraW5kIjogIkNoYXIiLCAidmFsdWUiOiAiZSJ9LCAibW9kaWZpZXJzIjoge319";
+        let line = format!("INPUT local#9999:1 {encoded}");
+        let command = parse_command(&line);
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::Input {
+                    ref target_id,
+                    key: super::super::logical_key::LogicalKey { code: super::super::logical_key::KeyCode::Char('e'), .. }
+                }) if target_id == "local#9999:1"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+}
