@@ -180,12 +180,13 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
 
 /// Send a RESIZE command with the current main-pane size to the server.
 fn send_main_pane_resize(stream: &mut UnixStream, sidebar_hidden: bool) {
-    let (cols, rows) = match terminal_size() {
+    let raw_size = terminal_size();
+    let (cols, rows) = match raw_size {
         Ok((cols, rows)) => main_pane_size(cols, rows, sidebar_hidden),
         Err(_) => (80, 24),
     };
     ERROR_LOG.log(format!(
-        "[ratatui-client] send resize sidebar_hidden={sidebar_hidden} cols={cols} rows={rows}"
+        "[ratatui-client] send resize sidebar_hidden={sidebar_hidden} raw={raw_size:?} main_cols={cols} main_rows={rows}"
     ));
     let _ = writeln!(stream, "RESIZE {cols} {rows}");
     let _ = stream.flush();
@@ -491,6 +492,9 @@ fn handle_crossterm_event(
         }
         Event::Resize(cols, rows) => {
             let (main_cols, main_rows) = main_pane_size(cols, rows, *sidebar_hidden);
+            ERROR_LOG.log(format!(
+                "[ratatui-client] event resize raw_cols={cols} raw_rows={rows} main_cols={main_cols} main_rows={main_rows}"
+            ));
             let _ = writeln!(stream, "RESIZE {main_cols} {main_rows}");
             let _ = stream.flush();
         }
@@ -772,6 +776,10 @@ fn render(
             ])
             .split(outer[0])
     };
+    ERROR_LOG.log(format!(
+        "[ratatui-client] render frame={}x{} main_pane={}x{} sidebar_hidden={sidebar_hidden}",
+        area.width, area.height, inner[0].width, inner[0].height
+    ));
 
     let main_block = Block::default()
         .borders(Borders::NONE)
