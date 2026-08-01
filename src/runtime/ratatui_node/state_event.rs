@@ -78,6 +78,10 @@ pub(crate) enum ClientCommand {
     Resize { cols: u16, rows: u16 },
     /// Forward a logical keyboard key to a specific session.
     Input { target_id: String, key: LogicalKey },
+    /// Request the full scrollback history for a session.
+    GetHistory { target_id: String },
+    /// Create a new remote session on the authority of the selected target.
+    CreateRemoteSession { authority_node_id: String },
 }
 
 /// Reply returned by `StateEventLoop` for control commands.

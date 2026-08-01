@@ -5,7 +5,6 @@ use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
 use std::borrow::Cow;
@@ -133,29 +132,7 @@ impl RatatuiLocalSession {
         let mut styled_lines = Vec::with_capacity(screen_lines);
         for row in 0..screen_lines {
             let line = Line(row as i32 - display_offset);
-            let grid_row = &grid[line];
-            let mut text = String::with_capacity(columns);
-            let mut styled = String::with_capacity(columns * 2);
-            let mut last_style = crate::terminal::TextStyle::default();
-            for col in 0..columns {
-                let cell = &grid_row[Column(col)];
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                let style = alacritty_style_to_text_style(&cell);
-                if style != last_style {
-                    if col > 0 {
-                        styled.push_str("\x1b[0m");
-                    }
-                    styled.push_str(&style.to_ansi());
-                    last_style = style;
-                }
-                styled.push(cell.c);
-                text.push(cell.c);
-            }
-            if last_style != crate::terminal::TextStyle::default() {
-                styled.push_str("\x1b[0m");
-            }
+            let (text, styled) = render_grid_line(&grid, line, columns);
             lines.push(text);
             styled_lines.push(styled);
         }
@@ -177,6 +154,32 @@ impl RatatuiLocalSession {
         };
 
         (lines, styled_lines, cursor)
+    }
+
+    /// Return the full scrollback history plus the visible screen as plain/styled lines.
+    pub fn history_snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let screen_lines = grid.screen_lines();
+        let columns = grid.columns();
+        let display_offset = grid.display_offset() as i32;
+        let history_len = grid.total_lines().saturating_sub(screen_lines);
+
+        let mut lines = Vec::with_capacity(history_len + screen_lines);
+        let mut styled_lines = Vec::with_capacity(history_len + screen_lines);
+        for offset in (1..=history_len).rev() {
+            let line = Line(-(offset as i32));
+            let (text, styled) = render_grid_line(&grid, line, columns);
+            lines.push(text);
+            styled_lines.push(styled);
+        }
+        for row in 0..screen_lines {
+            let line = Line(row as i32 - display_offset);
+            let (text, styled) = render_grid_line(&grid, line, columns);
+            lines.push(text);
+            styled_lines.push(styled);
+        }
+        (lines, styled_lines)
     }
 }
 
@@ -238,6 +241,34 @@ fn alacritty_style_to_text_style(
     style.foreground = color_to_value(&cell.fg);
     style.background = color_to_value(&cell.bg);
     style
+}
+
+/// Render a single grid row into plain and ANSI-styled text.
+fn render_grid_line(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    line: Line,
+    columns: usize,
+) -> (String, String) {
+    let mut text = String::with_capacity(columns);
+    let mut styled = String::with_capacity(columns * 8);
+    let mut active_style = crate::terminal::TextStyle::default();
+
+    for col in 0..columns {
+        let cell = &grid[line][Column(col)];
+        text.push(cell.c);
+        let style = alacritty_style_to_text_style(cell);
+        if style != active_style {
+            styled.push_str(&style.to_ansi());
+            active_style = style;
+        }
+        styled.push(cell.c);
+    }
+
+    if active_style != crate::terminal::TextStyle::default() {
+        styled.push_str("\x1b[0m");
+    }
+
+    (text, styled)
 }
 
 /// Bridge terminal emulator events back into the WaitAgent server.

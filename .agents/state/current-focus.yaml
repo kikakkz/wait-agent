@@ -1,11 +1,11 @@
 kind: state
 version: 1
-current_task: task.ratatui-phase-2-5-session-backend
+current_task: task.ratatui-phase-3-bottom-menu-shortcuts
 focus_statement: >
-  active task is ratatui migration phase 2.5: migrate local and remote session creation from the
-  tmux backend onto the ratatui node server. First slice: add an in-memory session catalog to the
-  node server, wire client-to-node commands for creating local and remote sessions, and render the
-  catalog in the sidebar using the existing tmux-path row format.
+  active task is ratatui migration phase 3 bottom-menu shortcuts: implement Ctrl-G sidebar
+  hide/show, Ctrl-O session history scrollback, Ctrl-E client-side error-log popup, and
+  Ctrl-S remote session creation from the selected sidebar item, all rendered as embedded
+  ratatui overlays without sub-process popups.
 last_updated_from:
   file: .agents/tasks/current.yaml
-  reference: task.ratatui-phase-2-5-session-backend.in_progress
+  reference: task.ratatui-phase-3-bottom-menu-shortcuts.done

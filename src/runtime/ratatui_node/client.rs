@@ -150,6 +150,14 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                     Some(key) => Some(ClientCommand::Input { target_id, key }),
                     None => None,
                 }
+            } else if let Some(args) = trimmed.strip_prefix("GET_HISTORY ") {
+                Some(ClientCommand::GetHistory {
+                    target_id: args.to_string(),
+                })
+            } else if let Some(args) = trimmed.strip_prefix("CREATE_REMOTE_SESSION ") {
+                Some(ClientCommand::CreateRemoteSession {
+                    authority_node_id: args.to_string(),
+                })
             } else {
                 None
             }

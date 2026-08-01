@@ -3,7 +3,8 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_node::logical_key::LogicalKey;
 use crate::runtime::ratatui_node_runtime::{
-    ratatui_socket_path, ControlResponse, RatatuiSnapshot, ServerMessageJson, SessionView,
+    ratatui_socket_path, ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson,
+    SessionView,
 };
 use crate::runtime::remote_host::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use base64::{engine::general_purpose, Engine as _};
@@ -194,7 +195,20 @@ enum Focus {
 enum ServerMessage {
     Snapshot(RatatuiSnapshot),
     Response(ControlResponse),
+    History(HistoryResponse),
     Log(String),
+}
+
+#[derive(Debug, Clone)]
+struct HistoryState {
+    styled_lines: Vec<String>,
+    scroll_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ErrorLogState {
+    entries: Vec<(u128, String)>,
+    scroll_offset: usize,
 }
 
 fn parse_server_message(line: &str) -> ServerMessage {
@@ -205,6 +219,9 @@ fn parse_server_message(line: &str) -> ServerMessage {
         }
         if let Ok(ServerMessageJson::Snapshot(snapshot)) = serde_json::from_str(trimmed) {
             return ServerMessage::Snapshot(snapshot);
+        }
+        if let Ok(ServerMessageJson::History(history)) = serde_json::from_str(trimmed) {
+            return ServerMessage::History(history);
         }
     }
     ServerMessage::Log(trimmed.to_string())
@@ -225,6 +242,7 @@ fn apply_server_message(
     selected_index: &mut usize,
     last_active_target: &mut Option<String>,
     status_message: &mut Option<(String, Instant)>,
+    history_state: &mut Option<HistoryState>,
     message: ServerMessage,
 ) {
     match message {
@@ -252,6 +270,12 @@ fn apply_server_message(
                 }
             }
         }
+        ServerMessage::History(history) => {
+            *history_state = Some(HistoryState {
+                styled_lines: history.styled_lines,
+                scroll_offset: 0,
+            });
+        }
         ServerMessage::Log(text) => {
             ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
             *status_message = Some((text, Instant::now()));
@@ -269,6 +293,9 @@ fn handle_crossterm_event(
     prefix_pressed: &mut bool,
     focus: &mut Focus,
     selected_index: &mut usize,
+    sidebar_hidden: &mut bool,
+    history_state: &mut Option<HistoryState>,
+    error_log_state: &mut Option<ErrorLogState>,
     status_message: &mut Option<(String, Instant)>,
     port: u16,
     network: &RemoteNetworkConfig,
@@ -276,6 +303,16 @@ fn handle_crossterm_event(
 ) -> Result<bool, LifecycleError> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
+            // Error-log popup takes precedence over other overlays.
+            if error_log_state.is_some() {
+                return handle_error_log_key(key, error_log_state);
+            }
+
+            // History mode consumes navigation keys until exited.
+            if history_state.is_some() {
+                return handle_history_key(key, history_state, status_message);
+            }
+
             if *prefix_pressed {
                 *prefix_pressed = false;
                 match key.code {
@@ -292,6 +329,7 @@ fn handle_crossterm_event(
                         *prefix_pressed = true;
                     }
                     KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *sidebar_hidden = false;
                         *focus = Focus::Sidebar;
                         if *selected_index >= snapshot.sessions.len()
                             && !snapshot.sessions.is_empty()
@@ -321,6 +359,61 @@ fn handle_crossterm_event(
                                 .log(format!("[ratatui-client] activate session: {}", session.id));
                         }
                     }
+                    KeyCode::Char('g') | KeyCode::Char('G')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        *sidebar_hidden = !*sidebar_hidden;
+                        if !*sidebar_hidden {
+                            *focus = Focus::Sidebar;
+                            if *selected_index >= snapshot.sessions.len()
+                                && !snapshot.sessions.is_empty()
+                            {
+                                *selected_index = snapshot.sessions.len() - 1;
+                            }
+                        }
+                    }
+                    KeyCode::Char('o') | KeyCode::Char('O')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        *error_log_state = None;
+                        if let Some(target_id) = snapshot.active_target.as_deref() {
+                            let _ = writeln!(stream, "GET_HISTORY {}", target_id);
+                            let _ = stream.flush();
+                        }
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        *history_state = None;
+                        *error_log_state = if error_log_state.is_some() {
+                            None
+                        } else {
+                            Some(ErrorLogState {
+                                entries: ERROR_LOG.entries(),
+                                scroll_offset: 0,
+                            })
+                        };
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(session) = snapshot.sessions.get(*selected_index) {
+                            if session.transport != "local" {
+                                let _ = writeln!(
+                                    stream,
+                                    "CREATE_REMOTE_SESSION {}",
+                                    session.authority_node_id
+                                );
+                                let _ = stream.flush();
+                            } else {
+                                *status_message = Some((
+                                    "selected session is local; use Ctrl-N for a local session"
+                                        .to_string(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
+                    }
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let _ = writeln!(stream, "CREATE_LOCAL_SESSION");
                         let _ = stream.flush();
@@ -332,6 +425,9 @@ fn handle_crossterm_event(
                                 snapshot,
                                 *focus,
                                 *selected_index,
+                                *sidebar_hidden,
+                                None,
+                                None,
                                 snapshot.active_target.as_deref(),
                                 status_message.as_ref().map(|(text, _)| text.as_str()),
                                 true,
@@ -382,6 +478,9 @@ fn run_event_loop(
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
     let mut selected_index = 0usize;
+    let mut sidebar_hidden = false;
+    let mut history_state: Option<HistoryState> = None;
+    let mut error_log_state: Option<ErrorLogState> = None;
     let mut last_active_target: Option<String> = None;
     let mut status_message: Option<(String, Instant)> = None;
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
@@ -396,6 +495,7 @@ fn run_event_loop(
                         &mut selected_index,
                         &mut last_active_target,
                         &mut status_message,
+                        &mut history_state,
                         message,
                     ),
                     Err(_) => {
@@ -417,6 +517,9 @@ fn run_event_loop(
                     &mut prefix_pressed,
                     &mut focus,
                     &mut selected_index,
+                    &mut sidebar_hidden,
+                    &mut history_state,
+                    &mut error_log_state,
                     &mut status_message,
                     port,
                     network,
@@ -435,6 +538,7 @@ fn run_event_loop(
                     &mut selected_index,
                     &mut last_active_target,
                     &mut status_message,
+                    &mut history_state,
                     message,
                 ),
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
@@ -454,6 +558,9 @@ fn run_event_loop(
                         &mut prefix_pressed,
                         &mut focus,
                         &mut selected_index,
+                        &mut sidebar_hidden,
+                        &mut history_state,
+                        &mut error_log_state,
                         &mut status_message,
                         port,
                         network,
@@ -482,6 +589,9 @@ fn run_event_loop(
                     &snapshot,
                     focus,
                     selected_index,
+                    sidebar_hidden,
+                    history_state.as_ref(),
+                    error_log_state.as_ref(),
                     snapshot.active_target.as_deref(),
                     status_message.as_ref().map(|(text, _)| text.as_str()),
                     false,
@@ -495,6 +605,75 @@ fn run_event_loop(
     Ok(())
 }
 
+fn handle_history_key(
+    key: KeyEvent,
+    history_state: &mut Option<HistoryState>,
+    _status_message: &mut Option<(String, Instant)>,
+) -> Result<bool, LifecycleError> {
+    let Some(state) = history_state.as_mut() else {
+        return Ok(true);
+    };
+
+    match key.code {
+        KeyCode::Char('o') | KeyCode::Char('O')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            *history_state = None;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            *history_state = None;
+        }
+        KeyCode::Up => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            state.scroll_offset = state.scroll_offset.saturating_add(10);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+fn handle_error_log_key(
+    key: KeyEvent,
+    error_log_state: &mut Option<ErrorLogState>,
+) -> Result<bool, LifecycleError> {
+    let Some(state) = error_log_state.as_mut() else {
+        return Ok(true);
+    };
+
+    match key.code {
+        KeyCode::Char('e') | KeyCode::Char('E')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            *error_log_state = None;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            *error_log_state = None;
+        }
+        KeyCode::Up => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            state.scroll_offset = state.scroll_offset.saturating_add(10);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
 fn key_event_to_logical_key(key: &KeyEvent) -> Option<LogicalKey> {
     // Ignore key-release events; crossterm already filters by KeyEventKind::Press
     // in the caller, so any key reaching here is a press we want to forward.
@@ -506,6 +685,9 @@ fn render(
     snapshot: &RatatuiSnapshot,
     focus: Focus,
     selected_index: usize,
+    sidebar_hidden: bool,
+    history_state: Option<&HistoryState>,
+    error_log_state: Option<&ErrorLogState>,
     active_target: Option<&str>,
     status_message: Option<&str>,
     dim_background: bool,
@@ -518,15 +700,41 @@ fn render(
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    // Inner horizontal layout: main pane left, separator, sidebar right.
-    let inner = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(32),
-        ])
-        .split(outer[0]);
+    if let Some(history) = history_state {
+        render_history_view(frame, snapshot, history, outer[0]);
+        let footer = if let Some(status) = status_message {
+            let style = dim_style(
+                Style::default().bg(Color::Yellow).fg(Color::Black),
+                dim_background,
+            );
+            Paragraph::new(pad_right(status, outer[1].width as usize)).style(style)
+        } else {
+            let footer_style = dim_style(
+                Style::default().bg(Color::Blue).fg(Color::White),
+                dim_background,
+            );
+            Paragraph::new(render_history_footer_line(outer[1].width as usize)).style(footer_style)
+        };
+        frame.render_widget(footer, outer[1]);
+        return;
+    }
+
+    // Inner horizontal layout: main pane left, optional separator, optional sidebar right.
+    let inner = if sidebar_hidden {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(outer[0])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(32),
+            ])
+            .split(outer[0])
+    };
 
     let main_block = Block::default()
         .borders(Borders::NONE)
@@ -549,25 +757,27 @@ fn render(
         }
     }
 
-    let separator = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(dim_style(separator_style(focus), dim_background));
-    frame.render_widget(separator, inner[1]);
+    if !sidebar_hidden {
+        let separator = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(dim_style(separator_style(focus), dim_background));
+        frame.render_widget(separator, inner[1]);
 
-    let sidebar_block = Block::default()
-        .borders(Borders::NONE)
-        .title_style(title_style(focus == Focus::Sidebar))
-        .style(dim_style(Style::default(), dim_background));
-    let sidebar = Paragraph::new(render_sidebar_lines(
-        &snapshot.sessions,
-        selected_index,
-        inner[2],
-        focus == Focus::Sidebar,
-        active_target,
-        dim_background,
-    ))
-    .block(sidebar_block);
-    frame.render_widget(sidebar, inner[2]);
+        let sidebar_block = Block::default()
+            .borders(Borders::NONE)
+            .title_style(title_style(focus == Focus::Sidebar))
+            .style(dim_style(Style::default(), dim_background));
+        let sidebar = Paragraph::new(render_sidebar_lines(
+            &snapshot.sessions,
+            selected_index,
+            inner[2],
+            focus == Focus::Sidebar,
+            active_target,
+            dim_background,
+        ))
+        .block(sidebar_block);
+        frame.render_widget(sidebar, inner[2]);
+    }
 
     let footer = if let Some(status) = status_message {
         let style = dim_style(
@@ -583,11 +793,133 @@ fn render(
         Paragraph::new(render_footer_line(
             snapshot,
             outer[1].width as usize,
+            sidebar_hidden,
             dim_background,
         ))
         .style(footer_style)
     };
     frame.render_widget(footer, outer[1]);
+
+    if let Some(error_log) = error_log_state {
+        render_error_log_popup(frame, error_log, outer[0]);
+    }
+}
+
+fn render_history_view(
+    frame: &mut Frame,
+    _snapshot: &RatatuiSnapshot,
+    history: &HistoryState,
+    area: Rect,
+) {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let total_lines = history.styled_lines.len();
+    let max_offset = total_lines.saturating_sub(height);
+    let offset = history.scroll_offset.min(max_offset);
+
+    let mut lines = Vec::new();
+    for line in history.styled_lines.iter().skip(offset).take(height) {
+        let spans: Vec<Span<'static>> = crate::terminal::parse_ansi_styled_line(line)
+            .into_iter()
+            .map(|(text, style)| Span::styled(text, text_style_to_ratatui(&style)))
+            .collect();
+        lines.push(truncate_spans_to_width(spans, width));
+    }
+    while lines.len() < height {
+        lines.push(Line::from(""));
+    }
+
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .style(Style::default());
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_history_footer_line(area_width: usize) -> Line<'static> {
+    let text = "History  Ctrl-O/Esc Exit · PgUp/PgDn Page · Up/Down Line";
+    let text_width = display_width(text);
+    let fill = area_width.saturating_sub(text_width);
+    Line::from(vec![
+        Span::styled(text.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(" ".repeat(fill), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
+    let popup = centered_rect(90, 85, area);
+
+    // Dim the area behind the popup.
+    let dim = Paragraph::new("").style(Style::default().bg(Color::Black));
+    frame.render_widget(dim, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title("Error Log");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let width = inner.width as usize;
+    let height = inner.height as usize;
+    let total_lines = state.entries.len();
+    let max_offset = total_lines.saturating_sub(height);
+    let offset = state.scroll_offset.min(max_offset);
+
+    let mut lines = Vec::new();
+    for (_, message) in state.entries.iter().skip(offset).take(height) {
+        lines.push(Line::from(truncate_display_width(message, width)));
+    }
+    while lines.len() < height {
+        lines.push(Line::from(""));
+    }
+
+    let footer_text = format!(
+        "{} lines · Ctrl-E/Esc/q close · Up/Down/PgUp/PgDn scroll",
+        total_lines
+    );
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        footer_text,
+        Style::default().fg(Color::Gray),
+    )]));
+
+    let content_height = inner.height.saturating_sub(1);
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: content_height,
+    };
+    let footer_area = Rect {
+        x: inner.x,
+        y: inner.y + content_height,
+        width: inner.width,
+        height: 1,
+    };
+
+    let content = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(content, content_area);
+    frame.render_widget(footer, footer_area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn render_main_text(snapshot: &RatatuiSnapshot, area: Rect) -> Vec<Line<'static>> {
@@ -924,7 +1256,12 @@ fn char_width(ch: char) -> usize {
     }
 }
 
-fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize, dim_background: bool) -> Line {
+fn render_footer_line(
+    snapshot: &RatatuiSnapshot,
+    area_width: usize,
+    sidebar_hidden: bool,
+    dim_background: bool,
+) -> Line {
     let muted_style = dim_style(Style::default().fg(Color::Gray), dim_background);
     let accent_style = dim_style(Style::default().fg(Color::White), dim_background);
 
@@ -950,8 +1287,12 @@ fn render_footer_line(snapshot: &RatatuiSnapshot, area_width: usize, dim_backgro
         spans.push(Span::styled("· ", muted_style));
     }
 
+    let toggle_label = if sidebar_hidden { "Show" } else { "Hide" };
     spans.push(Span::styled(
-        "Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-M Menu",
+        format!(
+            "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs",
+            toggle_label
+        ),
         muted_style,
     ));
 

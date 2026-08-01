@@ -2858,6 +2858,7 @@ fn run_ratatui_connect(
                     return Err(resp.message.unwrap_or_default());
                 }
                 ServerMessageJson::Snapshot(_) => continue,
+                ServerMessageJson::History(_) => continue,
             }
         }
         // Plain-text fallback for older/simple replies.

@@ -284,6 +284,19 @@ impl RatatuiRemoteSession {
         (screen.lines.clone(), screen.styled_lines.clone(), cursor)
     }
 
+    /// Return the full scrollback history plus the visible screen as plain/styled lines.
+    pub fn history_snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = observer.sync();
+        let snap = observer.snapshot();
+        let screen = snap.active_screen();
+        let mut lines = screen.scrollback.clone();
+        let mut styled_lines = screen.styled_scrollback.clone();
+        lines.extend_from_slice(&screen.lines);
+        styled_lines.extend_from_slice(&screen.styled_lines);
+        (lines, styled_lines)
+    }
+
     /// Return the terminal-mode flags needed to translate logical keys into
     /// the byte sequences expected by the remote PTY.
     pub fn translation_mode(

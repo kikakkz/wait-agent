@@ -15,7 +15,7 @@ pub mod state_loop;
 pub use runtime::RatatuiNodeRuntime;
 pub(crate) use runtime::SharedState;
 pub use snapshot::{
-    ControlResponse, RatatuiSnapshot, ServerMessageJson, ServerStatus, SessionView,
+    ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson, ServerStatus, SessionView,
 };
 pub use socket::{
     node_is_running, ratatui_socket_dir, ratatui_socket_path, remove_node_socket, send_node_command,

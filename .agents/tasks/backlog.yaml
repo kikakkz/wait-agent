@@ -548,7 +548,10 @@ next:
     status: done
   - id: task.ratatui-phase-3-remote-main-pane
     title: render remote sessions in the ratatui main pane
-    status: in_progress
+    status: done
+  - id: task.ratatui-phase-3-bottom-menu-shortcuts
+    title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
+    status: done
   - id: task.ratatui-phase-4-remove-tmux
     title: remove tmux backend once ratatui path is stable
     status: ready

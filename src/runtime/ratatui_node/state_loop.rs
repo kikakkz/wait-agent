@@ -1,4 +1,7 @@
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+    SessionTransport,
+};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use std::collections::HashSet;
@@ -14,7 +17,8 @@ use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
 use super::runtime::SharedState;
 use super::snapshot::{
-    build_snapshot, response_json, snapshot_json, ControlResponse, ServerStatus, SessionView,
+    build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
+    HistoryResponse, ServerStatus, SessionView,
 };
 use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
 use crate::runtime::ratatui_remote_connect::connect_remote_host;
@@ -138,17 +142,23 @@ fn run_state_event_loop(
             }
 
             StateEvent::ClientCommand { client_id, command } => {
-                let outcome = handle_client_command(
-                    &shared,
-                    &authority_host_io_tx,
-                    &catalog_tx,
-                    &client_writer,
-                    &connected_clients,
-                    command,
-                );
-                let response: ControlResponse = outcome.into();
-                let payload = response_json(&response);
-                client_writer.send(ClientWriterRequest::Write { client_id, payload });
+                if let ClientCommand::GetHistory { target_id } = command {
+                    let response = build_history_response(&shared, &target_id);
+                    let payload = history_response_json(&response);
+                    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+                } else {
+                    let outcome = handle_client_command(
+                        &shared,
+                        &authority_host_io_tx,
+                        &catalog_tx,
+                        &client_writer,
+                        &connected_clients,
+                        command,
+                    );
+                    let response: ControlResponse = outcome.into();
+                    let payload = response_json(&response);
+                    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+                }
             }
 
             StateEvent::CreateAuthorityHostSession {
@@ -338,6 +348,30 @@ fn handle_client_command(
             route_input(shared, authority_host_io_tx, &target_id, key);
             CommandOutcome::Ok
         }
+
+        ClientCommand::GetHistory { .. } => {
+            // Handled directly in the event-loop dispatcher above.
+            CommandOutcome::Ok
+        }
+
+        ClientCommand::CreateRemoteSession { authority_node_id } => {
+            let outcome = create_remote_session_on_authority(shared, &authority_node_id);
+            if matches!(outcome, CommandOutcome::Message(_)) {
+                broadcast_snapshot(shared, client_writer, connected_clients);
+            }
+            outcome
+        }
+    }
+}
+
+fn build_history_response(shared: &Arc<SharedState>, target_id: &str) -> HistoryResponse {
+    let (lines, styled_lines) = shared
+        .history_for_target(target_id)
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+    HistoryResponse {
+        target_id: target_id.to_string(),
+        lines,
+        styled_lines,
     }
 }
 
@@ -524,6 +558,94 @@ fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> 
                 .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
             CommandOutcome::Message(format!("connected {target}"))
         }
+        Err(error) => CommandOutcome::Error(error.to_string()),
+    }
+}
+
+fn create_remote_session_on_authority(
+    shared: &Arc<SharedState>,
+    authority_node_id: &str,
+) -> CommandOutcome {
+    use crate::application::remote_session_creation_service::{
+        GrpcRemoteSessionCreationTransport, RemoteSessionCreationTransport,
+    };
+    use crate::infra::remote_protocol::CreateSessionRequestPayload;
+    use std::time::Duration;
+
+    let request_id = format!(
+        "ratatui-create-session-{}-{}",
+        std::process::id(),
+        shared.start_time.elapsed().as_millis()
+    );
+    let request = CreateSessionRequestPayload {
+        request_id: request_id.clone(),
+        authority_node_id: authority_node_id.to_string(),
+        cwd_hint: None,
+        cols: 0,
+        rows: 0,
+    };
+
+    let result = (|| -> Result<ManagedSessionRecord, LifecycleError> {
+        let transport = GrpcRemoteSessionCreationTransport::new(shared.network.clone());
+        transport
+            .create_session(request, Duration::from_secs(10))
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))
+            .and_then(|reply| match reply {
+                crate::application::remote_session_creation_service::CreateSessionReply::Accepted(
+                    accepted,
+                ) => {
+                    let target = ManagedSessionAddress::remote_peer(
+                        authority_node_id.to_string(),
+                        accepted.session_id.clone(),
+                    )
+                    .qualified_target();
+                    let record = ManagedSessionRecord {
+                        address: ManagedSessionAddress::remote_peer(
+                            authority_node_id.to_string(),
+                            accepted.session_id.clone(),
+                        ),
+                        selector: Some(target.clone()),
+                        availability: SessionAvailability::Online,
+                        workspace_dir: None,
+                        workspace_key: Some(accepted.session_id.clone()),
+                        session_role: Some(crate::domain::workspace::WorkspaceSessionRole::TargetHost),
+                        opened_by: Vec::new(),
+                        attached_clients: 0,
+                        window_count: 1,
+                        command_name: Some("bash".to_string()),
+                        display_command_name: None,
+                        current_path: None,
+                        task_state: ManagedSessionTaskState::Input,
+                    };
+                    {
+                        let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.insert(target.clone(), record.clone());
+                    }
+                    shared.ensure_remote_session(&record).map_err(|error| {
+                        LifecycleError::Protocol(format!(
+                            "created remote session but failed to open viewer: {error}"
+                        ))
+                    })?;
+                    *shared
+                        .active_target
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+                    Ok(record)
+                }
+                crate::application::remote_session_creation_service::CreateSessionReply::Rejected(
+                    rejected,
+                ) => Err(LifecycleError::Protocol(format!(
+                    "remote session creation rejected ({}): {}",
+                    rejected.code, rejected.message
+                ))),
+            })
+    })();
+
+    match result {
+        Ok(record) => CommandOutcome::Message(format!(
+            "created remote session {}",
+            record.address.qualified_target()
+        )),
         Err(error) => CommandOutcome::Error(error.to_string()),
     }
 }

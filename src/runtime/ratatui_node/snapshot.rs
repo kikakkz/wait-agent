@@ -64,6 +64,14 @@ impl ControlResponse {
     }
 }
 
+/// History buffer returned by the GET_HISTORY command.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoryResponse {
+    pub target_id: String,
+    pub lines: Vec<String>,
+    pub styled_lines: Vec<String>,
+}
+
 /// Top-level wire message sent from the node server to clients.
 ///
 /// Using an explicit `type` tag keeps snapshots and command responses
@@ -73,6 +81,7 @@ impl ControlResponse {
 pub enum ServerMessageJson {
     Snapshot(RatatuiSnapshot),
     Response(ControlResponse),
+    History(HistoryResponse),
 }
 
 pub(crate) fn snapshot_json(snapshot: &RatatuiSnapshot) -> String {
@@ -81,6 +90,10 @@ pub(crate) fn snapshot_json(snapshot: &RatatuiSnapshot) -> String {
 
 pub(crate) fn response_json(response: &ControlResponse) -> String {
     serde_json::to_string(&ServerMessageJson::Response(response.clone())).unwrap_or_default()
+}
+
+pub(crate) fn history_response_json(response: &HistoryResponse) -> String {
+    serde_json::to_string(&ServerMessageJson::History(response.clone())).unwrap_or_default()
 }
 
 /// Snapshot sent from the node server to a TUI client on attach and update.

@@ -12,7 +12,7 @@ design_ref:
     - Footer shortcuts are the user-facing command surface for the new single-process TUI.
     - They must match the existing tmux-style command semantics (hide/show sidebar, history scrollback, error logs, remote session creation) without spawning sub-processes.
 source_of_truth:
-  file: .agents/tasks/current.yaml
+  file: .agents/tasks/queued/task.ratatui-phase-3-bottom-menu-shortcuts.yaml
   reference: current
 depends_on:
   - task.ratatui-phase-3-main-pane.done

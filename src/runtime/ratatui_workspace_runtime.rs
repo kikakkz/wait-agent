@@ -177,6 +177,11 @@ impl RatatuiWorkspaceRuntime {
                     "unexpected snapshot response for port {port}"
                 )))
             }
+            ServerMessageJson::History(_) => {
+                return Err(LifecycleError::Protocol(format!(
+                    "unexpected history response for port {port}"
+                )))
+            }
         };
         let sessions: Vec<crate::runtime::ratatui_node_runtime::SessionView> = data
             .and_then(|value| serde_json::from_value(value).ok())
@@ -336,6 +341,9 @@ fn query_server_status(
         ))),
         ServerMessageJson::Snapshot(_) => Err(LifecycleError::Protocol(format!(
             "unexpected snapshot response for port {port}"
+        ))),
+        ServerMessageJson::History(_) => Err(LifecycleError::Protocol(format!(
+            "unexpected history response for port {port}"
         ))),
     }
 }

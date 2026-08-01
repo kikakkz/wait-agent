@@ -495,6 +495,30 @@ impl SharedState {
             session.resize_local_screen(cols, rows);
         }
     }
+
+    /// Return the full scrollback history plus visible screen for a target.
+    pub(crate) fn history_for_target(&self, target_id: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let transport = guard.get(target_id).map(|s| s.address.transport().clone());
+        drop(guard);
+        match transport {
+            Some(SessionTransport::RemotePeer) => {
+                let guard = self
+                    .remote_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(target_id).map(|s| s.history_snapshot())
+            }
+            Some(SessionTransport::Local) => {
+                let guard = self
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(target_id).map(|s| s.history_snapshot())
+            }
+            None => None,
+        }
+    }
 }
 
 impl RatatuiNodeRuntime {
