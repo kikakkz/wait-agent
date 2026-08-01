@@ -121,6 +121,16 @@ impl RatatuiLocalSession {
                 cell_height: 1,
             }));
         }
+        // The PTY resize is handled asynchronously by the alacritty event loop.
+        // Resize the terminal emulator grid synchronously so snapshot line widths
+        // match the PTY width; otherwise output wraps at the initial grid size.
+        {
+            let mut term = self.term.lock();
+            term.resize(TermSize {
+                cols: cols as usize,
+                rows: rows as usize,
+            });
+        }
     }
 
     /// Snapshot the visible screen as plain/styled text lines and the cursor position.
