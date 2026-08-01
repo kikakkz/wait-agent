@@ -67,6 +67,9 @@ pub(crate) struct SharedState {
     pub(crate) local_sessions: Mutex<HashMap<String, Arc<RatatuiLocalSession>>>,
     pub(crate) authority_host_sessions: Mutex<HashMap<String, Arc<RatatuiAuthorityHostSession>>>,
     pub(crate) remote_sessions: Mutex<HashMap<String, Arc<RatatuiRemoteSession>>>,
+    /// Last main-pane size reported by a TUI client. Used when the active target
+    /// changes so the newly activated session can be resized immediately.
+    pub(crate) last_client_resize: Mutex<Option<(u16, u16)>>,
     state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
     authority_host_io_tx: Mutex<Option<super::authority_host_io_loop::AuthorityHostIoHandle>>,
     local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
@@ -85,6 +88,7 @@ impl SharedState {
             local_sessions: Mutex::new(HashMap::new()),
             authority_host_sessions: Mutex::new(HashMap::new()),
             remote_sessions: Mutex::new(HashMap::new()),
+            last_client_resize: Mutex::new(None),
             state_tx: Mutex::new(None),
             authority_host_io_tx: Mutex::new(None),
             local_catalog_tx: Mutex::new(None),

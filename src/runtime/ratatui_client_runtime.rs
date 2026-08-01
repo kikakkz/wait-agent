@@ -165,6 +165,30 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
+/// Compute the dimensions of the main pane that actually renders session
+/// content. The footer always consumes one row; the sidebar, when visible,
+/// consumes a separator plus a 32-column panel.
+fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
+    let chrome_rows = rows.saturating_sub(1).max(1);
+    if sidebar_hidden {
+        (cols.max(1), chrome_rows)
+    } else {
+        (cols.saturating_sub(33).max(1), chrome_rows)
+    }
+}
+
+/// Send a RESIZE command with the current main-pane size to the server.
+fn send_main_pane_resize(
+    stream: &mut UnixStream,
+    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    sidebar_hidden: bool,
+) {
+    let size = terminal.size().unwrap_or(Rect::default());
+    let (cols, rows) = main_pane_size(size.width, size.height, sidebar_hidden);
+    let _ = writeln!(stream, "RESIZE {cols} {rows}");
+    let _ = stream.flush();
+}
+
 fn run_connect_popup<F>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     port: u16,
@@ -336,6 +360,7 @@ fn handle_crossterm_event(
                         {
                             *selected_index = snapshot.sessions.len() - 1;
                         }
+                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
                     }
                     KeyCode::Left if *focus == Focus::Sidebar => {
                         *focus = Focus::Main;
@@ -357,6 +382,7 @@ fn handle_crossterm_event(
                             *focus = Focus::Main;
                             ERROR_LOG
                                 .log(format!("[ratatui-client] activate session: {}", session.id));
+                            send_main_pane_resize(stream, terminal, *sidebar_hidden);
                         }
                     }
                     KeyCode::Char('g') | KeyCode::Char('G')
@@ -371,6 +397,7 @@ fn handle_crossterm_event(
                                 *selected_index = snapshot.sessions.len() - 1;
                             }
                         }
+                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
                     }
                     KeyCode::Char('o') | KeyCode::Char('O')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -442,6 +469,9 @@ fn handle_crossterm_event(
                         ) {
                             *status_message = Some((error.to_string(), Instant::now()));
                         }
+                        // The popup may have consumed resize events; refresh the
+                        // server with the current main-pane size.
+                        send_main_pane_resize(stream, terminal, *sidebar_hidden);
                     }
                     _ if *focus == Focus::Main => {
                         if let Some(logical_key) = key_event_to_logical_key(&key) {
@@ -458,7 +488,8 @@ fn handle_crossterm_event(
             }
         }
         Event::Resize(cols, rows) => {
-            let _ = writeln!(stream, "RESIZE {cols} {rows}");
+            let (main_cols, main_rows) = main_pane_size(cols, rows, *sidebar_hidden);
+            let _ = writeln!(stream, "RESIZE {main_cols} {main_rows}");
             let _ = stream.flush();
         }
         _ => {}
@@ -484,6 +515,10 @@ fn run_event_loop(
     let mut last_active_target: Option<String> = None;
     let mut status_message: Option<(String, Instant)> = None;
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
+
+    // Tell the server the initial main-pane size so the PTY/observer screen
+    // matches what we are about to draw.
+    send_main_pane_resize(stream, &terminal, sidebar_hidden);
 
     loop {
         // Wait event-driven for the next input from either source.

@@ -119,12 +119,34 @@ impl RatatuiAuthorityHostSession {
         });
     }
 
-    /// Resize the PTY.
-    pub fn resize(&self, io_tx: &AuthorityHostIoHandle, cols: u16, rows: u16) {
+    /// Resize the PTY on behalf of a specific console.
+    ///
+    /// The IO loop uses the console id to decide whether this console is the
+    /// active console for the session; only the active console's dimensions are
+    /// applied to the PTY.
+    pub fn resize_for_console(
+        &self,
+        io_tx: &AuthorityHostIoHandle,
+        cols: u16,
+        rows: u16,
+        console_id: impl Into<String>,
+    ) {
         let _ = io_tx.send(AuthorityHostIoRequest::Resize {
             session_id: self.session_id.clone(),
             cols,
             rows,
+            console_id: console_id.into(),
+        });
+    }
+
+    /// Remove a console from the session.
+    ///
+    /// Called when a remote viewer closes its mirror or the local TUI detaches.
+    /// The IO loop elects a new active console and resizes the PTY if needed.
+    pub fn unregister_console(&self, io_tx: &AuthorityHostIoHandle, console_id: impl Into<String>) {
+        let _ = io_tx.send(AuthorityHostIoRequest::UnregisterConsole {
+            session_id: self.session_id.clone(),
+            console_id: console_id.into(),
         });
     }
 

@@ -138,6 +138,34 @@ fn run_state_event_loop(
                 connected_clients.remove(&client_id);
                 shared.client_count.fetch_sub(1, Ordering::SeqCst);
                 client_writer.send(ClientWriterRequest::Unregister { client_id });
+                // If a local TUI was viewing an authority-host session, unregister
+                // its "local" console so a remote viewer can take over the PTY size.
+                if let Some(target_id) = shared
+                    .active_target
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
+                    if let Some(session_id) =
+                        target_id.rsplit_once(':').map(|(_, id)| id.to_string())
+                    {
+                        let is_host = {
+                            let guard = shared
+                                .authority_host_sessions
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.contains_key(&session_id)
+                        };
+                        if is_host {
+                            let _ = authority_host_io_tx.send(
+                                AuthorityHostIoRequest::UnregisterConsole {
+                                    session_id,
+                                    console_id: "local".to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
@@ -284,7 +312,7 @@ fn handle_client_command(
         }
 
         ClientCommand::ActivateTarget { target_id } => {
-            let outcome = activate_target(shared, &target_id);
+            let outcome = activate_target(shared, authority_host_io_tx, &target_id);
             if matches!(outcome, CommandOutcome::Ok) {
                 broadcast_snapshot(shared, client_writer, connected_clients);
             }
@@ -311,6 +339,10 @@ fn handle_client_command(
         }
 
         ClientCommand::Resize { cols, rows } => {
+            *shared
+                .last_client_resize
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((cols, rows));
             let transport = {
                 let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
                 let active = shared
@@ -334,6 +366,7 @@ fn handle_client_command(
                     if let Some(id) = active_authority_host_session_id(shared) {
                         let _ = authority_host_io_tx.send(AuthorityHostIoRequest::Resize {
                             session_id: id,
+                            console_id: "local".to_string(),
                             cols,
                             rows,
                         });
@@ -511,7 +544,20 @@ fn active_authority_host_session_id(shared: &SharedState) -> Option<String> {
     }
 }
 
-fn activate_target(shared: &Arc<SharedState>, target_id: &str) -> CommandOutcome {
+fn activate_target(
+    shared: &Arc<SharedState>,
+    authority_host_io_tx: &AuthorityHostIoHandle,
+    target_id: &str,
+) -> CommandOutcome {
+    // We are the single writer of SharedState, so the active target will not
+    // change underneath us. Read it first so we can unregister the local TUI
+    // console from the previously active authority-host session.
+    let previous_target = shared
+        .active_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
     let record = {
         let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
         guard
@@ -519,16 +565,65 @@ fn activate_target(shared: &Arc<SharedState>, target_id: &str) -> CommandOutcome
             .find(|s| s.address.qualified_target() == target_id)
             .cloned()
     };
+
     if let Some(record) = record {
         if *record.address.transport() == SessionTransport::RemotePeer {
             if let Err(error) = shared.ensure_remote_session(&record) {
                 return CommandOutcome::Error(error.to_string());
             }
         }
+
+        if let Some(prev) = previous_target.as_deref() {
+            if prev != target_id {
+                if let Some(session_id) = prev.rsplit_once(':').map(|(_, id)| id.to_string()) {
+                    let is_host = {
+                        let guard = shared
+                            .authority_host_sessions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        guard.contains_key(&session_id)
+                    };
+                    if is_host {
+                        let _ =
+                            authority_host_io_tx.send(AuthorityHostIoRequest::UnregisterConsole {
+                                session_id,
+                                console_id: "local".to_string(),
+                            });
+                    }
+                }
+            }
+        }
+
         *shared
             .active_target
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(target_id.to_string());
+
+        // Register the local TUI console on the newly active authority-host
+        // session using the last known main-pane size.
+        if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
+            let is_host = {
+                let guard = shared
+                    .authority_host_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.contains_key(&session_id)
+            };
+            if is_host {
+                let (cols, rows) = shared
+                    .last_client_resize
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or((80, 24));
+                let _ = authority_host_io_tx.send(AuthorityHostIoRequest::Resize {
+                    session_id,
+                    console_id: "local".to_string(),
+                    cols,
+                    rows,
+                });
+            }
+        }
+
         CommandOutcome::Ok
     } else {
         CommandOutcome::Error("unknown target".to_string())

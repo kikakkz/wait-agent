@@ -1244,11 +1244,18 @@ fn spawn_ratatui_authority_target_host(
         });
 
         let mut _input_seq: u64 = 1;
+        let mut viewer_console_id: Option<String> = None;
         while running.load(Ordering::Relaxed) {
             match read_authority_transport_frame(&mut listener_stream) {
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
                     ControlPlanePayload::OpenMirrorRequest(payload) => {
-                        session.resize(&io_tx, payload.cols as u16, payload.rows as u16);
+                        viewer_console_id = Some(payload.console_id.clone());
+                        session.resize_for_console(
+                            &io_tx,
+                            payload.cols as u16,
+                            payload.rows as u16,
+                            payload.console_id,
+                        );
                         mirror_active.store(true, Ordering::Relaxed);
                     }
                     ControlPlanePayload::RawPtyInput(payload) => {
@@ -1259,10 +1266,19 @@ fn spawn_ratatui_authority_target_host(
                         session.feed_input(&io_tx, payload.input_bytes);
                     }
                     ControlPlanePayload::ApplyResize(payload) => {
-                        session.resize(&io_tx, payload.cols as u16, payload.rows as u16);
+                        viewer_console_id = Some(payload.resize_authority_console_id.clone());
+                        session.resize_for_console(
+                            &io_tx,
+                            payload.cols as u16,
+                            payload.rows as u16,
+                            payload.resize_authority_console_id,
+                        );
                     }
                     ControlPlanePayload::CloseMirrorRequest(_) => {
                         mirror_active.store(false, Ordering::Relaxed);
+                        if let Some(console_id) = viewer_console_id.take() {
+                            session.unregister_console(&io_tx, console_id);
+                        }
                     }
                     _ => {}
                 },
@@ -1297,6 +1313,9 @@ fn spawn_ratatui_authority_target_host(
                     break;
                 }
             }
+        }
+        if let Some(console_id) = viewer_console_id.take() {
+            session.unregister_console(&io_tx, console_id);
         }
         running.store(false, Ordering::Relaxed);
     });

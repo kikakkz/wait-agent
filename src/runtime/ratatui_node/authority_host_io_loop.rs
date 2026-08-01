@@ -29,6 +29,7 @@ pub(crate) enum AuthorityHostIoRequest {
     },
     Resize {
         session_id: String,
+        console_id: String,
         cols: u16,
         rows: u16,
     },
@@ -40,6 +41,10 @@ pub(crate) enum AuthorityHostIoRequest {
     },
     UnregisterSession {
         session_id: String,
+    },
+    UnregisterConsole {
+        session_id: String,
+        console_id: String,
     },
     SetOutputSender {
         session_id: String,
@@ -83,6 +88,12 @@ impl AuthorityHostIoHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ConsoleState {
+    cols: u16,
+    rows: u16,
+}
+
 struct SessionState {
     pty_master: File,
     child: Child,
@@ -95,6 +106,13 @@ struct SessionState {
     /// because the kernel buffer was full. Drained when the PTY becomes
     /// writable again.
     pending_write: Vec<u8>,
+    /// Consoles currently viewing this session, mapped to their last requested
+    /// dimensions. The local TUI uses the reserved id "local"; remote viewers
+    /// use the console id from their OpenMirror/ApplyResize envelopes.
+    consoles: HashMap<String, ConsoleState>,
+    /// The console whose dimensions currently drive the PTY size. A local
+    /// console always takes precedence over remote viewers.
+    active_console: Option<String>,
 }
 
 /// Single thread that owns all authority-host PTY master fd I/O.
@@ -329,11 +347,20 @@ fn drain_requests(
             }
             AuthorityHostIoRequest::Resize {
                 session_id,
+                console_id,
                 cols,
                 rows,
             } => {
                 if let Some(state) = sessions.get_mut(&session_id) {
-                    resize_pty(&state.pty_master, cols, rows);
+                    apply_console_resize(state, &session_id, console_id, cols, rows);
+                }
+            }
+            AuthorityHostIoRequest::UnregisterConsole {
+                session_id,
+                console_id,
+            } => {
+                if let Some(state) = sessions.get_mut(&session_id) {
+                    unregister_console(state, &session_id, console_id);
                 }
             }
             AuthorityHostIoRequest::RegisterSession {
@@ -371,6 +398,8 @@ fn drain_requests(
                         output_tx,
                         output_buffer: VecDeque::new(),
                         pending_write: Vec::new(),
+                        consoles: HashMap::new(),
+                        active_console: None,
                     },
                 );
             }
@@ -574,6 +603,72 @@ fn drain_pending_write(state: &mut SessionState, poller: &mut polling::Poller) {
         );
     }
     let _ = state.pty_master.flush();
+}
+
+/// Apply a resize request from a console and, if that console becomes (or is)
+/// the active console, resize the PTY.
+///
+/// Locking: this is called from the single IO loop thread; `state` is not
+/// shared with other threads.
+fn apply_console_resize(
+    state: &mut SessionState,
+    session_id: &str,
+    console_id: String,
+    cols: u16,
+    rows: u16,
+) {
+    state
+        .consoles
+        .insert(console_id.clone(), ConsoleState { cols, rows });
+
+    let should_activate = match state.active_console.as_deref() {
+        // A local console always keeps priority.
+        Some("local") => console_id == "local",
+        // No active console, or only remote viewers: the latest request wins.
+        _ => true,
+    };
+
+    if should_activate {
+        if state.active_console.as_deref() != Some(console_id.as_str()) {
+            ERROR_LOG.log(format!(
+                "[ratatui-authority-host-io] session={session_id} active_console={console_id}"
+            ));
+            state.active_console = Some(console_id);
+        }
+        resize_pty(&state.pty_master, cols, rows);
+    }
+}
+
+/// Remove a console from the session. If the active console was removed, elect
+/// a new one (preferring the local console) and resize the PTY to its last
+/// known dimensions.
+fn unregister_console(state: &mut SessionState, session_id: &str, console_id: String) {
+    let was_active = state.active_console.as_deref() == Some(console_id.as_str());
+    state.consoles.remove(&console_id);
+
+    if !was_active {
+        return;
+    }
+
+    let next = elect_active_console(&state.consoles);
+    if let Some(ref next_id) = next {
+        if let Some(console) = state.consoles.get(next_id) {
+            resize_pty(&state.pty_master, console.cols, console.rows);
+        }
+    }
+    ERROR_LOG.log(format!(
+        "[ratatui-authority-host-io] session={session_id} console={console_id} unregistered; next_active={next:?}"
+    ));
+    state.active_console = next;
+}
+
+/// Choose the next active console. The local console is preferred; otherwise
+/// pick any remaining console deterministically (currently the first by key).
+fn elect_active_console(consoles: &HashMap<String, ConsoleState>) -> Option<String> {
+    if consoles.contains_key("local") {
+        return Some("local".to_string());
+    }
+    consoles.keys().next().cloned()
 }
 
 fn resize_pty(pty_master: &File, cols: u16, rows: u16) {
