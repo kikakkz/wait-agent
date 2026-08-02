@@ -2,7 +2,7 @@ id: task.ratatui-phase-2-sidebar
 kind: task
 version: 1
 title: build sidebar UI skeleton with navigation (no real session data yet)
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/ratatui-replace-tmux-plan.md

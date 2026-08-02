@@ -6,7 +6,6 @@ status: in_progress
 priority: high
 design_ref:
   doc: /root/.kimi-code/sessions/wd_wait-agent-ratatui_7ed27e3252ef/session_b2d1e8b6-65e7-4d81-8d58-f614fb12aedf/agents/main/plans/shatterstar-dove-dagger.md
-  section: "3. Design"
   why:
     - Phase 3 remote main pane renders remote sessions but removes them immediately on any authority transport drop.
     - The remote node already keeps authority-host target sessions alive across inbound gRPC session loss and reuses them for new viewers.
@@ -14,8 +13,6 @@ design_ref:
 source_of_truth:
   file: .agents/tasks/current.yaml
   reference: current
-depends_on:
-  - task.ratatui-phase-3-remote-main-pane.done
 done_criteria:
   - Remote session stays in sidebar when authority transport drops, marked Offline.
   - A reconnect worker retries the authority transport with exponential backoff.

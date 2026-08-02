@@ -274,7 +274,7 @@ next:
     status: cancelled
   - id: task.feature-agent-status-recognition
     title: improve session state recognition accuracy in catalog and sidebar with agent plugin
-    status: done
+    status: deferred
   - id: task.ux-3
     title: implement workspace snapshot persistence and auto-load on startup
     status: deferred
@@ -542,19 +542,22 @@ next:
     status: done
   - id: task.ratatui-phase-2-5-session-backend
     title: migrate local and remote session creation onto the ratatui node server
-    status: in_progress
+    status: done
   - id: task.ratatui-phase-3-main-pane
     title: implement main pane PTY with alacritty_terminal
     status: done
   - id: task.ratatui-phase-3-remote-main-pane
     title: render remote sessions in the ratatui main pane
     status: done
+  - id: task.ratatui-phase-3-remote-reconnect
+    title: implement automatic reconnect for ratatui remote sessions
+    status: in_progress
   - id: task.ratatui-phase-3-bottom-menu-shortcuts
     title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
     status: done
   - id: task.ratatui-phase-4-remove-tmux
     title: remove tmux backend once ratatui path is stable
-    status: ready
+    status: done
   - id: task.ratatui-phase-5-cloud
     title: activate distributed control topologies on the server/client foundation
     status: ready

@@ -1,11 +1,12 @@
 kind: state
 version: 1
-current_task: task.ratatui-phase-3-bottom-menu-shortcuts
+current_task: task.ratatui-phase-3-remote-reconnect
 focus_statement: >
-  active task is ratatui migration phase 3 bottom-menu shortcuts: implement Ctrl-G sidebar
-  hide/show, Ctrl-O session history scrollback, Ctrl-E client-side error-log popup, and
-  Ctrl-S remote session creation from the selected sidebar item, all rendered as embedded
-  ratatui overlays without sub-process popups.
+  Starting ratatui migration completion queue: implement automatic reconnect for
+  ratatui remote sessions. Currently a remote session disappears from the local
+  sidebar as soon as the authority transport drops; the session should survive the
+  disconnect, reconnect when the remote node comes back, and resume output without
+  requiring the user to Ctrl-W again. Next step is plan-mode design.
 last_updated_from:
-  file: .agents/tasks/current.yaml
-  reference: task.ratatui-phase-3-bottom-menu-shortcuts.done
+  file: .agents/tasks/backlog.yaml
+  reference: task.ratatui-phase-3-remote-reconnect.in_progress

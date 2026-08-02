@@ -2,7 +2,7 @@ id: task.ratatui-phase-2-5-session-backend
 kind: task
 version: 1
 title: migrate local and remote session creation onto the ratatui node server
-status: ready
+status: done
 priority: high
 design_ref:
   doc: docs/ratatui-replace-tmux-plan.md
