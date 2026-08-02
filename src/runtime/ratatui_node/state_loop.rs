@@ -4,7 +4,7 @@ use crate::domain::session_catalog::{
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use super::authority_host_io_loop::{
 use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
+use super::reconnect_worker::ReconnectWorker;
 use super::runtime::SharedState;
 use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
@@ -71,6 +72,7 @@ fn run_state_event_loop(
     client_writer: ClientWriterHandle,
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
+    let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
 
     while let Ok(event) = rx.recv() {
         match event {
@@ -170,19 +172,28 @@ fn run_state_event_loop(
             }
 
             StateEvent::ClientCommand { client_id, command } => {
-                if let ClientCommand::GetHistory { target_id } = command {
-                    let response = build_history_response(&shared, &target_id);
+                if let ClientCommand::GetHistory { target_id } = &command {
+                    let response = build_history_response(&shared, target_id);
                     let payload = history_response_json(&response);
                     client_writer.send(ClientWriterRequest::Write { client_id, payload });
                 } else {
-                    let outcome = handle_client_command(
-                        &shared,
-                        &authority_host_io_tx,
-                        &catalog_tx,
-                        &client_writer,
-                        &connected_clients,
-                        command,
-                    );
+                    let outcome = if let ClientCommand::CloseSession { target_id } = &command {
+                        if let Some(tx) = reconnect_handles.remove(target_id) {
+                            let _ = tx.send(());
+                        }
+                        shared.handle_session_exit(target_id);
+                        broadcast_snapshot(&shared, &client_writer, &connected_clients);
+                        CommandOutcome::Message(format!("closed {target_id}"))
+                    } else {
+                        handle_client_command(
+                            &shared,
+                            &authority_host_io_tx,
+                            &catalog_tx,
+                            &client_writer,
+                            &connected_clients,
+                            command,
+                        )
+                    };
                     let response: ControlResponse = outcome.into();
                     let payload = response_json(&response);
                     client_writer.send(ClientWriterRequest::Write { client_id, payload });
@@ -219,7 +230,106 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
+            StateEvent::RemoteSessionDisconnected { target_id } => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] remote session disconnected target_id={target_id}"
+                ));
+                let target_key = target_id.clone();
+                match reconnect_handles.entry(target_key) {
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        ERROR_LOG.log(format!(
+                            "[ratatui-state-loop] reconnect already in progress for {target_id}"
+                        ));
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        // Mark the catalog entry offline so the sidebar shows the
+                        // disconnected state immediately.
+                        {
+                            let mut guard =
+                                shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(record) = guard
+                                .values_mut()
+                                .find(|r| r.address.qualified_target() == target_id)
+                            {
+                                record.availability = SessionAvailability::Offline;
+                            }
+                        }
+
+                        // Stop and discard the old runtime.  The observer screen is
+                        // preserved in the catalog record until a reconnect succeeds.
+                        {
+                            let session = {
+                                let guard = shared
+                                    .remote_sessions
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                guard.get(&target_id).cloned()
+                            };
+                            if let Some(session) = session {
+                                session.stop();
+                            }
+                            let mut guard = shared
+                                .remote_sessions
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.remove(&target_id);
+                        }
+
+                        // Start a background worker with the last known terminal size.
+                        let record = {
+                            let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.get(&target_id).cloned()
+                        };
+                        if let Some(record) = record {
+                            let (cols, rows) = shared
+                                .last_client_resize
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or((80, 24));
+                            let worker = ReconnectWorker::start(
+                                record,
+                                shared.workspace_id(),
+                                shared.network.clone(),
+                                cols,
+                                rows,
+                                shared.clone(),
+                                shared.state_sender(),
+                            );
+                            slot.insert(worker.cancel_tx);
+                        }
+                        broadcast_snapshot(&shared, &client_writer, &connected_clients);
+                    }
+                }
+            }
+
+            StateEvent::RemoteSessionReconnected { target_id, session } => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] remote session reconnected target_id={target_id}"
+                ));
+                {
+                    let mut guard = shared
+                        .remote_sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.insert(target_id.clone(), session.clone());
+                }
+                {
+                    let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(record) = guard
+                        .values_mut()
+                        .find(|r| r.address.qualified_target() == target_id)
+                    {
+                        record.availability = SessionAvailability::Online;
+                    }
+                }
+                reconnect_handles.remove(&target_id);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
             StateEvent::SessionClosed { target_id } => {
+                if let Some(tx) = reconnect_handles.remove(&target_id) {
+                    let _ = tx.send(());
+                }
                 shared.handle_session_exit(&target_id);
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
@@ -228,6 +338,25 @@ fn run_state_event_loop(
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] remote node offline node={node_id}"
                 ));
+                // Cancel any active reconnect workers for this node before the
+                // records are removed.  Failure to cancel would leave a worker
+                // running for a session that no longer exists.
+                let affected: Vec<String> = {
+                    let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    guard
+                        .values()
+                        .filter(|record| {
+                            *record.address.transport() == SessionTransport::RemotePeer
+                                && record.address.authority_id() == node_id
+                        })
+                        .map(|record| record.address.qualified_target())
+                        .collect()
+                };
+                for target_id in affected {
+                    if let Some(tx) = reconnect_handles.remove(&target_id) {
+                        let _ = tx.send(());
+                    }
+                }
                 shared.remove_remote_sessions_for_node(&node_id);
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
@@ -396,6 +525,12 @@ fn handle_client_command(
                 broadcast_snapshot(shared, client_writer, connected_clients);
             }
             outcome
+        }
+
+        ClientCommand::CloseSession { .. } => {
+            // CloseSession is handled directly in the event-loop dispatcher so
+            // it can cancel the active reconnect worker before tearing down state.
+            CommandOutcome::Error("CloseSession must be handled by the event loop".to_string())
         }
     }
 }

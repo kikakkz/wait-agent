@@ -1,4 +1,5 @@
 use super::logical_key::LogicalKey;
+use std::sync::Arc;
 
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.
 ///
@@ -44,6 +45,15 @@ pub(crate) enum StateEvent {
     },
     /// A remote session produced output; the TUI clients should be refreshed.
     RemoteSessionOutput { target_id: String },
+    /// The authority transport for a remote session dropped. The session should
+    /// be marked offline and a reconnect worker should be started.
+    RemoteSessionDisconnected { target_id: String },
+    /// A reconnect worker successfully re-established the authority transport
+    /// for a remote session. The new runtime should be inserted and marked online.
+    RemoteSessionReconnected {
+        target_id: String,
+        session: Arc<super::remote_session::RatatuiRemoteSession>,
+    },
     /// A session has exited and should be removed from the local catalog.
     ///
     /// This covers both a remote session viewer closing and a local
@@ -82,6 +92,8 @@ pub(crate) enum ClientCommand {
     GetHistory { target_id: String },
     /// Create a new remote session on the authority of the selected target.
     CreateRemoteSession { authority_node_id: String },
+    /// Close a session and cancel any pending reconnect for it.
+    CloseSession { target_id: String },
 }
 
 /// Reply returned by `StateEventLoop` for control commands.

@@ -158,6 +158,10 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                 Some(ClientCommand::CreateRemoteSession {
                     authority_node_id: args.to_string(),
                 })
+            } else if let Some(args) = trimmed.strip_prefix("CLOSE_SESSION ") {
+                Some(ClientCommand::CloseSession {
+                    target_id: args.to_string(),
+                })
             } else {
                 None
             }

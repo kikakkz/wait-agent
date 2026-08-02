@@ -22,6 +22,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -42,17 +43,36 @@ pub struct RatatuiRemoteSession {
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
     shared: Arc<SharedState>,
+    /// Optional one-shot channel signaled when the authority transport handshake
+    /// completes or fails. Used by the reconnect worker to wait for the new
+    /// transport without polling.
+    connected_tx: Mutex<Option<mpsc::Sender<Result<(), LifecycleError>>>>,
+}
+
+impl std::fmt::Debug for RatatuiRemoteSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RatatuiRemoteSession")
+            .field("target_id", &self.target_id)
+            .field("session_id", &self.session_id)
+            .field("authority_node_id", &self.authority_node_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RatatuiRemoteSession {
     /// Start listening on the authority transport socket, register it with the
     /// local ingress owner, and return the session. The acceptor sends the
     /// OpenMirrorRequest once the gRPC bridge connects.
+    ///
+    /// If `connection_tx` is provided, it is signaled once the authority
+    /// transport handshake completes (Ok) or fails (Err). This lets callers
+    /// such as the reconnect worker block until the transport is ready.
     pub fn open(
         target: &ManagedSessionRecord,
         socket_name: &str,
         network: &RemoteNetworkConfig,
         shared: &Arc<SharedState>,
+        connection_tx: Option<mpsc::Sender<Result<(), LifecycleError>>>,
     ) -> Result<Arc<Self>, LifecycleError> {
         let target_id = target.address.qualified_target();
         let session_id = target.address.session_id().to_string();
@@ -96,6 +116,7 @@ impl RatatuiRemoteSession {
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
             shared: shared.clone(),
+            connected_tx: Mutex::new(connection_tx),
         });
 
         spawn_authority_transport_acceptor(
@@ -110,7 +131,12 @@ impl RatatuiRemoteSession {
 
     /// Interrupt the authority acceptor and reader threads and close the
     /// underlying socket so the session stops immediately.
+    ///
+    /// Marks the session as explicitly closed so the reader thread does not
+    /// emit a disconnect event; the caller (StateEventLoop) already owns the
+    /// lifecycle decision.
     pub fn stop(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         self.running.store(false, Ordering::Relaxed);
 
         // Dropping the listener unblocks the acceptor thread if it is blocked
@@ -127,6 +153,14 @@ impl RatatuiRemoteSession {
         if let Some(writer) = guard.take() {
             let _ = writer.shutdown(Shutdown::Both);
         }
+    }
+
+    /// Clear the observer output sequence watermark so a newly reconnected
+    /// authority transport can resume feeding without its initial frames being
+    /// dropped as duplicates.
+    pub fn clear_output_seq(&self) {
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
+        observer.clear_output_seq();
     }
 
     /// Send an OpenMirrorRequest once the local terminal size is known.
@@ -358,6 +392,14 @@ fn spawn_authority_transport_acceptor(
     });
 }
 
+fn signal_connected(session: &RatatuiRemoteSession, result: Result<(), LifecycleError>) {
+    if let Ok(mut guard) = session.connected_tx.lock() {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
 fn handle_authority_transport_stream(
     mut stream: UnixStream,
     session: Arc<RatatuiRemoteSession>,
@@ -377,9 +419,12 @@ fn handle_authority_transport_stream(
         ERROR_LOG.log(format!(
             "[ratatui-remote-session] authority handshake failed: {error}"
         ));
+        signal_connected(&session, Err(error));
         session.running.store(false, Ordering::Relaxed);
         return;
     }
+
+    signal_connected(&session, Ok(()));
 
     {
         let cloned = match stream.try_clone() {
@@ -480,15 +525,14 @@ fn handle_authority_transport_stream(
         "[ratatui-remote-session] authority reader exiting for {target_id}"
     ));
     session.running.store(false, Ordering::Relaxed);
-    if session
-        .closed
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
-        .is_ok()
-    {
+    // Only report a disconnect when the session was not explicitly stopped by
+    // StateEventLoop. The loop will decide whether to start a reconnect worker
+    // or tear the session down.
+    if !session.closed.load(Ordering::SeqCst) {
         let _ = session
             .shared
             .state_sender()
-            .send(StateEvent::SessionClosed {
+            .send(StateEvent::RemoteSessionDisconnected {
                 target_id: target_id.to_string(),
             });
     }

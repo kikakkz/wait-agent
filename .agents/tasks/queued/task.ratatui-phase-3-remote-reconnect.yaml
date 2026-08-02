@@ -2,7 +2,7 @@ id: task.ratatui-phase-3-remote-reconnect
 kind: task
 version: 1
 title: implement automatic reconnect for ratatui remote sessions
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: /root/.kimi-code/sessions/wd_wait-agent-ratatui_7ed27e3252ef/session_b2d1e8b6-65e7-4d81-8d58-f614fb12aedf/agents/main/plans/shatterstar-dove-dagger.md
