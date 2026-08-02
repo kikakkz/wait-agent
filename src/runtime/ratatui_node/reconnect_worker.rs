@@ -104,7 +104,7 @@ fn run_reconnect_worker(
                             "[reconnect-worker] {target_id} handshake succeeded on attempt {attempt}"
                         ));
                         session.clear_output_seq();
-                        session.send_open_mirror(cols, rows);
+                        session.open_mirror(cols, rows);
                         // Tell StateEventLoop to adopt the new transport.
                         let _ = state_tx.send(StateEvent::RemoteSessionReconnected {
                             target_id: target_id.clone(),

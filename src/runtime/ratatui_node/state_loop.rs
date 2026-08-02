@@ -780,6 +780,17 @@ fn activate_target(
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(target_id.to_string());
 
+        // Open the remote mirror immediately using the last known main-pane
+        // size so the first rendered frame has the correct dimensions.
+        if *record.address.transport() == SessionTransport::RemotePeer {
+            let (cols, rows) = shared
+                .last_client_resize
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or((80, 24));
+            shared.resize_active_remote_session(cols, rows);
+        }
+
         // Register the local TUI console on the newly active authority-host
         // session using the last known main-pane size.
         if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
@@ -832,6 +843,12 @@ fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> 
                 .active_target
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+            let (cols, rows) = shared
+                .last_client_resize
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or((80, 24));
+            shared.resize_active_remote_session(cols, rows);
             CommandOutcome::Message(format!("connected {target}"))
         }
         Err(error) => CommandOutcome::Error(error.to_string()),
@@ -906,6 +923,12 @@ fn create_remote_session_on_authority(
                         .active_target
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+                    let (cols, rows) = shared
+                        .last_client_resize
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or((80, 24));
+                    shared.resize_active_remote_session(cols, rows);
                     Ok(record)
                 }
                 crate::application::remote_session_creation_service::CreateSessionReply::Rejected(

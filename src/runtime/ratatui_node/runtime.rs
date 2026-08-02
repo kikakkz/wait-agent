@@ -465,6 +465,11 @@ impl SharedState {
     }
 
     /// Open or reuse a remote session viewer for the given record.
+    ///
+    /// This does **not** send the OpenMirrorRequest.  The mirror is opened with
+    /// the real TUI dimensions the first time the session becomes active or a
+    /// resize arrives, avoiding the stale 80x24 startup frame that used to leave
+    /// the top half of the main pane blank.
     pub(crate) fn ensure_remote_session(
         self: &Arc<Self>,
         record: &ManagedSessionRecord,
@@ -475,14 +480,12 @@ impl SharedState {
                 .remote_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = guard.get(&target_id) {
-                session.send_open_mirror(80, 24);
+            if guard.contains_key(&target_id) {
                 return Ok(target_id);
             }
         }
         let session =
             RatatuiRemoteSession::open(record, &self.workspace_id(), &self.network, self, None)?;
-        session.send_open_mirror(80, 24);
         {
             let mut guard = self
                 .remote_sessions
@@ -527,7 +530,8 @@ impl SharedState {
         }
     }
 
-    /// Resize the active remote session, if any.
+    /// Resize the active remote session, or open it with the given dimensions
+    /// if this is the first time it is being viewed.
     pub(crate) fn resize_active_remote_session(&self, cols: u16, rows: u16) {
         let active = self
             .active_target
@@ -537,13 +541,23 @@ impl SharedState {
         let Some(target) = active else {
             return;
         };
-        let guard = self
-            .remote_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = guard.get(&target) {
-            session.resize(cols, rows);
-            session.resize_local_screen(cols, rows);
+        let session = {
+            let guard = self
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.get(&target).cloned()
+        };
+        if let Some(session) = session {
+            // Drop the remote_sessions lock before doing I/O or calling into
+            // the observer.  The opened flag guarantees the mirror is opened
+            // exactly once even if resize races with activation.
+            if !session.is_opened() {
+                session.open_mirror(cols, rows);
+            } else {
+                session.resize(cols, rows);
+                session.resize_local_screen(cols, rows);
+            }
         }
     }
 

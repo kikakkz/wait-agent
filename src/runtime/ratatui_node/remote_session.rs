@@ -44,6 +44,7 @@ pub struct RatatuiRemoteSession {
     listener: Mutex<Option<UnixListener>>,
     running: Arc<AtomicBool>,
     closed: AtomicBool,
+    opened: AtomicBool,
     next_input_seq: AtomicU64,
     initial_cols: Mutex<u16>,
     initial_rows: Mutex<u16>,
@@ -122,6 +123,7 @@ impl RatatuiRemoteSession {
             listener: Mutex::new(Some(listener)),
             running: Arc::new(AtomicBool::new(true)),
             closed: AtomicBool::new(false),
+            opened: AtomicBool::new(false),
             next_input_seq: AtomicU64::new(1),
             initial_cols: Mutex::new(80),
             initial_rows: Mutex::new(24),
@@ -218,8 +220,39 @@ impl RatatuiRemoteSession {
         let _ = writer.flush();
     }
 
+    /// Return whether the remote mirror has already been opened.
+    pub fn is_opened(&self) -> bool {
+        self.opened.load(Ordering::SeqCst)
+    }
+
+    /// Open the remote mirror with the given terminal size exactly once.
+    ///
+    /// This is the only place that should transition a session from "created"
+    /// to "opened".  It stores the size, sends the OpenMirrorRequest, and
+    /// resizes the local observer so the first rendered frame already has the
+    /// correct dimensions.
+    pub fn open_mirror(&self, cols: u16, rows: u16) {
+        if self
+            .opened
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        self.send_open_mirror(cols, rows);
+        self.resize_local_screen(cols, rows);
+    }
+
     /// Flush a pending OpenMirrorRequest using the last stored size.
+    ///
+    /// This is called by the authority transport reader once the bridge
+    /// connects.  If the mirror has not been opened yet we must not send a
+    /// default 80x24 request; the real size will be supplied by the first
+    /// resize/activate from the TUI.
     fn flush_open_mirror(&self) {
+        if !self.opened.load(Ordering::SeqCst) {
+            return;
+        }
         let (cols, rows) = {
             let cols = *self.initial_cols.lock().unwrap_or_else(|e| e.into_inner());
             let rows = *self.initial_rows.lock().unwrap_or_else(|e| e.into_inner());
