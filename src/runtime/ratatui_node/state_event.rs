@@ -15,6 +15,12 @@ pub(crate) enum StateEvent {
     LocalSessionChildExit { target_id: String, exit_code: i32 },
     /// A local `alacritty_terminal` session changed its window title.
     LocalSessionTitleChanged { target_id: String, title: String },
+    /// The detected task state of a session changed (e.g., shell at prompt vs
+    /// running a foreground command).
+    SessionTaskStateChanged {
+        target_id: String,
+        task_state: crate::domain::session_catalog::ManagedSessionTaskState,
+    },
     /// A local `alacritty_terminal` session produced output and the TUI
     /// clients should be refreshed.  This is deliberately sent to the single
     /// writer loop so that snapshots are broadcast without holding the

@@ -123,6 +123,14 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
+            StateEvent::SessionTaskStateChanged {
+                target_id,
+                task_state,
+            } => {
+                shared.set_session_task_state(&target_id, task_state);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
             StateEvent::LocalSessionOutput { .. } => {
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }

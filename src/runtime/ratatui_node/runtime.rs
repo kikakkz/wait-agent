@@ -274,6 +274,18 @@ impl SharedState {
         }
     }
 
+    /// Update the inferred task state of a session.
+    pub(super) fn set_session_task_state(
+        &self,
+        target_id: &str,
+        task_state: ManagedSessionTaskState,
+    ) {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = guard.get_mut(target_id) {
+            record.task_state = task_state;
+        }
+    }
+
     /// Return the authority id used for local sessions hosted by this server.
     pub(crate) fn local_authority_id(&self) -> String {
         format!("local#{}", self.network.port)

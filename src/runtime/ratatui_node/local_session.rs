@@ -9,7 +9,11 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
@@ -70,6 +74,9 @@ impl RatatuiLocalSession {
             proxy.clone(),
         )));
 
+        let master_fd = pty.file().as_raw_fd();
+        let child_pid = pty.child().id() as i32;
+
         let event_loop =
             EventLoop::new(term.clone(), proxy, pty, true, false).map_err(|error| {
                 LifecycleError::Io("failed to create terminal event loop".to_string(), error)
@@ -79,6 +86,8 @@ impl RatatuiLocalSession {
         *sender_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
 
         let _join_handle = event_loop.spawn();
+
+        spawn_task_state_monitor(session_id.clone(), master_fd, child_pid, shared.clone());
 
         ERROR_LOG.log(format!(
             "[ratatui-local-session] spawned session={} cols={} rows={}",
@@ -367,4 +376,55 @@ impl Dimensions for TermSize {
     fn columns(&self) -> usize {
         self.cols
     }
+}
+
+/// Spawn a background thread that watches the PTY foreground process group
+/// to infer whether the shell is at a prompt (Input) or a command is running
+/// (Running).  The result is sent to `StateEventLoop` as a task-state change.
+fn spawn_task_state_monitor(
+    target_id: String,
+    master_fd: std::os::unix::io::RawFd,
+    child_pid: i32,
+    shared: Arc<SharedState>,
+) {
+    thread::spawn(move || {
+        let running = Arc::new(AtomicBool::new(true));
+        let mut last_state = None;
+
+        while running.load(Ordering::Relaxed) {
+            // SAFETY: `tcgetpgrp` and `getpgid` are async-signal-safe POSIX
+            // calls operating on the PTY master fd owned by the alacritty
+            // event loop.  The fd remains valid until the child exits.
+            let fg_pgid = unsafe { libc::tcgetpgrp(master_fd) };
+            if fg_pgid < 0 {
+                break;
+            }
+            let shell_pgid = unsafe { libc::getpgid(child_pid) };
+            if shell_pgid < 0 {
+                break;
+            }
+
+            let task_state = if fg_pgid == shell_pgid {
+                crate::domain::session_catalog::ManagedSessionTaskState::Input
+            } else {
+                crate::domain::session_catalog::ManagedSessionTaskState::Running
+            };
+
+            if last_state != Some(task_state) {
+                last_state = Some(task_state);
+                let _ = shared
+                    .state_sender()
+                    .send(StateEvent::SessionTaskStateChanged {
+                        target_id: target_id.clone(),
+                        task_state,
+                    });
+            }
+
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        ERROR_LOG.log(format!(
+            "[ratatui-local-session] task-state monitor exiting for {target_id}"
+        ));
+    });
 }

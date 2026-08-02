@@ -21,10 +21,15 @@ use std::io::Write;
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+const TASK_STATE_INPUT: u8 = 0;
+const TASK_STATE_RUNNING: u8 = 1;
+const REMOTE_IDLE_INPUT_MS: u128 = 500;
 
 /// A remote session viewed by the local ratatui node.
 ///
@@ -47,6 +52,11 @@ pub struct RatatuiRemoteSession {
     /// completes or fails. Used by the reconnect worker to wait for the new
     /// transport without polling.
     connected_tx: Mutex<Option<mpsc::Sender<Result<(), LifecycleError>>>>,
+    /// Milliseconds since UNIX epoch when the last PTY output frame arrived.
+    /// Used to infer Running/Input state for the sidebar badge.
+    last_output_ms: AtomicU64,
+    /// Current inferred task state: 0 = input, 1 = running.
+    task_state: AtomicU8,
 }
 
 impl std::fmt::Debug for RatatuiRemoteSession {
@@ -117,6 +127,8 @@ impl RatatuiRemoteSession {
             initial_rows: Mutex::new(24),
             shared: shared.clone(),
             connected_tx: Mutex::new(connection_tx),
+            last_output_ms: AtomicU64::new(now_millis() as u64),
+            task_state: AtomicU8::new(TASK_STATE_INPUT),
         });
 
         spawn_authority_transport_acceptor(
@@ -425,6 +437,7 @@ fn handle_authority_transport_stream(
     }
 
     signal_connected(&session, Ok(()));
+    spawn_remote_task_state_monitor(session.clone());
 
     {
         let cloned = match stream.try_clone() {
@@ -466,6 +479,7 @@ fn handle_authority_transport_stream(
                     .send(StateEvent::RemoteSessionOutput {
                         target_id: target_id.to_string(),
                     });
+                signal_output_activity(&session);
             }
             Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match &envelope.payload {
                 ControlPlanePayload::OpenMirrorAccepted(_) => {
@@ -497,6 +511,7 @@ fn handle_authority_transport_stream(
                         .send(StateEvent::RemoteSessionOutput {
                             target_id: target_id.to_string(),
                         });
+                    signal_output_activity(&session);
                 }
                 _ => {}
             },
@@ -536,6 +551,59 @@ fn handle_authority_transport_stream(
                 target_id: target_id.to_string(),
             });
     }
+}
+
+fn signal_output_activity(session: &RatatuiRemoteSession) {
+    session
+        .last_output_ms
+        .store(now_millis() as u64, Ordering::Relaxed);
+    if session
+        .task_state
+        .compare_exchange(
+            TASK_STATE_INPUT,
+            TASK_STATE_RUNNING,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        let _ = session
+            .shared
+            .state_sender()
+            .send(StateEvent::SessionTaskStateChanged {
+                target_id: session.target_id.clone(),
+                task_state: crate::domain::session_catalog::ManagedSessionTaskState::Running,
+            });
+    }
+}
+
+fn spawn_remote_task_state_monitor(session: Arc<RatatuiRemoteSession>) {
+    thread::spawn(move || {
+        while session.running.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(100));
+            let last_output = session.last_output_ms.load(Ordering::Relaxed) as u128;
+            let idle = now_millis().saturating_sub(last_output);
+            if idle >= REMOTE_IDLE_INPUT_MS
+                && session
+                    .task_state
+                    .compare_exchange(
+                        TASK_STATE_RUNNING,
+                        TASK_STATE_INPUT,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                let _ = session
+                    .shared
+                    .state_sender()
+                    .send(StateEvent::SessionTaskStateChanged {
+                        target_id: session.target_id.clone(),
+                        task_state: crate::domain::session_catalog::ManagedSessionTaskState::Input,
+                    });
+            }
+        }
+    });
 }
 
 fn now_millis() -> u128 {
