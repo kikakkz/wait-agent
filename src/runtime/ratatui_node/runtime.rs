@@ -295,40 +295,54 @@ impl SharedState {
         ));
     }
 
-    /// Update the inferred task state of a session.
+    /// Update the inferred task state of a session and notify catalog sync.
     pub(super) fn set_session_task_state(
         &self,
         target_id: &str,
         task_state: ManagedSessionTaskState,
     ) {
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(target_id) {
-            record.task_state = task_state;
+        {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = guard.get_mut(target_id) {
+                record.task_state = task_state;
+            }
         }
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
     }
 
-    /// Update the displayed command name from agent/process detection.
+    /// Update the displayed command name from agent/process detection and notify
+    /// catalog sync.
     pub(super) fn set_session_command_name(&self, target_id: &str, command_name: String) {
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(target_id) {
-            record.display_command_name = Some(command_name);
+        {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = guard.get_mut(target_id) {
+                record.display_command_name = Some(command_name);
+            }
         }
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
     }
 
-    /// Clear the displayed command name, e.g. when an agent signals session end.
+    /// Clear the displayed command name and notify catalog sync.
     pub(super) fn clear_session_command_name(&self, target_id: &str) {
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(target_id) {
-            record.display_command_name = None;
+        {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = guard.get_mut(target_id) {
+                record.display_command_name = None;
+            }
         }
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
     }
 
-    /// Update the current working directory of a session from shell integration.
+    /// Update the current working directory of a session from shell integration
+    /// and notify catalog sync so remote viewers see cwd changes.
     pub(super) fn set_session_current_path(&self, target_id: &str, current_path: PathBuf) {
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(target_id) {
-            record.current_path = Some(current_path);
+        {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = guard.get_mut(target_id) {
+                record.current_path = Some(current_path);
+            }
         }
+        self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
     }
 
     /// Update a remote-peer catalog record from a published owner snapshot.
