@@ -1,10 +1,11 @@
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::infra::tmux::RemoteTargetPublicationBinding;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::ratatui_node::state_event::StateEvent;
 use crate::runtime::ratatui_node::SharedState;
-use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_backend::{
+    RemoteTargetPublicationBackend, RemoteTargetPublicationBinding,
+};
 use std::path::Path;
 use std::sync::Arc;
 

@@ -8,7 +8,7 @@
 
 <p>
 Run Claude Code, Codex CLI, Kimi, shells, and remote machine sessions from one
-tmux-native workspace. Keep one active input surface, one session sidebar, and
+terminal workspace. Keep one active input surface, one session sidebar, and
 one workflow for the agents you already use in terminals.
 </p>
 
@@ -17,7 +17,7 @@ one workflow for the agents you already use in terminals.
   <a href="https://github.com/kikakkz/wait-agent/releases"><img src="https://img.shields.io/badge/status-public%20alpha-orange?style=for-the-badge" alt="Project status: public alpha"></a>
   <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.86.0-orange?style=for-the-badge&logo=rust" alt="Rust 1.86.0"></a>
-  <a href="https://github.com/tmux/tmux"><img src="https://img.shields.io/badge/tmux-vendored-1e90ff?style=for-the-badge" alt="Vendored tmux"></a>
+
 </p>
 
 <p align="center">

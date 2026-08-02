@@ -7,7 +7,6 @@ mod runtime;
 mod types;
 
 pub use engine::TerminalEngine;
-pub use runtime::TerminalRuntime;
 pub use types::{
     MouseEncoding, MouseReportingMode, ScreenSnapshot, ScreenState, TerminalError, TerminalSize,
 };

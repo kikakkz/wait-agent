@@ -8,7 +8,6 @@ use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, 
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope};
 use crate::infra::remote_transport_codec::read_node_session_envelope;
-use crate::infra::tmux::RemoteTargetPublicationBinding;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node_session_sync_runtime::{
@@ -16,7 +15,7 @@ use crate::runtime::remote_node_session_sync_runtime::{
 };
 use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
 use crate::runtime::remote_publication::remote_target_publication_backend::{
-    RemoteTargetPublicationBackend, TmuxRemoteTargetPublicationBackend,
+    RemoteTargetPublicationBackend, RemoteTargetPublicationBinding,
 };
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
@@ -32,9 +31,7 @@ mod publication_helpers;
 pub(crate) use publication_helpers::*;
 
 #[derive(Clone)]
-pub struct RemoteTargetPublicationRuntime<
-    B: RemoteTargetPublicationBackend = TmuxRemoteTargetPublicationBackend,
-> {
+pub struct RemoteTargetPublicationRuntime<B: RemoteTargetPublicationBackend> {
     remote_runtime_owner: RemoteRuntimeOwnerClient,
     backend: B,
     current_executable: PathBuf,
@@ -104,39 +101,6 @@ impl RemoteRuntimeOwnerClient {
             #[cfg(test)]
             RemoteRuntimeOwnerClient::Noop => Ok(()),
         }
-    }
-}
-
-impl RemoteTargetPublicationRuntime<TmuxRemoteTargetPublicationBackend> {
-    #[cfg(test)]
-    pub fn from_build_env() -> Result<Self, LifecycleError> {
-        Self::from_build_env_with_network(RemoteNetworkConfig::default())
-    }
-
-    pub fn from_build_env_with_network(
-        network: RemoteNetworkConfig,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self {
-            remote_runtime_owner: RemoteRuntimeOwnerClient::Runtime(
-                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
-            ),
-            backend: TmuxRemoteTargetPublicationBackend::from_build_env()?,
-            current_executable: current_waitagent_executable()?,
-            network,
-            discover_live_workspaces: true,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_route_tests_without_remote_runtime_owner() -> Result<Self, LifecycleError>
-    {
-        Ok(Self {
-            remote_runtime_owner: RemoteRuntimeOwnerClient::Noop,
-            backend: TmuxRemoteTargetPublicationBackend::from_build_env()?,
-            current_executable: current_waitagent_executable()?,
-            network: RemoteNetworkConfig::default(),
-            discover_live_workspaces: false,
-        })
     }
 }
 
@@ -1056,6 +1020,3 @@ fn ignore_missing_publication_sidecar(error: LifecycleError) -> Result<(), Lifec
         _ => Err(error),
     }
 }
-
-#[cfg(test)]
-mod remote_target_publication_runtime_test;

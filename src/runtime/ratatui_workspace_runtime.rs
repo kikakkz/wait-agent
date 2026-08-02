@@ -150,6 +150,38 @@ impl RatatuiWorkspaceRuntime {
         Ok(())
     }
 
+    /// Remove stale ratatui server sockets that no longer have a live node.
+    pub fn cleanup(&self) -> Result<(), LifecycleError> {
+        let mut removed = 0;
+        let mut live = 0;
+        let socket_dir = ratatui_socket_dir();
+        let Ok(entries) = std::fs::read_dir(&socket_dir) else {
+            println!("no ratatui sockets to clean in {}", socket_dir.display());
+            return Ok(());
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if !name.ends_with(".sock") {
+                continue;
+            }
+            let port_str = name.trim_end_matches(".sock");
+            let Ok(port) = port_str.parse::<u16>() else {
+                continue;
+            };
+            if node_is_running(port) {
+                live += 1;
+            } else {
+                let _ = std::fs::remove_file(&path);
+                removed += 1;
+            }
+        }
+
+        println!("cleaned {removed} stale ratatui sockets (kept {live} live)");
+        Ok(())
+    }
+
     /// List sessions inside a server.
     pub fn list_sessions(&self, target: Option<String>) -> Result<(), LifecycleError> {
         let port = resolve_target_to_port(target.as_deref())?;

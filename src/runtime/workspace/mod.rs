@@ -1,10 +1,3 @@
-pub mod footer_menu_runtime;
-pub mod local_target_host_runtime;
-pub mod main_slot_runtime;
-pub mod native_pane_fullscreen_runtime;
+//! Preserved workspace helpers required by the ratatui remote path.
+//! The tmux-backed workspace runtimes were removed in Phase 4.
 pub mod sidecar_process_runtime;
-pub mod target_host_runtime;
-pub mod workspace_command_runtime;
-pub mod workspace_entry_runtime;
-pub mod workspace_layout_runtime;
-pub mod workspace_runtime;

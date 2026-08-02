@@ -7,18 +7,14 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
 };
-use crate::infra::tmux::{RemoteTargetPublicationBinding, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
-use crate::runtime::session_lifecycle::session_lifecycle_hook_tmux_command;
-use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar;
+use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBinding;
 use base64::Engine;
 use std::collections::BTreeSet;
-use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::str;
-use std::thread;
 use std::time::Duration;
 
 pub(crate) const PUBLICATION_SERVER_READY_RETRIES: usize = 20;
@@ -194,14 +190,6 @@ pub(crate) fn remote_target_publication_owner_args(
         ],
         network,
     )
-}
-
-pub(crate) fn publication_socket_hook_tmux_command(
-    executable: &str,
-    socket_name: &str,
-    network: &RemoteNetworkConfig,
-) -> String {
-    session_lifecycle_hook_tmux_command(executable, socket_name, network)
 }
 
 pub(crate) fn socket_lifecycle_publication_action(
@@ -964,14 +952,6 @@ pub(crate) fn discovered_remote_session_from_envelope(
     }
 }
 
-pub(crate) fn spawn_socket_chrome_refresh(
-    current_executable: &std::path::Path,
-    socket_name: &str,
-) -> Result<(), LifecycleError> {
-    spawn_waitagent_sidecar(current_executable, chrome_refresh_socket_args(socket_name))
-        .map_err(remote_target_publication_error)
-}
-
 pub(crate) fn live_workspace_socket_names_from_sessions(
     sessions: &[ManagedSessionRecord],
 ) -> Vec<String> {
@@ -988,14 +968,6 @@ pub(crate) fn live_workspace_socket_names_from_sessions(
 
 pub(crate) fn is_publishable_discovered_remote_session(session: &ManagedSessionRecord) -> bool {
     session.address.transport() == &SessionTransport::RemotePeer && session.is_target_host()
-}
-
-pub(crate) fn chrome_refresh_socket_args(socket_name: &str) -> Vec<String> {
-    vec![
-        "__chrome-refresh-socket".to_string(),
-        "--socket-name".to_string(),
-        socket_name.to_string(),
-    ]
 }
 
 pub(crate) fn remote_target_exited_args(
@@ -1058,69 +1030,6 @@ pub(crate) fn published_remote_target_record_from_payload(
             ))
         })?,
     })
-}
-
-pub(crate) fn ensure_publication_owner_process_running(
-    current_executable: &std::path::Path,
-    socket_name: &str,
-    target_session_name: &str,
-    network: &RemoteNetworkConfig,
-) -> Result<(), LifecycleError> {
-    let socket_path = remote_target_publication_owner_socket_path(socket_name, target_session_name);
-    if publication_owner_available(&socket_path) {
-        return Ok(());
-    }
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-
-    spawn_waitagent_sidecar(
-        current_executable,
-        remote_target_publication_owner_args(socket_name, target_session_name, network),
-    )
-    .map_err(remote_target_publication_error)?;
-
-    for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
-        if publication_owner_available(&socket_path) {
-            return Ok(());
-        }
-        thread::sleep(PUBLICATION_SERVER_READY_SLEEP);
-    }
-
-    Err(LifecycleError::Protocol(format!(
-        "remote target publication owner for socket `{socket_name}` session `{target_session_name}` did not become ready"
-    )))
-}
-
-pub(crate) fn ensure_publication_sender_process_running(
-    current_executable: &std::path::Path,
-    socket_name: &str,
-    network: &RemoteNetworkConfig,
-) -> Result<(), LifecycleError> {
-    let socket_path = remote_target_publication_sender_socket_path(socket_name);
-    if publication_sender_available(&socket_path) {
-        return Ok(());
-    }
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-
-    spawn_waitagent_sidecar(
-        current_executable,
-        remote_target_publication_sender_args(socket_name, network),
-    )
-    .map_err(remote_target_publication_error)?;
-
-    for _ in 0..PUBLICATION_SERVER_READY_RETRIES {
-        if publication_sender_available(&socket_path) {
-            return Ok(());
-        }
-        thread::sleep(PUBLICATION_SERVER_READY_SLEEP);
-    }
-
-    Err(LifecycleError::Protocol(format!(
-        "remote target publication sender for socket `{socket_name}` did not become ready"
-    )))
 }
 
 pub(crate) fn signal_publication_sender_live_session_registered(
@@ -1220,103 +1129,4 @@ pub(crate) fn signal_publication_sender_command(
         .write_all(render_publication_sender_command(&command).as_bytes())
         .map_err(remote_target_publication_error)?;
     stream.flush().map_err(remote_target_publication_error)
-}
-
-/// Decoupled publication operations using only TmuxSessionGateway trait methods.
-/// These replace the methods that were previously on EmbeddedTmuxBackend.
-pub(crate) fn bind_publication_on_socket(
-    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
-    socket_name: &str,
-    target_session_name: &str,
-    authority_id: &str,
-    transport_session_id: &str,
-    selector: Option<&str>,
-) -> Result<(), crate::infra::tmux::TmuxError> {
-    let socket = TmuxSocketName::new(socket_name);
-    gateway.set_session_environment(
-        &socket,
-        target_session_name,
-        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
-        authority_id,
-    )?;
-    gateway.set_session_environment(
-        &socket,
-        target_session_name,
-        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
-        transport_session_id,
-    )?;
-    match selector {
-        Some(selector) => gateway.set_session_environment(
-            &socket,
-            target_session_name,
-            crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-            selector,
-        )?,
-        None => gateway.unset_session_environment(
-            &socket,
-            target_session_name,
-            crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-        )?,
-    }
-    Ok(())
-}
-
-pub(crate) fn unbind_publication_on_socket(
-    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
-    socket_name: &str,
-    target_session_name: &str,
-) -> Result<(), crate::infra::tmux::TmuxError> {
-    let socket = TmuxSocketName::new(socket_name);
-    for key in [
-        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV,
-        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV,
-        crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV,
-    ] {
-        gateway.unset_session_environment(&socket, target_session_name, key)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn list_publication_bindings_on_socket(
-    gateway: &impl TmuxSessionGateway<Error = crate::infra::tmux::TmuxError>,
-    socket_name: &TmuxSocketName,
-) -> Result<Vec<RemoteTargetPublicationBinding>, crate::infra::tmux::TmuxError> {
-    let sessions = gateway.list_sessions_on_socket(socket_name)?;
-    let mut bindings = Vec::new();
-    for session in sessions {
-        if session.session_role != Some(WorkspaceSessionRole::TargetHost) {
-            continue;
-        }
-        let env_vars =
-            gateway.show_session_environment(socket_name, session.address.session_id())?;
-        let mut authority_id = None;
-        let mut transport_session_id = None;
-        let mut selector = None;
-        for (key, value) in &env_vars {
-            if key.as_str() == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_AUTHORITY_ID_ENV {
-                authority_id = Some(value.clone());
-            } else if key.as_str()
-                == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_TRANSPORT_SESSION_ID_ENV
-            {
-                transport_session_id = Some(value.clone());
-            } else if key.as_str() == crate::infra::tmux::WAITAGENT_REMOTE_PUBLICATION_SELECTOR_ENV
-            {
-                selector = Some(value.clone());
-            }
-        }
-        let Some(authority_id) = authority_id else {
-            continue;
-        };
-        let Some(transport_session_id) = transport_session_id else {
-            continue;
-        };
-        bindings.push(RemoteTargetPublicationBinding {
-            socket_name: socket_name.as_str().to_string(),
-            target_session_name: session.address.session_id().to_string(),
-            authority_id,
-            transport_session_id,
-            selector,
-        });
-    }
-    Ok(bindings)
 }

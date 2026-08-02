@@ -20,7 +20,6 @@ use crate::infra::remote_protocol::{
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
 };
-use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -30,14 +29,12 @@ use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
 use crate::runtime::remote_node_session_sync_runtime::{
-    LocalAuthorityHostBackend, LocalTargetFactory, SessionSyncAuthorityManager,
-    TmuxLocalAuthorityHostBackend, TmuxLocalTargetFactory,
+    LocalAuthorityHostBackend, LocalTargetFactory, RatatuiLocalAuthorityHostBackend,
+    RatatuiLocalTargetFactory, SessionSyncAuthorityManager,
 };
 use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
-use crate::runtime::remote_workspace_socket_registry_runtime::{
-    workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
-};
+use crate::runtime::remote_workspace_socket_registry_runtime::workspace_socket_registry_path;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -73,9 +70,9 @@ pub(super) enum AuthoritySocketReadyStatus {
 }
 
 pub struct RemoteNodeIngressServerRuntime<
-    B: RemoteTargetPublicationBackend = crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend,
-    F: LocalTargetFactory = TmuxLocalTargetFactory,
-    A: LocalAuthorityHostBackend = TmuxLocalAuthorityHostBackend,
+    B: RemoteTargetPublicationBackend = crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
+    F: LocalTargetFactory = RatatuiLocalTargetFactory,
+    A: LocalAuthorityHostBackend = RatatuiLocalAuthorityHostBackend,
 > {
     publication_runtime: RemoteTargetPublicationRuntime<B>,
     target_factory: F,
@@ -217,36 +214,19 @@ pub(crate) enum OwnerLifecycleEvent {
     ShutdownRequested,
 }
 
-impl RemoteNodeIngressServerRuntime {
-    pub fn from_build_env_with_network_and_socket(
-        network: RemoteNetworkConfig,
-        socket_name: impl Into<String>,
-    ) -> Result<Self, LifecycleError> {
-        let socket_name = socket_name.into();
-        Ok(Self {
-            publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
-                network.clone(),
-            )?,
-            target_factory: TmuxLocalTargetFactory::from_build_env_with_socket(
-                network.clone(),
-                &socket_name,
-            )?,
-            authority_backend: TmuxLocalAuthorityHostBackend::from_build_env(network.clone())?,
-            network,
-        })
-    }
-
-    pub fn new_with_backends<B, F, A>(
+impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
+where
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
+    pub fn new_with_backends(
         network: RemoteNetworkConfig,
         publication_runtime: RemoteTargetPublicationRuntime<B>,
         target_factory: F,
         authority_backend: A,
-    ) -> RemoteNodeIngressServerRuntime<B, F, A>
-    where
-        B: RemoteTargetPublicationBackend,
-        F: LocalTargetFactory,
-        A: LocalAuthorityHostBackend,
-    {
+    ) -> Self {
         RemoteNodeIngressServerRuntime {
             publication_runtime,
             target_factory,
@@ -390,15 +370,7 @@ impl RemoteNodeIngressServerRuntime {
         }
         shutdown_owner_with_control_socket(network)
     }
-}
 
-impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
-where
-    B: RemoteTargetPublicationBackend,
-    F: LocalTargetFactory,
-    A: LocalAuthorityHostBackend,
-    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
-{
     pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
         let transport = GrpcRemoteNodeTransport::new();
         let (transport_tx, transport_rx) = mpsc::channel();
@@ -478,7 +450,11 @@ pub(crate) fn notify_authority_socket_ready(
     node_id: &str,
     socket_path: &std::path::Path,
 ) -> io::Result<()> {
-    RemoteNodeIngressServerRuntime::ensure_owner_running("__shared__", network)
+    RemoteNodeIngressServerRuntime::<
+        crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
+        RatatuiLocalTargetFactory,
+        RatatuiLocalAuthorityHostBackend,
+    >::ensure_owner_running("__shared__", network)
         .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
     let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -1021,13 +997,11 @@ fn read_owner_control_string(reader: &mut impl Read) -> io::Result<String> {
 }
 
 fn live_workspace_sockets(
-    network: &RemoteNetworkConfig,
+    _network: &RemoteNetworkConfig,
 ) -> Result<BTreeSet<String>, LifecycleError> {
-    let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_node_ingress_error)?;
-    let registry = RemoteWorkspaceSocketRegistryRuntime::new(network.clone());
-    registry.live_workspace_socket_names_retaining(|socket_name| {
-        backend.socket_is_live(&crate::infra::tmux::TmuxSocketName::new(socket_name))
-    })
+    // Preserved for ratatui remote path; tmux dependency to be removed in a later phase.
+    // In the ratatui-only build there are no tmux workspace sockets to enumerate.
+    Ok(BTreeSet::new())
 }
 
 fn apply_owner_lifecycle_event(
@@ -3192,6 +3166,3 @@ where
         io::Error::new(io::ErrorKind::Other, error.to_string()),
     )
 }
-
-#[cfg(test)]
-mod remote_node_ingress_server_runtime_test;

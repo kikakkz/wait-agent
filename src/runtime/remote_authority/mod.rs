@@ -1,4 +1,3 @@
-pub mod geometry_coordinator;
 pub mod remote_authority_connection_runtime;
 pub mod remote_authority_target_host_runtime;
 pub mod remote_authority_transport_runtime;

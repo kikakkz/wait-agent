@@ -20,7 +20,9 @@ done_criteria:
   - --ratatui flag launches a complete ratatui workspace with sidebar, footer, and main pane
   - ratatui path supports session detach/attach and server/client separation
   - footer, sidebar, and main pane render real session state
-  - tmux backend is removed from the default build path
+  - --ratatui flag is removed; running waitagent without flags launches the ratatui TUI
+  - --tmux flag and tmux fallback are removed
+  - tmux backend source files and vendored tmux submodule are removed
   - cargo fmt --check passes
   - cargo check passes
   - relevant test suites pass

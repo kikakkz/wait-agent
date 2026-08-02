@@ -2,7 +2,7 @@ id: task.ratatui-phase-3-remote-main-pane
 kind: task
 version: 1
 title: render remote sessions in the ratatui main pane
-status: in_progress
+status: done
 priority: high
 design_ref:
   doc: docs/ratatui-replace-tmux-plan.md

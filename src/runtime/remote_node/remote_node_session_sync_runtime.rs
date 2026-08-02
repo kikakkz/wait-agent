@@ -1,22 +1,18 @@
-use crate::application::target_registry_service::merge_local_targets_by_identity;
-use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, RemoteSessionSyncOwnerCommand};
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
 };
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
+use crate::runtime::remote_authority::remote_authority_target_host_runtime::{
+    wait_for_ready_socket, RemoteAuthorityPublicationGateway,
+};
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
-use crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend;
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
-use crate::runtime::remote_runtime_owner_runtime::{
-    RemoteRuntimeOwnerRuntime, RemoteTargetSourceBindingResolver,
-};
 use crate::runtime::sidecar_process_runtime::{
     spawn_waitagent_sidecar, spawn_waitagent_sidecar_child,
 };
@@ -50,54 +46,6 @@ pub trait LocalSessionCatalog: Send + 'static {
 
     fn local_target_socket_name(&self) -> Option<&str> {
         None
-    }
-}
-
-#[derive(Clone)]
-pub struct TmuxLocalSessionCatalog {
-    gateway: EmbeddedTmuxBackend,
-    socket_name: TmuxSocketName,
-    remote_target_resolver: Arc<dyn RemoteTargetSourceBindingResolver>,
-}
-
-impl TmuxLocalSessionCatalog {
-    pub fn new(
-        gateway: EmbeddedTmuxBackend,
-        socket_name: TmuxSocketName,
-        remote_target_resolver: impl RemoteTargetSourceBindingResolver + 'static,
-    ) -> Self {
-        Self {
-            gateway,
-            socket_name,
-            remote_target_resolver: Arc::new(remote_target_resolver),
-        }
-    }
-}
-
-impl LocalSessionCatalog for TmuxLocalSessionCatalog {
-    type Error = crate::infra::tmux::TmuxError;
-
-    fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        let sessions = self.gateway.list_sessions_on_socket(&self.socket_name)?;
-        let pane_backed = self
-            .gateway
-            .list_local_target_content_pane_sessions(&self.socket_name)?;
-        let sessions = merge_local_targets_by_identity(sessions, pane_backed);
-        let active_targets =
-            active_workspace_targets_on_socket(&self.gateway, &self.socket_name, &sessions)?;
-        Ok(exportable_local_sessions_for_socket(
-            overlay_workspace_runtime_onto_active_local_target_hosts(
-                sessions,
-                self.socket_name.as_str(),
-                &active_targets,
-            ),
-            self.socket_name.as_str(),
-            self.remote_target_resolver.as_ref(),
-        ))
-    }
-
-    fn local_target_socket_name(&self) -> Option<&str> {
-        Some(self.socket_name.as_str())
     }
 }
 
@@ -171,12 +119,12 @@ impl LocalTargetExitObserver for SidecarLocalTargetExitObserver {
 }
 
 pub struct RemoteNodeSessionSyncRuntime<
-    G,
-    T = GrpcRemoteNodeTransport,
-    O = SidecarLocalTargetExitObserver,
-    F = TmuxLocalTargetFactory,
-    A = TmuxLocalAuthorityHostBackend,
-    P: crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend = TmuxRemoteTargetPublicationBackend,
+    G: LocalSessionCatalog = RatatuiLocalSessionCatalog,
+    T: OutboundRemoteNodeTransport = GrpcRemoteNodeTransport,
+    O: LocalTargetExitObserver = RatatuiLocalTargetExitObserver,
+    F: LocalTargetFactory = RatatuiLocalTargetFactory,
+    A: LocalAuthorityHostBackend = RatatuiLocalAuthorityHostBackend,
+    P: crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend = crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
 > {
     gateway: G,
     transport: T,
@@ -232,108 +180,78 @@ impl SessionSyncAuthorityPublicationGateway {
     }
 }
 
-impl RemoteNodeSessionSyncRuntime<TmuxLocalSessionCatalog> {
-    pub fn from_build_env_with_network_and_socket(
-        network: RemoteNetworkConfig,
+impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
+    fn ensure_live_session_registered(
+        &self,
         socket_name: &str,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self::new_with_backends(
-            TmuxLocalSessionCatalog::new(
-                EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
-                TmuxSocketName::new(socket_name),
-                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
-            ),
-            GrpcRemoteNodeTransport::new(),
-            SidecarLocalTargetExitObserver::from_build_env(network.clone())?,
-            TmuxLocalTargetFactory::from_build_env_with_socket(network.clone(), socket_name)?,
-            TmuxLocalAuthorityHostBackend::from_build_env(network.clone())?,
-            Some(RemoteTargetPublicationRuntime::from_build_env_with_network(
-                network.clone(),
-            )?),
-            network,
-        ))
-    }
-
-    pub fn run_owner(
-        command: RemoteSessionSyncOwnerCommand,
-        network: RemoteNetworkConfig,
+        target_session_name: &str,
+        authority_id: &str,
+        target_id: &str,
+        transport_socket_path: &str,
+        authority_socket_path: &std::path::Path,
     ) -> Result<(), LifecycleError> {
-        // Install a file-based panic hook so that panic messages are captured
-        // even when stderr goes to a deleted pts (the sidecar's original stderr
-        // fd may reference a dead pty). The hook chains to the original hook so
-        // stderr output is preserved when it is available.
-        let socket_name_for_hook = command.socket_name.clone();
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let diag_path = std::env::temp_dir().join(format!(
-                "waitagent-sync-owner-panic-{}.log",
-                socket_name_for_hook
-                    .chars()
-                    .map(|ch| match ch {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-                        _ => '_',
-                    })
-                    .collect::<String>()
-            ));
-            let _ = std::fs::write(
-                &diag_path,
-                format!("remote session sync owner panicked: {info}\n"),
-            );
-            original_hook(info);
-        }));
-
-        let socket_path = remote_session_sync_owner_socket_path(&command.socket_name);
-        let startup = (|| -> Result<
-            (
-                mpsc::Receiver<()>,
-                RemoteNodeSessionSyncGuard,
-                thread::JoinHandle<()>,
-            ),
-            LifecycleError,
-        > {
-            if socket_path.exists() {
-                let _ = fs::remove_file(&socket_path);
-            }
-            let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
-            let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
-            let (shutdown_tx, shutdown_rx) = mpsc::channel();
-            let owner_socket = listener.try_clone().map_err(remote_session_sync_error)?;
-            let owner_command_worker =
-                serve_owner_commands(owner_socket, local_catalog_tx, shutdown_tx);
-            let guard =
-                Self::from_build_env_with_network_and_socket(network, &command.socket_name)?
-                    .start_with_local_catalog_changes(local_catalog_rx)?;
-            Ok((shutdown_rx, guard, owner_command_worker))
-        })();
-        let (shutdown_rx, _guard, _owner_command_worker) = match startup {
-            Ok(startup) => startup,
-            Err(error) => {
-                let _ = notify_remote_session_sync_owner_ready(
-                    command.ready_socket.as_deref(),
-                    Err(error.to_string()),
-                );
-                return Err(error);
-            }
+        use crate::runtime::remote_publication::remote_target_publication_runtime::{
+            signal_publication_sender_live_session_registered, RemoteTargetPublicationRuntime,
         };
-        if let Err(error) =
-            notify_remote_session_sync_owner_ready(command.ready_socket.as_deref(), Ok(()))
-        {
-            ERROR_LOG.log(format!(
-                "[diag-newhost] session_sync_owner ready notification failed: {error}"
-            ));
-        }
-        loop {
-            if shutdown_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-                break;
-            }
-            if !backend_socket_still_exists(&command.socket_name) {
-                break;
-            }
-        }
-        let _ = fs::remove_file(&socket_path);
-        Ok(())
+        let network = self.network.clone();
+        let backend =
+            crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend::new(
+                crate::runtime::ratatui_node::SharedState::new(network.clone()),
+                network.clone(),
+            );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.ensure_publication_sender_running(socket_name)?;
+        signal_publication_sender_live_session_registered(
+            socket_name,
+            target_session_name,
+            authority_id,
+            target_id,
+            transport_socket_path,
+        )?;
+        wait_for_ready_socket(authority_socket_path)
     }
 
+    fn ensure_live_session_unregistered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        crate::runtime::remote_publication::remote_target_publication_runtime::signal_publication_sender_live_session_unregistered(
+            socket_name,
+            target_session_name,
+        )
+    }
+
+    fn signal_source_session_closed(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+        use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+        let network = self.network.clone();
+        let backend = RatatuiRemoteTargetPublicationBackend::new(
+            crate::runtime::ratatui_node::SharedState::new(network.clone()),
+            network.clone(),
+        );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.signal_source_session_closed(socket_name, target_session_name)
+    }
+
+    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+        use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+        let network = self.network.clone();
+        let backend = RatatuiRemoteTargetPublicationBackend::new(
+            crate::runtime::ratatui_node::SharedState::new(network.clone()),
+            network.clone(),
+        );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.signal_local_runtime_changed(socket_name)
+    }
+}
+
+impl RemoteNodeSessionSyncRuntime {
     pub fn ensure_owner_running(
         socket_name: &str,
         network: &RemoteNetworkConfig,
@@ -955,45 +873,6 @@ where
     }
 }
 
-impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
-    fn ensure_live_session_registered(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-        _authority_id: &str,
-        _target_id: &str,
-        _transport_socket_path: &str,
-        authority_socket_path: &std::path::Path,
-    ) -> Result<(), LifecycleError> {
-        wait_for_live_authority_socket(authority_socket_path)?;
-        Ok(())
-    }
-
-    fn ensure_live_session_unregistered(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        Ok(())
-    }
-
-    fn signal_source_session_closed(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        Ok(())
-    }
-
-    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        RemoteNodeSessionSyncRuntime::signal_local_catalog_changed(
-            socket_name,
-            &self.network,
-            LocalCatalogChangeReason::LocalRuntimeChanged,
-        )
-    }
-}
-
 impl Drop for RemoteNodeSessionSyncGuard {
     fn drop(&mut self) {
         if let Some(stop_tx) = self.stop_tx.take() {
@@ -1004,6 +883,3 @@ impl Drop for RemoteNodeSessionSyncGuard {
         }
     }
 }
-
-#[cfg(test)]
-mod remote_node_session_sync_runtime_test;

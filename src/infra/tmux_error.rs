@@ -514,7 +514,7 @@ pub(crate) fn parse_tmux_id(value: &str, prefix: char, label: &str) -> Result<St
     Ok(identifier)
 }
 
-pub(crate) fn tmux_socket_dir() -> PathBuf {
+pub fn tmux_socket_dir() -> PathBuf {
     let base = std::env::var_os("TMUX_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));

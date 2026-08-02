@@ -600,13 +600,6 @@ impl TargetRegistryService<DefaultTargetCatalogGateway> {
     }
 }
 
-#[cfg(test)]
-impl DefaultTargetCatalogGateway {
-    fn remote_runtime_owner_network(&self) -> crate::cli::RemoteNetworkConfig {
-        self.remote_runtime_owner.network_config_for_tests()
-    }
-}
-
 pub fn project_visible_targets(
     targets: &[ManagedSessionRecord],
     authority_id: &str,
@@ -689,14 +682,13 @@ fn current_tmux_socket_name_from_env() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_activation_target, project_visible_targets, DefaultTargetCatalogGateway,
-        SessionCatalogMemoryStore, TargetCatalogGateway, TargetRegistryService,
+        is_activation_target, project_visible_targets, SessionCatalogMemoryStore,
+        TargetCatalogGateway, TargetRegistryService,
     };
     use crate::domain::session_catalog::{
         ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::WorkspaceSessionRole;
-    use crate::infra::tmux::{TmuxGateway, TmuxSessionGateway};
     use std::path::PathBuf;
 
     #[derive(Clone)]
@@ -1127,49 +1119,6 @@ mod tests {
         assert!(store.load("wa-unknown").is_none());
     }
 
-    #[test]
-    fn catalog_gateway_uses_socket_scoped_network_config_for_remote_snapshot() {
-        let _guard = crate::test_support::integration_test_lock();
-        let backend = crate::infra::tmux::EmbeddedTmuxBackend::from_build_env()
-            .expect("vendored tmux backend should discover build env");
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time should be monotonic")
-            .as_nanos();
-        let socket_name = format!("wa-test-target-catalog-network-{nonce:x}");
-        let network = crate::cli::RemoteNetworkConfig {
-            port: 17575,
-            connect: Some("127.0.0.1:7575".to_string()),
-            node_id: None,
-            public_endpoint: None,
-        };
-
-        backend
-            .ensure_workspace(&crate::domain::workspace::WorkspaceInstanceConfig {
-                workspace_dir: std::env::temp_dir(),
-                workspace_key: format!("target-catalog-network-{nonce:x}"),
-                socket_name: socket_name.clone(),
-                session_name: format!("waitagent-test-target-catalog-network-{nonce:x}"),
-                session_role: crate::domain::workspace::WorkspaceSessionRole::WorkspaceChrome,
-                initial_rows: None,
-                initial_cols: None,
-                initial_program: None,
-            })
-            .expect("workspace should be created");
-        crate::runtime::network_state_runtime::persist_socket_network_config(
-            &backend,
-            &socket_name,
-            &network,
-        )
-        .expect("network config should persist on socket");
-
-        let gateway =
-            DefaultTargetCatalogGateway::from_build_env_with_socket_name(socket_name.clone())
-                .expect("target catalog should build");
-
-        assert_eq!(gateway.remote_runtime_owner_network(), network);
-        let _ = backend.kill_server(&crate::infra::tmux::TmuxSocketName::new(socket_name));
-    }
     fn remote_session(authority_id: &str, session_id: &str, command: &str) -> ManagedSessionRecord {
         ManagedSessionRecord {
             address: ManagedSessionAddress::remote_peer(authority_id, session_id),

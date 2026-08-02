@@ -19,7 +19,6 @@ pub fn default_remote_node_port() -> u16 {
 pub struct Cli {
     pub network: RemoteNetworkConfig,
     pub network_explicit: bool,
-    pub ratatui: bool,
     pub command: Command,
 }
 
@@ -500,20 +499,17 @@ impl Cli {
             return Ok(Self {
                 network: RemoteNetworkConfig::default(),
                 network_explicit: false,
-                ratatui: false,
                 command: Command::Help(help_text()),
             });
         }
 
         args.remove(0);
-        let ratatui = parse_global_feature_flags(&mut args)?;
         let (network, network_explicit) = parse_global_network_config(&mut args)?;
 
         if args.is_empty() {
             return Ok(Self {
                 network,
                 network_explicit,
-                ratatui,
                 command: Command::Workspace,
             });
         }
@@ -752,28 +748,9 @@ impl Cli {
         Ok(Self {
             network,
             network_explicit,
-            ratatui,
             command,
         })
     }
-}
-
-fn parse_global_feature_flags(args: &mut Vec<String>) -> Result<bool, CliError> {
-    let mut ratatui = false;
-
-    loop {
-        let Some(flag) = args.first().cloned() else {
-            break;
-        };
-        if flag == "--ratatui" {
-            args.remove(0);
-            ratatui = true;
-        } else {
-            break;
-        }
-    }
-
-    Ok(ratatui)
 }
 
 fn parse_global_network_config(
@@ -1972,13 +1949,13 @@ fn help_text() -> String {
         "WaitAgent",
         "",
         "Usage:",
-        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>]",
-        "  waitagent [--ratatui] [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<index>]",
-        "  waitagent [--ratatui] ls",
-        "  waitagent [--ratatui] list-sessions [<index>]",
+        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>]",
+        "  waitagent [--port <port>] [--connect <host:port>] [--public <host:port>] attach [<index>]",
+        "  waitagent ls",
+        "  waitagent list-sessions [<index>]",
         "  waitagent cleanup",
-        "  waitagent [--ratatui] detach [<index>]",
-        "  waitagent [--ratatui] stop [<index>]",
+        "  waitagent detach [<index>]",
+        "  waitagent stop [<index>]",
         "  waitagent version",
     ]
     .join("\n")
@@ -2022,14 +1999,6 @@ mod tests {
         assert!(matches!(cli.command, Command::Workspace));
         assert_eq!(cli.network.port, default_remote_node_port());
         assert!(cli.network.connect.is_none());
-        assert!(!cli.ratatui);
-    }
-
-    #[test]
-    fn parses_ratatui_flag() {
-        let cli = parse(&["waitagent", "--ratatui"]);
-        assert!(matches!(cli.command, Command::Workspace));
-        assert!(cli.ratatui);
     }
 
     #[test]

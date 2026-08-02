@@ -1,6 +1,5 @@
-use crate::cli::{RemoteAuthorityTargetHostCommand, RemoteNetworkConfig};
+use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
-use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
 use crate::infra::remote_protocol::{
@@ -10,11 +9,8 @@ use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
     AuthorityTransportFrame,
 };
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway};
 use crate::lifecycle::LifecycleError;
-use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::ratatui_node::SharedState;
-use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityTargetHostRuntime;
 use crate::runtime::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
     AUTHORITY_TRANSPORT_SOCKET_TIMEOUT,
@@ -22,10 +18,9 @@ use crate::runtime::remote_authority_transport_runtime::{
 use crate::runtime::remote_node_session_sync_runtime::sync_helpers::remote_session_sync_owner_socket_path;
 use crate::runtime::remote_node_session_sync_runtime::{
     remote_session_sync_error, SessionSyncAuthorityHost, SessionSyncAuthorityOutputRoute,
-    SessionSyncAuthorityPublicationGateway, LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
+    LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
 };
 
-use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -97,265 +92,7 @@ pub trait LocalAuthorityHostBackend: Clone + Send + 'static {
     fn shutdown_authority_host(&self, host: &SessionSyncAuthorityHost);
 }
 
-/// Tmux-backed factory that creates a new local target session using the
-/// existing `TargetHostRuntime` path.
-#[derive(Clone)]
-pub struct TmuxLocalTargetFactory {
-    network: RemoteNetworkConfig,
-    socket_name: String,
-    current_executable: PathBuf,
-}
-
-impl TmuxLocalTargetFactory {
-    pub fn from_build_env_with_socket(
-        network: RemoteNetworkConfig,
-        socket_name: &str,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self {
-            network,
-            socket_name: socket_name.to_string(),
-            current_executable: current_waitagent_executable()?,
-        })
-    }
-
-    pub fn with_network_socket_and_executable(
-        network: RemoteNetworkConfig,
-        socket_name: String,
-        current_executable: PathBuf,
-    ) -> Self {
-        Self {
-            network,
-            socket_name,
-            current_executable,
-        }
-    }
-}
-
-impl LocalTargetFactory for TmuxLocalTargetFactory {
-    type Error = LifecycleError;
-
-    fn create_local_target(
-        &self,
-        node_id: &str,
-        cwd: &Path,
-        cols: u16,
-        rows: u16,
-    ) -> Result<CreatedLocalTarget, Self::Error> {
-        let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?;
-        let runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
-            gateway,
-            self.network.clone(),
-            self.current_executable.clone(),
-        )?;
-        let workspace = runtime
-            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                cwd,
-                &self.socket_name,
-                Some(rows).filter(|rows| *rows > 0),
-                Some(cols).filter(|cols| *cols > 0),
-            ))
-            .map_err(|error| {
-                LifecycleError::Io(
-                    "failed to ensure target host".to_string(),
-                    io::Error::new(io::ErrorKind::Other, error.to_string()),
-                )
-            })?;
-        let session_id = workspace.workspace_handle.session_name.as_str().to_string();
-        Ok(CreatedLocalTarget {
-            target_id: format!("remote-peer:{node_id}:{session_id}"),
-            session_id,
-        })
-    }
-}
-
-/// Tmux-backed authority host backend.
-///
-/// Preserves the original Unix-socket authority listener plus in-process
-/// authority target host sidecar model.
-#[derive(Clone)]
-pub struct TmuxLocalAuthorityHostBackend {
-    network: RemoteNetworkConfig,
-    current_executable: PathBuf,
-}
-
-impl TmuxLocalAuthorityHostBackend {
-    pub fn from_build_env(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
-        Ok(Self {
-            network,
-            current_executable: current_waitagent_executable()?,
-        })
-    }
-
-    pub fn with_network_and_executable(
-        network: RemoteNetworkConfig,
-        current_executable: PathBuf,
-    ) -> Self {
-        Self {
-            network,
-            current_executable,
-        }
-    }
-}
-
 const AUTHORITY_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
-
-impl LocalAuthorityHostBackend for TmuxLocalAuthorityHostBackend {
-    type Error = LifecycleError;
-
-    fn spawn_authority_host(
-        &self,
-        session_handle: &RemoteNodeSessionHandle,
-        target_id: &str,
-        output_route: SessionSyncAuthorityOutputRoute,
-    ) -> Result<SessionSyncAuthorityHost, Self::Error> {
-        let bound_session_instance_id = session_handle.session_instance_id().to_string();
-        let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
-            ERROR_LOG.log(format!(
-                "[session-sync] failed to extract session from target id `{target_id}`"
-            ));
-            LifecycleError::Protocol(format!(
-                "failed to derive local session from target id `{target_id}`"
-            ))
-        })?;
-        let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
-            ERROR_LOG.log(format!(
-                "[session-sync] no local socket owns session `{session_name}` for `{target_id}`"
-            ));
-            LifecycleError::Protocol(format!(
-                "no local workspace socket owns session `{session_name}` for `{target_id}`"
-            ))
-        })?;
-        let authority_socket_path = live_authority_session_socket_path(&socket_name, &session_name);
-        let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
-        let running = Arc::new(AtomicBool::new(true));
-        let writer = Arc::new(Mutex::new(None));
-        let writer_ready = Arc::new(Condvar::new());
-        let bridge_session_id = Arc::new(RwLock::new(bound_session_instance_id.clone()));
-        spawn_live_authority_listener(
-            authority_socket_path.clone(),
-            session_handle.node_id().to_string(),
-            bridge_session_id.clone(),
-            output_route,
-            running.clone(),
-            writer.clone(),
-            writer_ready.clone(),
-        );
-        spawn_in_process_authority_target_host(
-            running.clone(),
-            writer.clone(),
-            writer_ready.clone(),
-            self.network.clone(),
-            self.current_executable.clone(),
-            RemoteAuthorityTargetHostCommand {
-                socket_name: socket_name.clone(),
-                target_session_name: session_name.clone(),
-                transport_session_id: target_session_name_from_target_id(target_id)
-                    .unwrap_or_else(|| target_id.to_string()),
-                authority_id: session_handle.node_id().to_string(),
-                target_id: target_id.to_string(),
-                transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
-                authority_socket_path: authority_socket_path.to_string_lossy().into_owned(),
-            },
-        )?;
-        Ok(SessionSyncAuthorityHost {
-            writer,
-            running,
-            writer_ready,
-            bound_session_instance_id,
-            bridge_session_id,
-        })
-    }
-
-    fn authority_host_signal(&self, host: &SessionSyncAuthorityHost) -> AuthorityHostSignal {
-        match host.writer.lock() {
-            Ok(guard) => {
-                if guard.is_some() {
-                    AuthorityHostSignal::Ready
-                } else if host.running.load(Ordering::Relaxed) {
-                    AuthorityHostSignal::Starting
-                } else {
-                    AuthorityHostSignal::Closed
-                }
-            }
-            Err(poisoned) => {
-                ERROR_LOG
-                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
-                let guard = poisoned.into_inner();
-                if guard.is_some() {
-                    AuthorityHostSignal::Ready
-                } else if host.running.load(Ordering::Relaxed) {
-                    AuthorityHostSignal::Starting
-                } else {
-                    AuthorityHostSignal::Closed
-                }
-            }
-        }
-    }
-
-    fn deliver_command(
-        &self,
-        host: &SessionSyncAuthorityHost,
-        command: RemoteAuthorityCommand,
-    ) -> Result<AuthorityHostSignal, Self::Error> {
-        let target_id = authority_command_target_id(&command).to_string();
-        let mut guard = match host.writer.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                ERROR_LOG
-                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
-                poisoned.into_inner()
-            }
-        };
-
-        while guard.is_none() && host.running.load(Ordering::Relaxed) {
-            let wait_result = host
-                .writer_ready
-                .wait_timeout(guard, AUTHORITY_HOST_READY_TIMEOUT)
-                .map_err(|_| {
-                    LifecycleError::Protocol(
-                        "authority writer mutex poisoned while waiting for ready signal"
-                            .to_string(),
-                    )
-                })?;
-            guard = wait_result.0;
-            if wait_result.1.timed_out() {
-                return Ok(AuthorityHostSignal::Starting);
-            }
-        }
-
-        let Some(writer) = guard.as_mut() else {
-            return Ok(AuthorityHostSignal::Closed);
-        };
-        let envelope = authority_command_envelope(command);
-        if let Err(error) = write_control_plane_envelope(writer, &envelope) {
-            let _ = writer.shutdown(Shutdown::Both);
-            *guard = None;
-            ERROR_LOG.log(format!(
-                "[diag-timing] send_command_to_host: write failed for target={target_id}: {error}"
-            ));
-            return Ok(AuthorityHostSignal::Closed);
-        }
-        ERROR_LOG.log(format!(
-            "[diag-timing] send_command_to_host: sent command to target={target_id}"
-        ));
-        Ok(AuthorityHostSignal::Ready)
-    }
-
-    fn shutdown_authority_host(&self, host: &SessionSyncAuthorityHost) {
-        host.running.store(false, Ordering::Relaxed);
-        let writer = match host.writer.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => {
-                ERROR_LOG
-                    .log("[session-sync] authority writer mutex poisoned, recovering".to_string());
-                poisoned.into_inner().take()
-            }
-        };
-        if let Some(writer) = writer {
-            let _ = writer.shutdown(Shutdown::Both);
-        }
-    }
-}
 
 fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
     match command {
@@ -446,73 +183,6 @@ pub(crate) fn sanitize_path_component(value: &str) -> String {
             _ => '_',
         })
         .collect()
-}
-
-fn find_socket_for_session(target_session_name: &str) -> Option<String> {
-    let backend = EmbeddedTmuxBackend::from_build_env().ok()?;
-    let sockets = backend.discover_waitagent_sockets().ok()?;
-    for socket_name in &sockets {
-        let sessions = backend.list_sessions_on_socket(socket_name).ok()?;
-        if sessions
-            .iter()
-            .any(|s| s.address.session_id() == target_session_name)
-        {
-            return Some(socket_name.as_str().to_string());
-        }
-        let pane_backed = backend
-            .list_local_target_content_pane_sessions(socket_name)
-            .ok()?;
-        if pane_backed
-            .iter()
-            .any(|s| s.address.session_id() == target_session_name)
-        {
-            return Some(socket_name.as_str().to_string());
-        }
-    }
-    None
-}
-
-fn spawn_in_process_authority_target_host(
-    running: Arc<AtomicBool>,
-    writer: Arc<Mutex<Option<UnixStream>>>,
-    writer_ready: Arc<Condvar>,
-    network: RemoteNetworkConfig,
-    current_executable: PathBuf,
-    command: RemoteAuthorityTargetHostCommand,
-) -> Result<(), LifecycleError> {
-    let gateway = EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?;
-    let runtime = RemoteAuthorityTargetHostRuntime::new(
-        gateway,
-        SessionSyncAuthorityPublicationGateway::new(network.clone()),
-        current_executable,
-    )
-    .with_network(network);
-    let authority_socket_path = PathBuf::from(&command.authority_socket_path);
-    let target_id_for_log = command.target_id.clone();
-    thread::spawn(move || {
-        let run_result = runtime.run_target_host(command);
-        if let Err(ref error) = run_result {
-            ERROR_LOG.log(format!(
-                "[session-sync] authority target host for target={target_id_for_log} exited with error: {error}"
-            ));
-        }
-        running.store(false, Ordering::Relaxed);
-        let writer_val = match writer.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => {
-                ERROR_LOG.log(
-                    "[session-sync] authority writer mutex poisoned during host cleanup, recovering".to_string()
-                );
-                poisoned.into_inner().take()
-            }
-        };
-        if let Some(writer) = writer_val {
-            let _ = writer.shutdown(Shutdown::Both);
-        }
-        writer_ready.notify_all();
-        let _ = UnixStream::connect(&authority_socket_path);
-    });
-    Ok(())
 }
 
 fn spawn_live_authority_listener(

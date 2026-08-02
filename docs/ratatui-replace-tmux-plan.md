@@ -84,6 +84,6 @@ waitagent-cli (TUI client)
 ## 7. 退出条件
 
 当 `--ratatui` 路径功能完备且稳定后：
-- `--ratatui` 设为默认
-- 保留 `--tmux` 作为 fallback 一段时间
-- 最终删除 tmux backend 和 vendored tmux submodule
+- `--ratatui` 设为默认并移除 flag（直接运行即进入 ratatui TUI）
+- 不保留 `--tmux` fallback
+- 删除 tmux backend 和 vendored tmux submodule

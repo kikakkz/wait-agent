@@ -6,7 +6,7 @@ description = "Terminal-native interaction scheduler for multi-agent workflows"
 homepage = "https://github.com/kikakkz/wait-agent"
 repository = "https://github.com/kikakkz/wait-agent"
 license = "MIT"
-keywords = ["tmux", "terminal", "multiplexer", "workspace", "agent"]
+keywords = ["terminal", "multiplexer", "workspace", "agent"]
 categories = ["command-line-utilities"]
 
 [package.metadata.deb]

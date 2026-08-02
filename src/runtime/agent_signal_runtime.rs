@@ -297,16 +297,6 @@ fn agent_signal_error(error: io::Error) -> LifecycleError {
     LifecycleError::Io("agent signal runtime failed".to_string(), error)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli::RemoteNetworkConfig;
-    use crate::domain::session_catalog::ManagedSessionTaskState;
-    use crate::infra::tmux::{
-        TmuxGateway, TmuxLayoutGateway, TmuxSessionGateway, TmuxWorkspaceHandle,
-    };
-    use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
-    use crate::runtime::workspace_layout_runtime::WorkspaceLayoutRuntime;
     use serde_json::Value;
 
     #[test]

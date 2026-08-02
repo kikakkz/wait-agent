@@ -210,7 +210,7 @@ start_daemon() {
   # instead of the tmux-based __remote-daemon.
   remote "
     set -e
-    nohup $(shq "$REMOTE_BIN") --ratatui --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server >> $(shq "$LOG_FILE") 2>&1 </dev/null &
+    nohup $(shq "$REMOTE_BIN") --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server >> $(shq "$LOG_FILE") 2>&1 </dev/null &
     sleep 0.5
     pgrep -f $(shq "waitagent.*--port $REMOTE_PORT.*__ratatui-node-server") >/dev/null
   "
