@@ -65,6 +65,12 @@ pub(crate) enum StateEvent {
         target_id: String,
         session: Arc<super::remote_session::RatatuiRemoteSession>,
     },
+    /// The remote runtime owner received a published update for a remote-peer
+    /// session (e.g., cwd or task-state changed). The local catalog record should
+    /// be updated to match.
+    RemoteSessionCatalogUpdated {
+        record: crate::domain::session_catalog::ManagedSessionRecord,
+    },
     /// A session has exited and should be removed from the local catalog.
     ///
     /// This covers both a remote session viewer closing and a local

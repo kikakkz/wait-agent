@@ -133,6 +133,18 @@ pub trait RemoteTargetPublicationBackend: Clone + Send + Sync + 'static {
 
     /// Signal that a remote node is offline.
     fn signal_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError>;
+
+    /// Optional hook called after a discovered remote session has been upserted
+    /// into the remote runtime owner. The ratatui backend uses this to keep the
+    /// in-memory SharedState catalog in sync with published remote metadata such
+    /// as current working directory and task state.
+    fn on_remote_session_upserted(
+        &self,
+        _node_id: &str,
+        _session: &ManagedSessionRecord,
+    ) -> Result<(), LifecycleError> {
+        Ok(())
+    }
 }
 
 /// Binding that publishes a local target host session to remote viewers.

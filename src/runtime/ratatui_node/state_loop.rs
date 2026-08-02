@@ -375,6 +375,11 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
+            StateEvent::RemoteSessionCatalogUpdated { record } => {
+                shared.update_remote_session_record(record);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
             StateEvent::SessionClosed { target_id } => {
                 if let Some(tx) = reconnect_handles.remove(&target_id) {
                     let _ = tx.send(());

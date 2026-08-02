@@ -331,6 +331,27 @@ impl SharedState {
         }
     }
 
+    /// Update a remote-peer catalog record from a published owner snapshot.
+    /// Local records are never overwritten by remote publications.
+    pub(super) fn update_remote_session_record(&self, record: ManagedSessionRecord) {
+        if record.address.transport() != &SessionTransport::RemotePeer {
+            return;
+        }
+        let target_id = record.address.qualified_target();
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.get_mut(&target_id) {
+            existing.current_path = record.current_path;
+            existing.task_state = record.task_state;
+            existing.availability = record.availability;
+            existing.command_name = record.command_name;
+            existing.display_command_name = record.display_command_name;
+            existing.attached_clients = record.attached_clients;
+            existing.window_count = record.window_count;
+        } else {
+            guard.insert(target_id, record);
+        }
+    }
+
     /// Return the authority id used for local sessions hosted by this server.
     pub(crate) fn local_authority_id(&self) -> String {
         format!("local#{}", self.network.port)

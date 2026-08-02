@@ -171,6 +171,20 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         Ok(())
     }
 
+    fn on_remote_session_upserted(
+        &self,
+        _node_id: &str,
+        session: &ManagedSessionRecord,
+    ) -> Result<(), LifecycleError> {
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::RemoteSessionCatalogUpdated {
+                record: session.clone(),
+            });
+        Ok(())
+    }
+
     fn refresh_workspace_socket(
         &self,
         socket_name: &str,

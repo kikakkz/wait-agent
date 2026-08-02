@@ -424,6 +424,16 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             result.is_ok(),
             t_upsert.elapsed()
         ));
+        if result.is_ok() {
+            if let Err(error) = self.backend.on_remote_session_upserted(node_id, session) {
+                ERROR_LOG.log(format!(
+                    "[diag-newhost] on_remote_session_upserted node={} target={} error={}",
+                    node_id,
+                    session.address.qualified_target(),
+                    error
+                ));
+            }
+        }
         result
     }
 
