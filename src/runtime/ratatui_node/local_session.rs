@@ -6,6 +6,7 @@ use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options, Shell};
 use std::borrow::Cow;
@@ -321,6 +322,15 @@ fn render_grid_line(
 
     for col in 0..columns {
         let cell = &grid[line][Column(col)];
+        // Wide characters occupy two columns; the second column is a spacer
+        // that must not be rendered as a separate character, otherwise CJK
+        // text appears with gaps between glyphs.
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
         text.push(cell.c);
         let style = alacritty_style_to_text_style(cell);
         if style != active_style {
