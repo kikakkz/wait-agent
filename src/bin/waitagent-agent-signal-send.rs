@@ -36,8 +36,10 @@ fn run() -> io::Result<()> {
     io::stdin().read_to_string(&mut payload)?;
     let payload = if payload.trim().is_empty() {
         "null".to_string()
-    } else {
+    } else if serde_json::from_str::<serde_json::Value>(&payload).is_ok() {
         payload
+    } else {
+        json_string(&payload)
     };
     let message = format!(
         "{{\"version\":1,\"agent\":{},\"event\":{},\"socket\":{},\"session\":{},\"pane\":{},\"token\":{},\"payload\":{}}}",
