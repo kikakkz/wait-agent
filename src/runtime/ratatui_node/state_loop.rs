@@ -353,18 +353,24 @@ fn run_state_event_loop(
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] agent signal target_id={target_id} agent={agent} event={event}"
                 ));
-                let effect =
-                    DetectorRegistry::default().signal_state_effect(&agent, &event, &payload);
-                match effect {
-                    Some(AgentStateEffect::Set(state)) => {
-                        shared.set_session_task_state(&target_id, state);
-                        shared.set_session_command_name(&target_id, agent);
+                if event == "cwd" {
+                    if let Some(path) = payload.as_str() {
+                        shared.set_session_current_path(&target_id, std::path::PathBuf::from(path));
                     }
-                    Some(AgentStateEffect::Clear) => {
-                        shared.set_session_task_state(&target_id, ManagedSessionTaskState::Input);
-                        shared.clear_session_command_name(&target_id);
+                } else {
+                    let effect =
+                        DetectorRegistry::default().signal_state_effect(&agent, &event, &payload);
+                    match effect {
+                        Some(AgentStateEffect::Set(state)) => {
+                            shared.set_session_task_state(&target_id, state);
+                            shared.set_session_command_name(&target_id, agent);
+                        }
+                        Some(AgentStateEffect::Clear) => {
+                            shared.set_session_task_state(&target_id, ManagedSessionTaskState::Input);
+                            shared.clear_session_command_name(&target_id);
+                        }
+                        None => {}
                     }
-                    None => {}
                 }
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }

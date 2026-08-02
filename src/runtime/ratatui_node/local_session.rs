@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use super::agent_signal_env::AgentSignalEnv;
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
@@ -41,23 +42,14 @@ impl RatatuiLocalSession {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let mut env = HashMap::new();
-        env.insert(
-            "WAITAGENT_SIGNAL_SOCKET".to_string(),
-            shared.agent_signal_socket_path.clone(),
-        );
-        env.insert(
-            "WAITAGENT_SOCKET_NAME".to_string(),
-            format!("ratatui-{}", shared.network.port),
-        );
-        env.insert(
-            "WAITAGENT_TARGET_SESSION_NAME".to_string(),
-            session_id.clone(),
-        );
-        env.insert("WAITAGENT_PANE_ID".to_string(), session_id.clone());
-        env.insert(
-            "WAITAGENT_AGENT_SIGNAL_TOKEN".to_string(),
-            shared.agent_signal_token.clone(),
-        );
+        let signal_env = AgentSignalEnv {
+            socket_path: shared.agent_signal_socket_path.clone(),
+            socket_name: format!("ratatui-{}", shared.network.port),
+            target_session_name: session_id.clone(),
+            pane_id: session_id.clone(),
+            token: shared.agent_signal_token.clone(),
+        };
+        signal_env.apply_to_hashmap(&mut env)?;
         let options = Options {
             shell: Some(Shell::new(shell, Vec::new())),
             working_directory: std::env::current_dir().ok(),

@@ -718,6 +718,31 @@ fn engine_resize_preserves_visible_prefix() {
 }
 
 #[test]
+fn engine_resize_resets_scroll_region_to_full_screen() {
+    // Regression: growing from the default 24 rows to 50 must reset the
+    // DECSTBM scrolling region, otherwise output stays confined to the old
+    // 24-row region and only the top half of the main pane is used.
+    let mut engine = TerminalEngine::new(TerminalSize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    engine.resize(TerminalSize {
+        rows: 50,
+        cols: 176,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.scroll_top, 0);
+    assert_eq!(snapshot.scroll_bottom, 49);
+    assert_eq!(snapshot.size.rows, 50);
+}
+
+#[test]
 fn engine_translates_dec_graphics_charset_line_drawing() {
     let mut engine = TerminalEngine::new(TerminalSize {
         rows: 2,

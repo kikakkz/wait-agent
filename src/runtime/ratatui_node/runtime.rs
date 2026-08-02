@@ -23,11 +23,13 @@ use crate::runtime::remote_publication::remote_target_publication_runtime::Remot
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use super::agent_signal_env::AgentSignalEnv;
 use super::agent_signal_server::AgentSignalServer;
 use super::authority_host_io_loop::AuthorityHostIoLoop;
 use super::authority_host_session::RatatuiAuthorityHostSession;
@@ -321,6 +323,14 @@ impl SharedState {
         }
     }
 
+    /// Update the current working directory of a session from shell integration.
+    pub(super) fn set_session_current_path(&self, target_id: &str, current_path: PathBuf) {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = guard.get_mut(target_id) {
+            record.current_path = Some(current_path);
+        }
+    }
+
     /// Return the authority id used for local sessions hosted by this server.
     pub(crate) fn local_authority_id(&self) -> String {
         format!("local#{}", self.network.port)
@@ -410,8 +420,15 @@ impl SharedState {
             .and_then(|s| s.rsplit_once('/').map(|(_, name)| name.to_string()))
             .unwrap_or_else(|| "bash".to_string());
 
+        let signal_env = AgentSignalEnv {
+            socket_path: self.agent_signal_socket_path.clone(),
+            socket_name: format!("ratatui-{}", self.network.port),
+            target_session_name: target_id.clone(),
+            pane_id: target_id.clone(),
+            token: self.agent_signal_token.clone(),
+        };
         let session =
-            RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows)?;
+            RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows, signal_env)?;
 
         {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());

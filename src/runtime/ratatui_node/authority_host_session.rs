@@ -1,5 +1,6 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::ratatui_node::agent_signal_env::AgentSignalEnv;
 use crate::runtime::ratatui_node::authority_host_io_loop::{
     AuthorityHostIoHandle, AuthorityHostIoRequest,
 };
@@ -32,6 +33,7 @@ impl RatatuiAuthorityHostSession {
         command_name: impl Into<String>,
         cols: u16,
         rows: u16,
+        signal_env: AgentSignalEnv,
     ) -> Result<Self, LifecycleError> {
         let session_id = session_id.into();
         let command_name = command_name.into();
@@ -64,6 +66,7 @@ impl RatatuiAuthorityHostSession {
             std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
         );
         cmd.env("COLORTERM", "truecolor");
+        signal_env.apply_to_command(&mut cmd)?;
         let master_fd = master.as_raw_fd();
         let slave_fd = slave.as_raw_fd();
 

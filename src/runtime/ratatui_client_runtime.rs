@@ -1310,44 +1310,100 @@ fn render_footer_line(
     let muted_style = dim_style(Style::default().fg(Color::Gray), dim_background);
     let accent_style = dim_style(Style::default().fg(Color::White), dim_background);
 
-    let mut spans = Vec::new();
+    let mut left_spans = Vec::new();
 
     if let Some(listener) = &snapshot.footer.listener_endpoint {
-        spans.push(Span::styled("Listen ", accent_style));
-        spans.push(Span::styled(format!("{} ", listener), muted_style));
+        left_spans.push(Span::styled("Listen ", accent_style));
+        left_spans.push(Span::styled(format!("{} ", listener), muted_style));
     }
     if let Some(connect) = &snapshot.footer.connect_endpoint {
-        spans.push(Span::styled("· Connect ", accent_style));
-        spans.push(Span::styled(format!("{} ", connect), muted_style));
+        left_spans.push(Span::styled("· Connect ", accent_style));
+        left_spans.push(Span::styled(format!("{} ", connect), muted_style));
     }
     if snapshot.footer.remote_count > 0 {
-        spans.push(Span::styled("· ", muted_style));
-        spans.push(Span::styled(
+        left_spans.push(Span::styled("· ", muted_style));
+        left_spans.push(Span::styled(
             format!("{} remote ", snapshot.footer.remote_count),
             muted_style,
         ));
     }
 
-    if !spans.is_empty() {
-        spans.push(Span::styled("· ", muted_style));
+    if !left_spans.is_empty() {
+        left_spans.push(Span::styled("· ", muted_style));
     }
 
     let toggle_label = if sidebar_hidden { "Show" } else { "Hide" };
-    spans.push(Span::styled(
-        format!(
-            "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs",
-            toggle_label
-        ),
-        muted_style,
-    ));
+    let menu_text = format!(
+        "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs",
+        toggle_label
+    );
 
-    let text_width: usize = spans.iter().map(|s| display_width(&s.content)).sum();
-    let fill = area_width.saturating_sub(text_width);
+    let left_width = left_spans
+        .iter()
+        .map(|s| display_width(&s.content))
+        .sum::<usize>();
+    let menu_width = display_width(&menu_text);
+
+    let path_text = active_session_current_path(snapshot)
+        .map(|p| format!("📁 {p}"))
+        .unwrap_or_default();
+    let path_width = display_width(&path_text);
+    let available_for_path = area_width.saturating_sub(left_width + menu_width + 1);
+    let path_display = if path_text.is_empty() || available_for_path == 0 {
+        String::new()
+    } else if path_width > available_for_path {
+        truncate_from_left(&path_text, available_for_path)
+    } else {
+        path_text
+    };
+    let path_display_width = display_width(&path_display);
+
+    let fill = area_width.saturating_sub(left_width + menu_width + path_display_width);
+
+    let mut spans = left_spans;
+    spans.push(Span::styled(menu_text, muted_style));
     if fill > 0 {
         spans.push(Span::styled(" ".repeat(fill), muted_style));
     }
+    if !path_display.is_empty() {
+        spans.push(Span::styled(path_display, muted_style));
+    }
 
     Line::from(spans)
+}
+
+fn active_session_current_path(snapshot: &RatatuiSnapshot) -> Option<String> {
+    let target_id = snapshot.active_target.as_deref()?;
+    let session = snapshot.sessions.iter().find(|s| s.id == target_id)?;
+    let path = session.current_path.as_deref()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Truncate a string by removing characters from the left, keeping the
+/// rightmost characters. Adds a leading ellipsis if truncation occurred.
+fn truncate_from_left(text: &str, width: usize) -> String {
+    if width == 0 || display_width(text) <= width {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut used = 0usize;
+    let mut start = chars.len();
+    for (index, ch) in chars.iter().enumerate().rev() {
+        let ch_width = char_width(*ch);
+        if used + ch_width > width.saturating_sub(1) {
+            break;
+        }
+        used += ch_width;
+        start = index;
+    }
+    if start >= chars.len() {
+        return text.to_string();
+    }
+    format!("…{}", chars[start..].iter().collect::<String>())
 }
 
 fn title_style(active: bool) -> Style {

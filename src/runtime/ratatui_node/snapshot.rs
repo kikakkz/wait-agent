@@ -123,6 +123,7 @@ pub struct SessionView {
     pub task_state: String,
     pub availability: String,
     pub attached_clients: usize,
+    pub current_path: Option<String>,
 }
 
 impl SessionView {
@@ -148,6 +149,10 @@ impl SessionView {
             task_state: record.task_state.as_str().to_string(),
             availability: record.availability.as_str().to_string(),
             attached_clients: record.attached_clients,
+            current_path: record
+                .current_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
         }
     }
 
