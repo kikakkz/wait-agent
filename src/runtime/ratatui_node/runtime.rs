@@ -232,7 +232,9 @@ impl SharedState {
 
         // Server lifetime is tied to local sessions. Remote sessions are views
         // into other hosts and should not keep this server alive when the last
-        // local session exits. On restart, clients are expected to reconnect.
+        // local session exits. Both the local server and peer node servers
+        // (started with --connect) exit once their last local session ends;
+        // clients are expected to reconnect if they need a new session.
         let remaining_local: Vec<String> = {
             let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard
@@ -248,24 +250,12 @@ impl SharedState {
         {
             let mut active_guard = self.active_target.lock().unwrap_or_else(|e| e.into_inner());
             if remaining_local.is_empty() {
-                // Peer node servers (started with --connect) are long-lived:
-                // they only host sessions on behalf of remote viewers and must
-                // stay alive so future sessions can be created.  The local node
-                // server (no --connect) exits when its last local session ends.
-                if self.network.connect.is_none() {
-                    ERROR_LOG.log(format!(
-                        "[ratatui-node] last local session {target_id} exited; shutting down"
-                    ));
-                    self.shutdown.store(true, Ordering::SeqCst);
-                    let _ =
-                        UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
-                    *active_guard = None;
-                } else {
-                    ERROR_LOG.log(format!(
-                        "[ratatui-node] peer node session {target_id} exited; keeping server alive"
-                    ));
-                    *active_guard = None;
-                }
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] last local session {target_id} exited; shutting down"
+                ));
+                self.shutdown.store(true, Ordering::SeqCst);
+                let _ = UnixStream::connect(super::socket::ratatui_socket_path(self.network.port));
+                *active_guard = None;
             } else {
                 // Pick the next local session. Prefer one that is not the
                 // just-exited session, falling back to the first remaining one.
