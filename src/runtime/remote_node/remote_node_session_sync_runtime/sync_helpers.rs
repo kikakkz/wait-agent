@@ -34,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
     LocalAuthorityHostBackend, LocalSessionCatalog, LocalTargetExitObserver, LocalTargetFactory,
-    OutboundRemoteNodeTransport, SessionSyncAuthorityManager, WAITAGENT_ACTIVE_TARGET_OPTION,
+    OutboundRemoteNodeTransport, SessionSyncAuthorityManager,
 };
 
 const SOURCE_PUBLICATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);

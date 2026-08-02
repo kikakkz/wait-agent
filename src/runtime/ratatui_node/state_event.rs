@@ -21,6 +21,11 @@ pub(crate) enum StateEvent {
         target_id: String,
         task_state: crate::domain::session_catalog::ManagedSessionTaskState,
     },
+    /// The detected foreground command name of a session changed.
+    SessionCommandNameChanged {
+        target_id: String,
+        command_name: String,
+    },
     /// A local `alacritty_terminal` session produced output and the TUI
     /// clients should be refreshed.  This is deliberately sent to the single
     /// writer loop so that snapshots are broadcast without holding the

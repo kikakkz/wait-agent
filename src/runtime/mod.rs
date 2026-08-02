@@ -8,7 +8,6 @@ pub mod remote_main_slot;
 pub use remote_main_slot::remote_main_slot_runtime;
 
 pub mod remote_node;
-pub use remote_node::remote_node_ingress_runtime;
 pub use remote_node::remote_node_ingress_server_runtime;
 pub use remote_node::remote_node_session_runtime;
 pub use remote_node::remote_node_session_sync_runtime;
@@ -34,7 +33,6 @@ pub mod workspace;
 pub use workspace::sidecar_process_runtime;
 
 // Standalone modules remaining in runtime root
-pub mod agent_signal_sender_bundle;
 pub mod remote_observer_runtime;
 
 pub(crate) mod current_executable;

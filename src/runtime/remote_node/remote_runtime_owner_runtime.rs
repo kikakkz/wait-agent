@@ -7,7 +7,6 @@ use crate::infra::error_log::ERROR_LOG;
 
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::remote_node::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;

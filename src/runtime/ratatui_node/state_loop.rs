@@ -131,6 +131,14 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
+            StateEvent::SessionCommandNameChanged {
+                target_id,
+                command_name,
+            } => {
+                shared.set_session_command_name(&target_id, command_name);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
             StateEvent::LocalSessionOutput { .. } => {
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }

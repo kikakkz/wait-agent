@@ -286,6 +286,14 @@ impl SharedState {
         }
     }
 
+    /// Update the displayed command name from agent/process detection.
+    pub(super) fn set_session_command_name(&self, target_id: &str, command_name: String) {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = guard.get_mut(target_id) {
+            record.display_command_name = Some(command_name);
+        }
+    }
+
     /// Return the authority id used for local sessions hosted by this server.
     pub(crate) fn local_authority_id(&self) -> String {
         format!("local#{}", self.network.port)

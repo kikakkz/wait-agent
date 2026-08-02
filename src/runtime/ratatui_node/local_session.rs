@@ -1,3 +1,4 @@
+use crate::domain::agent_detector::DetectorRegistry;
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -11,7 +12,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -87,17 +88,25 @@ impl RatatuiLocalSession {
 
         let _join_handle = event_loop.spawn();
 
-        spawn_task_state_monitor(session_id.clone(), master_fd, child_pid, shared.clone());
+        let session = Arc::new(Self {
+            term,
+            event_loop_sender: sender_slot,
+        });
+
+        spawn_task_state_monitor(
+            session_id.clone(),
+            master_fd,
+            child_pid,
+            session.clone(),
+            shared.clone(),
+        );
 
         ERROR_LOG.log(format!(
             "[ratatui-local-session] spawned session={} cols={} rows={}",
             session_id, cols, rows
         ));
 
-        Ok(Arc::new(Self {
-            term,
-            event_loop_sender: sender_slot,
-        }))
+        Ok(session)
     }
 
     /// Send bytes to the PTY as if typed by the user.
@@ -202,6 +211,23 @@ impl RatatuiLocalSession {
             styled_lines.push(styled);
         }
         (lines, styled_lines)
+    }
+
+    /// Return the last `n` visible screen lines joined as plain text.
+    fn last_visible_text(&self, n: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let screen_lines = grid.screen_lines();
+        let columns = grid.columns();
+        let display_offset = grid.display_offset() as i32;
+        let start = screen_lines.saturating_sub(n);
+        let mut lines = Vec::with_capacity(n);
+        for row in start..screen_lines {
+            let line = Line(row as i32 - display_offset);
+            let (text, _) = render_grid_line(&grid, line, columns);
+            lines.push(text);
+        }
+        lines.join("\n")
     }
 }
 
@@ -378,18 +404,28 @@ impl Dimensions for TermSize {
     }
 }
 
+/// Lazily-initialized global agent detector registry used by all local
+/// sessions to map foreground process info to command names and task states.
+fn detector_registry() -> &'static DetectorRegistry {
+    static REGISTRY: OnceLock<DetectorRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(DetectorRegistry::default)
+}
+
 /// Spawn a background thread that watches the PTY foreground process group
 /// to infer whether the shell is at a prompt (Input) or a command is running
-/// (Running).  The result is sent to `StateEventLoop` as a task-state change.
+/// (Running/Confirm).  The result is sent to `StateEventLoop` as task-state
+/// and command-name changes.
 fn spawn_task_state_monitor(
     target_id: String,
     master_fd: std::os::unix::io::RawFd,
     child_pid: i32,
+    session: Arc<RatatuiLocalSession>,
     shared: Arc<SharedState>,
 ) {
     thread::spawn(move || {
         let running = Arc::new(AtomicBool::new(true));
         let mut last_state = None;
+        let mut last_command_name = None;
 
         while running.load(Ordering::Relaxed) {
             // SAFETY: `tcgetpgrp` and `getpgid` are async-signal-safe POSIX
@@ -404,8 +440,32 @@ fn spawn_task_state_monitor(
                 break;
             }
 
-            let task_state = if fg_pgid == shell_pgid {
+            let at_shell_prompt = fg_pgid == shell_pgid;
+
+            // Resolve the foreground command name and argv from /proc so the
+            // agent detector can recognize known agents (claude, codex, kimi).
+            let (detected_command, argv) = if at_shell_prompt {
+                (None, None)
+            } else {
+                foreground_process_info(fg_pgid)
+            };
+
+            let pane_text = session.last_visible_text(8);
+            let registry = detector_registry();
+
+            let command_name = detected_command
+                .as_deref()
+                .map(|cmd| registry.detect_command_name(cmd, argv.as_deref(), &pane_text));
+
+            let task_state = if at_shell_prompt {
                 crate::domain::session_catalog::ManagedSessionTaskState::Input
+            } else if let Some(name) = command_name.as_deref() {
+                let detected = registry.infer_task_state(Some(name), &pane_text);
+                if detected == crate::domain::session_catalog::ManagedSessionTaskState::Unknown {
+                    crate::domain::session_catalog::ManagedSessionTaskState::Running
+                } else {
+                    detected
+                }
             } else {
                 crate::domain::session_catalog::ManagedSessionTaskState::Running
             };
@@ -420,6 +480,18 @@ fn spawn_task_state_monitor(
                     });
             }
 
+            if last_command_name != command_name {
+                last_command_name = command_name.clone();
+                if let Some(command_name) = command_name {
+                    let _ = shared
+                        .state_sender()
+                        .send(StateEvent::SessionCommandNameChanged {
+                            target_id: target_id.clone(),
+                            command_name,
+                        });
+                }
+            }
+
             thread::sleep(Duration::from_millis(200));
         }
 
@@ -427,4 +499,27 @@ fn spawn_task_state_monitor(
             "[ratatui-local-session] task-state monitor exiting for {target_id}"
         ));
     });
+}
+
+/// Read /proc for the process group leader of `pgid` and return its argv[0]
+/// and full argv vector.
+fn foreground_process_info(pgid: i32) -> (Option<String>, Option<Vec<String>>) {
+    // The foreground process group leader is typically the running command.
+    let leader_pid = unsafe { libc::getpgid(pgid) };
+    if leader_pid <= 0 {
+        return (None, None);
+    }
+    let cmdline_path = format!("/proc/{leader_pid}/cmdline");
+    let contents = std::fs::read_to_string(&cmdline_path).unwrap_or_default();
+    let parts: Vec<String> = contents
+        .split('\0')
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let argv0 = parts.first().cloned();
+    if parts.is_empty() {
+        (None, None)
+    } else {
+        (argv0, Some(parts))
+    }
 }

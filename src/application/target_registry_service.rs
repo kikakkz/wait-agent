@@ -1,12 +1,8 @@
-use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionAvailability;
 use crate::domain::session_catalog::SessionTransport;
 use crate::infra::error_log::ERROR_LOG;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 pub trait TargetCatalogGateway {
     type Error;

@@ -149,16 +149,6 @@ impl RatatuiAuthorityHostSession {
             console_id: console_id.into(),
         });
     }
-
-    /// Request a graceful shutdown of the PTY session.
-    pub fn shutdown(&mut self, io_tx: &AuthorityHostIoHandle) {
-        let _ = io_tx.send(AuthorityHostIoRequest::UnregisterSession {
-            session_id: self.session_id.clone(),
-        });
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-        }
-    }
 }
 
 fn set_nonblocking(file: &mut File) {

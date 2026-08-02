@@ -37,7 +37,6 @@ const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
 pub(super) const LIVE_AUTHORITY_SERVER_ID: &str = "waitagent-live-authority-owner";
-pub(super) const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub trait LocalSessionCatalog: Send + 'static {
     type Error: ToString;
