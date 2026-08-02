@@ -17,7 +17,7 @@ mod tests {
     };
     use crate::domain::workspace::WorkspaceSessionRole;
     use crate::infra::remote_protocol::TargetPublishedPayload;
-    use crate::infra::tmux::RemoteTargetPublicationBinding;
+    use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBinding;
     use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
     use crate::runtime::remote_workspace_socket_registry_runtime::{
         workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,

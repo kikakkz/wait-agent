@@ -136,4 +136,11 @@ pub trait RemoteTargetPublicationBackend: Clone + Send + Sync + 'static {
 }
 
 /// Binding that publishes a local target host session to remote viewers.
-pub use crate::infra::tmux::RemoteTargetPublicationBinding;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTargetPublicationBinding {
+    pub socket_name: String,
+    pub target_session_name: String,
+    pub authority_id: String,
+    pub transport_session_id: String,
+    pub selector: Option<String>,
+}

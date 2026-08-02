@@ -21,8 +21,6 @@ pub use remote_publication::remote_target_publication_runtime;
 pub use remote_publication::remote_target_publication_transport_runtime;
 pub use remote_publication::remote_transport_runtime;
 
-pub mod session_lifecycle;
-
 // Ratatui migration path
 pub mod ratatui_client_runtime;
 pub mod ratatui_node;
@@ -41,4 +39,3 @@ pub mod remote_observer_runtime;
 
 pub(crate) mod current_executable;
 pub(crate) mod network_state_runtime;
-pub(crate) mod output_quiet_refresh_scheduler;

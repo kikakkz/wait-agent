@@ -15,9 +15,7 @@ use crate::infra::remote_protocol::{
     ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, TargetPublicationAckPayload,
     TargetPublicationAckStatus,
 };
-use crate::infra::tmux::{
-    EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSessionName, TmuxSocketName, TmuxWorkspaceHandle,
-};
+
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
 use crate::runtime::remote_node_session_runtime::{
@@ -1321,36 +1319,6 @@ fn merge_cached_remote_identity_with_live_target_runtime(
     cached_remote_target
 }
 
-pub(super) fn active_workspace_targets_on_socket<G>(
-    gateway: &G,
-    socket_name: &TmuxSocketName,
-    sessions: &[ManagedSessionRecord],
-) -> Result<HashMap<String, String>, G::Error>
-where
-    G: TmuxChromeGateway,
-{
-    let mut active_targets = HashMap::new();
-    for session in sessions
-        .iter()
-        .filter(|session| session.is_workspace_chrome())
-    {
-        let workspace = TmuxWorkspaceHandle {
-            workspace_id: crate::domain::workspace::WorkspaceInstanceId::new(
-                session.address.session_id(),
-            ),
-            socket_name: socket_name.clone(),
-            session_name: TmuxSessionName::new(session.address.session_id()),
-        };
-        if let Some(active_target) = gateway
-            .show_session_option(&workspace, WAITAGENT_ACTIVE_TARGET_OPTION)?
-            .filter(|target| !target.is_empty())
-        {
-            active_targets.insert(session.address.session_id().to_string(), active_target);
-        }
-    }
-    Ok(active_targets)
-}
-
 pub(crate) fn overlay_workspace_runtime_onto_active_local_target_hosts(
     sessions: Vec<ManagedSessionRecord>,
     socket_name: &str,
@@ -1795,14 +1763,4 @@ fn send_owner_command_without_response(
         .map_err(remote_session_sync_error)?;
     stream.shutdown(Shutdown::Write).ok();
     Ok(())
-}
-
-pub(super) fn backend_socket_still_exists(socket_name: &str) -> bool {
-    let socket_path = crate::infra::tmux::tmux_socket_dir().join(socket_name);
-    if !socket_path.exists() {
-        return false;
-    }
-    EmbeddedTmuxBackend::from_build_env()
-        .map(|backend| backend.socket_is_live(&TmuxSocketName::new(socket_name)))
-        .unwrap_or(false)
 }

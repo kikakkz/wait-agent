@@ -4,12 +4,11 @@ use crate::domain::session_catalog::{
 };
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxSessionGateway, TmuxSocketName};
+
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node::remote_workspace_socket_registry_runtime::live_workspace_socket_names_for_network;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
-use crate::runtime::workspace::sidecar_process_runtime::spawn_waitagent_sidecar;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -337,48 +336,12 @@ fn compute_next_ttl_deadline(state: &RemoteRuntimeOwnerSharedState) -> Option<To
 }
 
 fn emit_remote_target_exited_cleanup(
-    state: &RemoteRuntimeOwnerSharedState,
-    pruned_records: &[OwnerStateRecord],
+    _state: &RemoteRuntimeOwnerSharedState,
+    _pruned_records: &[OwnerStateRecord],
 ) -> Result<(), LifecycleError> {
-    if pruned_records.is_empty() {
-        return Ok(());
-    }
-
-    let live_sockets = live_workspace_socket_names_for_network(&state.network)?;
-    if live_sockets.is_empty() {
-        return Ok(());
-    }
-
-    let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_runtime_owner_error)?;
-
-    for record in pruned_records {
-        let target = record.session.address.qualified_target();
-        for socket_name in &live_sockets {
-            let sessions = backend
-                .list_sessions_on_socket(&TmuxSocketName::new(socket_name))
-                .map_err(remote_runtime_owner_error)?;
-            for session in sessions {
-                if !session.is_workspace_chrome() {
-                    continue;
-                }
-                let mut args = vec![
-                    "__remote-target-exited".to_string(),
-                    "--socket-name".to_string(),
-                    socket_name.clone(),
-                    "--session-name".to_string(),
-                    session.address.session_id().to_string(),
-                    "--target".to_string(),
-                    target.clone(),
-                ];
-                if let Some(pane_id) = record.socket_panes.get(socket_name) {
-                    args.push("--pane-id".to_string());
-                    args.push(pane_id.clone());
-                }
-                spawn_waitagent_sidecar(&state.current_executable, args)
-                    .map_err(remote_runtime_owner_error)?;
-            }
-        }
-    }
+    // In the ratatui single-process model there are no tmux chrome sessions
+    // to notify. Remote target exits are propagated to TUI clients via the
+    // snapshot broadcast instead of sidecar notifications.
     Ok(())
 }
 
