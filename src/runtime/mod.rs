@@ -33,6 +33,7 @@ pub mod workspace;
 pub use workspace::sidecar_process_runtime;
 
 // Standalone modules remaining in runtime root
+pub mod agent_signal_sender_bundle;
 pub mod remote_observer_runtime;
 
 pub(crate) mod current_executable;

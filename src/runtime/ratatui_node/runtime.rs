@@ -1,3 +1,6 @@
+use crate::application::claude_hooks_config_service::ClaudeHooksConfigService;
+use crate::application::codex_hooks_config_service::CodexHooksConfigService;
+use crate::application::kimi_hooks_config_service::KimiHooksConfigService;
 use crate::cli::{RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
@@ -5,6 +8,7 @@ use crate::domain::session_catalog::{
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use crate::runtime::agent_signal_sender_bundle::extract_agent_signal_sender;
 use crate::runtime::remote_node::remote_node_ingress_server_runtime::{
     remote_node_ingress_owner_socket_path, start_owner_control_acceptor, OwnerLifecycleEvent,
     RemoteNodeIngressServerRuntime,
@@ -24,6 +28,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use super::agent_signal_server::AgentSignalServer;
 use super::authority_host_io_loop::AuthorityHostIoLoop;
 use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
@@ -70,6 +75,10 @@ pub(crate) struct SharedState {
     /// Last main-pane size reported by a TUI client. Used when the active target
     /// changes so the newly activated session can be resized immediately.
     pub(crate) last_client_resize: Mutex<Option<(u16, u16)>>,
+    /// Unix datagram socket path where agent hooks send lifecycle events.
+    pub(crate) agent_signal_socket_path: String,
+    /// Random token agents must include in their signal envelopes.
+    pub(crate) agent_signal_token: String,
     state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
     authority_host_io_tx: Mutex<Option<super::authority_host_io_loop::AuthorityHostIoHandle>>,
     local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
@@ -77,6 +86,11 @@ pub(crate) struct SharedState {
 
 impl SharedState {
     pub(crate) fn new(network: RemoteNetworkConfig) -> Arc<Self> {
+        let agent_signal_socket_path = super::socket::ratatui_socket_dir()
+            .join(format!("signal-{port}.sock", port = network.port))
+            .to_string_lossy()
+            .to_string();
+        let agent_signal_token = random_token();
         Arc::new(Self {
             network,
             sessions: Mutex::new(HashMap::new()),
@@ -89,6 +103,8 @@ impl SharedState {
             authority_host_sessions: Mutex::new(HashMap::new()),
             remote_sessions: Mutex::new(HashMap::new()),
             last_client_resize: Mutex::new(None),
+            agent_signal_socket_path,
+            agent_signal_token,
             state_tx: Mutex::new(None),
             authority_host_io_tx: Mutex::new(None),
             local_catalog_tx: Mutex::new(None),
@@ -266,12 +282,15 @@ impl SharedState {
         });
     }
 
-    /// Update the displayed command name from the terminal title.
+    /// Record a terminal title change.
+    ///
+    /// The title is not used as the sidebar command name; the sidebar prefers
+    /// agent/process detection so that user-typed text (e.g. in an agent prompt)
+    /// does not overwrite the session label.
     pub(super) fn set_local_session_title(&self, target_id: &str, title: String) {
-        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(record) = guard.get_mut(target_id) {
-            record.display_command_name = Some(title);
-        }
+        ERROR_LOG.log(format!(
+            "[ratatui-node] terminal title changed target_id={target_id} title={title}"
+        ));
     }
 
     /// Update the inferred task state of a session.
@@ -291,6 +310,14 @@ impl SharedState {
         let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(record) = guard.get_mut(target_id) {
             record.display_command_name = Some(command_name);
+        }
+    }
+
+    /// Clear the displayed command name, e.g. when an agent signals session end.
+    pub(super) fn clear_session_command_name(&self, target_id: &str) {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = guard.get_mut(target_id) {
+            record.display_command_name = None;
         }
     }
 
@@ -545,6 +572,14 @@ impl SharedState {
     }
 }
 
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    // getrandom is a required dependency; failure here indicates a serious
+    // platform issue, so we panic rather than propagate.
+    getrandom::fill(&mut bytes).expect("getrandom should succeed for agent signal token");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 impl RatatuiNodeRuntime {
     pub fn from_network(network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
         let remote_owner = RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
@@ -609,6 +644,56 @@ impl RatatuiNodeRuntime {
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
         self.shared.set_local_catalog_tx(catalog_tx);
+
+        // Start the agent signal listener so agent hooks can deliver lifecycle
+        // events (UserPromptSubmit, PermissionRequest, etc.) to this server.
+        let signal_server = match AgentSignalServer::start(self.shared.clone()) {
+            Ok(server) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] agent signal socket={}",
+                    self.shared.agent_signal_socket_path
+                ));
+                Some(server)
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] failed to start agent signal server: {error}"
+                ));
+                None
+            }
+        };
+
+        // Install agent hooks into claude/codex/kimi config files.  The hooks
+        // reuse the existing `waitagent-agent-signal-send` binary and the
+        // environment variables exported into each local PTY session.
+        match extract_agent_signal_sender() {
+            Ok(sender_path) => {
+                if let Err(error) =
+                    KimiHooksConfigService::from_env(sender_path.clone()).reconcile()
+                {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] failed to install kimi hooks: {error}"
+                    ));
+                }
+                if let Err(error) =
+                    CodexHooksConfigService::from_env(sender_path.clone()).reconcile()
+                {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] failed to install codex hooks: {error}"
+                    ));
+                }
+                if let Err(error) = ClaudeHooksConfigService::from_env(sender_path).reconcile() {
+                    ERROR_LOG.log(format!(
+                        "[ratatui-node] failed to install claude hooks: {error}"
+                    ));
+                }
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-node] failed to extract agent signal sender: {error}"
+                ));
+            }
+        }
 
         // Start the remote runtime owner inside the server process so that
         // discovered remote sessions are kept in-memory and shared with the
@@ -734,6 +819,9 @@ impl RatatuiNodeRuntime {
             }
         }
 
+        if let Some(signal_server) = signal_server {
+            signal_server.cleanup();
+        }
         let _ = std::fs::remove_file(&socket_path);
         if let Err(error) = RemoteRuntimeOwnerRuntime::shutdown_owner(&owner_network) {
             ERROR_LOG.log(format!(

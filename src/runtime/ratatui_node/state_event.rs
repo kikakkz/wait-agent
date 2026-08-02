@@ -70,6 +70,13 @@ pub(crate) enum StateEvent {
     /// This covers both a remote session viewer closing and a local
     /// authority-host session being closed by a remote peer.
     SessionClosed { target_id: String },
+    /// An agent hook sent a lifecycle signal for a local session.
+    AgentSignalReceived {
+        target_id: String,
+        agent: String,
+        event: String,
+        payload: serde_json::Value,
+    },
     /// A remote peer went offline (the last ingress session to it closed).
     /// Any remote-peer sessions that were views into that node are stale and
     /// should be removed from the local catalog.

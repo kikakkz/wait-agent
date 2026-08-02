@@ -1,3 +1,4 @@
+pub mod agent_signal_server;
 pub mod authority_host_io_loop;
 pub mod authority_host_session;
 pub mod client;

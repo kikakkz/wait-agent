@@ -1,3 +1,5 @@
+use crate::domain::agent_detector::DetectorRegistry;
+use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
     SessionTransport,
@@ -339,6 +341,31 @@ fn run_state_event_loop(
                     }
                 }
                 reconnect_handles.remove(&target_id);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
+            StateEvent::AgentSignalReceived {
+                target_id,
+                agent,
+                event,
+                payload,
+            } => {
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] agent signal target_id={target_id} agent={agent} event={event}"
+                ));
+                let effect =
+                    DetectorRegistry::default().signal_state_effect(&agent, &event, &payload);
+                match effect {
+                    Some(AgentStateEffect::Set(state)) => {
+                        shared.set_session_task_state(&target_id, state);
+                        shared.set_session_command_name(&target_id, agent);
+                    }
+                    Some(AgentStateEffect::Clear) => {
+                        shared.set_session_task_state(&target_id, ManagedSessionTaskState::Input);
+                        shared.clear_session_command_name(&target_id);
+                    }
+                    None => {}
+                }
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 

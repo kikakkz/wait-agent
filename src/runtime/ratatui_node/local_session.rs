@@ -39,11 +39,29 @@ impl RatatuiLocalSession {
         tty::setup_env();
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let mut env = HashMap::new();
+        env.insert(
+            "WAITAGENT_SIGNAL_SOCKET".to_string(),
+            shared.agent_signal_socket_path.clone(),
+        );
+        env.insert(
+            "WAITAGENT_SOCKET_NAME".to_string(),
+            format!("ratatui-{}", shared.network.port),
+        );
+        env.insert(
+            "WAITAGENT_TARGET_SESSION_NAME".to_string(),
+            session_id.clone(),
+        );
+        env.insert("WAITAGENT_PANE_ID".to_string(), session_id.clone());
+        env.insert(
+            "WAITAGENT_AGENT_SIGNAL_TOKEN".to_string(),
+            shared.agent_signal_token.clone(),
+        );
         let options = Options {
             shell: Some(Shell::new(shell, Vec::new())),
             working_directory: std::env::current_dir().ok(),
             drain_on_exit: true,
-            env: HashMap::new(),
+            env,
             #[cfg(target_os = "windows")]
             escape_args: false,
         };
@@ -462,7 +480,15 @@ fn spawn_task_state_monitor(
             } else if let Some(name) = command_name.as_deref() {
                 let detected = registry.infer_task_state(Some(name), &pane_text);
                 if detected == crate::domain::session_catalog::ManagedSessionTaskState::Unknown {
-                    crate::domain::session_catalog::ManagedSessionTaskState::Running
+                    // For known agents, default to Input when pane-text heuristics
+                    // are inconclusive; hook signals will switch to Running when
+                    // the agent actually starts working.  Non-agent foreground
+                    // commands default to Running.
+                    if registry.agent_signal_matches_command(name, name) {
+                        crate::domain::session_catalog::ManagedSessionTaskState::Input
+                    } else {
+                        crate::domain::session_catalog::ManagedSessionTaskState::Running
+                    }
                 } else {
                     detected
                 }
