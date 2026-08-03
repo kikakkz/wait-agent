@@ -87,7 +87,7 @@ impl RatatuiAuthorityHostSession {
         unsafe {
             cmd.pre_exec(move || {
                 let _ = libc::setsid();
-                let _ = libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+                let _ = libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
                 libc::close(slave_fd);
                 libc::close(master_fd);
                 Ok(())

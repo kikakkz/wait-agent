@@ -37,6 +37,7 @@ use crate::runtime::remote_node_session_sync_runtime::{
 };
 use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+#[cfg(target_os = "linux")]
 use crate::runtime::remote_workspace_socket_registry_runtime::workspace_socket_registry_path;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
