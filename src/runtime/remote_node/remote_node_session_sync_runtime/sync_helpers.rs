@@ -1,3 +1,6 @@
+// Legacy tmux-era session-sync helpers kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::domain::agent_detector::SHELL_NAMES;
 use crate::domain::session_catalog::{

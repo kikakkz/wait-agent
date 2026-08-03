@@ -1,3 +1,6 @@
+// Legacy tmux-era remote runtime owner kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig, RemoteRuntimeOwnerCommand};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,

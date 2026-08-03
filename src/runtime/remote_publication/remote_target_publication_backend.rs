@@ -1,3 +1,6 @@
+// Legacy tmux-era publication backend abstraction kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::lifecycle::LifecycleError;

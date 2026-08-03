@@ -1,3 +1,6 @@
+// Legacy tmux-era authority target-host runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::RemoteNetworkConfig;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::remote_target_publication_runtime::{

@@ -17,7 +17,6 @@ pub use remote_node::remote_workspace_socket_registry_runtime;
 
 pub mod remote_publication;
 pub use remote_publication::remote_target_publication_runtime;
-pub use remote_publication::remote_target_publication_transport_runtime;
 pub use remote_publication::remote_transport_runtime;
 
 // Ratatui migration path

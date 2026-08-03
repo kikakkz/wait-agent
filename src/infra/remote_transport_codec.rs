@@ -1,3 +1,6 @@
+// Legacy tmux-era transport codec kept during the ratatui migration; `write_registration_frame` is used only in tests/dead modules.
+#![allow(dead_code)]
+
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ClientHelloPayload, CloseMirrorRequestPayload,
     ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,

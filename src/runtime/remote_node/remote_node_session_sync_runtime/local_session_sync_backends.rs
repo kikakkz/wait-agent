@@ -1,3 +1,6 @@
+// Legacy tmux-era session-sync backends kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;

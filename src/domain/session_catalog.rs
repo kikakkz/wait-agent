@@ -1,3 +1,6 @@
+// Legacy tmux-era session catalog kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::workspace::WorkspaceSessionRole;
 use std::path::PathBuf;
 

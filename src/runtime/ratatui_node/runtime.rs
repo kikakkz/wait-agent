@@ -452,8 +452,13 @@ impl SharedState {
             pane_id: target_id.clone(),
             token: self.agent_signal_token.clone(),
         };
-        let session =
-            RatatuiAuthorityHostSession::spawn(id.clone(), command_name.clone(), cols, rows, signal_env)?;
+        let session = RatatuiAuthorityHostSession::spawn(
+            id.clone(),
+            command_name.clone(),
+            cols,
+            rows,
+            signal_env,
+        )?;
 
         {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());

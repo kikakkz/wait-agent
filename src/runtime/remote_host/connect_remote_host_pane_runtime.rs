@@ -1,3 +1,6 @@
+// Legacy tmux-era remote-host pane runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;

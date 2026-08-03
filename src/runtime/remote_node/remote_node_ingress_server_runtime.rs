@@ -1,3 +1,6 @@
+// Legacy tmux-era node ingress runtime kept during the ratatui migration; many items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -42,7 +45,6 @@ use std::io::{self, Cursor, ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -57,13 +59,13 @@ const OWNER_CONTROL_REPLY_PENDING: u8 = 1;
 const OWNER_CONTROL_REPLY_ERROR: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AuthoritySocketReadyReply {
+pub(crate) struct AuthoritySocketReadyReply {
     status: AuthoritySocketReadyStatus,
     message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AuthoritySocketReadyStatus {
+pub(crate) enum AuthoritySocketReadyStatus {
     Registered,
     Pending,
     Error,

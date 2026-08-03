@@ -229,7 +229,11 @@ enum ServerMessage {
 #[derive(Debug, Clone)]
 struct HistoryState {
     styled_lines: Vec<String>,
-    scroll_offset: usize,
+    /// Absolute line index of the cursor within the full history buffer.
+    /// The viewport scrolls to keep this line visible.
+    cursor_line: usize,
+    /// Cursor column preserved while scrolling up/down through history.
+    cursor_col: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -270,22 +274,36 @@ fn apply_server_message(
     last_active_target: &mut Option<String>,
     status_message: &mut Option<(String, Instant)>,
     history_state: &mut Option<HistoryState>,
+    focus: Focus,
     message: ServerMessage,
 ) {
     match message {
         ServerMessage::Snapshot(new_snapshot) => {
+            let active_changed = new_snapshot.active_target != *last_active_target;
             *snapshot = new_snapshot;
             if *selected_index >= snapshot.sessions.len() && !snapshot.sessions.is_empty() {
                 *selected_index = snapshot.sessions.len() - 1;
             }
-            // When the server changes the active target (e.g. after a
-            // remote host connects), move the selection marker to that
-            // row so the sidebar stays consistent with the main pane.
-            if snapshot.active_target != *last_active_target {
+            if active_changed {
                 *last_active_target = snapshot.active_target.clone();
+                // History is tied to the previously active session; exit history
+                // mode so the main pane shows the new session instead of stale
+                // scrollback.
+                *history_state = None;
+            }
+            // When focus is in the main pane, keep the sidebar marker aligned
+            // with the active session. When focus is in the sidebar, leave the
+            // user's selection alone so arrow-key navigation does not jump.
+            if focus == Focus::Main {
                 if let Some(target) = snapshot.active_target.as_deref() {
-                    if let Some(idx) = snapshot.sessions.iter().position(|s| s.id == target) {
-                        *selected_index = idx;
+                    let current_id = snapshot
+                        .sessions
+                        .get(*selected_index)
+                        .map(|s| s.id.as_str());
+                    if current_id != Some(target) {
+                        if let Some(idx) = snapshot.sessions.iter().position(|s| s.id == target) {
+                            *selected_index = idx;
+                        }
                     }
                 }
             }
@@ -298,9 +316,21 @@ fn apply_server_message(
             }
         }
         ServerMessage::History(history) => {
+            // Place the history cursor at the same position as the live terminal
+            // cursor so the user continues from where they pressed Ctrl+O.
+            let total = history.styled_lines.len();
+            let (cursor_line, cursor_col) = if let Some((col, row)) = snapshot.main_cursor {
+                let screen_rows = snapshot.main_lines.len().max(1);
+                let absolute_line = total.saturating_sub(screen_rows)
+                    + (row as usize).min(screen_rows.saturating_sub(1));
+                (absolute_line.min(total.saturating_sub(1)), col)
+            } else {
+                (total.saturating_sub(1), 0)
+            };
             *history_state = Some(HistoryState {
                 styled_lines: history.styled_lines,
-                scroll_offset: 0,
+                cursor_line,
+                cursor_col,
             });
         }
         ServerMessage::Log(text) => {
@@ -537,6 +567,7 @@ fn run_event_loop(
                         &mut last_active_target,
                         &mut status_message,
                         &mut history_state,
+                        focus,
                         message,
                     ),
                     Err(_) => {
@@ -580,6 +611,7 @@ fn run_event_loop(
                     &mut last_active_target,
                     &mut status_message,
                     &mut history_state,
+                    focus,
                     message,
                 ),
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
@@ -654,6 +686,9 @@ fn handle_history_key(
     let Some(state) = history_state.as_mut() else {
         return Ok(true);
     };
+    let total = state.styled_lines.len();
+    let max_line = total.saturating_sub(1);
+    const PAGE_SIZE: usize = 10;
 
     match key.code {
         KeyCode::Char('o') | KeyCode::Char('O')
@@ -665,16 +700,16 @@ fn handle_history_key(
             *history_state = None;
         }
         KeyCode::Up => {
-            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+            state.cursor_line = state.cursor_line.saturating_sub(1);
         }
         KeyCode::Down => {
-            state.scroll_offset = state.scroll_offset.saturating_add(1);
+            state.cursor_line = (state.cursor_line + 1).min(max_line);
         }
         KeyCode::PageUp => {
-            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+            state.cursor_line = state.cursor_line.saturating_sub(PAGE_SIZE);
         }
         KeyCode::PageDown => {
-            state.scroll_offset = state.scroll_offset.saturating_add(10);
+            state.cursor_line = (state.cursor_line + PAGE_SIZE).min(max_line);
         }
         _ => {}
     }
@@ -741,26 +776,8 @@ fn render(
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    if let Some(history) = history_state {
-        render_history_view(frame, snapshot, history, outer[0]);
-        let footer = if let Some(status) = status_message {
-            let style = dim_style(
-                Style::default().bg(Color::Yellow).fg(Color::Black),
-                dim_background,
-            );
-            Paragraph::new(pad_right(status, outer[1].width as usize)).style(style)
-        } else {
-            let footer_style = dim_style(
-                Style::default().bg(Color::Blue).fg(Color::White),
-                dim_background,
-            );
-            Paragraph::new(render_history_footer_line(outer[1].width as usize)).style(footer_style)
-        };
-        frame.render_widget(footer, outer[1]);
-        return;
-    }
-
     // Inner horizontal layout: main pane left, optional separator, optional sidebar right.
+    // This layout is computed even in history mode so the sidebar stays visible.
     let inner = if sidebar_hidden {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -781,23 +798,31 @@ fn render(
         area.width, area.height, inner[0].width, inner[0].height
     ));
 
-    let main_block = Block::default()
-        .borders(Borders::NONE)
-        .style(dim_style(Style::default(), dim_background));
-    let main_text = render_main_text(snapshot, inner[0]);
-    let main = Paragraph::new(main_text).block(main_block);
-    frame.render_widget(main, inner[0]);
+    let history_viewport =
+        history_state.map(|history| compute_history_viewport(history, inner[0].height as usize));
 
-    // Draw cursor if the active local session provided a cursor position.
-    if focus == Focus::Main {
-        if let Some((col, row)) = snapshot.main_cursor {
-            let cursor_x = inner[0].x + col;
-            let cursor_y = inner[0].y + row;
-            if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
-                frame
-                    .buffer_mut()
-                    .get_mut(cursor_x, cursor_y)
-                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+    if let Some(history) = history_state {
+        render_history_view(frame, history, inner[0]);
+    } else {
+        let main_block = Block::default()
+            .borders(Borders::NONE)
+            .style(dim_style(Style::default(), dim_background));
+        let main_text = render_main_text(snapshot, inner[0]);
+        let main = Paragraph::new(main_text).block(main_block);
+        frame.render_widget(main, inner[0]);
+
+        // Draw cursor if the active session provided a cursor position.
+        if focus == Focus::Main {
+            if let Some((col, row)) = snapshot.main_cursor {
+                let cursor_x = inner[0].x + col;
+                let cursor_y = inner[0].y + row;
+                if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
+                    frame
+                        .buffer_mut()
+                        .get_mut(cursor_x, cursor_y)
+                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                    frame.set_cursor(cursor_x, cursor_y);
+                }
             }
         }
     }
@@ -830,6 +855,18 @@ fn render(
             dim_background,
         );
         Paragraph::new(pad_right(status, outer[1].width as usize)).style(style)
+    } else if let Some(viewport) = history_viewport {
+        let footer_style = dim_style(
+            Style::default().bg(Color::Blue).fg(Color::White),
+            dim_background,
+        );
+        Paragraph::new(render_history_footer_line(
+            outer[1].width as usize,
+            viewport.offset,
+            viewport.visible_bottom,
+            viewport.total_lines,
+        ))
+        .style(footer_style)
     } else {
         let footer_style = dim_style(
             Style::default().bg(Color::Blue).fg(Color::White),
@@ -850,44 +887,106 @@ fn render(
     }
 }
 
-fn render_history_view(
-    frame: &mut Frame,
-    _snapshot: &RatatuiSnapshot,
-    history: &HistoryState,
-    area: Rect,
-) {
-    let width = area.width as usize;
-    let height = area.height as usize;
+/// Viewport coordinates for a history buffer rendered inside a given height.
+struct HistoryViewport {
+    offset: usize,
+    content_height: usize,
+    visible_bottom: usize,
+    total_lines: usize,
+    cursor_line: usize,
+}
+
+fn compute_history_viewport(history: &HistoryState, height: usize) -> HistoryViewport {
     let total_lines = history.styled_lines.len();
-    let max_offset = total_lines.saturating_sub(height);
-    let offset = history.scroll_offset.min(max_offset);
+    let cursor_line = history.cursor_line.min(total_lines.saturating_sub(1));
+    let offset = if total_lines <= height {
+        0
+    } else if cursor_line + height > total_lines {
+        total_lines - height
+    } else {
+        cursor_line
+    };
+    let visible_bottom = (offset + height).min(total_lines);
+    HistoryViewport {
+        offset,
+        content_height: height,
+        visible_bottom,
+        total_lines,
+        cursor_line,
+    }
+}
+
+fn render_history_view(frame: &mut Frame, history: &HistoryState, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+
+    let width = area.width as usize;
+    let content_height = area.height as usize;
+    let viewport = compute_history_viewport(history, content_height);
 
     let mut lines = Vec::new();
-    for line in history.styled_lines.iter().skip(offset).take(height) {
+    for line in history
+        .styled_lines
+        .iter()
+        .skip(viewport.offset)
+        .take(viewport.content_height)
+    {
         let spans: Vec<Span<'static>> = crate::terminal::parse_ansi_styled_line(line)
             .into_iter()
             .map(|(text, style)| Span::styled(text, text_style_to_ratatui(&style)))
             .collect();
         lines.push(truncate_spans_to_width(spans, width));
     }
-    while lines.len() < height {
+    while lines.len() < viewport.content_height {
         lines.push(Line::from(""));
     }
 
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .style(Style::default());
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(Paragraph::new(lines).style(Style::default()), area);
+
+    // Draw a visible cursor on the cursor line so the user knows their position.
+    if viewport.total_lines > 0 {
+        let cursor_screen_row = viewport.cursor_line.saturating_sub(viewport.offset);
+        if cursor_screen_row < viewport.content_height {
+            let cursor_col = history.cursor_col.min(area.width.saturating_sub(1));
+            let cursor_x = area.x + cursor_col;
+            let cursor_y = area.y + cursor_screen_row as u16;
+            if area.contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
+                frame
+                    .buffer_mut()
+                    .get_mut(cursor_x, cursor_y)
+                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                frame.set_cursor(cursor_x, cursor_y);
+            }
+        }
+    }
 }
 
-fn render_history_footer_line(area_width: usize) -> Line<'static> {
-    let text = "History  Ctrl-O/Esc Exit · PgUp/PgDn Page · Up/Down Line";
-    let text_width = display_width(text);
-    let fill = area_width.saturating_sub(text_width);
+fn render_history_footer_line(
+    area_width: usize,
+    offset: usize,
+    visible_bottom: usize,
+    total_lines: usize,
+) -> Line<'static> {
+    let position_text = if total_lines == 0 {
+        "[empty]".to_string()
+    } else {
+        format!("[{}-{} / {}]", offset + 1, visible_bottom, total_lines)
+    };
+    let right_text = "Ctrl-O/Esc Exit · PgUp/PgDn Page · Up/Down Line";
+    let left_text = format!("History  {position_text}");
+    let left_width = display_width(&left_text);
+    let right_width = display_width(right_text);
+    let fill = area_width.saturating_sub(left_width + right_width);
     Line::from(vec![
-        Span::styled(text.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(
+            left_text,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" ".repeat(fill), Style::default().fg(Color::Gray)),
+        Span::styled(right_text, Style::default().fg(Color::Gray)),
     ])
 }
 

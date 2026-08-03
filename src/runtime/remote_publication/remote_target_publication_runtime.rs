@@ -1,31 +1,22 @@
-use crate::cli::{
-    RemoteNetworkConfig, RemoteTargetBindPublicationCommand, RemoteTargetPublicationAgentCommand,
-    RemoteTargetPublicationOwnerCommand, RemoteTargetPublicationServerCommand,
-    RemoteTargetReconcilePublicationsCommand, RemoteTargetUnbindPublicationCommand,
-    SocketLifecycleHookCommand,
-};
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
+// Legacy tmux-era publication runtime kept during the ratatui migration; many items are currently unused.
+#![allow(dead_code)]
+
+use crate::cli::RemoteNetworkConfig;
+use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::remote_protocol::{ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope};
-use crate::infra::remote_transport_codec::read_node_session_envelope;
+use crate::infra::remote_protocol::{ControlPlanePayload, ProtocolEnvelope};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, RemoteNodeSessionSyncRuntime,
 };
-use crate::runtime::remote_node_transport_runtime::{read_client_hello, write_server_hello};
-use crate::runtime::remote_publication::remote_target_publication_backend::{
-    RemoteTargetPublicationBackend, RemoteTargetPublicationBinding,
-};
+use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
 use crate::runtime::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
-use crate::runtime::remote_target_publication_transport_runtime::remote_target_publication_socket_path;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 
 mod publication_helpers;
 pub(crate) use publication_helpers::*;
@@ -118,68 +109,6 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             network,
             discover_live_workspaces: true,
         })
-    }
-
-    pub fn run_publication_server(
-        &self,
-        command: RemoteTargetPublicationServerCommand,
-    ) -> Result<(), LifecycleError> {
-        let socket_path = remote_target_publication_socket_path(&command.socket_name);
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(remote_target_publication_error)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(remote_target_publication_error)?;
-        let command_socket_path =
-            remote_target_publication_server_command_socket_path(&command.socket_name);
-        if command_socket_path.exists() {
-            let _ = fs::remove_file(&command_socket_path);
-        }
-        let command_listener =
-            UnixListener::bind(&command_socket_path).map_err(remote_target_publication_error)?;
-        command_listener
-            .set_nonblocking(true)
-            .map_err(remote_target_publication_error)?;
-        loop {
-            if drain_publication_server_commands(&command_listener)? {
-                break;
-            }
-            match listener.accept() {
-                Ok((mut stream, _addr)) => {
-                    let source_socket_name = command.socket_name.clone();
-                    let _current_executable = self.current_executable.clone();
-                    thread::spawn(move || {
-                        if read_client_hello(&mut stream).is_err() {
-                            return;
-                        }
-                        if write_server_hello(&mut stream, "waitagent-publication").is_err() {
-                            return;
-                        }
-                        while let Ok(session_envelope) = read_node_session_envelope(&mut stream) {
-                            if session_envelope.channel != NodeSessionChannel::Publication {
-                                break;
-                            }
-                            let _changed = match apply_publication_envelope(
-                                &source_socket_name,
-                                &session_envelope.envelope,
-                            ) {
-                                Ok(changed) => changed,
-                                Err(_) => break,
-                            };
-                        }
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = fs::remove_file(socket_path);
-        let _ = fs::remove_file(command_socket_path);
-        Ok(())
     }
 
     pub fn shutdown_socket_sidecars(&self, socket_name: &str) -> Result<(), LifecycleError> {
@@ -370,41 +299,6 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         self.refresh_live_workspace_socket(socket_name)
     }
 
-    pub fn run_publication_agent(
-        &self,
-        command: RemoteTargetPublicationAgentCommand,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_server_running(&command.socket_name)?;
-        let socket_path = remote_target_publication_agent_socket_path(&command.socket_name);
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(remote_target_publication_error)?;
-        let mut stop_requested = false;
-        for accepted in listener.incoming() {
-            let Ok(mut stream) = accepted else {
-                break;
-            };
-            let Ok(first_command) = read_publication_agent_command(&mut stream) else {
-                continue;
-            };
-            let mut commands = vec![first_command];
-            drain_pending_publication_agent_commands(&listener, &mut commands)?;
-            for agent_command in commands {
-                if agent_command == PublicationAgentCommand::Stop {
-                    stop_requested = true;
-                    continue;
-                }
-                self.process_publication_agent_command(&command.socket_name, agent_command)?;
-            }
-            if stop_requested {
-                break;
-            }
-        }
-        let _ = fs::remove_file(socket_path);
-        Ok(())
-    }
-
     fn signal_remote_runtime_owner_upsert(
         &self,
         node_id: &str,
@@ -527,170 +421,12 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             .refresh_workspace_socket(socket_name, &self.current_executable)
     }
 
-    pub fn run_publication_owner(
-        &self,
-        command: RemoteTargetPublicationOwnerCommand,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_server_running(&command.socket_name)?;
-        self.ensure_publication_sender_running(&command.socket_name)?;
-        let socket_path = remote_target_publication_owner_socket_path(
-            &command.socket_name,
-            &command.target_session_name,
-        );
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(remote_target_publication_error)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(remote_target_publication_error)?;
-        let mut last_snapshot: Option<PublicationOwnerSnapshot> = None;
-
-        loop {
-            let owner_drain = drain_publication_owner_commands(&listener)?;
-
-            let binding = self.find_remote_publication_binding_on_socket(
-                &command.socket_name,
-                &command.target_session_name,
-            )?;
-            let Some(binding) = binding else {
-                if let Some(previous) = last_snapshot.take() {
-                    signal_publication_target_exited(
-                        &command.socket_name,
-                        &previous.authority_id,
-                        &previous.transport_session_id,
-                        Some(&command.target_session_name),
-                    )?;
-                }
-                break;
-            };
-
-            let session = self
-                .backend
-                .list_sessions_on_socket(&command.socket_name)?
-                .into_iter()
-                .find(|session| {
-                    session.address.session_id() == command.target_session_name
-                        && session.address.transport() == &SessionTransport::Local
-                        && session.is_target_host()
-                });
-
-            let Some(session) = session else {
-                if let Some(previous) = last_snapshot.take() {
-                    signal_publication_target_exited(
-                        &command.socket_name,
-                        &previous.authority_id,
-                        &previous.transport_session_id,
-                        Some(&command.target_session_name),
-                    )?;
-                }
-                break;
-            };
-
-            if session.availability == SessionAvailability::Exited {
-                let snapshot = publication_owner_snapshot(&binding, &session);
-                signal_publication_target_exited(
-                    &command.socket_name,
-                    &snapshot.authority_id,
-                    &snapshot.transport_session_id,
-                    Some(&command.target_session_name),
-                )?;
-                break;
-            }
-
-            if owner_drain.stop_requested {
-                let snapshot = publication_owner_snapshot(&binding, &session);
-                signal_publication_target_exited(
-                    &command.socket_name,
-                    &snapshot.authority_id,
-                    &snapshot.transport_session_id,
-                    Some(&command.target_session_name),
-                )?;
-                break;
-            }
-
-            let snapshot = publication_owner_snapshot(&binding, &session);
-            if let Some(previous) = last_snapshot.as_ref() {
-                if publication_target_identity_changed(previous, &snapshot) {
-                    signal_publication_target_exited(
-                        &command.socket_name,
-                        &previous.authority_id,
-                        &previous.transport_session_id,
-                        Some(&command.target_session_name),
-                    )?;
-                }
-            }
-            if owner_drain.refresh_requested || last_snapshot.as_ref() != Some(&snapshot) {
-                let published = published_remote_target_from_local(&binding, &session);
-                signal_publication_target_published(
-                    &command.socket_name,
-                    &binding.authority_id,
-                    &published,
-                    Some(&command.target_session_name),
-                )?;
-                last_snapshot = Some(snapshot);
-            }
-
-            thread::sleep(PUBLICATION_OWNER_POLL_INTERVAL);
-        }
-
-        let _ = fs::remove_file(socket_path);
-        Ok(())
-    }
-
-    pub fn run_bind_publication(
-        &self,
-        command: RemoteTargetBindPublicationCommand,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_hooks_on_socket(&command.socket_name)?;
-        self.backend.bind_publication(
-            &command.socket_name,
-            &command.target_session_name,
-            &command.authority_id,
-            &command.transport_session_id,
-            command.selector.as_deref(),
-        )?;
-        self.ensure_publication_owner_running(&command.socket_name, &command.target_session_name)?;
-        self.signal_publication_owner_command(
-            &command.socket_name,
-            &command.target_session_name,
-            PublicationOwnerCommand::Refresh,
-        )
-    }
-
-    pub fn run_unbind_publication(
-        &self,
-        command: RemoteTargetUnbindPublicationCommand,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_hooks_on_socket(&command.socket_name)?;
-        let owner_stopped = self
-            .signal_publication_owner_command(
-                &command.socket_name,
-                &command.target_session_name,
-                PublicationOwnerCommand::Stop,
-            )
-            .is_ok();
-        self.backend
-            .unbind_publication(&command.socket_name, &command.target_session_name)?;
-        if owner_stopped {
-            return Ok(());
-        }
-        self.signal_source_session_closed(&command.socket_name, &command.target_session_name)
-    }
-
-    pub fn run_reconcile_publications(
-        &self,
-        command: RemoteTargetReconcilePublicationsCommand,
-    ) -> Result<(), LifecycleError> {
-        self.signal_publication_reconcile(&command.socket_name)
-    }
-
     pub fn signal_source_session_closed(
         &self,
         socket_name: &str,
         session_name: &str,
     ) -> Result<(), LifecycleError> {
-        let _ = self.signal_publication_owner_command(
+        let _ = signal_publication_owner_command(
             socket_name,
             session_name,
             PublicationOwnerCommand::Stop,
@@ -706,200 +442,11 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         )
     }
 
-    pub fn signal_source_session_refresh(
-        &self,
-        socket_name: &str,
-        session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        if self.ensure_targeted_publication_owner(socket_name, session_name)? {
-            self.signal_publication_owner_command(
-                socket_name,
-                session_name,
-                PublicationOwnerCommand::Refresh,
-            )?;
-            return Ok(());
-        }
-        self.signal_publication_agent_command(
-            socket_name,
-            PublicationAgentCommand::PublishSession {
-                session_name: session_name.to_string(),
-            },
-        )
-    }
-
-    pub fn signal_cached_source_session_refresh(
-        &self,
-        _socket_name: &str,
-        _session_name: &str,
-    ) -> Result<bool, LifecycleError> {
-        Ok(false)
-    }
-
-    pub fn run_socket_lifecycle_hook(
-        &self,
-        command: SocketLifecycleHookCommand,
-    ) -> Result<(), LifecycleError> {
-        if !self.socket_is_live(&command.socket_name) {
-            return Ok(());
-        }
-        self.ensure_publication_hooks_on_socket(&command.socket_name)?;
-        let hook_name = command
-            .hook_name
-            .as_deref()
-            .filter(|value| !value.is_empty());
-        let session_name = command
-            .session_name
-            .as_deref()
-            .filter(|value| !value.is_empty());
-
-        match socket_lifecycle_publication_action(hook_name) {
-            SocketLifecyclePublicationAction::TargetedPublish => {
-                if let Some(session_name) = session_name {
-                    if self.ensure_targeted_publication_owner(&command.socket_name, session_name)? {
-                        let _ = self.signal_publication_owner_command(
-                            &command.socket_name,
-                            session_name,
-                            PublicationOwnerCommand::Refresh,
-                        );
-                    }
-                }
-                Ok(())
-            }
-            SocketLifecyclePublicationAction::TargetedExit => {
-                if let Some(session_name) = session_name {
-                    if self.live_content_pane_for_session(&command.socket_name, session_name)? {
-                        self.signal_source_session_refresh(&command.socket_name, session_name)?;
-                    }
-                }
-                self.ensure_configured_publications_on_socket(&command.socket_name)
-            }
-            SocketLifecyclePublicationAction::FullReconcile => {
-                self.ensure_configured_publications_on_socket(&command.socket_name)
-            }
-        }
-    }
-
-    fn live_content_pane_for_session(
-        &self,
-        socket_name: &str,
-        session_name: &str,
-    ) -> Result<bool, LifecycleError> {
-        self.backend
-            .live_content_pane_for_session(socket_name, session_name)
-    }
-
     pub fn ensure_publication_server_running(
         &self,
         socket_name: &str,
     ) -> Result<(), LifecycleError> {
         self.backend.ensure_publication_server_running(
-            socket_name,
-            &self.network,
-            &self.current_executable,
-        )
-    }
-
-    pub fn ensure_configured_publications_on_socket(
-        &self,
-        socket_name: &str,
-    ) -> Result<(), LifecycleError> {
-        if !self.socket_is_live(socket_name) {
-            return Ok(());
-        }
-        self.ensure_publication_hooks_on_socket(socket_name)?;
-        let bindings = self.backend.list_publication_bindings(socket_name)?;
-
-        for binding in &bindings {
-            self.ensure_publication_owner_running(socket_name, &binding.target_session_name)?;
-        }
-        Ok(())
-    }
-
-    fn ensure_publication_hooks_on_socket(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        self.backend
-            .ensure_publication_hooks(socket_name, &self.network)
-    }
-
-    fn socket_is_live(&self, socket_name: &str) -> bool {
-        self.backend.socket_is_live(socket_name)
-    }
-
-    fn publish_bound_target_with_cache(
-        &self,
-        socket_name: &str,
-        binding: &RemoteTargetPublicationBinding,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_server_running(socket_name)?;
-        self.ensure_publication_sender_running(socket_name)?;
-        let local_target = self
-            .backend
-            .list_sessions_on_socket(socket_name)?
-            .into_iter()
-            .find(|session| {
-                session.address.session_id() == binding.target_session_name
-                    && session.address.transport() == &SessionTransport::Local
-                    && session.is_target_host()
-            })
-            .ok_or_else(|| {
-                LifecycleError::Protocol(format!(
-                    "target host session `{}` is not available on socket `{socket_name}` for remote publication",
-                    binding.target_session_name
-                ))
-            })?;
-        let published = published_remote_target_from_local(binding, &local_target);
-        signal_publication_target_published(
-            socket_name,
-            &binding.authority_id,
-            &published,
-            Some(&binding.target_session_name),
-        )
-    }
-
-    fn try_publish_bound_target_session_with_cache(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<bool, LifecycleError> {
-        let Some(binding) =
-            self.find_remote_publication_binding_on_socket(socket_name, target_session_name)?
-        else {
-            return Ok(false);
-        };
-        self.publish_bound_target_with_cache(socket_name, &binding)?;
-        Ok(true)
-    }
-
-    fn find_remote_publication_binding_on_socket(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<Option<RemoteTargetPublicationBinding>, LifecycleError> {
-        self.backend
-            .find_publication_binding(socket_name, target_session_name)
-    }
-
-    fn signal_publication_reconcile(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        self.signal_publication_agent_command(socket_name, PublicationAgentCommand::FullReconcile)
-    }
-
-    fn signal_publication_agent_command(
-        &self,
-        socket_name: &str,
-        command: PublicationAgentCommand,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_server_running(socket_name)?;
-        self.ensure_publication_agent_running(socket_name)?;
-        let mut stream =
-            UnixStream::connect(remote_target_publication_agent_socket_path(socket_name))
-                .map_err(remote_target_publication_error)?;
-        stream
-            .write_all(render_publication_agent_command(&command).as_bytes())
-            .map_err(remote_target_publication_error)?;
-        stream.flush().map_err(remote_target_publication_error)
-    }
-
-    fn ensure_publication_agent_running(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        self.backend.ensure_publication_agent_running(
             socket_name,
             &self.network,
             &self.current_executable,
@@ -916,100 +463,13 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             &self.current_executable,
         )
     }
+}
 
-    fn ensure_publication_owner_running(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        self.backend.ensure_publication_owner_running(
-            socket_name,
-            target_session_name,
-            &self.network,
-            &self.current_executable,
-        )
-    }
-
-    fn ensure_targeted_publication_owner(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-    ) -> Result<bool, LifecycleError> {
-        if self
-            .find_remote_publication_binding_on_socket(socket_name, target_session_name)?
-            .is_none()
-        {
-            return Ok(false);
-        }
-        self.ensure_publication_owner_running(socket_name, target_session_name)?;
-        Ok(true)
-    }
-
-    fn signal_publication_owner_command(
-        &self,
-        socket_name: &str,
-        target_session_name: &str,
-        command: PublicationOwnerCommand,
-    ) -> Result<(), LifecycleError> {
-        signal_publication_owner_command(socket_name, target_session_name, command)
-    }
-
-    fn reconcile_socket_publications_with_cache(
-        &self,
-        socket_name: &str,
-    ) -> Result<(), LifecycleError> {
-        self.ensure_publication_server_running(socket_name)?;
-        self.ensure_publication_sender_running(socket_name)?;
-        let bindings = self.backend.list_publication_bindings(socket_name)?;
-        let local_targets = self.backend.list_sessions_on_socket(socket_name)?;
-
-        for binding in bindings {
-            let Some(local_target) = local_targets.iter().find(|session| {
-                session.address.session_id() == binding.target_session_name
-                    && session.address.transport() == &SessionTransport::Local
-                    && session.is_target_host()
-            }) else {
-                continue;
-            };
-            let published = published_remote_target_from_local(&binding, local_target);
-            signal_publication_target_published(
-                socket_name,
-                &binding.authority_id,
-                &published,
-                Some(&binding.target_session_name),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn process_publication_agent_command(
-        &self,
-        socket_name: &str,
-        command: PublicationAgentCommand,
-    ) -> Result<(), LifecycleError> {
-        match command {
-            PublicationAgentCommand::Stop => Ok(()),
-            PublicationAgentCommand::FullReconcile => {
-                self.reconcile_socket_publications_with_cache(socket_name)
-            }
-            PublicationAgentCommand::PublishSession { session_name } => self
-                .try_publish_bound_target_session_with_cache(socket_name, &session_name)
-                .map(|_| ()),
-            PublicationAgentCommand::ExitTarget {
-                authority_id,
-                transport_session_id,
-                source_session_name,
-            } => {
-                self.ensure_publication_sender_running(socket_name)?;
-                signal_publication_target_exited(
-                    socket_name,
-                    &authority_id,
-                    &transport_session_id,
-                    source_session_name.as_deref(),
-                )
-            }
-        }
-    }
+pub fn remote_target_publication_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
 }
 
 fn parse_remote_target_id(target_id: &str) -> Option<(&str, &str)> {

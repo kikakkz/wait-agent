@@ -47,12 +47,10 @@ impl CommandDispatcher {
                 .map_err(AppError::from),
             Command::RatatuiNodeServer(command) => self
                 .ratatui_node_server(command)
-                .and_then(|runtime| runtime.run().map_err(AppError::from))
-                .map_err(AppError::from),
+                .and_then(|runtime| runtime.run().map_err(AppError::from)),
             Command::RatatuiClient(command) => self
                 .ratatui_client(command)
-                .and_then(|runtime| runtime.run().map_err(AppError::from))
-                .map_err(AppError::from),
+                .and_then(|runtime| runtime.run().map_err(AppError::from)),
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");
@@ -77,9 +75,6 @@ impl CommandDispatcher {
                 }
                 Ok(())
             }
-            other => Err(AppError::from(crate::lifecycle::LifecycleError::Protocol(
-                format!("tmux-backed command {other:?} is no longer supported"),
-            ))),
         }
     }
 

@@ -1,3 +1,6 @@
+// Legacy tmux-era authority transport runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,

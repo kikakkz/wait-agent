@@ -1,3 +1,6 @@
+// Legacy tmux-era workspace domain kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};

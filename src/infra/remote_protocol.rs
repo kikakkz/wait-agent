@@ -1,3 +1,6 @@
+// Legacy tmux-era remote protocol kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::session_catalog::ConsoleLocation;
 
 pub const REMOTE_PROTOCOL_VERSION: &str = "1.1";

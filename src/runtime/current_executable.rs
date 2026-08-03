@@ -28,8 +28,3 @@ pub(crate) fn current_waitagent_executable() -> Result<PathBuf, LifecycleError> 
 
     Ok(current_exe)
 }
-
-#[cfg(test)]
-pub(crate) fn waitagent_test_executable() -> PathBuf {
-    current_waitagent_executable().expect("waitagent test executable should resolve")
-}

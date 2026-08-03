@@ -1,3 +1,6 @@
+// Legacy tmux-era workspace socket registry kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::RemoteNetworkConfig;
 use crate::lifecycle::LifecycleError;
 use std::collections::BTreeSet;

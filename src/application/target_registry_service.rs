@@ -1,3 +1,6 @@
+// Legacy tmux-era target registry kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::session_catalog::SessionAvailability;
 use crate::domain::session_catalog::SessionTransport;

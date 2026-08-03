@@ -1,3 +1,6 @@
+// Legacy tmux-era remote-node session runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
@@ -1280,6 +1283,3 @@ fn now_millis() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
-
-#[cfg(test)]
-mod remote_node_session_runtime_test;

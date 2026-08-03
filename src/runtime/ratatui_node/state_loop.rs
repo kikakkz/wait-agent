@@ -366,7 +366,8 @@ fn run_state_event_loop(
                             shared.set_session_command_name(&target_id, agent);
                         }
                         Some(AgentStateEffect::Clear) => {
-                            shared.set_session_task_state(&target_id, ManagedSessionTaskState::Input);
+                            shared
+                                .set_session_task_state(&target_id, ManagedSessionTaskState::Input);
                             shared.clear_session_command_name(&target_id);
                         }
                         None => {}
@@ -621,6 +622,8 @@ fn create_authority_host_session(
         pty_master,
         child,
         output_tx: None,
+        cols,
+        rows,
     });
     {
         let mut host_guard = shared

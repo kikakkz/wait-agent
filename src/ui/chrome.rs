@@ -1,3 +1,6 @@
+// Legacy tmux-era UI helpers kept during the ratatui migration; `display_width` is used in tests.
+#![allow(dead_code)]
+
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BG_BAR: &str = "\x1b[48;5;24m\x1b[38;5;255m";
 const ANSI_FOOTER_KEY: &str = "\x1b[48;5;24m\x1b[1;38;5;159m";

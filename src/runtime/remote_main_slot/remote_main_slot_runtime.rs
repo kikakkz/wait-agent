@@ -1,3 +1,6 @@
+// Legacy tmux-era main-slot runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::application::remote_control_plane_service::RemoteControlPlaneService;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;

@@ -211,7 +211,16 @@ pub struct SessionSummary {
 
 pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> RatatuiSnapshot {
     let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
+    let mut sessions: Vec<SessionView> = guard.values().map(SessionView::from_record).collect();
+    // Stable ordering keeps the sidebar selection predictable across
+    // reconnects and snapshots: local sessions first, then remote peers,
+    // each group sorted by qualified target id.
+    sessions.sort_by(|a, b| {
+        let a_local = a.transport == "local";
+        let b_local = b.transport == "local";
+        b_local.cmp(&a_local).then_with(|| a.id.cmp(&b.id))
+    });
+
     let active_target = shared
         .active_target
         .lock()

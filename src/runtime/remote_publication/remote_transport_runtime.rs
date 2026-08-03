@@ -1,3 +1,6 @@
+// Legacy tmux-era transport runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::infra::remote_protocol::{
     ControlPlanePayload, NodeBoundControlPlaneMessage, ProtocolEnvelope, RawPtyInputPayload,
 };

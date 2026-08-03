@@ -22,8 +22,14 @@ impl AgentSignalEnv {
         &self,
         env: &mut HashMap<String, String>,
     ) -> Result<(), LifecycleError> {
-        env.insert("WAITAGENT_SIGNAL_SOCKET".to_string(), self.socket_path.clone());
-        env.insert("WAITAGENT_SOCKET_NAME".to_string(), self.socket_name.clone());
+        env.insert(
+            "WAITAGENT_SIGNAL_SOCKET".to_string(),
+            self.socket_path.clone(),
+        );
+        env.insert(
+            "WAITAGENT_SOCKET_NAME".to_string(),
+            self.socket_name.clone(),
+        );
         env.insert(
             "WAITAGENT_TARGET_SESSION_NAME".to_string(),
             self.target_session_name.clone(),
@@ -52,9 +58,7 @@ impl AgentSignalEnv {
     fn prompt_command(&self) -> Result<String, LifecycleError> {
         let cwd_cmd = self.cwd_command()?;
         match std::env::var("PROMPT_COMMAND") {
-            Ok(existing) if !existing.trim().is_empty() => {
-                Ok(format!("{}; {}", cwd_cmd, existing))
-            }
+            Ok(existing) if !existing.trim().is_empty() => Ok(format!("{}; {}", cwd_cmd, existing)),
             _ => Ok(cwd_cmd),
         }
     }
@@ -62,10 +66,7 @@ impl AgentSignalEnv {
     fn cwd_command(&self) -> Result<String, LifecycleError> {
         let sender_path = extract_agent_signal_sender()?;
         let quoted = shell_single_quote(sender_path.to_string_lossy().as_ref());
-        Ok(format!(
-            "printf '%s' \"$PWD\" | {} cwd",
-            quoted
-        ))
+        Ok(format!("printf '%s' \"$PWD\" | {} cwd", quoted))
     }
 }
 

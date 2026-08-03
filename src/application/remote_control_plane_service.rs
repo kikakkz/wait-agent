@@ -1,3 +1,6 @@
+// Legacy tmux-era control-plane service kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ControlPlaneDestination, ControlPlanePayload,

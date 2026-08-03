@@ -303,7 +303,7 @@ fn alacritty_style_to_text_style(
 }
 
 /// Render a single grid row into plain and ANSI-styled text.
-fn render_grid_line(
+pub(crate) fn render_grid_line(
     grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
     line: Line,
     columns: usize,

@@ -1,5 +1,10 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
+use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::vte::ansi;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -9,6 +14,7 @@ use std::process::Child;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use super::local_session::render_grid_line;
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
@@ -38,6 +44,8 @@ pub(crate) enum AuthorityHostIoRequest {
         pty_master: File,
         child: Child,
         output_tx: Option<mpsc::Sender<Vec<u8>>>,
+        cols: u16,
+        rows: u16,
     },
     UnregisterSession {
         session_id: String,
@@ -94,6 +102,26 @@ struct ConsoleState {
     rows: u16,
 }
 
+/// Minimal `Dimensions` implementation for creating an `alacritty_terminal::Term`.
+struct TermSize {
+    cols: usize,
+    rows: usize,
+}
+
+impl Dimensions for TermSize {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
+
 struct SessionState {
     pty_master: File,
     child: Child,
@@ -113,6 +141,16 @@ struct SessionState {
     /// The console whose dimensions currently drive the PTY size. A local
     /// console always takes precedence over remote viewers.
     active_console: Option<String>,
+    /// Local terminal emulator model of the PTY screen. Used to synthesize a
+    /// bootstrap ANSI replay when a new remote console attaches.
+    term: Term<VoidListener>,
+    /// VTE parser that turns raw PTY bytes into terminal state updates.
+    parser: ansi::Processor,
+    /// Set when a new output sender is installed but the active console's
+    /// dimensions are not known yet. The bootstrap is sent once the console
+    /// is activated so it is rendered at the viewer's size instead of the
+    /// PTY's initial size.
+    bootstrap_pending: bool,
 }
 
 /// Single thread that owns all authority-host PTY master fd I/O.
@@ -368,6 +406,8 @@ fn drain_requests(
                 mut pty_master,
                 child,
                 output_tx,
+                cols,
+                rows,
             } => {
                 set_nonblocking(&mut pty_master);
                 let token = *next_token;
@@ -389,6 +429,14 @@ fn drain_requests(
                         })?;
                 }
                 token_to_session.insert(token, session_id.clone());
+                let term = Term::new(
+                    Config::default(),
+                    &TermSize {
+                        cols: cols as usize,
+                        rows: rows as usize,
+                    },
+                    VoidListener,
+                );
                 sessions.insert(
                     session_id,
                     SessionState {
@@ -400,6 +448,9 @@ fn drain_requests(
                         pending_write: Vec::new(),
                         consoles: HashMap::new(),
                         active_console: None,
+                        term,
+                        parser: ansi::Processor::new(),
+                        bootstrap_pending: false,
                     },
                 );
             }
@@ -415,7 +466,17 @@ fn drain_requests(
             } => {
                 if let Some(state) = sessions.get_mut(&session_id) {
                     state.output_tx = Some(output_tx);
-                    flush_output_buffer(state);
+                    // The bootstrap snapshot already captures all output produced
+                    // so far; replaying the buffered raw bytes on top of it would
+                    // corrupt the screen. Drop the buffer.
+                    state.output_buffer.clear();
+                    if state.active_console.is_some() {
+                        send_bootstrap(state);
+                    } else {
+                        // Defer bootstrap until the viewer's console is activated
+                        // and the PTY/Term have been resized to the right geometry.
+                        state.bootstrap_pending = true;
+                    }
                 }
             }
         }
@@ -464,6 +525,7 @@ fn read_pty(session_id: &str, sessions: &mut HashMap<String, SessionState>) -> b
 }
 
 fn forward_output(state: &mut SessionState, bytes: &[u8]) {
+    state.parser.advance(&mut state.term, bytes);
     if let Some(tx) = state.output_tx.as_ref() {
         let chunk = state.output_buffer.make_contiguous();
         let mut payload = Vec::with_capacity(chunk.len() + bytes.len());
@@ -490,6 +552,50 @@ fn flush_output_buffer(state: &mut SessionState) {
         let chunk: Vec<u8> = state.output_buffer.drain(..).collect();
         let _ = tx.send(chunk);
     }
+}
+
+/// Send a bootstrap ANSI snapshot to the session's output sender, if one is
+/// installed, and clear the pending flag.
+fn send_bootstrap(state: &mut SessionState) {
+    if state.output_tx.is_none() {
+        state.bootstrap_pending = false;
+        return;
+    }
+    let bootstrap = bootstrap_ansi_for_term(&state.term);
+    let _ = state.output_tx.as_ref().unwrap().send(bootstrap);
+    state.bootstrap_pending = false;
+}
+
+/// Render the current terminal screen as an ANSI byte sequence that reproduces
+/// the visible content and cursor position when fed to a fresh terminal emulator.
+///
+/// Used to bootstrap a newly attached remote console so it sees the prompt
+/// immediately instead of a blank pane until new PTY output arrives.
+fn bootstrap_ansi_for_term(term: &Term<VoidListener>) -> Vec<u8> {
+    let grid = term.grid();
+    let screen_lines = grid.screen_lines();
+    let columns = grid.columns();
+    let display_offset = grid.display_offset() as i32;
+
+    let mut payload = Vec::with_capacity(screen_lines * (columns * 8 + 16) + 64);
+    // Hide cursor, clear screen, and move to home to draw the bootstrap frame
+    // without intermediate flicker.
+    payload.extend_from_slice(b"\x1b[?25l\x1b[2J\x1b[H");
+    for row in 0..screen_lines {
+        if row > 0 {
+            payload.extend_from_slice(b"\r\n");
+        }
+        let line = Line(row as i32 - display_offset);
+        let (_, styled) = render_grid_line(&grid, line, columns);
+        payload.extend_from_slice(styled.as_bytes());
+    }
+
+    let point = grid.cursor.point;
+    let cursor_col = point.column.0 as u16 + 1;
+    let cursor_row = (point.line.0 + display_offset) as u16 + 1;
+    payload.extend_from_slice(format!("\x1b[{cursor_row};{cursor_col}H").as_bytes());
+    payload.extend_from_slice(b"\x1b[?25h");
+    payload
 }
 
 fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<SharedState>) {
@@ -639,6 +745,13 @@ fn apply_console_resize(
             "[ratatui-authority-host-io] resize PTY session={session_id} cols={cols} rows={rows}"
         ));
         resize_pty(&state.pty_master, cols, rows);
+        state.term.resize(TermSize {
+            cols: cols as usize,
+            rows: rows as usize,
+        });
+        if state.bootstrap_pending {
+            send_bootstrap(state);
+        }
     }
 }
 
@@ -657,6 +770,13 @@ fn unregister_console(state: &mut SessionState, session_id: &str, console_id: St
     if let Some(ref next_id) = next {
         if let Some(console) = state.consoles.get(next_id) {
             resize_pty(&state.pty_master, console.cols, console.rows);
+            state.term.resize(TermSize {
+                cols: console.cols as usize,
+                rows: console.rows as usize,
+            });
+        }
+        if state.bootstrap_pending {
+            send_bootstrap(state);
         }
     }
     ERROR_LOG.log(format!(
