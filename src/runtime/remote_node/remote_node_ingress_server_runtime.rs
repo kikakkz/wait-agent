@@ -1,3 +1,6 @@
+// Legacy tmux-era node ingress runtime kept during the ratatui migration; many items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
@@ -20,7 +23,6 @@ use crate::infra::remote_protocol::{
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
 };
-use crate::infra::tmux::EmbeddedTmuxBackend;
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
 use crate::runtime::remote_authority_transport_runtime::{
@@ -29,25 +31,25 @@ use crate::runtime::remote_authority_transport_runtime::{
 use crate::runtime::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
-use crate::runtime::remote_node_session_sync_runtime::SessionSyncAuthorityManager;
-use crate::runtime::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
-use crate::runtime::remote_workspace_socket_registry_runtime::{
-    workspace_socket_registry_path, RemoteWorkspaceSocketRegistryRuntime,
+use crate::runtime::remote_node_session_sync_runtime::{
+    LocalAuthorityHostBackend, LocalTargetFactory, RatatuiLocalAuthorityHostBackend,
+    RatatuiLocalTargetFactory, SessionSyncAuthorityManager,
 };
+use crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend;
+use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use crate::runtime::remote_workspace_socket_registry_runtime::workspace_socket_registry_path;
 use crate::runtime::sidecar_process_runtime::spawn_waitagent_sidecar_child;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Cursor, ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const BRIDGE_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const BRIDGE_DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const BRIDGE_DISCOVERY_RETRY_ATTEMPTS: u8 = 20;
 const REMOTE_NODE_INGRESS_OWNER_IDLE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,20 +59,26 @@ const OWNER_CONTROL_REPLY_PENDING: u8 = 1;
 const OWNER_CONTROL_REPLY_ERROR: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AuthoritySocketReadyReply {
+pub(crate) struct AuthoritySocketReadyReply {
     status: AuthoritySocketReadyStatus,
     message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AuthoritySocketReadyStatus {
+pub(crate) enum AuthoritySocketReadyStatus {
     Registered,
     Pending,
     Error,
 }
 
-pub struct RemoteNodeIngressServerRuntime {
-    publication_runtime: RemoteTargetPublicationRuntime,
+pub struct RemoteNodeIngressServerRuntime<
+    B: RemoteTargetPublicationBackend = crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
+    F: LocalTargetFactory = RatatuiLocalTargetFactory,
+    A: LocalAuthorityHostBackend = RatatuiLocalAuthorityHostBackend,
+> {
+    publication_runtime: RemoteTargetPublicationRuntime<B>,
+    target_factory: F,
+    authority_backend: A,
     network: RemoteNetworkConfig,
 }
 
@@ -154,7 +162,7 @@ impl ReceiverPublicationRevisionTable {
     }
 }
 
-pub(super) enum InternalEvent {
+pub(crate) enum InternalEvent {
     BridgeClosed {
         node_id: String,
         socket_path: PathBuf,
@@ -201,24 +209,32 @@ pub(super) enum InternalEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OwnerLifecycleEvent {
+pub(crate) enum OwnerLifecycleEvent {
     WorkspaceRegistered(String),
     WorkspaceUnregistered(String),
     WorkspaceRegistryChanged(BTreeSet<String>),
     ShutdownRequested,
 }
 
-impl RemoteNodeIngressServerRuntime {
-    pub fn from_build_env_with_network_and_socket(
+impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
+where
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
+    pub fn new_with_backends(
         network: RemoteNetworkConfig,
-        _socket_name: impl Into<String>,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self {
-            publication_runtime: RemoteTargetPublicationRuntime::from_build_env_with_network(
-                network.clone(),
-            )?,
+        publication_runtime: RemoteTargetPublicationRuntime<B>,
+        target_factory: F,
+        authority_backend: A,
+    ) -> Self {
+        RemoteNodeIngressServerRuntime {
+            publication_runtime,
+            target_factory,
+            authority_backend,
             network,
-        })
+        }
     }
 
     pub fn run_owner(&self, ready_socket: Option<&str>) -> Result<(), LifecycleError> {
@@ -366,11 +382,15 @@ impl RemoteNodeIngressServerRuntime {
             .listen_inbound(self.network.listener_addr(), transport_tx)
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
+        let target_factory = self.target_factory.clone();
+        let authority_backend = self.authority_backend.clone();
         let network = self.network.clone();
         let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
             let _ = run_node_ingress_server_loop(
                 publication_runtime,
+                target_factory,
+                authority_backend,
                 network,
                 transport_rx,
                 internal_rx,
@@ -433,7 +453,11 @@ pub(crate) fn notify_authority_socket_ready(
     node_id: &str,
     socket_path: &std::path::Path,
 ) -> io::Result<()> {
-    RemoteNodeIngressServerRuntime::ensure_owner_running("__shared__", network)
+    RemoteNodeIngressServerRuntime::<
+        crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
+        RatatuiLocalTargetFactory,
+        RatatuiLocalAuthorityHostBackend,
+    >::ensure_owner_running("__shared__", network)
         .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
     let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -624,7 +648,7 @@ fn remote_node_ingress_owner_available(socket_path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-fn start_owner_control_acceptor(
+pub(crate) fn start_owner_control_acceptor(
     listener: UnixListener,
     owner_tx: &mpsc::Sender<InternalEvent>,
     lifecycle_tx: mpsc::Sender<OwnerLifecycleEvent>,
@@ -978,13 +1002,11 @@ fn read_owner_control_string(reader: &mut impl Read) -> io::Result<String> {
 }
 
 fn live_workspace_sockets(
-    network: &RemoteNetworkConfig,
+    _network: &RemoteNetworkConfig,
 ) -> Result<BTreeSet<String>, LifecycleError> {
-    let backend = EmbeddedTmuxBackend::from_build_env().map_err(remote_node_ingress_error)?;
-    let registry = RemoteWorkspaceSocketRegistryRuntime::new(network.clone());
-    registry.live_workspace_socket_names_retaining(|socket_name| {
-        backend.socket_is_live(&crate::infra::tmux::TmuxSocketName::new(socket_name))
-    })
+    // Preserved for ratatui remote path; tmux dependency to be removed in a later phase.
+    // In the ratatui-only build there are no tmux workspace sockets to enumerate.
+    Ok(BTreeSet::new())
 }
 
 fn apply_owner_lifecycle_event(
@@ -1110,7 +1132,7 @@ fn start_workspace_registry_polling_watcher(
     Ok(thread::spawn(move || {
         let mut previous = live_workspace_sockets(&network).unwrap_or_default();
         loop {
-            thread::sleep(BRIDGE_REFRESH_INTERVAL);
+            thread::sleep(Duration::from_millis(50));
             let current = live_workspace_sockets(&network).unwrap_or_default();
             if current == previous {
                 continue;
@@ -1126,6 +1148,15 @@ fn start_workspace_registry_polling_watcher(
     }))
 }
 
+/// Handle returned by `start_socket_watcher`. The caller wakes the watcher by
+/// writing to a dedicated shutdown pipe so the blocking `poll` returns and the
+/// thread can exit cleanly.
+struct SocketWatcherHandle {
+    inotify_fd: RawFd,
+    shutdown_write: RawFd,
+    worker: thread::JoinHandle<()>,
+}
+
 /// Watches the temp directory for new authority socket files and sends
 /// [`InternalEvent::SocketDirChanged`] through the channel when one appears.
 ///
@@ -1133,16 +1164,15 @@ fn start_workspace_registry_polling_watcher(
 /// kernel filesystem events, not periodic refresh scans.
 fn start_socket_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
-    shutdown: Arc<AtomicBool>,
-) -> io::Result<thread::JoinHandle<()>> {
+) -> io::Result<SocketWatcherHandle> {
     #[cfg(target_os = "linux")]
     {
-        start_inotify_watcher(internal_tx, shutdown)
+        start_inotify_watcher(internal_tx)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (internal_tx, shutdown);
+        let _ = internal_tx;
         Err(io::Error::other(
             "remote node ingress server requires Linux inotify for event-driven authority discovery",
         ))
@@ -1153,10 +1183,9 @@ fn start_socket_watcher(
 #[cfg(target_os = "linux")]
 fn start_inotify_watcher(
     internal_tx: mpsc::Sender<InternalEvent>,
-    shutdown: Arc<AtomicBool>,
-) -> io::Result<thread::JoinHandle<()>> {
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
-    if fd == -1 {
+) -> io::Result<SocketWatcherHandle> {
+    let inotify_fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if inotify_fd == -1 {
         return Err(io::Error::last_os_error());
     }
 
@@ -1165,28 +1194,75 @@ fn start_inotify_watcher(
         .map_err(|_| io::Error::other("temp_dir contains interior null byte"))?;
 
     let wd = unsafe {
-        libc::inotify_add_watch(fd, dir_path.as_ptr(), libc::IN_CREATE | libc::IN_MOVED_TO)
+        libc::inotify_add_watch(
+            inotify_fd,
+            dir_path.as_ptr(),
+            libc::IN_CREATE | libc::IN_MOVED_TO,
+        )
     };
     if wd == -1 {
-        unsafe { libc::close(fd) };
+        unsafe { libc::close(inotify_fd) };
         return Err(io::Error::last_os_error());
     }
 
-    Ok(thread::spawn(move || {
+    let mut pipe_fds = [-1; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        unsafe { libc::close(inotify_fd) };
+        return Err(io::Error::last_os_error());
+    }
+    let shutdown_read = pipe_fds[0];
+    let shutdown_write = pipe_fds[1];
+
+    // Mark the write end close-on-exec so it is not inherited by sidecars.
+    unsafe {
+        let flags = libc::fcntl(shutdown_write, libc::F_GETFD, 0);
+        if flags >= 0 {
+            libc::fcntl(shutdown_write, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
+
+    let worker = thread::spawn(move || {
         let event_size = std::mem::size_of::<libc::inotify_event>();
         let mut buf = [0u8; 4096];
 
         loop {
-            if shutdown.load(Ordering::Relaxed) {
+            let mut fds = [
+                libc::pollfd {
+                    fd: inotify_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: shutdown_read,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+            if ready <= 0 {
                 break;
             }
-            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+
+            if fds[1].revents != 0 {
+                // Shutdown requested: drain the pipe and exit.
+                let mut drain = [0u8; 16];
+                unsafe {
+                    libc::read(
+                        shutdown_read,
+                        drain.as_mut_ptr() as *mut libc::c_void,
+                        drain.len(),
+                    )
+                };
+                break;
+            }
+
+            if fds[0].revents == 0 {
+                continue;
+            }
+
+            let n =
+                unsafe { libc::read(inotify_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    thread::sleep(BRIDGE_REFRESH_INTERVAL);
-                    continue;
-                }
                 break;
             }
 
@@ -1211,12 +1287,21 @@ fn start_inotify_watcher(
             }
         }
 
-        unsafe { libc::close(fd) };
-    }))
+        unsafe {
+            libc::close(inotify_fd);
+            libc::close(shutdown_read);
+        }
+    });
+
+    Ok(SocketWatcherHandle {
+        inotify_fd,
+        shutdown_write,
+        worker,
+    })
 }
 
 impl RemoteNodeIngressServerGuard {
-    fn owner_event_sender(&self) -> Option<mpsc::Sender<InternalEvent>> {
+    pub fn owner_event_sender(&self) -> Option<mpsc::Sender<InternalEvent>> {
         self.shutdown_tx.clone()
     }
 }
@@ -1244,17 +1329,30 @@ enum IngressEventPriority {
     Low,
 }
 
-fn run_node_ingress_server_loop(
-    publication_runtime: RemoteTargetPublicationRuntime,
+fn run_node_ingress_server_loop<
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+>(
+    publication_runtime: RemoteTargetPublicationRuntime<B>,
+    target_factory: F,
+    authority_backend: A,
     network: RemoteNetworkConfig,
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
     start_authority_socket_watcher: bool,
-) {
+) where
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
-    let mut authority_manager =
-        SessionSyncAuthorityManager::with_ingress_events(network, None, internal_tx.clone());
+    let mut authority_manager = SessionSyncAuthorityManager::with_ingress_events(
+        network.clone(),
+        None,
+        internal_tx.clone(),
+        target_factory,
+        authority_backend,
+    );
     let mut pending_create_sessions =
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let mut registered_workspace_sockets = BTreeSet::<String>::new();
@@ -1281,9 +1379,8 @@ fn run_node_ingress_server_loop(
         })
     };
     drop(event_tx);
-    let watcher_shutdown = Arc::new(AtomicBool::new(false));
     let watcher = if start_authority_socket_watcher {
-        match start_socket_watcher(internal_tx.clone(), watcher_shutdown.clone()) {
+        match start_socket_watcher(internal_tx.clone()) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -1379,9 +1476,20 @@ fn run_node_ingress_server_loop(
             }
         }
     }
-    watcher_shutdown.store(true, Ordering::Relaxed);
-    if let Some(watcher) = watcher {
-        let _ = watcher.join();
+    if let Some(handle) = watcher {
+        let signal = [1u8];
+        unsafe {
+            libc::write(
+                handle.shutdown_write,
+                signal.as_ptr() as *const libc::c_void,
+                signal.len(),
+            );
+        }
+        let _ = handle.worker.join();
+        unsafe {
+            libc::close(handle.shutdown_write);
+            libc::close(handle.inotify_fd);
+        }
     }
 }
 
@@ -1429,9 +1537,13 @@ fn ingress_event_priority(event: &IngressServerEvent) -> IngressEventPriority {
     }
 }
 
-fn handle_transport_event(
-    publication_runtime: &RemoteTargetPublicationRuntime,
-    authority_manager: &mut SessionSyncAuthorityManager,
+fn handle_transport_event<
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
+    authority_manager: &mut SessionSyncAuthorityManager<F, A>,
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     pending_create_sessions: &mut HashMap<String, mpsc::Sender<GrpcNodeSessionEnvelope>>,
     registered_workspace_sockets: &BTreeSet<String>,
@@ -1440,17 +1552,20 @@ fn handle_transport_event(
     socket_discovery_retry_scheduled: &mut bool,
     closed_session_instances: &mut HashSet<String>,
     event: RemoteNodeTransportEvent,
-) {
+) where
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     match event {
         RemoteNodeTransportEvent::SessionOpened { session } => {
-            let node_id = session.node_id().to_string();
             let session_instance_id = session.session_instance_id().to_string();
             closed_session_instances.remove(&session_instance_id);
+
             let mut active = ActiveNodeIngressSession {
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
             };
+            let node_id = active.session.node_id().to_string();
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
                 schedule_socket_discovery_retry(
@@ -1571,8 +1686,8 @@ fn has_active_ingress_session_for_node(
         .any(|active| active.session.node_id() == node_id)
 }
 
-fn mark_discovered_node_offline_if_last_ingress_session(
-    publication_runtime: &RemoteTargetPublicationRuntime,
+fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicationBackend>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
     sessions: &HashMap<String, ActiveNodeIngressSession>,
     node_id: &str,
 ) {
@@ -1582,6 +1697,11 @@ fn mark_discovered_node_offline_if_last_ingress_session(
     if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(node_id) {
         ERROR_LOG.log(format!(
             "[diag] ingress server: failed to mark discovered node offline {node_id}: {error}"
+        ));
+    }
+    if let Err(error) = publication_runtime.signal_remote_node_offline(node_id) {
+        ERROR_LOG.log(format!(
+            "[diag] ingress server: failed to signal remote node offline {node_id}: {error}"
         ));
     }
 }
@@ -1794,6 +1914,10 @@ fn handle_internal_event(
             socket_path,
             command,
         } => {
+            ERROR_LOG.log(format!(
+                "[remote-node-ingress] authority command received node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
+                socket_path.display()
+            ));
             let Some(active) = sessions.get(&session_instance_id) else {
                 ERROR_LOG.log(format!(
                     "[remote-node-ingress] dropping authority command for node={node_id} session_instance_id={session_instance_id} socket={} because no active session is open",
@@ -1978,8 +2102,8 @@ fn target_published_fingerprint(payload: &GrpcTargetPublished) -> String {
     .join("\u{1f}")
 }
 
-fn route_transport_envelope(
-    publication_runtime: &RemoteTargetPublicationRuntime,
+fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
+    publication_runtime: &RemoteTargetPublicationRuntime<B>,
     node_id: &str,
     envelope: GrpcNodeSessionEnvelope,
     mut session: Option<&mut ActiveNodeIngressSession>,
@@ -2201,6 +2325,10 @@ fn route_transport_envelope(
             let Some(session) = session else {
                 return Ok(());
             };
+            ERROR_LOG.log(format!(
+                "[diag-timing] ingress route RawPtyOutput node={node_id} session={} target={} seq={} bytes={}",
+                payload.session_id, payload.target_id, payload.output_seq, payload.output_bytes.len()
+            ));
             bridge_output_to_authority_transports(
                 node_id,
                 session,
@@ -2655,7 +2783,13 @@ fn spawn_authority_bridge_reader(
     thread::spawn(move || {
         loop {
             let command = match reader.recv_command() {
-                Ok(command) => command,
+                Ok(command) => {
+                    ERROR_LOG.log(format!(
+                        "[remote-node-ingress] bridge reader recv_command node={node_id} session_instance_id={session_instance_id} socket={} command={command:?}",
+                        socket_path.display()
+                    ));
+                    command
+                }
                 Err(_) => break,
             };
             if internal_tx
@@ -3037,6 +3171,3 @@ where
         io::Error::new(io::ErrorKind::Other, error.to_string()),
     )
 }
-
-#[cfg(test)]
-mod remote_node_ingress_server_runtime_test;

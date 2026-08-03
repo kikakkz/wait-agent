@@ -688,11 +688,12 @@ impl ScreenBuffer {
         self.cursor_row = self.cursor_row.min(size.rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(size.cols.saturating_sub(1));
         self.pending_wrap = false;
-        self.scroll_top = self.scroll_top.min(size.rows.saturating_sub(1));
-        self.scroll_bottom = self
-            .scroll_bottom
-            .max(self.scroll_top)
-            .min(size.rows.saturating_sub(1));
+        // Resize resets the DECSTBM scrolling region to the full new screen.
+        // The remote peer is expected to repaint after SIGWINCH and can set
+        // explicit margins again if it needs them; keeping old margins caused
+        // the screen to use only the top half when growing from 24 to 50 rows.
+        self.scroll_top = 0;
+        self.scroll_bottom = size.rows.saturating_sub(1);
         if self.saved_cursor.valid {
             self.saved_cursor.row = self.saved_cursor.row.min(size.rows.saturating_sub(1));
             self.saved_cursor.col = self.saved_cursor.col.min(size.cols.saturating_sub(1));

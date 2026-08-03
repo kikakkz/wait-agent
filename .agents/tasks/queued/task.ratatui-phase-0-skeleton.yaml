@@ -1,0 +1,50 @@
+id: task.ratatui-phase-0-skeleton
+kind: task
+version: 1
+title: add --ratatui flag and server/client skeleton with detach
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 5
+  why:
+    - first phase must prove the parallel ratatui path works end-to-end before migrating real UI components
+    - establishes the server/client split that detach and future cloud capabilities depend on
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-0-skeleton.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-replace-tmux.in_progress
+done_criteria:
+  - add --ratatui global CLI flag
+  - dispatch workspace command to a new ratatui_workspace_runtime when --ratatui is set
+  - draw a complete placeholder layout (main area, sidebar, footer) with ratatui
+  - main pane has no left/top border; sidebar has no right/top border; single divider between them
+  - support focus switching between main pane and sidebar with visual focus indicator
+  - focus sidebar with Ctrl+Right, return to main with Left, matching the tmux path keybindings
+  - implement panic hook and terminal restoration
+  - sessions are global per user (scoped by UID, like tmux), not tied to workspace_dir
+  - waitagent --ratatui creates/attaches the default session "1"
+  - waitagent --ratatui attach <session> creates or attaches a named session
+  - waitagent --ratatui detach <session> disconnects all clients from a session
+  - waitagent --ratatui ls lists sessions with attached/detached status
+  - waitagent --ratatui stop <session> stops a session's node server
+  - node server continues running after TUI client exits
+  - re-running waitagent --ratatui re-attaches to the existing session
+  - cargo fmt --check passes
+  - cargo check passes
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo build --bin waitagent
+  - manual test: create sessions 1 and 2, list them, detach session 1, stop both sessions
+touched_paths:
+  - src/cli.rs
+  - src/command/dispatch.rs
+  - src/runtime/ratatui_workspace_runtime.rs
+  - src/runtime/ratatui_node_runtime.rs
+  - src/runtime/ratatui_client_runtime.rs
+notes:
+  - This phase intentionally uses placeholder widgets; real footer/sidebar/main-pane content follows in later phases.
+  - Session/socket isolation is per-UID (like tmux) rather than per-workspace_dir.
+  - Focus and chrome keybindings align with the existing tmux path: Ctrl+Right focuses sidebar, Left returns to main, q/Ctrl+B d detaches.

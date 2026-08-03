@@ -23,6 +23,7 @@ pub struct RemoteWaitAgentStartPlan {
     pub authority_id: String,
     pub endpoint_preflight_command: String,
     pub command: String,
+    pub subcommand: String,
 }
 
 impl RemoteWaitAgentStartPlan {
@@ -43,6 +44,7 @@ impl RemoteWaitAgentStartPlan {
             ),
             local_connect_endpoint,
             authority_id,
+            subcommand: "__remote-daemon".to_string(),
         }
     }
 }
@@ -58,6 +60,12 @@ pub struct RemoteHostBootstrapPlan {
     pub install_or_update_command: String,
     pub install_reachability_preflight_command: Option<String>,
     pub start_plan: RemoteWaitAgentStartPlan,
+    /// When set, the bootstrapper deploys the local waitagent binary to the
+    /// remote host via this script instead of running the curl-based installer.
+    pub deploy_script_path: Option<String>,
+    /// Remote path where the deployed binary is installed. Used by the deploy
+    /// script and for version/daemon checks.
+    pub remote_bin_path: String,
 }
 
 impl RemoteHostBootstrapPlan {
@@ -78,6 +86,9 @@ impl RemoteHostBootstrapPlan {
             ),
         };
         let authority_id = authority_id.into();
+        let start_plan =
+            RemoteWaitAgentStartPlan::new(remote_port, local_connect_endpoint, authority_id);
+        let remote_bin_path = "$HOME/.local/bin/waitagent".to_string();
         Self {
             host: profile.host.clone(),
             ssh_user: profile.ssh_user.clone(),
@@ -87,12 +98,30 @@ impl RemoteHostBootstrapPlan {
             sudo_password_secret_id: profile.sudo_password_secret_id.clone(),
             install_or_update_command: install_or_update_command(),
             install_reachability_preflight_command: None,
-            start_plan: RemoteWaitAgentStartPlan::new(
-                remote_port,
-                local_connect_endpoint,
-                authority_id,
-            ),
+            start_plan,
+            deploy_script_path: None,
+            remote_bin_path,
         }
+    }
+
+    /// Configure this plan to deploy the locally-built waitagent binary to the
+    /// remote host using the repository deployment script instead of the curl
+    /// release installer. The script copies target/release/waitagent to the
+    /// remote host, kills any existing daemon on the same port, and starts a
+    /// fresh ratatui node server in the background with nohup.
+    pub fn with_local_binary_deploy(mut self) -> Self {
+        self.deploy_script_path = Some(default_deploy_script_path());
+        self.install_or_update_command = deploy_command(&self);
+        self.start_plan.subcommand = "__ratatui-node-server".to_string();
+        self.start_plan.command = format!(
+            "nohup waitagent --port {} --connect {} --node-id {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+            self.start_plan.remote_port,
+            shell_single_quote(&self.start_plan.local_connect_endpoint),
+            shell_single_quote(&self.start_plan.authority_id),
+            shell_single_quote(&self.start_plan.subcommand),
+            self.start_plan.remote_port,
+        );
+        self
     }
 }
 
@@ -181,6 +210,12 @@ where
                 plan.start_plan.local_connect_endpoint, error, plan.host
             ))
         })?;
+
+        if plan.deploy_script_path.is_some() {
+            self.run_deploy_script(plan)?;
+            return Ok(());
+        }
+
         if !self.remote_waitagent_is_current(plan)? {
             if let Some(command) = &plan.install_reachability_preflight_command {
                 self.run_ssh_command(plan, command, false)
@@ -216,7 +251,7 @@ where
         Ok(output.status == 0)
     }
 
-    fn remote_waitagent_daemon_is_running(
+    pub fn remote_waitagent_daemon_is_running(
         &self,
         plan: &RemoteHostBootstrapPlan,
     ) -> Result<bool, RemoteHostBootstrapError> {
@@ -266,6 +301,55 @@ where
         self.ssh_executor
             .exec(&target, &remote_command, stdin.as_deref())
             .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))
+    }
+
+    fn run_deploy_script(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<(), RemoteHostBootstrapError> {
+        let Some(script_path) = &plan.deploy_script_path else {
+            return Err(RemoteHostBootstrapError::new(
+                "deploy script path is not configured",
+            ));
+        };
+        let ssh_password = self.ssh_password(plan)?;
+        let mut command = std::process::Command::new(script_path);
+        command
+            .arg("--host")
+            .arg(&plan.host)
+            .arg("--user")
+            .arg(&plan.ssh_user)
+            .arg("--remote-port")
+            .arg(plan.start_plan.remote_port.to_string())
+            .arg("--connect")
+            .arg(&plan.start_plan.local_connect_endpoint)
+            .arg("--node-id")
+            .arg(&plan.start_plan.authority_id)
+            .arg("--remote-bin")
+            .arg(&plan.remote_bin_path);
+        if let Some(key_path) = &plan.key_path {
+            command.arg("--identity").arg(key_path);
+        }
+        if let Some(password) = ssh_password {
+            command.env(
+                "WAITAGENT_SSH_PASSWORD",
+                password.expose_secret().to_string(),
+            );
+        }
+        let output = command.output().map_err(|error| {
+            RemoteHostBootstrapError::new(format!("deploy script failed: {error}"))
+        })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let _stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(RemoteHostBootstrapError::new(format!(
+                "deploy script exited with status {}{}",
+                output.status,
+                stderr_summary(stderr.as_bytes())
+            )))
+        }
     }
 
     fn ssh_target(
@@ -369,6 +453,34 @@ pub fn install_or_update_command() -> String {
     )
 }
 
+fn default_deploy_script_path() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/scripts/deploy-ratatui-remote.sh", manifest_dir)
+}
+
+fn deploy_command(plan: &RemoteHostBootstrapPlan) -> String {
+    let mut parts = vec![
+        shell_single_quote(plan.deploy_script_path.as_deref().unwrap_or("")),
+        "--host".to_string(),
+        shell_single_quote(&plan.host),
+        "--user".to_string(),
+        shell_single_quote(&plan.ssh_user),
+        "--remote-port".to_string(),
+        shell_single_quote(&plan.start_plan.remote_port.to_string()),
+        "--connect".to_string(),
+        shell_single_quote(&plan.start_plan.local_connect_endpoint),
+        "--node-id".to_string(),
+        shell_single_quote(&plan.start_plan.authority_id),
+        "--remote-bin".to_string(),
+        shell_single_quote(&plan.remote_bin_path),
+    ];
+    if let Some(key_path) = &plan.key_path {
+        parts.push("--identity".to_string());
+        parts.push(shell_single_quote(key_path));
+    }
+    parts.join(" ")
+}
+
 fn current_version_check_command() -> String {
     let expected_version = env!("CARGO_PKG_VERSION");
     format!(
@@ -384,7 +496,7 @@ fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
         shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
         shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
         shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
-        shell_single_quote("__remote-daemon"),
+        shell_single_quote(&plan.start_plan.subcommand),
     )
 }
 
@@ -937,5 +1049,55 @@ mod tests {
         assert!(!calls
             .iter()
             .any(|(_, command, _)| command.contains("nohup")));
+    }
+
+    #[test]
+    fn remote_host_bootstrap_plan_with_local_deploy_uses_repo_script_and_connect_args() {
+        let profile = RemoteHostProfile {
+            name: "130".to_string(),
+            host: "10.1.29.130".to_string(),
+            ssh_user: "kk".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("/home/kk/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: None,
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+        };
+
+        let plan = RemoteHostBootstrapPlan::from_profile(
+            &profile,
+            7476,
+            "10.1.26.84:7474",
+            "10.1.29.130#7476",
+        )
+        .with_local_binary_deploy();
+
+        assert!(plan.deploy_script_path.is_some());
+        assert!(plan
+            .deploy_script_path
+            .as_deref()
+            .unwrap()
+            .contains("scripts/deploy-ratatui-remote.sh"));
+        let command = plan.install_or_update_command;
+        assert!(command.contains("deploy-ratatui-remote.sh"));
+        assert!(command.contains("--host"));
+        assert!(command.contains("10.1.29.130"));
+        assert!(command.contains("--user"));
+        assert!(command.contains("kk"));
+        assert!(command.contains("--remote-port"));
+        assert!(command.contains("7476"));
+        assert!(command.contains("--connect"));
+        assert!(command.contains("10.1.26.84:7474"));
+        assert!(command.contains("--node-id"));
+        assert!(command.contains("10.1.29.130#7476"));
+        assert!(command.contains("--identity"));
+        assert!(command.contains("/home/kk/.ssh/id_rsa"));
+        assert!(command.contains("--remote-bin"));
+        assert!(command.contains("$HOME/.local/bin/waitagent"));
+        assert!(plan.start_plan.command.contains("__ratatui-node-server"));
     }
 }

@@ -37,6 +37,15 @@ pub enum RemotePortPreference {
     Port(u16),
 }
 
+impl RemotePortPreference {
+    pub fn explicit_port(&self) -> Option<u16> {
+        match self {
+            RemotePortPreference::Auto => None,
+            RemotePortPreference::Port(port) => Some(*port),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteHostHistory {
     pub hosts: Vec<RemoteHostProfile>,

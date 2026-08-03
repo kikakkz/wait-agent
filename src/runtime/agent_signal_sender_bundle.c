@@ -136,6 +136,40 @@ static int blank(const char *s) {
   return 1;
 }
 
+static int is_json_value(const char *s) {
+  if (!s) {
+    return 0;
+  }
+  while (*s == ' ' || *s == '\n' || *s == '\r' || *s == '\t') {
+    s++;
+  }
+  if (!*s) {
+    return 0;
+  }
+  char c = *s;
+  if (c == '{' || c == '[' || c == '"') {
+    return 1;
+  }
+  if (strncmp(s, "true", 4) == 0 || strncmp(s, "false", 5) == 0 ||
+      strncmp(s, "null", 4) == 0) {
+    return 1;
+  }
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    return 1;
+  }
+  return 0;
+}
+
+static int append_payload(struct buffer *out, const char *payload) {
+  if (blank(payload)) {
+    return buf_append(out, "null");
+  }
+  if (is_json_value(payload)) {
+    return buf_append(out, payload);
+  }
+  return json_append_string(out, payload);
+}
+
 int main(int argc, char **argv) {
   const char *event = argc > 1 ? argv[1] : "";
   const char *signal_socket = getenv("WAITAGENT_SIGNAL_SOCKET");
@@ -174,7 +208,7 @@ int main(int argc, char **argv) {
       buf_append(&message, ",\"token\":") != 0 ||
       json_append_string(&message, token) != 0 ||
       buf_append(&message, ",\"payload\":") != 0 ||
-      buf_append(&message, blank(payload) ? "null" : payload) != 0 ||
+      append_payload(&message, payload) != 0 ||
       buf_append_char(&message, '}') != 0) {
     free(payload);
     free(message.data);

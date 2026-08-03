@@ -1,15 +1,18 @@
 mod tests {
+    use super::super::local_session_sync_backends::{
+        authority_host_signal, deliver_command_to_ready_host,
+    };
     use super::super::{
-        authority_host_signal, compute_session_sync_delta, deliver_command_to_ready_host,
-        exportable_local_sessions_for_socket, local_sessions_by_local_id,
-        notify_remote_session_sync_owner, overlay_workspace_runtime_onto_active_local_target_hosts,
-        remote_session_exited_envelope, remote_session_published_envelope,
-        remote_session_sync_owner_args, remote_session_sync_owner_available,
-        remote_session_sync_owner_socket_path, signal_remote_session_sync_owner,
-        sync_local_sessions, AuthorityHostSignal, LocalCatalogChangeReason, LocalSessionCatalog,
-        LocalTargetExitObserver, OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime,
-        SessionSyncAuthorityHost, SessionSyncAuthorityPublicationGateway, SessionSyncMode,
-        SourcePublicationAckOutcome, SourcePublicationTracker,
+        compute_session_sync_delta, exportable_local_sessions_for_socket,
+        local_sessions_by_local_id, notify_remote_session_sync_owner,
+        overlay_workspace_runtime_onto_active_local_target_hosts, remote_session_exited_envelope,
+        remote_session_published_envelope, remote_session_sync_owner_args,
+        remote_session_sync_owner_available, remote_session_sync_owner_socket_path,
+        signal_remote_session_sync_owner, sync_local_sessions, AuthorityHostSignal,
+        LocalCatalogChangeReason, LocalSessionCatalog, LocalTargetExitObserver,
+        OutboundRemoteNodeTransport, RemoteNodeSessionSyncRuntime, SessionSyncAuthorityHost,
+        SessionSyncAuthorityPublicationGateway, SessionSyncMode, SourcePublicationAckOutcome,
+        SourcePublicationTracker,
     };
     use crate::cli::RemoteNetworkConfig;
     use crate::domain::session_catalog::{
@@ -39,10 +42,57 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[derive(Clone)]
+    struct DummyTargetFactory;
+
+    impl super::super::LocalTargetFactory for DummyTargetFactory {
+        type Error = LifecycleError;
+
+        fn create_local_target(
+            &self,
+            _node_id: &str,
+            _cwd: &Path,
+            _cols: u16,
+            _rows: u16,
+        ) -> Result<super::super::CreatedLocalTarget, Self::Error> {
+            Err(LifecycleError::Protocol("dummy factory".to_string()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct DummyAuthorityBackend;
+
+    impl super::super::LocalAuthorityHostBackend for DummyAuthorityBackend {
+        type Error = LifecycleError;
+
+        fn spawn_authority_host(
+            &self,
+            _session_handle: &RemoteNodeSessionHandle,
+            _target_id: &str,
+            _output_route: super::super::SessionSyncAuthorityOutputRoute,
+        ) -> Result<SessionSyncAuthorityHost, Self::Error> {
+            Err(LifecycleError::Protocol("dummy backend".to_string()))
+        }
+
+        fn authority_host_signal(&self, _host: &SessionSyncAuthorityHost) -> AuthorityHostSignal {
+            AuthorityHostSignal::Closed
+        }
+
+        fn deliver_command(
+            &self,
+            _host: &SessionSyncAuthorityHost,
+            _command: RemoteAuthorityCommand,
+        ) -> Result<AuthorityHostSignal, Self::Error> {
+            Ok(AuthorityHostSignal::Closed)
+        }
+
+        fn shutdown_authority_host(&self, _host: &SessionSyncAuthorityHost) {}
+    }
+
     #[test]
     fn session_sync_delta_publishes_new_and_removed_sessions() {
         let previous = HashMap::from([(
-            "local-tmux:wa-1:shell-old".to_string(),
+            "local:wa-1:shell-old".to_string(),
             session("wa-1", "shell-old"),
         )]);
         let current = local_sessions_by_local_id(vec![
@@ -475,6 +525,9 @@ mod tests {
                 receiver_slot: receiver_slot.clone(),
             },
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -514,6 +567,9 @@ mod tests {
                 receiver_slot: receiver_slot.clone(),
             },
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -550,6 +606,9 @@ mod tests {
             },
             transport: transport.clone(),
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -618,6 +677,9 @@ mod tests {
             },
             transport: transport.clone(),
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -855,6 +917,9 @@ mod tests {
                 receiver_slot: receiver_slot.clone(),
             },
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -910,6 +975,9 @@ mod tests {
                 receiver_slot: receiver_slot.clone(),
             },
             local_target_exit_observer: RecordingLocalTargetExitObserver::default(),
+            target_factory: DummyTargetFactory,
+            authority_backend: DummyAuthorityBackend,
+            publication_runtime: None::<crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime<crate::runtime::remote_publication::remote_target_publication_backend::TmuxRemoteTargetPublicationBackend>>,
             network: RemoteNetworkConfig {
                 port: 7474,
                 connect: Some("127.0.0.1:7474".to_string()),
@@ -1041,7 +1109,7 @@ mod tests {
         );
 
         assert!(!should_reconnect);
-        assert!(synced_sessions.contains_key("local-tmux:wa-1:shell-2"));
+        assert!(synced_sessions.contains_key("local:wa-1:shell-2"));
         let envelope = receiver
             .try_recv()
             .expect("newly created target should be published immediately");
@@ -1609,7 +1677,7 @@ mod tests {
         session_role: WorkspaceSessionRole,
     ) -> ManagedSessionRecord {
         ManagedSessionRecord {
-            address: ManagedSessionAddress::local_tmux(socket_name, session_id),
+            address: ManagedSessionAddress::local(socket_name, session_id),
             selector: Some(format!("{socket_name}:{session_id}")),
             availability: SessionAvailability::Online,
             workspace_dir: None,

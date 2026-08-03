@@ -1,0 +1,50 @@
+id: task.ratatui-phase-4-remove-tmux
+kind: task
+version: 1
+title: remove tmux backend from the default build path
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 2.2
+  why:
+    - Phase 0-3 of the ratatui migration are complete.
+    - The --ratatui path now provides sidebar, footer, main pane PTY, local/remote sessions, and overlays.
+    - Keeping the tmux backend forces dual maintenance and prevents simplifying the command dispatch/bootstrap paths.
+source_of_truth:
+  file: .agents/tasks/current.yaml
+  reference: current
+depends_on:
+  - task.ratatui-phase-3-main-pane.done
+  - task.ratatui-phase-3-remote-main-pane.done
+  - task.ratatui-phase-3-bottom-menu-shortcuts.done
+done_criteria:
+  - --ratatui flag is removed; running waitagent without flags launches the ratatui TUI.
+  - --tmux flag and tmux fallback are removed.
+  - tmux-backed command dispatch paths are deleted or routed through ratatui node server.
+  - vendored tmux submodule and build-time tmux compilation are removed.
+  - src/infra/tmux*.rs and src/infra/tmux_backend/ are removed unless still required by a queued non-ratatui task.
+  - cargo fmt --check passes.
+  - cargo check passes.
+  - cargo build --bin waitagent succeeds.
+  - cargo test passes (or remaining failures are explicitly documented as pre-existing).
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo build --bin waitagent
+  - cargo test
+touched_paths:
+  - src/cli.rs
+  - src/command/dispatch.rs
+  - src/bootstrap.rs
+  - build.rs
+  - Cargo.toml
+  - .gitmodules
+  - third_party/tmux/
+  - src/infra/tmux*.rs
+  - src/infra/tmux_backend/
+  - src/runtime/workspace/*
+  - src/ui/*.rs
+notes:
+  - Do not preserve --tmux fallback per product decision.
+  - Any remaining tmux references must be explicitly justified in code comments.

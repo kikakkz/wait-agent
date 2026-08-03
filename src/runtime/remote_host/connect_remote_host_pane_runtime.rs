@@ -1,6 +1,10 @@
+// Legacy tmux-era remote-host pane runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::cli::{prepend_global_network_args, ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
+use crate::runtime::ratatui_node_runtime::ServerMessageJson;
 use crate::runtime::remote_host::remote_host_history_store::{
     RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostProfile, RemotePortPreference,
 };
@@ -11,6 +15,7 @@ use crate::runtime::remote_host::remote_install_proxy_store::{
     no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
     RemoteInstallProxyStore,
 };
+use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
@@ -19,19 +24,34 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct ConnectRemoteHostPaneRuntime {
     network: RemoteNetworkConfig,
+    ratatui_port: Option<u16>,
+    ratatui_socket_path: Option<std::path::PathBuf>,
 }
 
 impl ConnectRemoteHostPaneRuntime {
     pub fn new(network: RemoteNetworkConfig) -> Self {
-        Self { network }
+        Self {
+            network,
+            ratatui_port: None,
+            ratatui_socket_path: None,
+        }
+    }
+
+    pub fn with_ratatui_port(mut self, port: u16) -> Self {
+        self.ratatui_port = Some(port);
+        self
+    }
+
+    pub fn with_ratatui_socket_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.ratatui_socket_path = Some(path.into());
+        self
     }
 
     pub fn run(&self, command: ConnectRemoteHostPaneCommand) -> Result<(), LifecycleError> {
@@ -42,15 +62,65 @@ impl ConnectRemoteHostPaneRuntime {
         let mut terminal = Terminal::new(backend).map_err(write_error)?;
         terminal.clear().map_err(write_error)?;
 
+        let (crossterm_tx, crossterm_rx) = unbounded::<Event>();
+        std::thread::spawn(move || loop {
+            match event::read() {
+                Ok(event) => {
+                    if crossterm_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        });
+
         let (mut state, initial_secret_request) =
             ConnectRemoteHostState::load_with_initial_secret_request();
-        let result =
-            self.run_event_loop(&mut terminal, &mut state, command, initial_secret_request);
+        let mut render_background = |_frame: &mut Frame| {};
+        let result = self.run_event_loop(
+            &mut terminal,
+            &mut state,
+            command,
+            initial_secret_request,
+            &mut render_background,
+            &crossterm_rx,
+        );
 
         crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
             .map_err(write_error)?;
         disable_raw_mode().map_err(write_error)?;
         terminal.show_cursor().map_err(write_error)?;
+        result
+    }
+
+    /// Run the popup inside an existing ratatui terminal without taking over
+    /// raw mode or the alternate screen. Used by the ratatui client for Ctrl+W.
+    ///
+    /// Events are read from `crossterm_rx` so the popup cooperates with the
+    /// external event-driven TUI loop instead of polling crossterm.
+    pub fn run_embedded<F>(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        command: ConnectRemoteHostPaneCommand,
+        mut render_background: F,
+        crossterm_rx: &CrossbeamReceiver<Event>,
+    ) -> Result<(), LifecycleError>
+    where
+        F: FnMut(&mut Frame),
+    {
+        crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)
+            .map_err(write_error)?;
+        let (mut state, initial_secret_request) =
+            ConnectRemoteHostState::load_with_initial_secret_request();
+        let result = self.run_event_loop(
+            terminal,
+            &mut state,
+            command,
+            initial_secret_request,
+            &mut render_background,
+            crossterm_rx,
+        );
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
         result
     }
 
@@ -60,116 +130,119 @@ impl ConnectRemoteHostPaneRuntime {
         state: &mut ConnectRemoteHostState,
         command: ConnectRemoteHostPaneCommand,
         initial_secret_request: Option<SecretLoadRequest>,
+        render_background: &mut dyn FnMut(&mut Frame),
+        crossterm_rx: &CrossbeamReceiver<Event>,
     ) -> Result<(), LifecycleError> {
-        let (secret_tx, secret_rx) = mpsc::channel();
+        let (secret_tx, secret_rx) = unbounded::<SecretLoadResult>();
         if let Some(request) = initial_secret_request {
             spawn_secret_loader(request, secret_tx.clone());
         }
         terminal
-            .draw(|frame| render(frame, state))
+            .draw(|frame| {
+                render_background(frame);
+                render(frame, state);
+            })
             .map_err(write_error)?;
         loop {
-            let mut needs_draw = self.apply_secret_results(state, &secret_rx);
-            if !needs_draw && !event::poll(Duration::from_millis(25)).map_err(write_error)? {
-                continue;
-            }
-            let action = if event::poll(Duration::from_millis(0)).map_err(write_error)? {
-                match event::read().map_err(write_error)? {
-                    Event::Key(key) => {
-                        needs_draw = true;
-                        state.apply_key(key)
-                    }
-                    Event::Mouse(mouse) => {
-                        needs_draw = true;
-                        state.apply_mouse(mouse)
-                    }
-                    Event::Resize(_, _) => {
-                        needs_draw = true;
-                        PaneAction::Redraw
-                    }
-                    _ => PaneAction::None,
-                }
-            } else {
-                PaneAction::None
-            };
-            match action {
-                PaneAction::None | PaneAction::Redraw => {}
-                PaneAction::Close => return Ok(()),
-                PaneAction::LoadSecrets(request) => {
-                    if let Some(request) = request {
-                        spawn_secret_loader(request, secret_tx.clone());
-                    }
-                }
-                PaneAction::SaveProxyConfig => match state.save_proxy_settings() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Saved proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::ActivateProxyConfig => match state.activate_proxy_profile() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Activated proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::DeleteProxyConfig => match state.delete_proxy_profile() {
-                    Ok(()) => {
-                        state.status = Status::Hint("Deleted proxy profile.".to_string());
-                    }
-                    Err(message) => {
-                        state.status = Status::Error(message);
-                    }
-                },
-                PaneAction::DeleteSelectedHost { profile_name } => {
-                    match delete_selected_host(state, &profile_name) {
-                        Ok(request) => {
+            crossbeam_channel::select! {
+                recv(crossterm_rx) -> result => {
+                    let event = match result {
+                        Ok(event) => event,
+                        Err(_) => return Ok(()),
+                    };
+                    let action = match event {
+                        Event::Key(key) => state.apply_key(key),
+                        Event::Mouse(mouse) => state.apply_mouse(mouse),
+                        Event::Resize(_, _) => PaneAction::Redraw,
+                        _ => PaneAction::None,
+                    };
+                    match action {
+                        PaneAction::None | PaneAction::Redraw => {}
+                        PaneAction::Close => return Ok(()),
+                        PaneAction::LoadSecrets(request) => {
                             if let Some(request) = request {
                                 spawn_secret_loader(request, secret_tx.clone());
                             }
                         }
-                        Err(message) => {
-                            state.delete_confirm = DeleteConfirmState::Idle;
-                            state.status = Status::Error(message);
+                        PaneAction::SaveProxyConfig => match state.save_proxy_settings() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Saved proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::ActivateProxyConfig => match state.activate_proxy_profile() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Activated proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::DeleteProxyConfig => match state.delete_proxy_profile() {
+                            Ok(()) => {
+                                state.status = Status::Hint("Deleted proxy profile.".to_string());
+                            }
+                            Err(message) => {
+                                state.status = Status::Error(message);
+                            }
+                        },
+                        PaneAction::DeleteSelectedHost { profile_name } => {
+                            match delete_selected_host(state, &profile_name) {
+                                Ok(request) => {
+                                    if let Some(request) = request {
+                                        spawn_secret_loader(request, secret_tx.clone());
+                                    }
+                                }
+                                Err(message) => {
+                                    state.delete_confirm = DeleteConfirmState::Idle;
+                                    state.status = Status::Error(message);
+                                }
+                            }
+                        }
+                        PaneAction::Connect => {
+                            if matches!(state.status, Status::Working(_)) || state.credentials_loading() {
+                                continue;
+                            }
+                            state.status = Status::Working("Connecting...".to_string());
+                            terminal
+                                .draw(|frame| {
+                                    render_background(frame);
+                                    render(frame, state);
+                                })
+                                .map_err(write_error)?;
+                            match run_connect(
+                                state,
+                                &command,
+                                &self.network,
+                                self.ratatui_port,
+                                self.ratatui_socket_path.as_deref(),
+                            ) {
+                                Ok(_) => return Ok(()),
+                                Err(message) => state.status = Status::Error(message),
+                            }
                         }
                     }
                 }
-                PaneAction::Connect => {
-                    if matches!(state.status, Status::Working(_)) || state.credentials_loading() {
-                        continue;
+                recv(secret_rx) -> result => {
+                    if let Ok(result) = result {
+                        state.apply_secret_result(result);
                     }
-                    state.status = Status::Working("Connecting...".to_string());
-                    terminal
-                        .draw(|frame| render(frame, state))
-                        .map_err(write_error)?;
-                    match run_connect(state, &command, &self.network) {
-                        Ok(_) => return Ok(()),
-                        Err(message) => state.status = Status::Error(message),
+                    // Drain any additional results that arrived while we were
+                    // blocked so the UI reflects the final state.
+                    while let Ok(result) = secret_rx.try_recv() {
+                        state.apply_secret_result(result);
                     }
                 }
             }
-            if needs_draw {
-                terminal
-                    .draw(|frame| render(frame, state))
-                    .map_err(write_error)?;
-            }
+            terminal
+                .draw(|frame| {
+                    render_background(frame);
+                    render(frame, state);
+                })
+                .map_err(write_error)?;
         }
-    }
-
-    fn apply_secret_results(
-        &self,
-        state: &mut ConnectRemoteHostState,
-        secret_rx: &Receiver<SecretLoadResult>,
-    ) -> bool {
-        let mut changed = false;
-        while let Ok(result) = secret_rx.try_recv() {
-            state.apply_secret_result(result);
-            changed = true;
-        }
-        changed
     }
 }
 
@@ -1519,12 +1592,27 @@ impl PopupGeometry {
     fn from_terminal_size((cols, rows): (u16, u16), state: &ConnectRemoteHostState) -> Self {
         let width = popup_preferred_width(state).min(cols);
         let x = cols.saturating_sub(width) / 2;
-        let dialog = Rect::new(x, 0, width, rows);
+
+        // Keep the popup compact and centered, like the original tmux popup,
+        // instead of stretching to the full terminal height.
+        let label_count = host_list_labels(state).len() as u16;
+        let detail_rows = if state.selected_proxy_config() {
+            12
+        } else if state.has_saved_selection() {
+            14
+        } else {
+            13
+        };
+        let body_height = label_count.max(detail_rows).min(rows.saturating_sub(2));
+        let dialog_height = body_height + 2;
+        let y = rows.saturating_sub(dialog_height) / 2;
+        let dialog = Rect::new(x, y, width, dialog_height);
+        // Leave one column/row on each side for the border.
         let body = Rect::new(
-            dialog.x,
-            dialog.y.saturating_add(2),
-            dialog.width,
-            dialog.height.saturating_sub(2),
+            dialog.x.saturating_add(1),
+            dialog.y.saturating_add(1),
+            dialog.width.saturating_sub(2),
+            body_height,
         );
         let host_width = host_list_width(state, body.width);
         let separator_width = u16::from(body.width > host_width);
@@ -1628,19 +1716,20 @@ impl ProxyDetailsGeometry {
 fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     let geometry =
         PopupGeometry::from_terminal_size((frame.size().width, frame.size().height), state);
+
+    // The background is rendered with a dim modifier behind the popup. Reset
+    // the dialog area to the default style so the popup text and borders are
+    // drawn at full brightness.
     frame.render_widget(Clear, geometry.dialog);
+
     frame.render_widget(
-        Paragraph::new(
-            Line::from("Connect Remote Host")
-                .style(Style::default().add_modifier(Modifier::BOLD))
-                .alignment(Alignment::Center),
-        ),
-        Rect::new(
-            geometry.dialog.x,
-            geometry.dialog.y,
-            geometry.dialog.width,
-            1,
-        ),
+        Block::default()
+            .title("Connect Remote Host")
+            .title_alignment(Alignment::Center)
+            .title_style(Style::default().add_modifier(Modifier::BOLD))
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::White)),
+        geometry.dialog,
     );
 
     render_hosts(frame, geometry.hosts, state);
@@ -2652,7 +2741,7 @@ fn edit_focus(field: EditField) -> Focus {
     }
 }
 
-fn spawn_secret_loader(request: SecretLoadRequest, tx: Sender<SecretLoadResult>) {
+fn spawn_secret_loader(request: SecretLoadRequest, tx: CrossbeamSender<SecretLoadResult>) {
     std::thread::spawn(move || {
         let ssh = request.ssh_secret_id.as_ref().map(load_secret_value);
         let sudo = request.sudo_secret_id.as_ref().map(load_secret_value);
@@ -2727,11 +2816,76 @@ fn delete_selected_host(
     Ok(request)
 }
 
+fn run_ratatui_connect(
+    state: &ConnectRemoteHostState,
+    port: u16,
+    socket_path: &std::path::Path,
+) -> Result<String, String> {
+    let Some(profile) = state
+        .selected_profile()
+        .filter(|profile| saved_profile_can_connect_by_id(state, profile))
+    else {
+        return Err("ratatui mode only supports saved profiles with saved credentials".to_string());
+    };
+
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("failed to connect to ratatui node on port {port}: {error}"))?;
+    writeln!(stream, "CONNECT_REMOTE_HOST {}", profile.name)
+        .map_err(|error| format!("failed to send connect command: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("failed to flush connect command: {error}"))?;
+
+    let reader = stream
+        .try_clone()
+        .map_err(|error| format!("failed to clone node socket: {error}"))?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("failed to read node response: {error}"))?;
+        let response = line.trim();
+        if response.is_empty() {
+            continue;
+        }
+        // The node server wraps command replies in `ServerMessageJson::Response`.
+        // Snapshots may also arrive on this socket while we wait, so skip them.
+        if let Ok(message) = serde_json::from_str::<ServerMessageJson>(response) {
+            match message {
+                ServerMessageJson::Response(resp) => {
+                    if resp.ok {
+                        return Ok("Connected. Press Esc to close.".to_string());
+                    }
+                    return Err(resp.message.unwrap_or_default());
+                }
+                ServerMessageJson::Snapshot(_) => continue,
+                ServerMessageJson::History(_) => continue,
+            }
+        }
+        // Plain-text fallback for older/simple replies.
+        if response.starts_with("OK") {
+            return Ok("Connected. Press Esc to close.".to_string());
+        }
+        return Err(response
+            .strip_prefix("ERR ")
+            .unwrap_or(response)
+            .to_string());
+    }
+}
+
 fn run_connect(
     state: &ConnectRemoteHostState,
     command: &ConnectRemoteHostPaneCommand,
     network: &RemoteNetworkConfig,
+    ratatui_port: Option<u16>,
+    ratatui_socket_path: Option<&std::path::Path>,
 ) -> Result<String, String> {
+    if let (Some(port), Some(socket_path)) = (ratatui_port, ratatui_socket_path) {
+        return run_ratatui_connect(state, port, socket_path);
+    }
+
     validate(state)?;
     let executable = current_waitagent_executable()
         .map_err(|error| error.to_string())?
@@ -3438,15 +3592,15 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
-        assert_eq!(geometry.dialog.height, 18);
+        assert_eq!(geometry.dialog.height, 15);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
-        assert_eq!(geometry.hosts.height, 16);
+        assert_eq!(geometry.hosts.height, 13);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
@@ -3475,10 +3629,10 @@ mod tests {
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
@@ -3575,10 +3729,10 @@ mod tests {
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 68);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
-            geometry.dialog.x + geometry.dialog.width
+            geometry.dialog.x + geometry.dialog.width - 1
         );
     }
 
@@ -3591,7 +3745,7 @@ mod tests {
         assert_eq!(geometry.dialog.x, 0);
         assert_eq!(geometry.dialog.width, 66);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 34);
+        assert_eq!(geometry.details.width, 32);
     }
 
     #[test]
@@ -3886,7 +4040,7 @@ mod tests {
         let details = DetailsGeometry::from_area(popup.details, &state);
 
         assert_eq!(popup.details.y, 2);
-        assert_eq!(popup.details.height, 16);
+        assert_eq!(popup.details.height, 14);
         assert_eq!(details.rows.delete, Some(13));
         assert!(
             popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height

@@ -1,3 +1,6 @@
+// Legacy tmux-era authority transport runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
@@ -596,6 +599,7 @@ fn split_target_identity(target: &str) -> Option<(&str, &str)> {
     let target = target
         .strip_prefix("remote-peer:")
         .or_else(|| target.strip_prefix("local-tmux:"))
+        .or_else(|| target.strip_prefix("local:"))
         .or_else(|| target.strip_prefix("remote:"))
         .unwrap_or(target);
     let (authority_id, session_id) = target.rsplit_once(':')?;

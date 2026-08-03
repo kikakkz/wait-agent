@@ -1,0 +1,46 @@
+id: task.ratatui-phase-3-remote-main-pane
+kind: task
+version: 1
+title: render remote sessions in the ratatui main pane
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 3
+  why:
+    - Phase 3 main pane currently only renders local PTY sessions.
+    - Remote sessions already appear in the sidebar catalog via the existing session-sync/publication path.
+    - The main pane must display the active remote session before Phase 4 tmux removal can be considered complete.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-3-remote-main-pane.yaml
+  reference: queued/remote-main-pane
+depends_on:
+  - task.ratatui-phase-3-main-pane.done
+done_criteria:
+  - ratatui node server can open a remote PTY mirror for an active remote session.
+  - remote session output is rendered into snapshot.main_lines and visible in the main pane.
+  - keyboard input in the main pane is forwarded to the active remote session.
+  - terminal resize is forwarded to the active remote session.
+  - switching between local and remote sessions updates the main pane correctly.
+  - cargo check --release passes.
+  - cargo test --release -- ratatui passes.
+  - manual cross-host test: connect to a remote waitagent and verify the remote shell appears in the main pane.
+verification:
+  - cargo check --release
+  - cargo test --release -- ratatui
+  - manual test on 192.168.31.178/182 pair
+touched_paths:
+  - Cargo.toml
+  - Cargo.lock
+  - src/runtime/ratatui_node/mod.rs
+  - src/runtime/ratatui_node/runtime.rs
+  - src/runtime/ratatui_node/snapshot.rs
+  - src/runtime/ratatui_node/commands.rs
+  - src/runtime/ratatui_node/local_session.rs
+  - src/runtime/ratatui_node/authority_host_session.rs
+  - src/runtime/ratatui_node/remote_session.rs
+  - src/runtime/ratatui_client_runtime.rs
+  - src/runtime/remote_node/remote_node_session_sync_runtime/local_session_sync_backends.rs
+notes:
+  - Reuse RemoteMainSlotRuntime and RemoteObserverRuntime; do not reimplement the gRPC codec.
+  - Keep tmux path untouched.

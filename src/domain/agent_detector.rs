@@ -1,3 +1,6 @@
+// Legacy tmux-era agent detector kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::interpreter_command_name_resolver::InterpreterCommandNameResolver;
 use crate::domain::session_catalog::ManagedSessionTaskState;

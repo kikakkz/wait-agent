@@ -19,6 +19,12 @@ active:
   - id: task.tmux-style-1
     title: analyze the legacy sidebar and menu style contract before tmux-pane restyling
     status: done
+  - id: task.ratatui-replace-tmux
+    title: replace tmux with ratatui as the local workspace UI substrate
+    status: in_progress
+  - id: task.ratatui-phase-0-skeleton
+    title: add --ratatui flag and tmux-style multi-session server/client skeleton with attach/detach/ls/stop
+    status: done
 next:
   - id: task.event-r2a
     title: replace cross-session attach switching with fixed-chrome main-slot target activation
@@ -268,7 +274,7 @@ next:
     status: cancelled
   - id: task.feature-agent-status-recognition
     title: improve session state recognition accuracy in catalog and sidebar with agent plugin
-    status: done
+    status: deferred
   - id: task.ux-3
     title: implement workspace snapshot persistence and auto-load on startup
     status: deferred
@@ -527,6 +533,33 @@ next:
     status: ready
   - id: task.bug-remote-main-slot-snapshot-clobber
     title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
+    status: ready
+  - id: task.ratatui-phase-1-footer
+    title: render real footer status bar with ratatui widget
+    status: done
+  - id: task.ratatui-phase-2-sidebar
+    title: build sidebar UI skeleton with navigation (no real session data yet)
+    status: done
+  - id: task.ratatui-phase-2-5-session-backend
+    title: migrate local and remote session creation onto the ratatui node server
+    status: done
+  - id: task.ratatui-phase-3-main-pane
+    title: implement main pane PTY with alacritty_terminal
+    status: done
+  - id: task.ratatui-phase-3-remote-main-pane
+    title: render remote sessions in the ratatui main pane
+    status: done
+  - id: task.ratatui-phase-3-remote-reconnect
+    title: implement automatic reconnect for ratatui remote sessions
+    status: in_progress
+  - id: task.ratatui-phase-3-bottom-menu-shortcuts
+    title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
+    status: done
+  - id: task.ratatui-phase-4-remove-tmux
+    title: remove tmux backend once ratatui path is stable
+    status: done
+  - id: task.ratatui-phase-5-cloud
+    title: activate distributed control topologies on the server/client foundation
     status: ready
 templates:
   - id: task-template.local-acceptance-cycle

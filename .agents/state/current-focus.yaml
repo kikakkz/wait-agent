@@ -1,8 +1,12 @@
 kind: state
 version: 1
-current_task: task.github-issue-18-remote-dead-panes-accumulate
+current_task: task.ratatui-phase-3-remote-reconnect
 focus_statement: >
-  active task is GitHub issue #18: remote sessions remain visible and dead wa-hidden panes accumulate after client hosts power off. Need to analyze the root cause in the lifecycle/catalog path that should react to node offline events by hiding or removing remote targets and cleaning up dead hidden panes.
+  Starting ratatui migration completion queue: implement automatic reconnect for
+  ratatui remote sessions. Currently a remote session disappears from the local
+  sidebar as soon as the authority transport drops; the session should survive the
+  disconnect, reconnect when the remote node comes back, and resume output without
+  requiring the user to Ctrl-W again. Next step is plan-mode design.
 last_updated_from:
-  file: .agents/tasks/current.yaml
-  reference: task.github-issue-18-remote-dead-panes-accumulate.in_progress
+  file: .agents/tasks/backlog.yaml
+  reference: task.ratatui-phase-3-remote-reconnect.in_progress

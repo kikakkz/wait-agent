@@ -17,7 +17,7 @@ mod tests {
         RemoteAuthorityConnectionRuntime,
     };
     use crate::runtime::remote_main_slot_runtime::RemoteControlPlaneSink;
-    use crate::runtime::remote_node_ingress_runtime::{
+    use crate::runtime::remote_node::remote_node_ingress_runtime::{
         GrpcRemoteNodeIngressSource, RemoteNodeIngressSource,
     };
     use crate::runtime::remote_transport_runtime::{

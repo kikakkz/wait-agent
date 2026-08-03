@@ -1,0 +1,37 @@
+id: task.ratatui-phase-2-sidebar
+kind: task
+version: 1
+title: build sidebar UI skeleton with navigation (no real session data yet)
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-replace-tmux-plan.md
+  section: 2
+  why:
+    - sidebar is the primary navigation surface for sessions in the ratatui path
+    - UI interactions (selection, scroll, Enter) can be built before real session backend is ready
+    - having the skeleton in place lets Phase 2.5 session backend plug real data in immediately
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-phase-2-sidebar.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-phase-1-footer.done
+done_criteria:
+  - sidebar is rendered as a ratatui List widget with placeholder rows
+  - sidebar supports Up/Down navigation and highlights the selected row
+  - pressing Enter on a sidebar row triggers a placeholder action (log/notification only)
+  - sidebar scrolls when rows exceed available height
+  - focus switching between main pane and sidebar remains working
+  - cargo fmt --check passes
+  - cargo check passes
+  - cargo build --bin waitagent succeeds
+verification:
+  - cargo fmt --check
+  - cargo check
+  - cargo build --bin waitagent
+  - manual test: open ratatui session, move selection up/down in sidebar, press Enter, switch focus back to main
+touched_paths:
+  - src/runtime/ratatui_client_runtime.rs
+notes:
+  - This phase intentionally does not display real session data; that is the responsibility of Phase 2.5 session backend migration.
+  - Placeholder rows should make it obvious they are placeholders (e.g., "Session A", "Session B").

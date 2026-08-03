@@ -1,3 +1,6 @@
+// Legacy tmux-era control-plane service kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability, SessionTransport};
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ControlPlaneDestination, ControlPlanePayload,
@@ -942,7 +945,7 @@ enum CloseOutcome {
 fn validate_remote_target(target: &ManagedSessionRecord) -> Result<(), RemoteControlPlaneError> {
     match target.address.transport() {
         SessionTransport::RemotePeer => {}
-        SessionTransport::LocalTmux => return Err(RemoteControlPlaneError::NotRemoteTarget),
+        SessionTransport::Local => return Err(RemoteControlPlaneError::NotRemoteTarget),
     }
     if target.availability != SessionAvailability::Online {
         return Err(RemoteControlPlaneError::TargetUnavailable);

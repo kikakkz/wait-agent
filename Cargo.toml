@@ -6,7 +6,7 @@ description = "Terminal-native interaction scheduler for multi-agent workflows"
 homepage = "https://github.com/kikakkz/wait-agent"
 repository = "https://github.com/kikakkz/wait-agent"
 license = "MIT"
-keywords = ["tmux", "terminal", "multiplexer", "workspace", "agent"]
+keywords = ["terminal", "multiplexer", "workspace", "agent"]
 categories = ["command-line-utilities"]
 
 [package.metadata.deb]
@@ -24,22 +24,29 @@ requires = "libevent, ncurses-libs"
 aes = "0.9"
 base64 = "0.22"
 cbc = "0.2"
+crossbeam-channel = "0.5"
 crossterm = "0.27.0"
 getrandom = "0.4"
 hmac = "0.13"
 libc = "0.2"
 pbkdf2 = "0.13"
+polling = "3.11"
 prost = "0.13"
 prost-types = "0.13"
 ratatui = { version = "0.27.0", default-features = false, features = ["crossterm"] }
 russh = "0.61.2"
+alacritty_terminal = "0.25"
+rustix = { version = "1.1", features = ["termios"] }
+rustix-openpty = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11"
 sha2 = "0.11"
+signal-hook = "0.3"
 tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
 tonic = { version = "0.12", features = ["transport"] }
+unicode-width = "0.1.14"
 
 [build-dependencies]
 cc = "1"

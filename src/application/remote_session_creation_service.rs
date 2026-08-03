@@ -62,7 +62,11 @@ impl RemoteSessionCreationTransport for GrpcRemoteSessionCreationTransport {
         request: CreateSessionRequestPayload,
         accept_timeout: Duration,
     ) -> Result<CreateSessionReply, Self::Error> {
-        RemoteNodeIngressServerRuntime::ensure_owner_running("__shared__", &self.network)
+        RemoteNodeIngressServerRuntime::<
+            crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
+            crate::runtime::remote_node_session_sync_runtime::RatatuiLocalTargetFactory,
+            crate::runtime::remote_node_session_sync_runtime::RatatuiLocalAuthorityHostBackend,
+        >::ensure_owner_running("__shared__", &self.network)
             .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
         let socket_path = remote_node_ingress_owner_socket_path(&self.network);
         let mut stream = UnixStream::connect(socket_path)

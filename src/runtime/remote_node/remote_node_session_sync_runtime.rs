@@ -1,33 +1,27 @@
-use crate::application::target_registry_service::merge_local_targets_by_identity;
-use crate::cli::{
-    prepend_global_network_args, RemoteAuthorityTargetHostCommand, RemoteNetworkConfig,
-    RemoteSessionSyncOwnerCommand,
-};
+// Legacy tmux-era session-sync runtime kept during the ratatui migration; most items are currently unused.
+#![allow(dead_code)]
+
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::domain::workspace::WorkspaceInstanceConfig;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
 };
-use crate::infra::tmux::{EmbeddedTmuxBackend, TmuxChromeGateway, TmuxSocketName};
 use crate::lifecycle::LifecycleError;
 use crate::runtime::current_executable::current_waitagent_executable;
-use crate::runtime::remote_authority_target_host_runtime::RemoteAuthorityPublicationGateway;
-use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
-use crate::runtime::remote_node_session_owner_runtime::live_authority_session_socket_path;
-use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
-use crate::runtime::remote_runtime_owner_runtime::{
-    RemoteRuntimeOwnerRuntime, RemoteTargetSourceBindingResolver,
+use crate::runtime::remote_authority::remote_authority_target_host_runtime::{
+    wait_for_ready_socket, RemoteAuthorityPublicationGateway,
 };
+use crate::runtime::remote_authority_transport_runtime::RemoteAuthorityCommand;
+use crate::runtime::remote_node_session_runtime::GrpcAuthorityEvent;
+use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use crate::runtime::sidecar_process_runtime::{
     spawn_waitagent_sidecar, spawn_waitagent_sidecar_child,
 };
-use crate::runtime::target_host_runtime::TargetHostRuntime;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -39,11 +33,13 @@ use std::time::Duration;
 mod sync_helpers;
 pub(crate) use sync_helpers::*;
 
+mod local_session_sync_backends;
+pub(crate) use local_session_sync_backends::*;
+
 const SESSION_SYNC_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) const SESSION_SYNC_AUTHORITY_ID: &str = "waitagent-session-sync-authority";
 pub(super) const LIVE_AUTHORITY_SERVER_ID: &str = "waitagent-live-authority-owner";
-pub(super) const WAITAGENT_ACTIVE_TARGET_OPTION: &str = "@waitagent_active_target";
 
 pub trait LocalSessionCatalog: Send + 'static {
     type Error: ToString;
@@ -52,58 +48,6 @@ pub trait LocalSessionCatalog: Send + 'static {
 
     fn local_target_socket_name(&self) -> Option<&str> {
         None
-    }
-}
-
-#[derive(Clone)]
-pub struct SocketScopedLocalSessionCatalog<G> {
-    gateway: G,
-    socket_name: TmuxSocketName,
-    remote_target_resolver: Arc<dyn RemoteTargetSourceBindingResolver>,
-}
-
-impl<G> SocketScopedLocalSessionCatalog<G> {
-    pub fn new(
-        gateway: G,
-        socket_name: TmuxSocketName,
-        remote_target_resolver: impl RemoteTargetSourceBindingResolver + 'static,
-    ) -> Self {
-        Self {
-            gateway,
-            socket_name,
-            remote_target_resolver: Arc::new(remote_target_resolver),
-        }
-    }
-}
-
-impl<G> LocalSessionCatalog for SocketScopedLocalSessionCatalog<G>
-where
-    G: TmuxChromeGateway + Send + 'static,
-    G::Error: ToString,
-{
-    type Error = G::Error;
-
-    fn list_local_sessions(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error> {
-        let sessions = self.gateway.list_sessions_on_socket(&self.socket_name)?;
-        let pane_backed = self
-            .gateway
-            .list_local_target_content_pane_sessions(&self.socket_name)?;
-        let sessions = merge_local_targets_by_identity(sessions, pane_backed);
-        let active_targets =
-            active_workspace_targets_on_socket(&self.gateway, &self.socket_name, &sessions)?;
-        Ok(exportable_local_sessions_for_socket(
-            overlay_workspace_runtime_onto_active_local_target_hosts(
-                sessions,
-                self.socket_name.as_str(),
-                &active_targets,
-            ),
-            self.socket_name.as_str(),
-            self.remote_target_resolver.as_ref(),
-        ))
-    }
-
-    fn local_target_socket_name(&self) -> Option<&str> {
-        Some(self.socket_name.as_str())
     }
 }
 
@@ -177,13 +121,19 @@ impl LocalTargetExitObserver for SidecarLocalTargetExitObserver {
 }
 
 pub struct RemoteNodeSessionSyncRuntime<
-    G,
-    T = GrpcRemoteNodeTransport,
-    O = SidecarLocalTargetExitObserver,
+    G: LocalSessionCatalog = RatatuiLocalSessionCatalog,
+    T: OutboundRemoteNodeTransport = GrpcRemoteNodeTransport,
+    O: LocalTargetExitObserver = RatatuiLocalTargetExitObserver,
+    F: LocalTargetFactory = RatatuiLocalTargetFactory,
+    A: LocalAuthorityHostBackend = RatatuiLocalAuthorityHostBackend,
+    P: crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend = crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
 > {
     gateway: G,
     transport: T,
     local_target_exit_observer: O,
+    target_factory: F,
+    authority_backend: A,
+    publication_runtime: Option<RemoteTargetPublicationRuntime<P>>,
     network: RemoteNetworkConfig,
     reconnect_delay: Duration,
 }
@@ -193,27 +143,26 @@ pub struct RemoteNodeSessionSyncGuard {
     worker: Option<thread::JoinHandle<()>>,
 }
 
-pub(super) struct SessionSyncAuthorityManager {
-    pub(super) running_hosts: HashMap<String, SessionSyncAuthorityHost>,
-    network: RemoteNetworkConfig,
-    local_target_socket_name: Option<String>,
+pub(crate) struct SessionSyncAuthorityManager<F: LocalTargetFactory, A: LocalAuthorityHostBackend> {
+    pub(crate) running_hosts: HashMap<String, SessionSyncAuthorityHost>,
     output_route: SessionSyncAuthorityOutputRoute,
+    target_factory: F,
+    authority_backend: A,
 }
 
-pub(super) struct SessionSyncAuthorityHost {
-    pub(super) writer: Arc<Mutex<Option<UnixStream>>>,
-    pub(super) running: Arc<AtomicBool>,
-    pub(super) writer_ready: Arc<Condvar>,
-    pub(super) bound_session_instance_id: String,
+pub(crate) struct SessionSyncAuthorityHost {
+    pub(crate) writer: Arc<Mutex<Option<UnixStream>>>,
+    pub(crate) running: Arc<AtomicBool>,
+    pub(crate) writer_ready: Arc<Condvar>,
+    pub(crate) bound_session_instance_id: String,
     /// The bridge forwards authority output using this session id. It is updated
     /// when a new inbound gRPC session takes over the same target, so the
     /// existing target host and bridge survive transient reconnects.
-    pub(super) bridge_session_id: Arc<RwLock<String>>,
+    pub(crate) bridge_session_id: Arc<RwLock<String>>,
 }
 
 #[derive(Clone)]
-pub(in crate::runtime::remote_node::remote_node_session_sync_runtime) enum SessionSyncAuthorityOutputRoute
-{
+pub(crate) enum SessionSyncAuthorityOutputRoute {
     OwnerEvent(mpsc::Sender<SessionSyncEvent>),
     IngressEvent(
         mpsc::Sender<
@@ -233,103 +182,78 @@ impl SessionSyncAuthorityPublicationGateway {
     }
 }
 
-impl RemoteNodeSessionSyncRuntime<SocketScopedLocalSessionCatalog<EmbeddedTmuxBackend>> {
-    pub fn from_build_env_with_network_and_socket(
-        network: RemoteNetworkConfig,
+impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
+    fn ensure_live_session_registered(
+        &self,
         socket_name: &str,
-    ) -> Result<Self, LifecycleError> {
-        Ok(Self::new_with_local_target_exit_observer(
-            SocketScopedLocalSessionCatalog::new(
-                EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
-                TmuxSocketName::new(socket_name),
-                RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?,
-            ),
-            GrpcRemoteNodeTransport::new(),
-            SidecarLocalTargetExitObserver::from_build_env(network.clone())?,
-            network,
-        ))
-    }
-
-    pub fn run_owner(
-        command: RemoteSessionSyncOwnerCommand,
-        network: RemoteNetworkConfig,
+        target_session_name: &str,
+        authority_id: &str,
+        target_id: &str,
+        transport_socket_path: &str,
+        authority_socket_path: &std::path::Path,
     ) -> Result<(), LifecycleError> {
-        // Install a file-based panic hook so that panic messages are captured
-        // even when stderr goes to a deleted pts (the sidecar's original stderr
-        // fd may reference a dead pty). The hook chains to the original hook so
-        // stderr output is preserved when it is available.
-        let socket_name_for_hook = command.socket_name.clone();
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let diag_path = std::env::temp_dir().join(format!(
-                "waitagent-sync-owner-panic-{}.log",
-                socket_name_for_hook
-                    .chars()
-                    .map(|ch| match ch {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-                        _ => '_',
-                    })
-                    .collect::<String>()
-            ));
-            let _ = std::fs::write(
-                &diag_path,
-                format!("remote session sync owner panicked: {info}\n"),
-            );
-            original_hook(info);
-        }));
-
-        let socket_path = remote_session_sync_owner_socket_path(&command.socket_name);
-        let startup = (|| -> Result<
-            (
-                mpsc::Receiver<()>,
-                RemoteNodeSessionSyncGuard,
-                thread::JoinHandle<()>,
-            ),
-            LifecycleError,
-        > {
-            if socket_path.exists() {
-                let _ = fs::remove_file(&socket_path);
-            }
-            let listener = UnixListener::bind(&socket_path).map_err(remote_session_sync_error)?;
-            let (local_catalog_tx, local_catalog_rx) = mpsc::channel();
-            let (shutdown_tx, shutdown_rx) = mpsc::channel();
-            let owner_socket = listener.try_clone().map_err(remote_session_sync_error)?;
-            let owner_command_worker =
-                serve_owner_commands(owner_socket, local_catalog_tx, shutdown_tx);
-            let guard =
-                Self::from_build_env_with_network_and_socket(network, &command.socket_name)?
-                    .start_with_local_catalog_changes(local_catalog_rx)?;
-            Ok((shutdown_rx, guard, owner_command_worker))
-        })();
-        let (shutdown_rx, _guard, _owner_command_worker) = match startup {
-            Ok(startup) => startup,
-            Err(error) => {
-                let _ = notify_remote_session_sync_owner_ready(
-                    command.ready_socket.as_deref(),
-                    Err(error.to_string()),
-                );
-                return Err(error);
-            }
+        use crate::runtime::remote_publication::remote_target_publication_runtime::{
+            signal_publication_sender_live_session_registered, RemoteTargetPublicationRuntime,
         };
-        if let Err(error) =
-            notify_remote_session_sync_owner_ready(command.ready_socket.as_deref(), Ok(()))
-        {
-            ERROR_LOG.log(format!(
-                "[diag-newhost] session_sync_owner ready notification failed: {error}"
-            ));
-        }
-        loop {
-            if shutdown_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-                break;
-            }
-            if !backend_socket_still_exists(&command.socket_name) {
-                break;
-            }
-        }
-        let _ = fs::remove_file(&socket_path);
-        Ok(())
+        let network = self.network.clone();
+        let backend =
+            crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend::new(
+                crate::runtime::ratatui_node::SharedState::new(network.clone()),
+                network.clone(),
+            );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.ensure_publication_sender_running(socket_name)?;
+        signal_publication_sender_live_session_registered(
+            socket_name,
+            target_session_name,
+            authority_id,
+            target_id,
+            transport_socket_path,
+        )?;
+        wait_for_ready_socket(authority_socket_path)
     }
 
+    fn ensure_live_session_unregistered(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        crate::runtime::remote_publication::remote_target_publication_runtime::signal_publication_sender_live_session_unregistered(
+            socket_name,
+            target_session_name,
+        )
+    }
+
+    fn signal_source_session_closed(
+        &self,
+        socket_name: &str,
+        target_session_name: &str,
+    ) -> Result<(), LifecycleError> {
+        use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+        use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+        let network = self.network.clone();
+        let backend = RatatuiRemoteTargetPublicationBackend::new(
+            crate::runtime::ratatui_node::SharedState::new(network.clone()),
+            network.clone(),
+        );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.signal_source_session_closed(socket_name, target_session_name)
+    }
+
+    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
+        use crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+        use crate::runtime::remote_publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+        let network = self.network.clone();
+        let backend = RatatuiRemoteTargetPublicationBackend::new(
+            crate::runtime::ratatui_node::SharedState::new(network.clone()),
+            network.clone(),
+        );
+        let runtime = RemoteTargetPublicationRuntime::with_network_and_backend(network, backend)?;
+        runtime.signal_local_runtime_changed(socket_name)
+    }
+}
+
+impl RemoteNodeSessionSyncRuntime {
     pub fn ensure_owner_running(
         socket_name: &str,
         network: &RemoteNetworkConfig,
@@ -562,22 +486,32 @@ fn wait_for_remote_session_sync_owner_ready(
     }
 }
 
-impl<G, T, O> RemoteNodeSessionSyncRuntime<G, T, O>
+impl<G, T, O, F, A, P> RemoteNodeSessionSyncRuntime<G, T, O, F, A, P>
 where
     G: LocalSessionCatalog,
     T: OutboundRemoteNodeTransport,
     O: LocalTargetExitObserver,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    P: crate::runtime::remote_publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
 {
-    pub fn new_with_local_target_exit_observer(
+    pub fn new_with_backends(
         gateway: G,
         transport: T,
         local_target_exit_observer: O,
+        target_factory: F,
+        authority_backend: A,
+        publication_runtime: Option<RemoteTargetPublicationRuntime<P>>,
         network: RemoteNetworkConfig,
     ) -> Self {
         Self {
             gateway,
             transport,
             local_target_exit_observer,
+            target_factory,
+            authority_backend,
+            publication_runtime,
             network,
             reconnect_delay: SESSION_SYNC_RECONNECT_DELAY,
         }
@@ -589,7 +523,7 @@ where
         self.start_with_local_catalog_changes(local_catalog_rx)
     }
 
-    fn start_with_local_catalog_changes(
+    pub fn start_with_local_catalog_changes(
         self,
         local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     ) -> Result<RemoteNodeSessionSyncGuard, LifecycleError> {
@@ -604,6 +538,9 @@ where
                 self.transport,
                 self.network,
                 self.local_target_exit_observer,
+                self.target_factory,
+                self.authority_backend,
+                self.publication_runtime,
                 node_id,
                 endpoint_uri,
                 local_catalog_rx,
@@ -616,11 +553,6 @@ where
             worker: Some(worker),
         })
     }
-}
-
-struct CreatedSyncSessionTarget {
-    session_id: String,
-    target_id: String,
 }
 
 fn create_session_reply_envelope(
@@ -662,50 +594,47 @@ fn sync_now_millis() -> u128 {
         .as_millis()
 }
 
-impl SessionSyncAuthorityManager {
+impl<F, A> SessionSyncAuthorityManager<F, A>
+where
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     pub(super) fn with_ingress_events(
-        network: RemoteNetworkConfig,
-        local_target_socket_name: Option<String>,
+        _network: RemoteNetworkConfig,
+        _local_target_socket_name: Option<String>,
         ingress_event_tx: mpsc::Sender<
             crate::runtime::remote_node::remote_node_ingress_server_runtime::InternalEvent,
         >,
+        target_factory: F,
+        authority_backend: A,
     ) -> Self {
         Self {
             running_hosts: HashMap::new(),
-            network,
-            local_target_socket_name,
             output_route: SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx),
+            target_factory,
+            authority_backend,
         }
     }
 
     fn with_session_events(
-        network: RemoteNetworkConfig,
-        local_target_socket_name: Option<String>,
+        _network: RemoteNetworkConfig,
+        _local_target_socket_name: Option<String>,
         session_event_tx: mpsc::Sender<SessionSyncEvent>,
+        target_factory: F,
+        authority_backend: A,
     ) -> Self {
         Self {
             running_hosts: HashMap::new(),
-            network,
-            local_target_socket_name,
             output_route: SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx),
+            target_factory,
+            authority_backend,
         }
     }
 
     pub(super) fn shutdown(&mut self) {
         for (_, host) in self.running_hosts.drain() {
-            host.running.store(false, Ordering::Relaxed);
-            let writer = match host.writer.lock() {
-                Ok(mut guard) => guard.take(),
-                Err(poisoned) => {
-                    ERROR_LOG.log(
-                        "[session-sync] authority writer mutex poisoned, recovering".to_string(),
-                    );
-                    poisoned.into_inner().take()
-                }
-            };
-            if let Some(writer) = writer {
-                let _ = writer.shutdown(Shutdown::Both);
-            }
+            self.authority_backend.shutdown_authority_host(&host);
         }
     }
 
@@ -810,7 +739,7 @@ impl SessionSyncAuthorityManager {
         &self,
         session_handle: &RemoteNodeSessionHandle,
         payload: &crate::infra::remote_protocol::CreateSessionRequestPayload,
-    ) -> Result<CreatedSyncSessionTarget, LifecycleError> {
+    ) -> Result<CreatedLocalTarget, LifecycleError> {
         if payload.authority_node_id != session_handle.node_id() {
             return Err(LifecycleError::Protocol(format!(
                 "create-session request for authority `{}` reached `{}`",
@@ -825,36 +754,22 @@ impl SessionSyncAuthorityManager {
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let runtime = TargetHostRuntime::from_build_env_with_network_and_executable(
-            EmbeddedTmuxBackend::from_build_env().map_err(remote_session_sync_error)?,
-            self.network.clone(),
-            current_waitagent_executable()?,
-        )?;
-        let socket_name = self.local_target_socket_name.as_deref().ok_or_else(|| {
-            LifecycleError::Protocol(
-                "create-session requires a socket-scoped local session catalog".to_string(),
-            )
-        })?;
-        let target_started = std::time::Instant::now();
-        let workspace = runtime
-            .ensure_target_host(WorkspaceInstanceConfig::for_new_target_on_socket_with_size(
-                &cwd,
-                socket_name,
-                u16::try_from(payload.rows).ok().filter(|rows| *rows > 0),
-                u16::try_from(payload.cols).ok().filter(|cols| *cols > 0),
-            ))
-            .map_err(remote_session_sync_error)?;
-        let session_id = workspace.workspace_handle.session_name.as_str().to_string();
-        ERROR_LOG.log(format!(
-            "[diag-create] sync owner ensure_target_host id={} session={} elapsed={:?}",
-            payload.request_id,
-            session_id,
-            target_started.elapsed()
-        ));
-        Ok(CreatedSyncSessionTarget {
-            target_id: format!("remote-peer:{}:{session_id}", session_handle.node_id()),
-            session_id,
-        })
+        let cols = u16::try_from(payload.cols)
+            .ok()
+            .filter(|cols| *cols > 0)
+            .unwrap_or(80);
+        let rows = u16::try_from(payload.rows)
+            .ok()
+            .filter(|rows| *rows > 0)
+            .unwrap_or(24);
+        self.target_factory
+            .create_local_target(session_handle.node_id(), &cwd, cols, rows)
+            .map_err(|error| {
+                LifecycleError::Io(
+                    "failed to create local target".to_string(),
+                    io::Error::new(io::ErrorKind::Other, error.to_string()),
+                )
+            })
     }
 
     fn ensure_authority_host(
@@ -887,63 +802,12 @@ impl SessionSyncAuthorityManager {
             self.running_hosts.remove(target_id);
         }
 
-        let session_name = target_session_name_from_target_id(target_id).ok_or_else(|| {
-            ERROR_LOG.log(format!(
-                "[session-sync] failed to extract session from target id `{target_id}`"
-            ));
-            LifecycleError::Protocol(format!(
-                "failed to derive local session from target id `{target_id}`"
-            ))
-        })?;
-        let socket_name = find_socket_for_session(&session_name).ok_or_else(|| {
-            ERROR_LOG.log(format!(
-                "[session-sync] no local socket owns session `{session_name}` for `{target_id}`"
-            ));
-            LifecycleError::Protocol(format!(
-                "no local workspace socket owns session `{session_name}` for `{target_id}`"
-            ))
-        })?;
-        let authority_socket_path = live_authority_session_socket_path(&socket_name, &session_name);
-        let transport_socket_path = remote_session_sync_owner_socket_path(&socket_name);
-        let running = Arc::new(AtomicBool::new(true));
-        let writer = Arc::new(Mutex::new(None));
-        let writer_ready = Arc::new(Condvar::new());
-        let bridge_session_id = Arc::new(RwLock::new(bound_session_instance_id.clone()));
-        spawn_live_authority_listener(
-            authority_socket_path.clone(),
-            session_handle.node_id().to_string(),
-            bridge_session_id.clone(),
+        let host = self.authority_backend.spawn_authority_host(
+            session_handle,
+            target_id,
             self.output_route.clone(),
-            running.clone(),
-            writer.clone(),
-            writer_ready.clone(),
-        );
-        spawn_in_process_authority_target_host(
-            running.clone(),
-            writer.clone(),
-            writer_ready.clone(),
-            self.network.clone(),
-            RemoteAuthorityTargetHostCommand {
-                socket_name: socket_name.clone(),
-                target_session_name: session_name.clone(),
-                transport_session_id: target_session_name_from_target_id(target_id)
-                    .unwrap_or_else(|| target_id.to_string()),
-                authority_id: session_handle.node_id().to_string(),
-                target_id: target_id.to_string(),
-                transport_socket_path: transport_socket_path.to_string_lossy().into_owned(),
-                authority_socket_path: authority_socket_path.to_string_lossy().into_owned(),
-            },
         )?;
-        self.running_hosts.insert(
-            target_id.to_string(),
-            SessionSyncAuthorityHost {
-                writer,
-                running,
-                writer_ready,
-                bound_session_instance_id,
-                bridge_session_id,
-            },
-        );
+        self.running_hosts.insert(target_id.to_string(), host);
         Ok(())
     }
 
@@ -971,7 +835,7 @@ impl SessionSyncAuthorityManager {
         let signal = self
             .running_hosts
             .get(target_id)
-            .map(authority_host_signal)
+            .map(|host| self.authority_backend.authority_host_signal(host))
             .unwrap_or(AuthorityHostSignal::Closed);
 
         if matches!(signal, AuthorityHostSignal::Closed) {
@@ -988,7 +852,10 @@ impl SessionSyncAuthorityManager {
         let host = self.running_hosts.get(target_id).ok_or_else(|| {
             LifecycleError::Protocol("authority host cache lost entry".to_string())
         })?;
-        match deliver_command_to_ready_host(host, command.clone())? {
+        match self
+            .authority_backend
+            .deliver_command(host, command.clone())?
+        {
             AuthorityHostSignal::Ready => Ok(()),
             AuthorityHostSignal::Starting => Err(LifecycleError::Protocol(format!(
                 "authority host for `{target_id}` did not become ready"
@@ -1008,45 +875,6 @@ impl SessionSyncAuthorityManager {
     }
 }
 
-impl RemoteAuthorityPublicationGateway for SessionSyncAuthorityPublicationGateway {
-    fn ensure_live_session_registered(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-        _authority_id: &str,
-        _target_id: &str,
-        _transport_socket_path: &str,
-        authority_socket_path: &std::path::Path,
-    ) -> Result<(), LifecycleError> {
-        wait_for_live_authority_socket(authority_socket_path)?;
-        Ok(())
-    }
-
-    fn ensure_live_session_unregistered(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        Ok(())
-    }
-
-    fn signal_source_session_closed(
-        &self,
-        _socket_name: &str,
-        _target_session_name: &str,
-    ) -> Result<(), LifecycleError> {
-        Ok(())
-    }
-
-    fn signal_local_runtime_changed(&self, socket_name: &str) -> Result<(), LifecycleError> {
-        RemoteNodeSessionSyncRuntime::signal_local_catalog_changed(
-            socket_name,
-            &self.network,
-            LocalCatalogChangeReason::LocalRuntimeChanged,
-        )
-    }
-}
-
 impl Drop for RemoteNodeSessionSyncGuard {
     fn drop(&mut self) {
         if let Some(stop_tx) = self.stop_tx.take() {
@@ -1057,6 +885,3 @@ impl Drop for RemoteNodeSessionSyncGuard {
         }
     }
 }
-
-#[cfg(test)]
-mod remote_node_session_sync_runtime_test;

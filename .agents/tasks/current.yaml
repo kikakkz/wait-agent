@@ -1,36 +1,46 @@
-id: task.github-issue-18-remote-dead-panes-accumulate
+id: task.ratatui-phase-3-remote-reconnect
 kind: task
 version: 1
-title: analyze and fix remote session visibility/pane cleanup after host power-off
+title: implement automatic reconnect for ratatui remote sessions
 status: done
 priority: high
 design_ref:
-  doc: docs/remote-network-completion-plan.md
-  issue: https://github.com/kikakkz/wait-agent/issues/18
+  doc: /root/.kimi-code/sessions/wd_wait-agent-ratatui_7ed27e3252ef/session_b2d1e8b6-65e7-4d81-8d58-f614fb12aedf/agents/main/plans/shatterstar-dove-dagger.md
+  section: "3. Design"
   why:
-    - issue #18 reports that remote sessions remain visible in the sidebar after client hosts power off
-    - dead wa-hidden panes/windows accumulate because lifecycle cleanup is not triggered by offline detection
-    - activation of stale remote targets can fail with unknown target
+    - Phase 3 remote main pane renders remote sessions but removes them immediately on any authority transport drop.
+    - The remote node already keeps authority-host target sessions alive across inbound gRPC session loss and reuses them for new viewers.
+    - Local reconnect orchestration is the missing piece to make remote sessions resilient.
 source_of_truth:
   file: .agents/tasks/current.yaml
   reference: current
 depends_on:
-  - task.github-issue-17-raw-pty-output-routing.done
+  - task.ratatui-phase-3-remote-main-pane.done
 done_criteria:
-  - identify the authoritative catalog/lifecycle path that should hide or remove offline remote targets
-  - identify where dead wa-hidden remote panes should be cleaned up
-  - implement the minimal native fix
-  - add or update tests to cover the offline cleanup path
-  - cargo fmt --check passes
-  - cargo check passes
-  - relevant test suites pass
+  - Remote session stays in sidebar when authority transport drops, marked Offline.
+  - A reconnect worker retries the authority transport with exponential backoff.
+  - On successful reconnect the session returns to Online and resumes output.
+  - User-initiated close cancels the reconnect worker.
+  - After the retry budget is exhausted the session is removed.
+  - cargo fmt --check passes.
+  - cargo check passes.
+  - cargo build --bin waitagent succeeds.
+  - cargo test --release passes.
 verification:
   - cargo fmt --check
   - cargo check
-  - cargo test remote_main_slot_runtime -- --test-threads=1
-  - cargo test workspace_runtime -- --test-threads=1
+  - cargo build --bin waitagent --release
+  - cargo test --release
+  - manual: connect to 10.1.29.110, restart remote waitagent, verify session resumes
 touched_paths:
-  - src/runtime/remote_main_slot/
-  - src/runtime/workspace/
+  - src/runtime/ratatui_node/state_event.rs
+  - src/runtime/ratatui_node/remote_session.rs
+  - src/runtime/ratatui_node/state_loop.rs
+  - src/runtime/ratatui_node/reconnect_worker.rs
+  - src/runtime/ratatui_node/mod.rs
+  - src/runtime/ratatui_node/runtime.rs
+  - src/ui/sidebar.rs
+  - src/ui/snapshot.rs
 notes:
-  - Previous task #17 closed as fixed by #15 (commit efc741c); regression test added in commit 50acdcc.
+  - Remote node restart that loses the target session is out of scope; the session closes after the retry budget.
+  - Local sessions and authority-host sessions do not need reconnect.
