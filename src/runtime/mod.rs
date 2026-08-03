@@ -23,7 +23,6 @@ pub use remote_publication::remote_transport_runtime;
 pub mod ratatui_client_runtime;
 pub mod ratatui_node;
 pub mod ratatui_node_runtime;
-pub mod ratatui_remote_connect;
 pub mod ratatui_workspace_runtime;
 
 // Preserved workspace helpers still required by the ratatui remote path;

@@ -700,6 +700,7 @@ impl RatatuiNodeRuntime {
             catalog_tx.clone(),
             &authority_host_io,
             client_writer.clone(),
+            self.remote_owner.clone(),
         )?;
         self.shared.set_state_tx(state_event_loop.sender());
         self.shared

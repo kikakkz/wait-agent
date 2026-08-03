@@ -1,3 +1,7 @@
+use crate::application::remote_session_creation_service::{
+    GrpcRemoteSessionCreationTransport, RemoteSessionCreationService,
+};
+use crate::application::target_registry_service::{TargetCatalogGateway, TargetRegistryService};
 use crate::domain::agent_detector::DetectorRegistry;
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::{
@@ -24,7 +28,12 @@ use super::snapshot::{
     HistoryResponse, ServerStatus, SessionView,
 };
 use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
-use crate::runtime::ratatui_remote_connect::connect_remote_host;
+use crate::runtime::remote_host::remote_host_connect_runtime::{
+    RemoteHostConnectRequest, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
+};
+use crate::runtime::remote_host::remote_host_history_store::RemoteHostHistoryStore;
+use crate::runtime::remote_host::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
+use crate::runtime::remote_node::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::runtime::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest,
 };
@@ -46,13 +55,19 @@ impl StateEventLoop {
         catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
         authority_host_io: &AuthorityHostIoLoop,
         client_writer: ClientWriterHandle,
+        remote_owner: RemoteRuntimeOwnerRuntime,
     ) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<StateEvent>();
         let authority_host_io_tx = authority_host_io.sender();
         std::thread::spawn(move || {
-            if let Err(error) =
-                run_state_event_loop(shared, rx, catalog_tx, authority_host_io_tx, client_writer)
-            {
+            if let Err(error) = run_state_event_loop(
+                shared,
+                rx,
+                catalog_tx,
+                authority_host_io_tx,
+                client_writer,
+                remote_owner,
+            ) {
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] loop exited with error: {error}"
                 ));
@@ -72,6 +87,7 @@ fn run_state_event_loop(
     catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
     authority_host_io_tx: AuthorityHostIoHandle,
     client_writer: ClientWriterHandle,
+    remote_owner: RemoteRuntimeOwnerRuntime,
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
     let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
@@ -205,6 +221,7 @@ fn run_state_event_loop(
                     } else {
                         handle_client_command(
                             &shared,
+                            &remote_owner,
                             &authority_host_io_tx,
                             &catalog_tx,
                             &client_writer,
@@ -436,6 +453,7 @@ fn broadcast_snapshot(
 
 fn handle_client_command(
     shared: &Arc<SharedState>,
+    remote_owner: &RemoteRuntimeOwnerRuntime,
     authority_host_io_tx: &AuthorityHostIoHandle,
     catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
     client_writer: &ClientWriterHandle,
@@ -504,7 +522,7 @@ fn handle_client_command(
         }
 
         ClientCommand::ConnectRemoteHost { profile_name } => {
-            let outcome = connect_remote_host_target(shared, &profile_name);
+            let outcome = connect_remote_host_target(shared, remote_owner, &profile_name);
             if matches!(outcome, CommandOutcome::Message(_)) {
                 broadcast_snapshot(shared, client_writer, connected_clients);
             }
@@ -854,36 +872,88 @@ fn activate_target(
     }
 }
 
-fn connect_remote_host_target(shared: &Arc<SharedState>, profile_name: &str) -> CommandOutcome {
-    let sessions_vec: Vec<ManagedSessionRecord> = {
-        let guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        guard.values().cloned().collect()
+fn connect_remote_host_target(
+    shared: &Arc<SharedState>,
+    remote_owner: &RemoteRuntimeOwnerRuntime,
+    profile_name: &str,
+) -> CommandOutcome {
+    let history_store = RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path());
+
+    let request = RemoteHostConnectRequest {
+        profile_name: Some(profile_name.to_string()),
+        direct_profile: None,
+        save_profile_name: None,
+        replace_profile_name: None,
+        local_connect_endpoint: shared.network.advertised_public_endpoint_label(),
+        cwd_hint: None,
+        use_install_proxy: true,
     };
-    let sessions_arc = Arc::new(std::sync::Mutex::new(sessions_vec));
-    match connect_remote_host(profile_name, &sessions_arc, &shared.network) {
-        Ok(record) => {
-            let target = record.address.qualified_target();
-            {
-                let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                guard.retain(|_, session| session.address.id() != record.address.id());
-                guard.insert(target.clone(), record.clone());
-            }
-            if let Err(error) = shared.ensure_remote_session(&record) {
-                return CommandOutcome::Error(error.to_string());
-            }
-            *shared
-                .active_target
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
-            let (cols, rows) = shared
-                .last_client_resize
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .unwrap_or((80, 24));
-            shared.resize_active_remote_session(cols, rows);
-            CommandOutcome::Message(format!("connected {target}"))
-        }
-        Err(error) => CommandOutcome::Error(error.to_string()),
+
+    let catalog =
+        TargetRegistryService::new(RatatuiTargetCatalogGateway::new(remote_owner.clone()));
+    let runtime = RemoteHostConnectRuntime::new(
+        history_store,
+        SshRemotePortProbeFactory,
+        SshRemoteHostBootstrapper::default(),
+        catalog.clone(),
+        RemoteSessionCreationService::new(
+            GrpcRemoteSessionCreationTransport::new(shared.network.clone()),
+            catalog,
+        ),
+    );
+
+    let outcome = match runtime.connect(request) {
+        Ok(outcome) => outcome,
+        Err(error) => return CommandOutcome::Error(error.to_string()),
+    };
+
+    let record = outcome.created_target;
+    let target = record.address.qualified_target();
+
+    if let Err(error) = remote_owner.upsert_session(&outcome.authority_node_id, &record) {
+        return CommandOutcome::Error(format!("failed to register remote session: {error}"));
+    }
+
+    {
+        let mut guard = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, session| session.address.id() != record.address.id());
+        guard.insert(target.clone(), record.clone());
+    }
+
+    if let Err(error) = shared.ensure_remote_session(&record) {
+        return CommandOutcome::Error(error.to_string());
+    }
+
+    *shared
+        .active_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+    let (cols, rows) = shared
+        .last_client_resize
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or((80, 24));
+    shared.resize_active_remote_session(cols, rows);
+
+    CommandOutcome::Message(format!("connected {target}"))
+}
+
+#[derive(Debug, Clone)]
+struct RatatuiTargetCatalogGateway {
+    remote_owner: RemoteRuntimeOwnerRuntime,
+}
+
+impl RatatuiTargetCatalogGateway {
+    fn new(remote_owner: RemoteRuntimeOwnerRuntime) -> Self {
+        Self { remote_owner }
+    }
+}
+
+impl TargetCatalogGateway for RatatuiTargetCatalogGateway {
+    type Error = LifecycleError;
+
+    fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, LifecycleError> {
+        Ok(self.remote_owner.try_snapshot()?.sessions)
     }
 }
 
