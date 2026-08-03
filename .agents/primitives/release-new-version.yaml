@@ -11,8 +11,8 @@ preconditions:
   - The version in Cargo.toml is the version to release, not the next development version.
   - Git working directory is clean.
   - The tag `v<current>` does not already exist locally or on origin.
-preferred_path:
-  - Run `./scripts/release.sh`, which enforces the correct order and checks preconditions automatically.
+required_path:
+  - Always run `./scripts/release.sh` for every release. Do not perform manual `git tag`, `cargo bump`, or `git push` steps outside the script.
 manual_steps:
   - Read the current version from Cargo.toml (e.g., 0.0.171).
   - Ensure Cargo.lock has the same version for the `waitagent` package; if not, run `cargo update -p waitagent` or edit Cargo.lock to match.
@@ -33,3 +33,4 @@ failure_modes:
   - Cargo.lock version drifts from Cargo.toml.
   - Push rejected because main has moved forward.
   - Working directory is dirty when the script is run.
+  - Cargo.toml version is not exactly one patch above the latest released `v0.0.*` tag (prevents skipped versions like v0.0.190).

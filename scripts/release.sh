@@ -36,6 +36,23 @@ if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
     exit 1
 fi
 
+# Enforce version continuity: for 0.0.x releases, the current patch must be
+# exactly one greater than the latest existing 0.0.x tag. This prevents tags
+# like v0.0.191 being created when v0.0.190 was never released.
+LATEST_0_0_TAG=$(git tag --list 'v0.0.*' --sort=-v:refname | head -n1 || true)
+if [[ -n "$LATEST_0_0_TAG" ]]; then
+    LATEST_PATCH=$(sed 's/^v0\.0\.//' <<<"$LATEST_0_0_TAG")
+    EXPECTED_PATCH=$((LATEST_PATCH + 1))
+    EXPECTED_VERSION="0.0.$EXPECTED_PATCH"
+    if [[ "$VERSION" != "$EXPECTED_VERSION" ]]; then
+        echo "error: version continuity check failed" >&2
+        echo "       latest released tag is $LATEST_0_0_TAG" >&2
+        echo "       expected Cargo.toml version to release is $EXPECTED_VERSION" >&2
+        echo "       but Cargo.toml currently has $VERSION" >&2
+        exit 1
+    fi
+fi
+
 echo ">>> Releasing waitagent $VERSION"
 
 echo ">>> cargo check"

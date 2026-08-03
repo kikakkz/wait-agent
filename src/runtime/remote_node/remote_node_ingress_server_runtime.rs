@@ -365,6 +365,7 @@ where
         unregister_workspace_socket_with_owner(network, socket_name)
     }
 
+    #[cfg(test)]
     pub fn shutdown_owner(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
         let socket_path = remote_node_ingress_owner_socket_path(network);
         if !remote_node_ingress_owner_available(&socket_path) {
@@ -524,6 +525,7 @@ fn unregister_workspace_socket_with_owner(
     }
 }
 
+#[cfg(test)]
 fn shutdown_owner_with_control_socket(network: &RemoteNetworkConfig) -> Result<(), LifecycleError> {
     let mut stream = UnixStream::connect(remote_node_ingress_owner_socket_path(network))
         .map_err(remote_node_ingress_error)?;
@@ -909,6 +911,7 @@ fn write_owner_control_unregister_workspace_socket(
     writer.flush()
 }
 
+#[cfg(test)]
 fn write_owner_control_shutdown(writer: &mut impl Write) -> io::Result<()> {
     writer.write_all(OWNER_CONTROL_MAGIC)?;
     writer.write_all(&[4])?;

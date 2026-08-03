@@ -33,7 +33,6 @@ pub struct ScreenSnapshot {
     pub lines: Vec<String>,
     pub styled_lines: Vec<String>,
     pub active_style_ansi: String,
-    pub scrollback: Vec<String>,
     pub styled_scrollback: Vec<String>,
     pub scroll_top: u16,
     pub scroll_bottom: u16,

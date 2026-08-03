@@ -402,7 +402,7 @@ impl RatatuiRemoteSession {
         let _ = observer.sync();
         let snap = observer.snapshot();
         let screen = snap.active_screen();
-        let mut lines = screen.scrollback.clone();
+        let mut lines = screen.styled_scrollback.clone();
         let mut styled_lines = screen.styled_scrollback.clone();
         lines.extend_from_slice(&screen.lines);
         styled_lines.extend_from_slice(&screen.styled_lines);
