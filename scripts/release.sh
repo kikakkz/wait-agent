@@ -6,11 +6,25 @@
 #   2. Tag v<current> on HEAD and push it to trigger the release workflow.
 #   3. Bump Cargo.toml to the next patch version and push the bump commit.
 #
-# Usage: ./scripts/release.sh
+# Usage: ./scripts/release.sh [--skip-continuity-check]
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+SKIP_CONTINUITY_CHECK=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-continuity-check)
+            SKIP_CONTINUITY_CHECK=true
+            ;;
+        *)
+            echo "error: unknown argument: $arg" >&2
+            echo "usage: ./scripts/release.sh [--skip-continuity-check]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 if [[ -n "$(git status --short)" ]]; then
     echo "error: working directory is not clean" >&2
@@ -45,11 +59,18 @@ if [[ -n "$LATEST_0_0_TAG" ]]; then
     EXPECTED_PATCH=$((LATEST_PATCH + 1))
     EXPECTED_VERSION="0.0.$EXPECTED_PATCH"
     if [[ "$VERSION" != "$EXPECTED_VERSION" ]]; then
-        echo "error: version continuity check failed" >&2
-        echo "       latest released tag is $LATEST_0_0_TAG" >&2
-        echo "       expected Cargo.toml version to release is $EXPECTED_VERSION" >&2
-        echo "       but Cargo.toml currently has $VERSION" >&2
-        exit 1
+        if [[ "$SKIP_CONTINUITY_CHECK" == true ]]; then
+            echo "warning: skipping version continuity check" >&2
+            echo "         latest released tag is $LATEST_0_0_TAG" >&2
+            echo "         expected $EXPECTED_VERSION, but Cargo.toml has $VERSION" >&2
+        else
+            echo "error: version continuity check failed" >&2
+            echo "       latest released tag is $LATEST_0_0_TAG" >&2
+            echo "       expected Cargo.toml version to release is $EXPECTED_VERSION" >&2
+            echo "       but Cargo.toml currently has $VERSION" >&2
+            echo "       use --skip-continuity-check to override" >&2
+            exit 1
+        fi
     fi
 fi
 
