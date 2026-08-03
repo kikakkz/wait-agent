@@ -106,13 +106,6 @@ impl RatatuiRemoteSession {
             )
         })?;
 
-        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path)
-        {
-            ERROR_LOG.log(format!(
-                "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
-            ));
-        }
-
         let observer = RemoteObserverRuntime::new(LocalNodeMailbox::default(), 80, 24);
         let session = Arc::new(Self {
             target_id: target_id.clone(),
@@ -133,12 +126,21 @@ impl RatatuiRemoteSession {
             task_state: AtomicU8::new(TASK_STATE_INPUT),
         });
 
+        // Start the acceptor first so the ingress owner can connect back and
+        // complete the authority transport handshake immediately.
         spawn_authority_transport_acceptor(
             session.clone(),
-            target_id,
-            session_id,
-            authority_node_id,
+            target_id.clone(),
+            session_id.clone(),
+            authority_node_id.clone(),
         );
+
+        if let Err(error) = notify_authority_socket_ready(network, &authority_node_id, &socket_path)
+        {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] failed to notify ingress owner for {target_id}: {error}"
+            ));
+        }
 
         Ok(session)
     }
