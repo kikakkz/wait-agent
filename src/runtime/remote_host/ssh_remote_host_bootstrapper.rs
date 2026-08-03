@@ -38,13 +38,13 @@ impl RemoteWaitAgentStartPlan {
             remote_port,
             endpoint_preflight_command: endpoint_preflight_command(&local_connect_endpoint),
             command: format!(
-                "nohup waitagent --port {remote_port} --connect {} --node-id {} __remote-daemon >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                "nohup waitagent --port {remote_port} --connect {} --node-id {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
                 shell_single_quote(&local_connect_endpoint),
                 shell_single_quote(&authority_id)
             ),
             local_connect_endpoint,
             authority_id,
-            subcommand: "__remote-daemon".to_string(),
+            subcommand: "__ratatui-node-server".to_string(),
         }
     }
 }
@@ -712,7 +712,7 @@ mod tests {
             .endpoint_preflight_command
             .contains("'7474'"));
         assert!(plan.start_plan.command.contains(
-            "waitagent --port 7476 --connect '10.1.26.84:7474' --node-id '10.1.29.130#7476' __remote-daemon"
+            "waitagent --port 7476 --connect '10.1.26.84:7474' --node-id '10.1.29.130#7476' __ratatui-node-server"
         ));
         assert!(plan.start_plan.command.contains("nohup"));
     }
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(calls[2].2.as_deref(), Some("sudo-secret\n"));
         assert!(calls[3].1.contains("ps -eo args="));
         assert_eq!(calls[3].2, None);
-        assert!(calls[4].1.contains("__remote-daemon"));
+        assert!(calls[4].1.contains("__ratatui-node-server"));
         assert_eq!(calls[4].2, None);
     }
 
@@ -888,7 +888,7 @@ mod tests {
         assert!(calls[2].1.contains(WAITAGENT_INSTALL_SCRIPT_URL));
         assert!(calls[3].1.starts_with("sudo -S -p '' sh -lc "));
         assert!(calls[4].1.contains("ps -eo args="));
-        assert!(calls[5].1.contains("__remote-daemon"));
+        assert!(calls[5].1.contains("__ratatui-node-server"));
     }
 
     #[test]
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(calls[1].2, None);
         assert!(calls[2].1.contains("ps -eo args="));
         assert_eq!(calls[2].2, None);
-        assert!(calls[3].1.contains("__remote-daemon"));
+        assert!(calls[3].1.contains("__ratatui-node-server"));
         assert_eq!(calls[3].2, None);
         assert!(!calls.iter().any(|(_, command, _)| command.contains("sudo")));
     }
