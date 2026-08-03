@@ -714,12 +714,15 @@ impl RatatuiNodeRuntime {
         // published through the local catalog to the remote authority.
         if self.network.connect.is_some() {
             let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-            let _ = self.shared.state_sender().send(StateEvent::CreateAuthorityHostSession {
-                request_id: "default-peer-session".to_string(),
-                cols: 80,
-                rows: 24,
-                reply_tx,
-            });
+            let _ = self
+                .shared
+                .state_sender()
+                .send(StateEvent::CreateAuthorityHostSession {
+                    request_id: "default-peer-session".to_string(),
+                    cols: 80,
+                    rows: 24,
+                    reply_tx,
+                });
         }
 
         // Start the agent signal listener so agent hooks can deliver lifecycle
