@@ -20,7 +20,7 @@ It complements:
 
 - [architecture.md](architecture.md)
 - [protocol.md](protocol.md)
-- [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
+- [tmux-first-workspace-plan.md](archive/tmux-first-workspace-plan.md)
 - [remote-network-completion-plan.md](remote-network-completion-plan.md)
 - [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
 
@@ -95,7 +95,7 @@ Session export rule:
    The server must not pretend to own that PTY locally.
 3. One main-slot presentation model
    Opening a remote target must preserve the same fixed sidebar, fixed main
-   slot, and fixed footer or menu contract used by the local tmux-first path.
+   slot, and fixed footer or menu contract used by the local ratatui path.
 4. Multiple consoles may open the same remote target
    A local workspace console and a server-side console may both observe the
    same remote target at the same time.

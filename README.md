@@ -70,7 +70,7 @@ them quickly becomes messy:
 - one Kimi session is still running
 - one Claude Code session is asking for confirmation
 - a remote machine has the shell you need
-- tmux panes keep multiplying until it is unclear where input will go
+- terminal tabs and panes keep multiplying until it is unclear where input will go
 
 WaitAgent adds the missing coordination layer underneath those agents:
 
@@ -78,11 +78,10 @@ WaitAgent adds the missing coordination layer underneath those agents:
 - task-state badges for input, running, confirm, and unknown states
 - one stable main slot that receives input
 - remote discovery, switching, resize, output, and session creation
-- tmux as the terminal substrate instead of a custom terminal replacement
+- a ratatui-based terminal UI built in Rust
 
 The goal is not to become an IDE or agent platform. WaitAgent is terminal
-infrastructure for developers who already live in tmux, SSH, shells, and CLI
-agents.
+infrastructure for developers who already live in SSH, shells, and CLI agents.
 
 ---
 
@@ -142,7 +141,7 @@ waitagent --public <windows-or-lan-ip>:7474
 <br>
 
 ```bash
-git clone --recursive https://github.com/kikakkz/wait-agent
+git clone https://github.com/kikakkz/wait-agent
 cd wait-agent
 ./scripts/install-build-deps.sh
 cargo build --release
@@ -226,8 +225,9 @@ cannot reach WSL2 directly, expose the listener through Windows NAT; see
 
 ## How WaitAgent Works
 
-WaitAgent embeds a vendored tmux and builds one persistent workspace out of real
-tmux panes.
+WaitAgent is a ratatui-based terminal workspace. It runs a local ratatui node
+server that manages PTY sessions directly and mirrors remote sessions over a
+gRPC transport.
 
 ```text
 ┌──────────────────────────────────────────────────────┬──────────────────────┐
@@ -249,12 +249,21 @@ Core pieces:
 | **Main Slot** | The only surface that receives normal input. |
 | **Sidebar** | Local and remote session catalog with task-state badges. |
 | **Footer** | Commands, listener/connect state, and workspace path. |
-| **Target hosts** | Real tmux sessions running agents or shells. |
+| **Target hosts** | Local PTY sessions and remote peers running agents or shells. |
 | **Remote nodes** | gRPC-connected peers that publish catalogs and PTY traffic. |
 | **Live mirror** | Session-scoped rendering path for remote PTYs. |
 
 Switching a sidebar item rebinds the main slot. Sidebar and footer stay mounted,
 so the workspace remains stable while the active PTY changes.
+
+Implementation modules:
+
+| Module | Role |
+|---|---|
+| `ratatui_node` | Local node server, TUI client, session state loop, and snapshot rendering. |
+| `remote` | gRPC transport, remote node ingress/egress, and authority peering. |
+| `host` | Host-level session lifecycle and authority host I/O loops. |
+| `process` | Process spawning, signal sending, and executable/session-leader helpers. |
 
 ---
 
@@ -262,7 +271,7 @@ so the workspace remains stable while the active PTY changes.
 
 | Capability | Current behavior |
 |---|---|
-| **Local agent workspace** | Run many shell, Codex, Claude, Kimi, or generic terminal sessions from one tmux workspace. |
+| **Local agent workspace** | Run many shell, Codex, Claude, Kimi, or generic terminal sessions in one ratatui workspace. |
 | **Remote session catalog** | Connect remote machines and show their sessions next to local sessions. |
 | **Single input authority** | Only the active main-slot target receives normal keystrokes. |
 | **Agent state badges** | Detect input, running, confirm, and unknown states for common CLI agents. |
@@ -280,7 +289,7 @@ Works today:
 - Linux x86_64 release artifacts: `.tar.gz`, `.deb`, `.rpm`
 - macOS Apple Silicon release artifacts: `.tar.gz`, `.dmg`
 - WSL2 through the Linux build
-- local tmux-backed workspace with fixed main slot, sidebar, and footer
+- local ratatui-backed workspace with fixed main slot, sidebar, and footer
 - local session create/switch/attach/detach/stop
 - main-slot fullscreen and history view
 - task-state badges for Codex, Claude, Kimi, shell, and unknown sessions
@@ -329,8 +338,8 @@ controls first.
 
 | Tool | What it is | Where WaitAgent differs |
 |---|---|---|
-| tmux / Zellij | Terminal multiplexers | WaitAgent adds local/remote session cataloging, agent state badges, and a fixed main-slot workflow. |
-| SSH + tmux manually | Flexible remote workflow | WaitAgent automates discovery, bootstrap, switching, resize, and focus discipline across machines. |
+| tmux / Zellij | Terminal multiplexers | WaitAgent adds local/remote session cataloging, agent state badges, and a fixed main-slot workflow on top of a ratatui UI. |
+| SSH + tmux manually | Flexible remote workflow | WaitAgent automates discovery, bootstrap, switching, resize, and focus discipline across machines without requiring tmux. |
 | Warp | Full terminal/agentic IDE product | WaitAgent is a local terminal-native binary with no account and no hosted platform. |
 | Cursor / Codex App | IDE or app-level agent surface | WaitAgent sits underneath CLI agents and keeps the terminal workflow. |
 
@@ -346,29 +355,29 @@ controls first.
 | Linux aarch64 | Source build expected; release artifact not currently published |
 | Intel macOS | Source build may work; release artifact not currently published |
 
-Source builds need Rust plus the dependencies required for the vendored tmux
-build. `./scripts/install-build-deps.sh` supports Debian/Ubuntu, Fedora,
-Arch/Manjaro, Alpine, openSUSE/SLES, and Homebrew.
+Source builds need Rust plus the protoc/protobuf build dependencies.
+`./scripts/install-build-deps.sh` supports Debian/Ubuntu, Fedora, Arch/Manjaro,
+Alpine, openSUSE/SLES, and Homebrew.
 
 ---
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Functional Design](docs/functional-design.md)
+- [Functional Design](docs/archive/functional-design.md)
 - [Remote Node Connection Architecture](docs/remote-node-connection-architecture.md)
 - [Remote Live Mirror Design](docs/remote-live-mirror-design.md)
 - [Remote Transport Stability Design](docs/remote-transport-stability-design.md)
 - [Protocol](docs/protocol.md)
-- [Interaction Flows](docs/interaction-flows.md)
+- [Interaction Flows](docs/archive/interaction-flows.md)
 - [UI Design](docs/ui-design.md)
-- [Execution Status Board](docs/execution-status-board.md)
+- [Execution Status Board](docs/archive/execution-status-board.md)
 
 ---
 
 ## Topics
 
-`tmux` `terminal-multiplexer` `workspace-manager` `terminal` `rust` `cli`
+`ratatui` `terminal-workspace` `workspace-manager` `terminal` `rust` `cli`
 `tui` `multi-agent` `ai-agents` `multi-machine` `session-manager` `grpc`
 
 ## License

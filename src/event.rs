@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![cfg(test)]
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};

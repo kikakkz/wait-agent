@@ -1,24 +1,23 @@
-use crate::domain::agent_detector::DetectorRegistry;
-use serde_json::{json, Map, Value};
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::application::agent_hooks_config_service::AgentHooksConfigService;
+use std::path::PathBuf;
 
-const WAITAGENT_HOOK_TAG: &str = "waitagent-agent-signal";
+#[cfg(test)]
+use crate::application::agent_hooks_config_service as generic;
+#[cfg(test)]
+use serde_json::Value;
+#[cfg(test)]
+use std::path::Path;
 
+/// Thin wrapper around [`AgentHooksConfigService`] for Claude compatibility.
+///
+/// New code should prefer [`AgentHooksConfigService::claude`] directly; this
+/// type is kept so existing call sites and tests continue to compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaudeHooksConfigService {
-    claude_home: PathBuf,
-    sender_path: PathBuf,
-}
+pub struct ClaudeHooksConfigService(AgentHooksConfigService);
 
 impl ClaudeHooksConfigService {
     pub fn new(claude_home: PathBuf, sender_path: PathBuf) -> Self {
-        Self {
-            claude_home,
-            sender_path,
-        }
+        Self(AgentHooksConfigService::claude(claude_home, sender_path))
     }
 
     pub fn from_env(sender_path: PathBuf) -> Self {
@@ -28,119 +27,42 @@ impl ClaudeHooksConfigService {
             .unwrap_or_else(|| PathBuf::from(".claude"));
         Self::new(claude_home, sender_path)
     }
+}
 
-    pub fn reconcile(&self) -> io::Result<()> {
-        let settings_path = self.claude_home.join("settings.json");
-        let value = read_json_or_backup(&settings_path)?;
-        let next = reconcile_hooks_value(value, &self.sender_path, claude_hook_events());
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&settings_path, serde_json::to_vec_pretty(&next)?)?;
-        Ok(())
+impl crate::ports::hooks_config::HooksConfigPort for ClaudeHooksConfigService {
+    fn agent_name(&self) -> &'static str {
+        self.0.agent_name()
+    }
+
+    fn reconcile(&self) -> std::io::Result<()> {
+        self.0.reconcile()
     }
 }
 
-fn read_json_or_backup(path: &Path) -> io::Result<Value> {
-    if !path.exists() {
-        return Ok(json!({}));
-    }
-    let bytes = fs::read(path)?;
-    if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
-        return Ok(json!({}));
-    }
-    match serde_json::from_slice(&bytes) {
-        Ok(value) => Ok(value),
-        Err(_) => {
-            let backup = path.with_file_name(format!(
-                "settings.json.waitagent-bak-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|duration| duration.as_millis())
-                    .unwrap_or(0)
-            ));
-            fs::write(&backup, bytes)?;
-            Ok(json!({}))
-        }
-    }
-}
-
+#[cfg(test)]
 fn reconcile_hooks_value(value: Value, sender_path: &Path, events: &[&str]) -> Value {
-    let mut root = match value {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
-    let hooks = root
-        .entry("hooks")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !hooks.is_object() {
-        *hooks = Value::Object(Map::new());
-    }
-    let hooks = hooks
-        .as_object_mut()
-        .expect("hooks was just normalized to object");
-    for event in events {
-        let entries = hooks
-            .entry(*event)
-            .or_insert_with(|| Value::Array(Vec::new()));
-        let array = match entries {
-            Value::Array(array) => array,
-            _ => {
-                *entries = Value::Array(Vec::new());
-                entries.as_array_mut().expect("entry was just set to array")
-            }
-        };
-        array.retain(|entry| {
-            let first_hook = entry
-                .get("hooks")
-                .and_then(Value::as_array)
-                .and_then(|hooks| hooks.first());
-            let tagged_by_status = first_hook
-                .and_then(|hook| hook.get("statusMessage"))
-                .and_then(Value::as_str)
-                .map(|message| !message.starts_with(WAITAGENT_HOOK_TAG))
-                .unwrap_or(true);
-            let tagged_by_command = first_hook
-                .and_then(|hook| hook.get("command"))
-                .and_then(Value::as_str)
-                .map(|command| command.contains("agent-signal-send"))
-                .unwrap_or(false);
-            tagged_by_status && !tagged_by_command
-        });
-        array.push(waitagent_hook_group(event, sender_path));
-    }
-    Value::Object(root)
-}
-
-fn claude_hook_events() -> &'static [&'static str] {
-    DetectorRegistry::default()
-        .hook_events_for_agent("claude")
-        .unwrap_or(&[])
-}
-
-fn waitagent_hook_group(event: &str, sender_path: &Path) -> Value {
-    json!({
-        "matcher": "",
-        "hooks": [
-            {
-                "type": "command",
-                "command": claude_hook_command(sender_path, event),
-                "statusMessage": format!("{WAITAGENT_HOOK_TAG}:{event}")
-            }
-        ]
-    })
-}
-
-fn claude_hook_command(sender_path: &Path, event: &str) -> String {
-    format!(
-        "{} {}",
-        shell_single_quote(sender_path.to_string_lossy().as_ref()),
-        shell_single_quote(event)
+    generic::reconcile_json_hooks_value(
+        value,
+        sender_path,
+        events,
+        generic::claude_waitagent_hook_predicate,
+        "claude",
     )
 }
 
+#[cfg(test)]
+fn claude_hook_events() -> &'static [&'static str] {
+    generic::hook_events_for_agent("claude")
+}
+
+#[cfg(test)]
+fn claude_hook_command(sender_path: &Path, event: &str) -> String {
+    generic::hook_command(sender_path, event, "claude")
+}
+
+#[cfg(test)]
 fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    generic::shell_single_quote(value)
 }
 
 #[cfg(test)]
@@ -149,7 +71,7 @@ mod tests {
 
     #[test]
     fn reconcile_preserves_user_hooks_and_replaces_waitagent_hooks() {
-        let value = json!({
+        let value = serde_json::json!({
             "hooks": {
                 "PreToolUse": [
                     {

@@ -323,10 +323,6 @@ pub(crate) fn blank_cells_with_style(size: TerminalSize, style: TextStyle) -> Ve
         .collect()
 }
 
-pub(crate) fn blank_row(cols: u16) -> Vec<ScreenCell> {
-    blank_row_with_style(cols, TextStyle::default())
-}
-
 pub(crate) fn blank_row_with_style(cols: u16, style: TextStyle) -> Vec<ScreenCell> {
     vec![blank_cell_with_style(style); cols as usize]
 }

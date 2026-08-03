@@ -8,13 +8,12 @@ Date: `2026-04-23`
 
 Current note:
 
-- the accepted replacement for the old custom local fullscreen and live-surface path is documented in [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
-- the accepted code-level runtime reorganization for that migration is documented in [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
-- the accepted resumed remote-session baseline is documented in [remote-session-foundation.md](remote-session-foundation.md)
-- the accepted active server-console scheduling design for `task.t6-01` is documented in [server-console-scheduling-design.md](server-console-scheduling-design.md)
-- until this architecture document is fully revised, treat the tmux-first plan as the authoritative local workspace display direction
+- the local workspace is implemented with a ratatui-based renderer, not tmux
+- local PTY sessions are backed by `alacritty_terminal`
+- remote sessions are rendered by a local VT emulator (`TerminalEngine`) inside `RemoteObserverRuntime`
+- the historical tmux planning documents live in `docs/archive/`
 
-This document translates the product requirements in [wait-agent-prd.md](wait-agent-prd.md) into a build-oriented system architecture.
+This document translates the product requirements in [wait-agent-prd.md](archive/wait-agent-prd.md) into a build-oriented system architecture.
 
 It answers:
 
@@ -605,6 +604,6 @@ These questions should be resolved before implementation locks down:
 
 Next implementation documents should refine:
 
-- [functional-design.md](functional-design.md)
+- [functional-design.md](archive/functional-design.md)
 - [module-design.md](module-design.md)
 - `protocol.md`

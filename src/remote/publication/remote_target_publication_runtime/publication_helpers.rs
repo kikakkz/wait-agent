@@ -1,0 +1,1232 @@
+// Legacy tmux-era publication helpers kept during the ratatui migration; most items are currently unused.
+
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+    SessionTransport,
+};
+use crate::domain::workspace::WorkspaceSessionRole;
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, ProtocolEnvelope, TargetPublishedPayload,
+};
+use crate::lifecycle::LifecycleError;
+use crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBinding;
+use base64::Engine;
+use std::collections::BTreeSet;
+use std::io::{self, ErrorKind, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::str;
+use std::time::Duration;
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) const PUBLICATION_SERVER_READY_RETRIES: usize = 20;
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) const PUBLICATION_SERVER_READY_SLEEP: Duration = Duration::from_millis(25);
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) const PUBLICATION_OWNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) const PUBLICATION_GLOBAL_HOOKS: [&str; 4] = [
+    "session-created",
+    "session-closed",
+    "client-attached",
+    "client-detached",
+];
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketLifecyclePublicationAction {
+    TargetedPublish,
+    TargetedExit,
+    FullReconcile,
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublicationAgentCommand {
+    Stop,
+    FullReconcile,
+    PublishSession {
+        session_name: String,
+    },
+    ExitTarget {
+        authority_id: String,
+        transport_session_id: String,
+        authority_host_session_name: Option<String>,
+    },
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublicationSenderCommand {
+    Stop,
+    RegisterLiveSession {
+        target_session_name: String,
+        authority_id: String,
+        target_id: String,
+        transport_socket_path: String,
+    },
+    RefreshLiveSession {
+        target_session_name: String,
+    },
+    UnregisterLiveSession {
+        target_session_name: String,
+    },
+    PublishTarget {
+        authority_id: String,
+        transport_session_id: String,
+        authority_host_session_name: Option<String>,
+        selector: Option<String>,
+        availability: &'static str,
+        session_role: Option<&'static str>,
+        workspace_key: Option<String>,
+        command_name: Option<String>,
+        display_command_name: Option<String>,
+        current_path: Option<String>,
+        attached_clients: usize,
+        window_count: usize,
+        task_state: &'static str,
+    },
+    ExitTarget {
+        authority_id: String,
+        transport_session_id: String,
+        authority_host_session_name: Option<String>,
+    },
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationOwnerCommand {
+    Refresh,
+    Stop,
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationServerCommand {
+    Stop,
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PublicationOwnerDrain {
+    pub(crate) refresh_requested: bool,
+    pub(crate) stop_requested: bool,
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicationOwnerSnapshot {
+    pub(crate) authority_id: String,
+    pub(crate) transport_session_id: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) availability: SessionAvailability,
+    pub(crate) workspace_key: Option<String>,
+    pub(crate) session_role: Option<WorkspaceSessionRole>,
+    pub(crate) attached_clients: usize,
+    pub(crate) window_count: usize,
+    pub(crate) command_name: Option<String>,
+    pub(crate) display_command_name: Option<String>,
+    pub(crate) current_path: Option<PathBuf>,
+    pub(crate) task_state: ManagedSessionTaskState,
+}
+
+pub(crate) struct DiscoveredRemoteSessionEnvelopeEffect {
+    pub(crate) published_session: Option<ManagedSessionRecord>,
+    pub(crate) exited_session: Option<(String, String)>,
+}
+
+pub(crate) fn remote_target_publication_error<E>(error: E) -> LifecycleError
+where
+    E: ToString,
+{
+    LifecycleError::Io(
+        "failed to update published remote target catalog".to_string(),
+        io::Error::new(io::ErrorKind::Other, error.to_string()),
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_server_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-server".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_agent_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-agent".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_sender_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-sender".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+        ],
+        network,
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_owner_args(
+    socket_name: &str,
+    target_session_name: &str,
+    network: &RemoteNetworkConfig,
+) -> Vec<String> {
+    prepend_global_network_args(
+        vec![
+            "__remote-target-publication-owner".to_string(),
+            "--socket-name".to_string(),
+            socket_name.to_string(),
+            "--target-session-name".to_string(),
+            target_session_name.to_string(),
+        ],
+        network,
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn socket_lifecycle_publication_action(
+    hook_name: Option<&str>,
+) -> SocketLifecyclePublicationAction {
+    match hook_name {
+        Some("client-attached") | Some("client-detached") | Some("session-created") => {
+            SocketLifecyclePublicationAction::TargetedPublish
+        }
+        Some("session-closed") => SocketLifecyclePublicationAction::TargetedExit,
+        Some(_) | None => SocketLifecyclePublicationAction::FullReconcile,
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_server_available(socket_path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_agent_available(socket_path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_sender_available(socket_path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_owner_available(socket_path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_agent_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-agent-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_publication_server_command_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-server-command-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
+}
+
+pub(crate) fn remote_target_publication_owner_socket_path(
+    socket_name: &str,
+    target_session_name: &str,
+) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-owner-{}-{}.sock",
+        sanitize_path_component(socket_name),
+        sanitize_path_component(target_session_name)
+    ))
+}
+
+pub(crate) fn remote_target_publication_sender_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-publication-sender-{}.sock",
+        sanitize_path_component(socket_name)
+    ))
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn render_publication_agent_command(command: &PublicationAgentCommand) -> String {
+    match command {
+        PublicationAgentCommand::Stop => "stop\n".to_string(),
+        PublicationAgentCommand::FullReconcile => "full_reconcile\n".to_string(),
+        PublicationAgentCommand::PublishSession { session_name } => format!(
+            "publish_session\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(session_name.as_bytes())
+        ),
+        PublicationAgentCommand::ExitTarget {
+            authority_id,
+            transport_session_id,
+            authority_host_session_name,
+        } => format!(
+            "exit_target\t{}\t{}\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(authority_id.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(transport_session_id.as_bytes()),
+            encode_optional_agent_field(authority_host_session_name.as_deref())
+        ),
+    }
+}
+
+pub(crate) fn render_publication_sender_command(command: &PublicationSenderCommand) -> String {
+    match command {
+        PublicationSenderCommand::Stop => "stop\n".to_string(),
+        PublicationSenderCommand::RegisterLiveSession {
+            target_session_name,
+            authority_id,
+            target_id,
+            transport_socket_path,
+        } => format!(
+            "register_live_session\t{}\t{}\t{}\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(target_session_name.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(authority_id.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(target_id.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(transport_socket_path.as_bytes())
+        ),
+        PublicationSenderCommand::RefreshLiveSession {
+            target_session_name,
+        } => format!(
+            "refresh_live_session\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(target_session_name.as_bytes())
+        ),
+        PublicationSenderCommand::UnregisterLiveSession {
+            target_session_name,
+        } => format!(
+            "unregister_live_session\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(target_session_name.as_bytes())
+        ),
+        PublicationSenderCommand::PublishTarget {
+            authority_id,
+            transport_session_id,
+            authority_host_session_name,
+            selector,
+            availability,
+            session_role,
+            workspace_key,
+            command_name,
+            display_command_name,
+            current_path,
+            attached_clients,
+            window_count,
+            task_state,
+        } => format!(
+            "publish_target\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(authority_id.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(transport_session_id.as_bytes()),
+            encode_optional_agent_field(authority_host_session_name.as_deref()),
+            encode_optional_agent_field(selector.as_deref()),
+            availability,
+            encode_optional_static_agent_field(*session_role),
+            encode_optional_agent_field(workspace_key.as_deref()),
+            encode_optional_agent_field(command_name.as_deref()),
+            encode_optional_agent_field(display_command_name.as_deref()),
+            encode_optional_agent_field(current_path.as_deref()),
+            attached_clients,
+            window_count,
+            task_state,
+        ),
+        PublicationSenderCommand::ExitTarget {
+            authority_id,
+            transport_session_id,
+            authority_host_session_name,
+        } => format!(
+            "exit_target\t{}\t{}\t{}\n",
+            base64::engine::general_purpose::STANDARD.encode(authority_id.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(transport_session_id.as_bytes()),
+            encode_optional_agent_field(authority_host_session_name.as_deref())
+        ),
+    }
+}
+
+pub(crate) fn render_publication_owner_command(command: PublicationOwnerCommand) -> &'static str {
+    match command {
+        PublicationOwnerCommand::Refresh => "refresh\n",
+        PublicationOwnerCommand::Stop => "stop\n",
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn render_publication_server_command(command: PublicationServerCommand) -> &'static str {
+    match command {
+        PublicationServerCommand::Stop => "stop\n",
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn signal_publication_server_command(
+    socket_name: &str,
+    command: PublicationServerCommand,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_target_publication_server_command_socket_path(
+        socket_name,
+    ))
+    .map_err(remote_target_publication_error)?;
+    stream
+        .write_all(render_publication_server_command(command).as_bytes())
+        .map_err(remote_target_publication_error)?;
+    stream.flush().map_err(remote_target_publication_error)
+}
+
+pub(crate) fn signal_publication_owner_command(
+    socket_name: &str,
+    target_session_name: &str,
+    command: PublicationOwnerCommand,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_target_publication_owner_socket_path(
+        socket_name,
+        target_session_name,
+    ))
+    .map_err(remote_target_publication_error)?;
+    stream
+        .write_all(render_publication_owner_command(command).as_bytes())
+        .map_err(remote_target_publication_error)?;
+    stream.flush().map_err(remote_target_publication_error)
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn read_publication_agent_command(
+    reader: &mut impl Read,
+) -> Result<PublicationAgentCommand, LifecycleError> {
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(remote_target_publication_error)?;
+    let line = str::from_utf8(&bytes)
+        .map_err(remote_target_publication_error)?
+        .trim();
+    parse_publication_agent_command(line)
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn read_publication_sender_command(
+    reader: &mut impl Read,
+) -> Result<PublicationSenderCommand, LifecycleError> {
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(remote_target_publication_error)?;
+    let line = str::from_utf8(&bytes)
+        .map_err(remote_target_publication_error)?
+        .trim();
+    parse_publication_sender_command(line)
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn parse_publication_agent_command(
+    line: &str,
+) -> Result<PublicationAgentCommand, LifecycleError> {
+    let mut parts = line.split('\t');
+    match parts.next().unwrap_or_default() {
+        "stop" => Ok(PublicationAgentCommand::Stop),
+        "full_reconcile" => Ok(PublicationAgentCommand::FullReconcile),
+        "publish_session" => {
+            let session_name =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("publish_session is missing session field".to_string())
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "publish_session contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationAgentCommand::PublishSession { session_name })
+        }
+        "exit_target" => {
+            let authority_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("exit_target is missing authority field".to_string())
+                })?)?;
+            let transport_session_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("exit_target is missing session field".to_string())
+                })?)?;
+            let authority_host_session_name =
+                decode_optional_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "exit_target is missing source session field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "exit_target contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationAgentCommand::ExitTarget {
+                authority_id,
+                transport_session_id,
+                authority_host_session_name,
+            })
+        }
+        other => Err(LifecycleError::Protocol(format!(
+            "unsupported remote publication agent command `{other}`"
+        ))),
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn parse_publication_sender_command(
+    line: &str,
+) -> Result<PublicationSenderCommand, LifecycleError> {
+    let mut parts = line.split('\t');
+    match parts.next().unwrap_or_default() {
+        "stop" => Ok(PublicationSenderCommand::Stop),
+        "register_live_session" => {
+            let target_session_name =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "register_live_session is missing target session field".to_string(),
+                    )
+                })?)?;
+            let authority_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "register_live_session is missing authority field".to_string(),
+                    )
+                })?)?;
+            let target_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "register_live_session is missing target id field".to_string(),
+                    )
+                })?)?;
+            let transport_socket_path =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "register_live_session is missing transport socket field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "register_live_session contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::RegisterLiveSession {
+                target_session_name,
+                authority_id,
+                target_id,
+                transport_socket_path,
+            })
+        }
+        "refresh_live_session" => {
+            let target_session_name =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "refresh_live_session is missing target session field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "refresh_live_session contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::RefreshLiveSession {
+                target_session_name,
+            })
+        }
+        "unregister_live_session" => {
+            let target_session_name =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "unregister_live_session is missing target session field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "unregister_live_session contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::UnregisterLiveSession {
+                target_session_name,
+            })
+        }
+        "publish_target" => {
+            let authority_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing authority field".to_string(),
+                    )
+                })?)?;
+            let transport_session_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("publish_target is missing session field".to_string())
+                })?)?;
+            let authority_host_session_name =
+                decode_optional_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing source session field".to_string(),
+                    )
+                })?)?;
+            let selector = decode_optional_agent_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing selector field".to_string())
+            })?)?;
+            let availability = parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing availability field".to_string())
+            })?;
+            let session_role =
+                decode_optional_static_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing session role field".to_string(),
+                    )
+                })?)?;
+            let workspace_key = decode_optional_agent_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol(
+                    "publish_target is missing workspace key field".to_string(),
+                )
+            })?)?;
+            let command_name = decode_optional_agent_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing command name field".to_string())
+            })?)?;
+            let display_command_name =
+                decode_optional_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing display command name field".to_string(),
+                    )
+                })?)?;
+            let current_path = decode_optional_agent_field(parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing current path field".to_string())
+            })?)?;
+            let attached_clients = parts
+                .next()
+                .ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing attached clients field".to_string(),
+                    )
+                })?
+                .parse::<usize>()
+                .map_err(remote_target_publication_error)?;
+            let window_count = parts
+                .next()
+                .ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "publish_target is missing window count field".to_string(),
+                    )
+                })?
+                .parse::<usize>()
+                .map_err(remote_target_publication_error)?;
+            let task_state = parts.next().ok_or_else(|| {
+                LifecycleError::Protocol("publish_target is missing task state field".to_string())
+            })?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "publish_target contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::PublishTarget {
+                authority_id,
+                transport_session_id,
+                authority_host_session_name,
+                selector,
+                availability: SessionAvailability::parse(availability)
+                    .ok_or_else(|| {
+                        LifecycleError::Protocol(format!(
+                            "unsupported publication sender availability `{availability}`"
+                        ))
+                    })?
+                    .as_str(),
+                session_role,
+                workspace_key,
+                command_name,
+                display_command_name,
+                current_path,
+                attached_clients,
+                window_count,
+                task_state: ManagedSessionTaskState::parse(task_state)
+                    .ok_or_else(|| {
+                        LifecycleError::Protocol(format!(
+                            "unsupported publication sender task state `{task_state}`"
+                        ))
+                    })?
+                    .as_str(),
+            })
+        }
+        "exit_target" => {
+            let authority_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("exit_target is missing authority field".to_string())
+                })?)?;
+            let transport_session_id =
+                decode_publication_agent_string_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol("exit_target is missing session field".to_string())
+                })?)?;
+            let authority_host_session_name =
+                decode_optional_agent_field(parts.next().ok_or_else(|| {
+                    LifecycleError::Protocol(
+                        "exit_target is missing source session field".to_string(),
+                    )
+                })?)?;
+            if parts.next().is_some() {
+                return Err(LifecycleError::Protocol(
+                    "exit_target contains unexpected extra fields".to_string(),
+                ));
+            }
+            Ok(PublicationSenderCommand::ExitTarget {
+                authority_id,
+                transport_session_id,
+                authority_host_session_name,
+            })
+        }
+        other => Err(LifecycleError::Protocol(format!(
+            "unsupported remote publication sender command `{other}`"
+        ))),
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn decode_publication_agent_string_field(value: &str) -> Result<String, LifecycleError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(remote_target_publication_error)?;
+    String::from_utf8(bytes).map_err(remote_target_publication_error)
+}
+
+fn encode_optional_agent_field(value: Option<&str>) -> String {
+    value
+        .map(|value| base64::engine::general_purpose::STANDARD.encode(value.as_bytes()))
+        .unwrap_or_else(|| "~".to_string())
+}
+
+fn encode_optional_static_agent_field(value: Option<&'static str>) -> String {
+    value
+        .map(|value| base64::engine::general_purpose::STANDARD.encode(value.as_bytes()))
+        .unwrap_or_else(|| "~".to_string())
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn decode_optional_agent_field(value: &str) -> Result<Option<String>, LifecycleError> {
+    if value == "~" {
+        return Ok(None);
+    }
+    decode_publication_agent_string_field(value).map(Some)
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn decode_optional_static_agent_field(value: &str) -> Result<Option<&'static str>, LifecycleError> {
+    decode_optional_agent_field(value)?
+        .map(|value| {
+            WorkspaceSessionRole::parse(&value)
+                .map(|role| role.as_str())
+                .ok_or_else(|| {
+                    LifecycleError::Protocol(format!(
+                        "unsupported publication sender session role `{value}`"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn drain_pending_publication_agent_commands(
+    listener: &UnixListener,
+    commands: &mut Vec<PublicationAgentCommand>,
+) -> Result<(), LifecycleError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(remote_target_publication_error)?;
+    let result = drain_pending_publication_agent_commands_nonblocking(listener, commands);
+    let reset = listener
+        .set_nonblocking(false)
+        .map_err(remote_target_publication_error);
+    result?;
+    reset
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn drain_pending_publication_agent_commands_nonblocking(
+    listener: &UnixListener,
+    commands: &mut Vec<PublicationAgentCommand>,
+) -> Result<(), LifecycleError> {
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if let Ok(command) = read_publication_agent_command(&mut stream) {
+                    commands.push(command);
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(remote_target_publication_error(error)),
+        }
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn drain_pending_publication_sender_commands(
+    listener: &UnixListener,
+    commands: &mut Vec<PublicationSenderCommand>,
+) -> Result<(), LifecycleError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(remote_target_publication_error)?;
+    let result = drain_pending_publication_sender_commands_nonblocking(listener, commands);
+    let reset = listener
+        .set_nonblocking(false)
+        .map_err(remote_target_publication_error);
+    result?;
+    reset
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn drain_pending_publication_sender_commands_nonblocking(
+    listener: &UnixListener,
+    commands: &mut Vec<PublicationSenderCommand>,
+) -> Result<(), LifecycleError> {
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if let Ok(command) = read_publication_sender_command(&mut stream) {
+                    commands.push(command);
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(remote_target_publication_error(error)),
+        }
+    }
+}
+
+pub(crate) fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_owner_snapshot(
+    binding: &RemoteTargetPublicationBinding,
+    local_target: &ManagedSessionRecord,
+) -> PublicationOwnerSnapshot {
+    PublicationOwnerSnapshot {
+        authority_id: binding.authority_id.clone(),
+        transport_session_id: binding.transport_session_id.clone(),
+        selector: binding
+            .selector
+            .clone()
+            .or_else(|| local_target.selector.clone()),
+        availability: local_target.availability,
+        workspace_key: local_target.workspace_key.clone(),
+        session_role: local_target.session_role,
+        attached_clients: local_target.attached_clients,
+        window_count: local_target.window_count,
+        command_name: local_target.command_name.clone(),
+        display_command_name: local_target.display_command_name.clone(),
+        current_path: local_target.current_path.clone(),
+        task_state: local_target.task_state,
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn publication_target_identity_changed(
+    previous: &PublicationOwnerSnapshot,
+    current: &PublicationOwnerSnapshot,
+) -> bool {
+    previous.authority_id != current.authority_id
+        || previous.transport_session_id != current.transport_session_id
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn published_remote_target_from_local(
+    binding: &RemoteTargetPublicationBinding,
+    local_target: &ManagedSessionRecord,
+) -> ManagedSessionRecord {
+    ManagedSessionRecord {
+        address: ManagedSessionAddress::remote_peer(
+            binding.authority_id.clone(),
+            binding.transport_session_id.clone(),
+        ),
+        selector: binding
+            .selector
+            .clone()
+            .or_else(|| local_target.selector.clone()),
+        availability: local_target.availability,
+        workspace_dir: None,
+        workspace_key: local_target.workspace_key.clone(),
+        session_role: local_target.session_role,
+        opened_by: Vec::new(),
+        attached_clients: local_target.attached_clients,
+        window_count: local_target.window_count,
+        command_name: local_target.command_name.clone(),
+        display_command_name: local_target.display_command_name.clone(),
+        current_path: local_target.current_path.clone(),
+        task_state: local_target.task_state,
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn parse_publication_owner_command(
+    line: &str,
+) -> Result<Option<PublicationOwnerCommand>, LifecycleError> {
+    match line.trim() {
+        "" => Ok(None),
+        "refresh" => Ok(Some(PublicationOwnerCommand::Refresh)),
+        "stop" => Ok(Some(PublicationOwnerCommand::Stop)),
+        other => Err(LifecycleError::Protocol(format!(
+            "unsupported remote publication owner command `{other}`"
+        ))),
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn parse_publication_server_command(
+    line: &str,
+) -> Result<Option<PublicationServerCommand>, LifecycleError> {
+    match line.trim() {
+        "" => Ok(None),
+        "stop" => Ok(Some(PublicationServerCommand::Stop)),
+        other => Err(LifecycleError::Protocol(format!(
+            "unsupported remote publication server command `{other}`"
+        ))),
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn drain_publication_server_commands(
+    listener: &UnixListener,
+) -> Result<bool, LifecycleError> {
+    let mut stop_requested = false;
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let mut buffer = String::new();
+                stream
+                    .read_to_string(&mut buffer)
+                    .map_err(remote_target_publication_error)?;
+                if matches!(
+                    parse_publication_server_command(&buffer)?,
+                    Some(PublicationServerCommand::Stop)
+                ) {
+                    stop_requested = true;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(stop_requested),
+            Err(error) => return Err(remote_target_publication_error(error)),
+        }
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn drain_publication_owner_commands(
+    listener: &UnixListener,
+) -> Result<PublicationOwnerDrain, LifecycleError> {
+    let mut drain = PublicationOwnerDrain::default();
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let mut buffer = String::new();
+                stream
+                    .read_to_string(&mut buffer)
+                    .map_err(remote_target_publication_error)?;
+                match parse_publication_owner_command(&buffer)? {
+                    Some(PublicationOwnerCommand::Refresh) => drain.refresh_requested = true,
+                    Some(PublicationOwnerCommand::Stop) => drain.stop_requested = true,
+                    None => {}
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(drain),
+            Err(error) => return Err(remote_target_publication_error(error)),
+        }
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn apply_publication_envelope(
+    _source_socket_name: &str,
+    _envelope: &ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<bool, LifecycleError> {
+    Ok(false)
+}
+
+pub(crate) fn discovered_remote_session_from_envelope(
+    authority_id: &str,
+    envelope: &ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<DiscoveredRemoteSessionEnvelopeEffect, LifecycleError> {
+    match &envelope.payload {
+        ControlPlanePayload::TargetPublished(payload) => {
+            Ok(DiscoveredRemoteSessionEnvelopeEffect {
+                published_session: Some(published_remote_target_record_from_payload(
+                    &envelope.sender_id,
+                    payload,
+                )?),
+                exited_session: None,
+            })
+        }
+        ControlPlanePayload::TargetExited(payload) => Ok(DiscoveredRemoteSessionEnvelopeEffect {
+            published_session: None,
+            exited_session: Some((
+                authority_id.to_string(),
+                payload.transport_session_id.clone(),
+            )),
+        }),
+        _ => Ok(DiscoveredRemoteSessionEnvelopeEffect {
+            published_session: None,
+            exited_session: None,
+        }),
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn live_workspace_socket_names_from_sessions(
+    sessions: &[ManagedSessionRecord],
+) -> Vec<String> {
+    let mut socket_names = BTreeSet::new();
+    for session in sessions {
+        if session.address.transport() != &SessionTransport::Local || !session.is_workspace_chrome()
+        {
+            continue;
+        }
+        socket_names.insert(session.address.server_id().to_string());
+    }
+    socket_names.into_iter().collect()
+}
+
+pub(crate) fn is_publishable_discovered_remote_session(session: &ManagedSessionRecord) -> bool {
+    session.address.transport() == &SessionTransport::RemotePeer && session.is_target_host()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn remote_target_exited_args(
+    socket_name: &str,
+    session_name: &str,
+    target: &str,
+) -> Vec<String> {
+    vec![
+        "__remote-target-exited".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+        "--session-name".to_string(),
+        session_name.to_string(),
+        "--target".to_string(),
+        target.to_string(),
+    ]
+}
+
+pub(crate) fn published_remote_target_record_from_payload(
+    authority_id: &str,
+    payload: &TargetPublishedPayload,
+) -> Result<ManagedSessionRecord, LifecycleError> {
+    let availability = SessionAvailability::parse(payload.availability).ok_or_else(|| {
+        LifecycleError::Protocol(format!(
+            "unsupported remote target availability `{}`",
+            payload.availability
+        ))
+    })?;
+    let session_role = payload
+        .session_role
+        .map(|value| {
+            WorkspaceSessionRole::parse(value).ok_or_else(|| {
+                LifecycleError::Protocol(format!(
+                    "unsupported remote target session role `{value}`"
+                ))
+            })
+        })
+        .transpose()?;
+
+    Ok(ManagedSessionRecord {
+        address: ManagedSessionAddress::remote_peer(
+            authority_id,
+            payload.transport_session_id.clone(),
+        ),
+        selector: payload.selector.clone(),
+        availability,
+        workspace_dir: None,
+        workspace_key: payload.workspace_key.clone(),
+        session_role,
+        opened_by: Vec::new(),
+        attached_clients: payload.attached_clients,
+        window_count: payload.window_count,
+        command_name: payload.command_name.clone(),
+        display_command_name: payload.display_command_name.clone(),
+        current_path: payload.current_path.as_ref().map(PathBuf::from),
+        task_state: ManagedSessionTaskState::parse(payload.task_state).ok_or_else(|| {
+            LifecycleError::Protocol(format!(
+                "unsupported remote target task state `{}`",
+                payload.task_state
+            ))
+        })?,
+    })
+}
+
+pub(crate) fn signal_publication_sender_live_session_registered(
+    socket_name: &str,
+    target_session_name: &str,
+    authority_id: &str,
+    target_id: &str,
+    transport_socket_path: &str,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::RegisterLiveSession {
+            target_session_name: target_session_name.to_string(),
+            authority_id: authority_id.to_string(),
+            target_id: target_id.to_string(),
+            transport_socket_path: transport_socket_path.to_string(),
+        },
+    )
+}
+
+pub(crate) fn signal_publication_sender_live_session_unregistered(
+    socket_name: &str,
+    target_session_name: &str,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::UnregisterLiveSession {
+            target_session_name: target_session_name.to_string(),
+        },
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn signal_publication_sender_live_session_refreshed(
+    socket_name: &str,
+    target_session_name: &str,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::RefreshLiveSession {
+            target_session_name: target_session_name.to_string(),
+        },
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn signal_publication_target_published(
+    socket_name: &str,
+    authority_id: &str,
+    target: &ManagedSessionRecord,
+    authority_host_session_name: Option<&str>,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::PublishTarget {
+            authority_id: authority_id.to_string(),
+            transport_session_id: target.address.session_id().to_string(),
+            authority_host_session_name: authority_host_session_name.map(str::to_string),
+            selector: target.selector.clone(),
+            availability: target.availability.as_str(),
+            session_role: target.session_role.map(|role| role.as_str()),
+            workspace_key: target.workspace_key.clone(),
+            command_name: target.command_name.clone(),
+            display_command_name: target.display_command_name.clone(),
+            current_path: target
+                .current_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            attached_clients: target.attached_clients,
+            window_count: target.window_count,
+            task_state: target.task_state.as_str(),
+        },
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn signal_publication_target_exited(
+    socket_name: &str,
+    authority_id: &str,
+    transport_session_id: &str,
+    authority_host_session_name: Option<&str>,
+) -> Result<(), LifecycleError> {
+    signal_publication_sender_command(
+        socket_name,
+        PublicationSenderCommand::ExitTarget {
+            authority_id: authority_id.to_string(),
+            transport_session_id: transport_session_id.to_string(),
+            authority_host_session_name: authority_host_session_name.map(str::to_string),
+        },
+    )
+}
+
+pub(crate) fn signal_publication_sender_command(
+    socket_name: &str,
+    command: PublicationSenderCommand,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(remote_target_publication_sender_socket_path(socket_name))
+        .map_err(remote_target_publication_error)?;
+    stream
+        .write_all(render_publication_sender_command(&command).as_bytes())
+        .map_err(remote_target_publication_error)?;
+    stream.flush().map_err(remote_target_publication_error)
+}

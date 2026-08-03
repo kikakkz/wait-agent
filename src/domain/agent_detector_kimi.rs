@@ -1,4 +1,5 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_detector_common::{detect_confirm_from_lines, AgentKeywords};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
@@ -15,6 +16,13 @@ const KIMI_HOOK_EVENTS: &[&str] = &[
     "Interrupt",
     "SessionEnd",
 ];
+
+const KIMI_KEYWORDS: AgentKeywords = AgentKeywords {
+    confirm_phrases: &["run this command", "allow this"],
+    input_phrases: &[],
+    prompt_chars: &[],
+    input_window: None,
+};
 
 pub struct KimiDetector;
 
@@ -61,15 +69,13 @@ impl AgentDetector for KimiDetector {
             .collect();
         let last_lines_start = normalized_lines.len().saturating_sub(8);
 
+        // 1. Shared confirm phrase / y-n scanner.
+        if let Some(state) = detect_confirm_from_lines(&normalized_lines, &KIMI_KEYWORDS) {
+            return Some(state);
+        }
+
+        // 2. Kimi-specific `?` dialog with empty prompt.
         for (i, line) in normalized_lines.iter().enumerate() {
-            let lc = line.to_ascii_lowercase();
-            if lc.contains("run this command")
-                || lc.contains("allow this")
-                || lc.ends_with("[y/n]")
-                || lc.ends_with("(y/n)")
-            {
-                return Some(ManagedSessionTaskState::Confirm);
-            }
             if line.trim_start().starts_with('?') && i + 1 < normalized_lines.len() {
                 let next = normalized_lines[i + 1].trim_start();
                 if kimi_prompt_is_empty(next) {
@@ -186,8 +192,6 @@ fn kimi_has_active_animation(lines: &[&str]) -> bool {
 
 fn kimi_compacting_status_line(line: &str) -> bool {
     let lowered = line.to_ascii_lowercase();
-    // Kimi renders compacting as a status bullet line that toggles on/off:
-    //   "● Compacting context..."  or  "  Compacting context..."
     (line.starts_with("● ") || line.starts_with("  ")) && lowered.contains("compacting")
 }
 
@@ -206,18 +210,6 @@ fn kimi_prompt_is_empty(line: &str) -> bool {
             .is_some_and(|rest| rest.trim().is_empty())
 }
 
-/// Detect Kimi's structured question/choice menu, e.g.:
-///
-/// ```text
-/// ? browser-use Ozon POC 已跑通，接下来优先做哪件事？
-/// → [1] 稳定商品提取 (Recommended)
-/// [2] ...
-/// ↑↓ select  1-5 / ↵ choose  ←/→/tab switch  esc cancel
-/// K2.7 Code thinking  [1 task running]
-/// ```
-///
-/// This must be recognized as Confirm before the background-task / running
-/// heuristics see `[1 task running]`.
 fn kimi_has_choice_menu(lines: &[&str]) -> bool {
     let mut has_question = false;
     let mut has_choice = false;
@@ -226,7 +218,7 @@ fn kimi_has_choice_menu(lines: &[&str]) -> bool {
     for line in lines {
         let trimmed = line.trim_start();
         if (trimmed.starts_with('?') && trimmed.len() > 1)
-            || trimmed.to_ascii_lowercase() == "question"
+            || trimmed.eq_ignore_ascii_case("question")
         {
             has_question = true;
         }
@@ -328,8 +320,6 @@ K2.7 Code thinking  [1 task running]"#;
 
     #[test]
     fn question_header_without_question_mark_is_confirm() {
-        // Some Kimi choice menus render a standalone "question" tag line
-        // instead of a leading '?' prompt.
         let pane_text = r#"question
 Next    Submit
   browser-use Ozon POC 已跑通，接下来优先做哪件事？
@@ -346,7 +336,6 @@ K2.7 Code thinking  [1 task running]"#;
 
     #[test]
     fn question_header_alone_is_not_confirm() {
-        // A stray "question" line without choices/hints must not become Confirm.
         let pane_text = r#"question
 │ >"#;
         let detector = KimiDetector;

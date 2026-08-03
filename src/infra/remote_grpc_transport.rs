@@ -54,7 +54,7 @@ pub enum RemoteNodeTransportEvent {
     EnvelopeReceived {
         node_id: String,
         session_instance_id: String,
-        envelope: NodeSessionEnvelope,
+        envelope: Box<NodeSessionEnvelope>,
     },
     TransportFailed {
         node_id: Option<String>,
@@ -165,10 +165,15 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         ));
         let worker = thread::Builder::new()
             .spawn(move || {
-                let runtime = Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("grpc outbound node transport runtime should build");
+                let runtime = match Builder::new_multi_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = started_tx.send(Err(RemoteNodeTransportError::new(format!(
+                            "failed to build grpc outbound node transport runtime: {error}"
+                        ))));
+                        return;
+                    }
+                };
                 let t_runtime = t_start.elapsed();
                 ERROR_LOG.log(format!(
                     "[diag-timing] connect_outbound tokio runtime ready: {:?}",
@@ -327,7 +332,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 let _ = event_tx.send(RemoteNodeTransportEvent::EnvelopeReceived {
                     node_id: request.node_id.clone(),
                     session_instance_id: session_instance_id.clone(),
-                    envelope: first_envelope,
+                    envelope: Box::new(first_envelope),
                 });
 
                 tokio::pin!(shutdown_rx);
@@ -346,7 +351,7 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                     if event_tx.send(RemoteNodeTransportEvent::EnvelopeReceived {
                                         node_id: request.node_id.clone(),
                                         session_instance_id: session_instance_id.clone(),
-                                        envelope,
+                                        envelope: Box::new(envelope),
                                     }).is_err() {
                                         ERROR_LOG.log(format!(
                                             "[diag] client reader: event_tx.send failed for node {}",
@@ -440,15 +445,35 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let worker = thread::Builder::new()
             .spawn(move || {
-                let runtime = Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("grpc remote node transport runtime should build");
+                let runtime = match Builder::new_multi_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                            node_id: None,
+                            session_instance_id: None,
+                            message: format!(
+                                "failed to build grpc remote node transport runtime: {error}"
+                            ),
+                        });
+                        return;
+                    }
+                };
                 runtime.block_on(async move {
-                    let listener = tokio::net::TcpListener::from_std(listener)
-                        .expect("std listener should convert into tokio listener");
-                    let incoming = TcpListenerStream::new(listener);
                     let failure_tx = event_tx.clone();
+                    let listener = match tokio::net::TcpListener::from_std(listener) {
+                        Ok(listener) => listener,
+                        Err(error) => {
+                            let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                node_id: None,
+                                session_instance_id: None,
+                                message: format!(
+                                    "failed to convert std tcp listener into tokio listener: {error}"
+                                ),
+                            });
+                            return;
+                        }
+                    };
+                    let incoming = TcpListenerStream::new(listener);
                     let session_shutdowns = Arc::new(Mutex::new(Vec::new()));
                     let shutdown_registry = session_shutdowns.clone();
                     let service = TransportNodeSessionService {
@@ -463,9 +488,9 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         .add_service(NodeSessionServiceServer::new(service))
                         .serve_with_incoming_shutdown(incoming, async move {
                             let _ = shutdown_rx.await;
-                            let mut guard = shutdown_registry.lock().expect(
-                            "grpc inbound session shutdown registry mutex should not be poisoned",
-                        );
+                            let mut guard = shutdown_registry
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
                             for shutdown in guard.drain(..) {
                                 let _ = shutdown.send(());
                             }
@@ -547,7 +572,7 @@ impl NodeSessionService for TransportNodeSessionService {
         let (session_shutdown_tx, session_shutdown_rx) = oneshot::channel();
         self.session_shutdowns
             .lock()
-            .expect("grpc inbound session shutdown registry mutex should not be poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .push(session_shutdown_tx);
         let session = RemoteNodeSessionHandle {
             node_id: node_id.clone(),
@@ -573,7 +598,7 @@ impl NodeSessionService for TransportNodeSessionService {
                             .send(RemoteNodeTransportEvent::EnvelopeReceived {
                                 node_id: node_id.clone(),
                                 session_instance_id: session_instance_id.clone(),
-                                envelope,
+                                envelope: Box::new(envelope),
                             })
                             .is_err()
                         {

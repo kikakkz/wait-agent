@@ -62,3 +62,47 @@ impl AgentDetector for ShellDetector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::session_catalog::ManagedSessionTaskState;
+
+    #[test]
+    fn detects_input_state_from_prompt_line() {
+        let detector = ShellDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("bash"), "user@host:~$ "),
+            Some(ManagedSessionTaskState::Input)
+        );
+        assert_eq!(
+            detector.infer_task_state(Some("zsh"), "~ % "),
+            Some(ManagedSessionTaskState::Input)
+        );
+    }
+
+    #[test]
+    fn detects_running_state_from_output() {
+        let detector = ShellDetector;
+        let pane_text = "Compiling project...\nDone";
+        assert_eq!(
+            detector.infer_task_state(Some("bash"), pane_text),
+            Some(ManagedSessionTaskState::Running)
+        );
+    }
+
+    #[test]
+    fn ignores_irrelevant_lines() {
+        let detector = ShellDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("claude"), "$ "),
+            None,
+            "detector should ignore lines when command is not a shell"
+        );
+        assert_eq!(
+            detector.detect_from_process("claude", None),
+            None,
+            "detector never matches a foreground process"
+        );
+    }
+}

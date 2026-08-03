@@ -1,4 +1,7 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_detector_common::{
+    detect_confirm_from_lines, detect_input_from_lines, AgentKeywords,
+};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
@@ -13,6 +16,13 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "SessionEnd",
 ];
+
+const CLAUDE_KEYWORDS: AgentKeywords = AgentKeywords {
+    confirm_phrases: &["run this command", "allow this", "approve this"],
+    input_phrases: &["ready", "type your message", "send a message"],
+    prompt_chars: &['❯', '›'],
+    input_window: None,
+};
 
 pub struct ClaudeDetector;
 
@@ -29,7 +39,6 @@ impl AgentDetector for ClaudeDetector {
         if current_command == "claude" || current_command == "claude.js" {
             return Some("claude");
         }
-        // check argv for any supported wrapper
         if let Some(argv) = argv {
             let is_claude = argv.first().and_then(|arg| {
                 std::path::Path::new(arg)
@@ -67,35 +76,16 @@ impl AgentDetector for ClaudeDetector {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        let last_line = normalized_lines.last().copied().unwrap_or_default();
-        let lowered = last_line.to_ascii_lowercase();
 
-        // Confirm — scan ALL non-empty lines for confirmation indicators.
-        //
-        // Claude Code's TUI shows a numbered menu when waiting for confirmation:
-        //   Do you want to create claude_test_file.txt?
+        // 1. Shared confirm scanner.
+        if let Some(state) = detect_confirm_from_lines(&normalized_lines, &CLAUDE_KEYWORDS) {
+            return Some(state);
+        }
+
+        // 2. Claude-specific numbered menu confirmation.
         //    ❯ 1. Yes
         //      2. No
-        //
-        //   Esc to cancel · Tab to amend
-        // The ❯ line contains "1." and is followed by "2." on the next line,
-        // distinguishing it from the Input prompt (❯ alone on its line between
-        // separator lines).
-        //
-        // Also check keywords across all lines, since the confirm prompt may be
-        // above a footer/instruction line, and the numbered menu may not be
-        // rendered yet in some TUI states.
         for (i, line) in normalized_lines.iter().enumerate() {
-            let lc = line.to_ascii_lowercase();
-            if lc.contains("run this command")
-                || lc.contains("allow this")
-                || lc.contains("approve this")
-                || lc.ends_with("[y/n]")
-                || lc.ends_with("(y/n)")
-            {
-                return Some(ManagedSessionTaskState::Confirm);
-            }
-            // TUI numbered menu: ❯ 1. ..., next non-empty line starts with "2."
             if line.starts_with('❯') && line.contains(" 1.") {
                 if let Some(next) = normalized_lines.get(i + 1) {
                     if next.starts_with("2.") || next.starts_with("2 ") {
@@ -103,50 +93,11 @@ impl AgentDetector for ClaudeDetector {
                     }
                 }
             }
-            // Dialog question starting with `?` (ratatui dialog marker).
-            // On the initial confirmation screen, the numbered menu hasn't
-            // rendered yet — only the `?` question and the `❯` prompt are
-            // visible. The `?` character at line start is a ratatui convention
-            // for dialog/question state and is unlikely in regular output.
-            //
-            // Only match when `❯`/`›` is empty (no user input yet). Once the
-            // user starts typing, Input detection should take over.
-            if line.trim_start().starts_with('?') && i + 1 < normalized_lines.len() {
-                let next = normalized_lines[i + 1];
-                if (next.starts_with('❯') || next.starts_with('›'))
-                    && next.trim_start_matches(&['❯', '›'][..]).trim().is_empty()
-                {
-                    return Some(ManagedSessionTaskState::Confirm);
-                }
-            }
         }
 
-        // Input detection.
-        //
-        // Any non-empty line starting with the prompt character (❯ or ›)
-        // indicates the agent is awaiting input. During active execution
-        // the ❯ prompt is still visible in the TUI, but the temporal
-        // content-change check in session_metadata.rs overrides Input →
-        // Running above the detector level, so being permissive here is
-        // safe — the temporal check will correct it when content is
-        // actively changing.
-        //
-        // Previously this required ❯ to be followed by a separator line
-        // (───) or to be the last visible line, but that missed cases where
-        // the bottom separator was scrolled off-screen or a footer line
-        // appeared below ❯.
-        for line in &normalized_lines {
-            if line.starts_with('❯') || line.starts_with('›') {
-                return Some(ManagedSessionTaskState::Input);
-            }
-        }
-        // Legacy keyword-based fallback (no prompt character visible)
-        if last_line.starts_with("> ")
-            || lowered.contains("ready")
-            || lowered.contains("type your message")
-            || lowered.contains("send a message")
-        {
-            return Some(ManagedSessionTaskState::Input);
+        // 3. Shared input scanner.
+        if let Some(state) = detect_input_from_lines(&normalized_lines, &CLAUDE_KEYWORDS) {
+            return Some(state);
         }
 
         Some(ManagedSessionTaskState::Running)
@@ -207,4 +158,55 @@ fn claude_has_stable_input_prompt(pane_text: &str) -> bool {
         let after_claude_prompt = line.trim_start_matches('❯').trim_start();
         line.starts_with('❯') && !after_claude_prompt.starts_with("1.")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::session_catalog::ManagedSessionTaskState;
+
+    #[test]
+    fn detects_input_state_from_prompt_line() {
+        let detector = ClaudeDetector;
+        let pane_text = "previous output\n❯ ";
+        assert_eq!(
+            detector.infer_task_state(Some("claude"), pane_text),
+            Some(ManagedSessionTaskState::Input)
+        );
+    }
+
+    #[test]
+    fn detects_running_state_from_output() {
+        let detector = ClaudeDetector;
+        let pane_text = "Computing result...\nHere is the answer";
+        assert_eq!(
+            detector.infer_task_state(Some("claude"), pane_text),
+            Some(ManagedSessionTaskState::Running)
+        );
+    }
+
+    #[test]
+    fn ignores_irrelevant_lines() {
+        let detector = ClaudeDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("bash"), "❯ "),
+            None,
+            "detector should ignore lines when command is not claude"
+        );
+        assert_eq!(
+            detector.detect_from_process("bash", None),
+            None,
+            "detector should ignore non-claude processes"
+        );
+    }
+
+    #[test]
+    fn numbered_menu_is_confirm() {
+        let detector = ClaudeDetector;
+        let pane_text = "Create file?\n❯ 1. Yes\n  2. No";
+        assert_eq!(
+            detector.infer_task_state(Some("claude"), pane_text),
+            Some(ManagedSessionTaskState::Confirm)
+        );
+    }
 }

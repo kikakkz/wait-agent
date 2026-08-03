@@ -1,7 +1,7 @@
 use crate::cli::Cli;
 use crate::error::AppError;
 use crate::infra::error_log::ERROR_LOG;
-use crate::runtime::network_state_runtime::command_network_config;
+use crate::remote::network_state::command_network_config;
 
 // The accepted local default route is: bootstrap -> command dispatch ->
 // workspace command runtime. Event-r4 keeps that path explicit so new local

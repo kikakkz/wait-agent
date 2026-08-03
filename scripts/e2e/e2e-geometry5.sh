@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY TMUX E2E SCRIPT. This script exercises the historical tmux-based
+# geometry scenarios and is kept for reference. It is not the active ratatui
+# smoke test; see e2e-ratatui-smoke.sh for the current end-to-end coverage.
+
 # geometry-5 e2e: per-server geometry store.
 # A (server, 17474) mirrors B (client node daemon, 17475, --connect 127.0.0.1:17474).
 # After negotiation, the store must hold T for key "127.0.0.1:17474";

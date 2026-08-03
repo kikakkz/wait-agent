@@ -10,7 +10,7 @@ Usage:
   ./scripts/install-build-deps.sh
   ./scripts/install-build-deps.sh --print
 
-Installs the system packages required to build/run waitagent, including vendored tmux.
+Installs the system packages required to build/run waitagent.
 `--print` shows the command without executing it.
 EOF
   exit 0

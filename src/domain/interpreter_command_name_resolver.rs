@@ -54,21 +54,21 @@ impl InterpreterCommandNameResolver {
         }
         // python script.py -> script.py
         argv.get(1)
-            .map(|path| std::path::Path::new(path))
+            .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
     }
 
     fn resolve_node(&self, argv: &[String]) -> Option<String> {
         argv.get(1)
-            .map(|path| std::path::Path::new(path))
+            .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
     }
 
     fn resolve_ruby(&self, argv: &[String]) -> Option<String> {
         argv.get(1)
-            .map(|path| std::path::Path::new(path))
+            .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
     }

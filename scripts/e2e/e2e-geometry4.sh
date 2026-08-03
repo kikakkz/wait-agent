@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY TMUX E2E SCRIPT. This script exercises the historical tmux-based
+# geometry scenarios and is kept for reference. It is not the active ratatui
+# smoke test; see e2e-ratatui-smoke.sh for the current end-to-end coverage.
+
 # geometry-4 e2e: server-side re-sync on geometry push.
 # A (server, 17474) mirrors B (client node daemon, 17475).
 # When B's client attaches small, authority pushes T; A's slot must

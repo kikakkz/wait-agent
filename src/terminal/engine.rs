@@ -80,10 +80,12 @@ impl TerminalEngine {
         self.alternate.resize(size);
     }
 
+    #[cfg(test)]
     pub fn size(&self) -> TerminalSize {
         self.normal.size
     }
 
+    #[cfg(test)]
     pub fn feed(&mut self, bytes: &[u8]) {
         let _ = self.feed_and_collect_replies(bytes);
     }
@@ -208,6 +210,7 @@ impl TerminalEngine {
         replies
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> ScreenSnapshot {
         self.active_buffer().snapshot(
             self.alternate_screen_active,
@@ -218,6 +221,7 @@ impl TerminalEngine {
 
     /// Snapshot of the visible screen for the per-frame render path; the
     /// scrollback vectors are left empty to avoid cloning history each frame.
+    #[cfg(test)]
     pub fn snapshot_visible(&self) -> ScreenSnapshot {
         self.active_buffer().snapshot_visible(
             self.alternate_screen_active,
@@ -245,29 +249,34 @@ impl TerminalEngine {
         self.application_cursor_keys
     }
 
+    #[cfg(test)]
     pub fn bracketed_paste(&self) -> bool {
         self.bracketed_paste
     }
 
+    #[cfg(test)]
     pub fn mouse_reporting(&self) -> MouseReportingMode {
         self.mouse_reporting
     }
 
+    #[cfg(test)]
     pub fn mouse_encoding(&self) -> MouseEncoding {
         self.mouse_encoding
     }
 
     /// OSC 52 clipboard payloads observed since the last drain, each the full
     /// `52;...` sequence body ready to be re-emitted to the local terminal.
+    #[cfg(test)]
     pub fn drain_osc52(&mut self) -> Vec<String> {
         std::mem::take(&mut self.osc52_queue)
     }
 
     /// Plain-text scrollback lines that have rolled off the normal screen since
     /// the last drain. Engine-mode rendering emits these to the local pane
-    /// before drawing the current frame so tmux copy-mode captures full history.
+    /// before drawing the current frame so the local terminal captures full history.
     /// Only the normal buffer is bridged: alternate-screen applications (vim,
-    /// tmux, full-screen TUIs) should not pollute the local scrollback.
+    /// full-screen TUIs) should not pollute the local scrollback.
+    #[cfg(test)]
     pub fn drain_scrollback_lines(&mut self) -> Vec<String> {
         self.normal.drain_scrollback_lines()
     }
@@ -633,7 +642,7 @@ struct ScreenBuffer {
     last_char: Option<char>,
     /// Number of scrollback lines already emitted to the local pane. Used by
     /// engine-mode rendering to bridge the engine's internal scrollback to the
-    /// local tmux pane scrollback without cloning the whole history each frame.
+    /// local terminal scrollback without cloning the whole history each frame.
     scrollback_emitted_count: usize,
 }
 
@@ -657,7 +666,8 @@ impl ScreenBuffer {
 
     /// Scrollback lines that have not been emitted yet and advance the emitted
     /// cursor. The returned lines preserve ANSI SGR escape sequences so the
-    /// local tmux pane copy-mode can show color, bold, and other styles.
+    /// local terminal copy-mode can show color, bold, and other styles.
+    #[cfg(test)]
     fn drain_scrollback_lines(&mut self) -> Vec<String> {
         let total = self.styled_scrollback.len();
         if total <= self.scrollback_emitted_count {
@@ -709,6 +719,7 @@ impl ScreenBuffer {
         self.build_snapshot(alternate_screen, window_title, cursor_visible, true)
     }
 
+    #[cfg(test)]
     fn snapshot_visible(
         &self,
         alternate_screen: bool,

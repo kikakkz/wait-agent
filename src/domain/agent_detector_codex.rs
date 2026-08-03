@@ -1,4 +1,7 @@
 use crate::domain::agent_detector::{AgentDetector, InputStabilityPolicy};
+use crate::domain::agent_detector_common::{
+    detect_confirm_from_lines, detect_input_from_lines, AgentKeywords,
+};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
@@ -11,6 +14,19 @@ const CODEX_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "Interrupt",
 ];
+
+const CODEX_KEYWORDS: AgentKeywords = AgentKeywords {
+    confirm_phrases: &[
+        "run this command",
+        "allow this",
+        "allow codex",
+        "do you trust the contents of this directory",
+        "hooks need review",
+    ],
+    input_phrases: &["type your message", "send a message"],
+    prompt_chars: &['›', '❯'],
+    input_window: Some(12),
+};
 
 pub struct CodexDetector;
 
@@ -27,7 +43,6 @@ impl AgentDetector for CodexDetector {
         if current_command == "codex" || current_command == "codex.js" {
             return Some("codex");
         }
-        // check argv for any supported wrapper
         if let Some(argv) = argv {
             let is_codex = argv.first().and_then(|arg| {
                 std::path::Path::new(arg)
@@ -65,94 +80,27 @@ impl AgentDetector for CodexDetector {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        let last_line = normalized_lines.last().copied().unwrap_or_default();
-        let last_lowered = last_line.to_ascii_lowercase();
 
-        // Confirm — scan ALL non-empty lines for confirmation indicators.
-        //
-        // Codex's TUI uses a numbered menu for trust/confirm prompts:
-        //   Do you trust the contents of this directory?
-        //   › 1. Yes, continue
-        //     2. No, quit
-        //
-        //   Press enter to continue
-        // The › line contains "1." and is followed by "2." on the next line.
-        //
-        // Also check keywords across all lines since the prompt may appear
-        // above an instruction or footer line, and the numbered menu may not
-        // be rendered yet on the initial confirmation screen.
-        for (i, line) in normalized_lines.iter().enumerate() {
-            let lc = line.to_ascii_lowercase();
-            if lc.contains("run this command")
-                || lc.contains("allow this")
-                || lc.contains("allow codex")
-                || lc.contains("do you trust the contents of this directory")
-                || lc.contains("hooks need review")
-                || lc.ends_with("[y/n]")
-                || lc.ends_with("(y/n)")
-            {
-                return Some(ManagedSessionTaskState::Confirm);
-            }
-            // TUI numbered menu: the selected line starts with `› N.` and
-            // another numbered option appears nearby. Options may wrap across
-            // lines, so the next option is not always the immediate next line.
+        // 1. Shared confirm scanner.
+        if let Some(state) = detect_confirm_from_lines(&normalized_lines, &CODEX_KEYWORDS) {
+            return Some(state);
+        }
+
+        // 2. Codex-specific numbered menu confirmation.
+        for (i, _line) in normalized_lines.iter().enumerate() {
             if codex_numbered_menu_selection(&normalized_lines, i) {
                 return Some(ManagedSessionTaskState::Confirm);
             }
-            // Dialog question starting with `?` (ratatui dialog marker).
-            // On the initial confirmation screen, the numbered menu hasn't
-            // rendered yet — only the `?` question and the `›` prompt are
-            // visible. The `?` character at line start is a ratatui convention
-            // for dialog/question state and is unlikely in regular output.
-            //
-            // Only match when `›` is empty (no user input yet). Once the user
-            // starts typing at the prompt, the confirm screen has shifted and
-            // Input detection should take over.
-            if line.trim_start().starts_with('?') && i + 1 < normalized_lines.len() {
-                let next = normalized_lines[i + 1];
-                if next.starts_with('›') && next.trim_start_matches('›').trim().is_empty() {
-                    return Some(ManagedSessionTaskState::Confirm);
-                }
-            }
         }
 
+        // 3. Active-work marker must take precedence over input prompts.
         if codex_has_active_work_marker(&normalized_lines) {
             return Some(ManagedSessionTaskState::Running);
         }
 
-        // Input — find › near the pane tail. The actual prompt › is
-        // always near the bottom of the pane. Conversation › lines (user's
-        // echoed input) scroll up during execution and won't be near the tail
-        // lines after the agent has started producing output.
-        //
-        // Only count a › line as Input if:
-        //   - The line contains ONLY "›" (empty prompt, no user text)
-        //   - OR the › is near the pane tail and the next line is not a
-        //     numbered option (numbered menus are caught by Confirm above)
-        for (i, line) in normalized_lines.iter().enumerate() {
-            if line.starts_with('›') && i >= normalized_lines.len().saturating_sub(12) {
-                // Empty prompt (just "›") — definitely Input
-                if line.trim_start_matches('›').trim().is_empty() {
-                    return Some(ManagedSessionTaskState::Input);
-                }
-                // User has typed text at the prompt.
-                if i >= normalized_lines.len().saturating_sub(12) {
-                    return Some(ManagedSessionTaskState::Input);
-                }
-            }
-        }
-        // Also check for ❯ prompt (shared TUI pattern) and keyword indicators.
-        if last_line.starts_with('❯')
-            || last_line.starts_with("> ")
-            || last_lowered.contains("type your message")
-            || last_lowered.contains("send a message")
-        // NOT checking `tip` or `ask codex` here — those keywords appear
-        // in codex's running output and would cause false Input when the
-        // prompt character (`›`) isn't visible. The temporal content-change
-        // check in session_metadata.rs distinguishes "awaiting input" from
-        // "running with visible output."
-        {
-            return Some(ManagedSessionTaskState::Input);
+        // 4. Shared input scanner.
+        if let Some(state) = detect_input_from_lines(&normalized_lines, &CODEX_KEYWORDS) {
+            return Some(state);
         }
 
         Some(ManagedSessionTaskState::Running)
@@ -228,5 +176,46 @@ fn parse_numbered_option(line: &str) -> Option<u32> {
         Some(number)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::session_catalog::ManagedSessionTaskState;
+
+    #[test]
+    fn detects_input_state_from_prompt_line() {
+        let detector = CodexDetector;
+        let pane_text = "previous output\n› ";
+        assert_eq!(
+            detector.infer_task_state(Some("codex"), pane_text),
+            Some(ManagedSessionTaskState::Input)
+        );
+    }
+
+    #[test]
+    fn detects_running_state_from_output() {
+        let detector = CodexDetector;
+        let pane_text = "working\nGenerating code...";
+        assert_eq!(
+            detector.infer_task_state(Some("codex"), pane_text),
+            Some(ManagedSessionTaskState::Running)
+        );
+    }
+
+    #[test]
+    fn ignores_irrelevant_lines() {
+        let detector = CodexDetector;
+        assert_eq!(
+            detector.infer_task_state(Some("bash"), "› "),
+            None,
+            "detector should ignore lines when command is not codex"
+        );
+        assert_eq!(
+            detector.detect_from_process("bash", None),
+            None,
+            "detector should ignore non-codex processes"
+        );
     }
 }

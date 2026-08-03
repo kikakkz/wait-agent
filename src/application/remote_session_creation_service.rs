@@ -1,8 +1,9 @@
-use crate::application::target_registry_service::{TargetCatalogGateway, TargetRegistryService};
+use crate::application::target_registry_service::TargetRegistryService;
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
 };
+use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
     CreateSessionRequestPayload, NodeSessionChannel, NodeSessionEnvelope, ProtocolEnvelope,
@@ -11,12 +12,12 @@ use crate::infra::remote_protocol::{
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
 };
-use crate::runtime::remote_node_ingress_server_runtime::{
-    remote_node_ingress_owner_socket_path, RemoteNodeIngressServerRuntime,
+use crate::ports::session_creation::{
+    RemoteSessionCreationError, RemoteSessionCreationRequest, SessionCreationPort,
 };
+use crate::ports::target_registry::TargetCatalogGateway;
 use std::fmt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,12 +63,6 @@ impl RemoteSessionCreationTransport for GrpcRemoteSessionCreationTransport {
         request: CreateSessionRequestPayload,
         accept_timeout: Duration,
     ) -> Result<CreateSessionReply, Self::Error> {
-        RemoteNodeIngressServerRuntime::<
-            crate::runtime::remote_publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
-            crate::runtime::remote_node_session_sync_runtime::RatatuiLocalTargetFactory,
-            crate::runtime::remote_node_session_sync_runtime::RatatuiLocalAuthorityHostBackend,
-        >::ensure_owner_running("__shared__", &self.network)
-            .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
         let socket_path = remote_node_ingress_owner_socket_path(&self.network);
         let mut stream = UnixStream::connect(socket_path)
             .map_err(|error| RemoteSessionCreationTransportError::new(error.to_string()))?;
@@ -157,14 +152,6 @@ where
 pub enum CreateSessionReply {
     Accepted(CreateSessionAcceptedPayload),
     Rejected(CreateSessionRejectedPayload),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteSessionCreationRequest {
-    pub authority_node_id: String,
-    pub cwd_hint: Option<PathBuf>,
-    pub cols: usize,
-    pub rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,39 +265,20 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteSessionCreationError {
-    InvalidRequest(String),
-    Transport(String),
-    Rejected { code: &'static str, message: String },
-    Protocol(String),
-    Catalog(String),
-}
-
-impl fmt::Display for RemoteSessionCreationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRequest(message) => {
-                write!(f, "invalid remote session creation request: {message}")
-            }
-            Self::Transport(message) => {
-                write!(f, "remote session creation transport failed: {message}")
-            }
-            Self::Rejected { code, message } => {
-                write!(f, "remote session creation rejected ({code}): {message}")
-            }
-            Self::Protocol(message) => {
-                write!(f, "remote session creation protocol error: {message}")
-            }
-            Self::Catalog(message) => write!(
-                f,
-                "remote session creation catalog lookup failed: {message}"
-            ),
-        }
+impl<T, C> SessionCreationPort for RemoteSessionCreationService<T, C>
+where
+    T: RemoteSessionCreationTransport + Send + Sync,
+    T::Error: ToString,
+    C: RemoteSessionCreationCatalog + Send + Sync,
+    C::Error: ToString,
+{
+    fn create_session(
+        &self,
+        request: RemoteSessionCreationRequest,
+    ) -> Result<ManagedSessionRecord, RemoteSessionCreationError> {
+        self.create_session(request)
     }
 }
-
-impl std::error::Error for RemoteSessionCreationError {}
 
 fn now_millis() -> u128 {
     SystemTime::now()
@@ -359,6 +327,9 @@ mod tests {
         ManagedSessionAddress, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::{WorkspaceInstanceId, WorkspaceSessionRole};
+    use crate::ports::session_creation::{
+        RemoteSessionCreationError, RemoteSessionCreationRequest,
+    };
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;

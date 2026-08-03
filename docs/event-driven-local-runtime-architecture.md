@@ -10,10 +10,10 @@ This document defines the accepted event-driven replacement for the remaining mi
 
 It complements:
 
-- [tmux-first-workspace-plan.md](tmux-first-workspace-plan.md)
-- [tmux-first-runtime-architecture.md](tmux-first-runtime-architecture.md)
+- [tmux-first-workspace-plan.md](archive/tmux-first-workspace-plan.md)
+- [tmux-first-runtime-architecture.md](archive/tmux-first-runtime-architecture.md)
 
-Those documents define the tmux-first product and layer boundaries.
+Those documents define the historical tmux-based product and layer boundaries.
 This document answers a narrower question:
 
 - which runtime modules produce events
@@ -238,4 +238,4 @@ Rejected work:
 - keeping `recv_timeout(...tick...)` as the primary coordinator and only renaming helpers
 - keeping pane runtimes on periodic `list_sessions()` refresh and calling that “reactive”
 - keeping scheduler recomputation in a timeout branch and calling that “event assisted”
-- keeping in-workspace target switching on `detach-client -E "waitagent attach <target>"` and calling that “tmux-native” or “event-driven”
+- keeping in-workspace target switching on tmux-specific attach primitives and calling that “event-driven”

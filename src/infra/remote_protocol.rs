@@ -1,9 +1,10 @@
 // Legacy tmux-era remote protocol kept during the ratatui migration; most items are currently unused.
-#![allow(dead_code)]
 
 use crate::domain::session_catalog::ConsoleLocation;
 
 pub const REMOTE_PROTOCOL_VERSION: &str = "1.1";
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 pub const SERVER_SENDER_ID: &str = "server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,7 +291,7 @@ pub struct TargetPublishedPayload {
     pub transport_session_id: String,
     pub node_instance_id: String,
     pub revision: u64,
-    pub source_session_name: Option<String>,
+    pub authority_host_session_name: Option<String>,
     pub selector: Option<String>,
     pub availability: &'static str,
     pub session_role: Option<&'static str>,
@@ -308,7 +309,7 @@ pub struct TargetExitedPayload {
     pub transport_session_id: String,
     pub node_instance_id: String,
     pub revision: u64,
-    pub source_session_name: Option<String>,
+    pub authority_host_session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +343,8 @@ pub struct RemoteConsoleDescriptor {
     pub location: ConsoleLocation,
 }
 
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPlaneDestination {
     ObserverNode(String),
@@ -359,4 +362,80 @@ pub struct RoutedControlPlaneMessage {
 pub struct NodeBoundControlPlaneMessage {
     pub node_id: String,
     pub envelope: ProtocolEnvelope<ControlPlanePayload>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ControlPlanePayload, ProtocolEnvelope, TargetExitedPayload, TargetPublishedPayload,
+    };
+    use crate::infra::remote_transport_codec::{
+        read_control_plane_envelope, write_control_plane_envelope,
+    };
+
+    fn round_trip_target_published() -> ProtocolEnvelope<ControlPlanePayload> {
+        ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-tp".to_string(),
+            message_type: "target_published",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::TargetPublished(TargetPublishedPayload {
+                transport_session_id: "shell-1".to_string(),
+                node_instance_id: "node-inst-1".to_string(),
+                revision: 7,
+                authority_host_session_name: Some("target-host-1".to_string()),
+                selector: Some("wa-local:shell-1".to_string()),
+                availability: "online",
+                session_role: Some("target-host"),
+                workspace_key: Some("wk-1".to_string()),
+                command_name: Some("codex".to_string()),
+                display_command_name: None,
+                current_path: Some("/tmp/demo".to_string()),
+                attached_clients: 2,
+                window_count: 3,
+                task_state: "input",
+            }),
+        }
+    }
+
+    #[test]
+    fn target_published_round_trips_authority_host_session_name() {
+        let envelope = round_trip_target_published();
+        let mut bytes = Vec::new();
+        write_control_plane_envelope(&mut bytes, &envelope).expect("encode");
+        let decoded = read_control_plane_envelope(&mut bytes.as_slice()).expect("decode");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn target_exited_round_trips_authority_host_session_name() {
+        let envelope = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-te".to_string(),
+            message_type: "target_exited",
+            timestamp: "2026-04-28T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::TargetExited(TargetExitedPayload {
+                transport_session_id: "shell-1".to_string(),
+                node_instance_id: "node-inst-1".to_string(),
+                revision: 7,
+                authority_host_session_name: Some("target-host-1".to_string()),
+            }),
+        };
+        let mut bytes = Vec::new();
+        write_control_plane_envelope(&mut bytes, &envelope).expect("encode");
+        let decoded = read_control_plane_envelope(&mut bytes.as_slice()).expect("decode");
+        assert_eq!(decoded, envelope);
+    }
 }

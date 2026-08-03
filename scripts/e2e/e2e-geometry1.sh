@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY TMUX E2E SCRIPT. This script exercises the historical tmux-based
+# geometry scenarios and is kept for reference. It is not the active ratatui
+# smoke test; see e2e-ratatui-smoke.sh for the current end-to-end coverage.
+
 # geometry-1 e2e: isolated two-instance check on this machine.
 # Instance A (server, port 17474) + Instance B (client node daemon, port 17475).
 # Must NOT touch the production instance on port 7474.

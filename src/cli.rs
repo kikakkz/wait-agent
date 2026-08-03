@@ -14,7 +14,7 @@ pub fn default_remote_node_port() -> u16 {
     std::env::var("WAITAGENT_DEFAULT_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| {
+        .unwrap_or({
             #[cfg(test)]
             {
                 17474
@@ -205,6 +205,8 @@ pub struct ConnectRemoteHostPaneCommand {
 }
 
 /// Used directly by ratatui runtime code; not parsed from the CLI.
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ConnectRemoteHostCommand {
     pub profile: Option<String>,

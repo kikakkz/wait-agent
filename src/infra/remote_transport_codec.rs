@@ -1,5 +1,4 @@
 // Legacy tmux-era transport codec kept during the ratatui migration; `write_registration_frame` is used only in tests/dead modules.
-#![allow(dead_code)]
 
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ClientHelloPayload, CloseMirrorRequestPayload,
@@ -28,7 +27,7 @@ const AUTHORITY_FRAME_INPUT_CONGESTION: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityTransportFrame {
-    ControlPlane(ProtocolEnvelope<ControlPlanePayload>),
+    ControlPlane(Box<ProtocolEnvelope<ControlPlanePayload>>),
     RawPtyInput(RawPtyInputPayload),
     RawPtyOutput(RawPtyOutputPayload),
     Ping,
@@ -46,6 +45,8 @@ pub enum AuthorityTransportFrame {
     InputCongestion(bool),
 }
 
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 pub fn write_registration_frame(
     writer: &mut impl Write,
     node_id: &str,
@@ -194,12 +195,11 @@ pub fn read_authority_transport_frame(
     if &prefix != AUTHORITY_FRAME_MAGIC {
         let mut chained = Cursor::new(prefix).chain(reader);
         return read_control_plane_envelope(&mut chained)
-            .map(AuthorityTransportFrame::ControlPlane);
+            .map(|envelope| AuthorityTransportFrame::ControlPlane(Box::new(envelope)));
     }
     match read_u8(reader)? {
-        AUTHORITY_FRAME_CONTROL_PLANE => {
-            read_control_plane_envelope(reader).map(AuthorityTransportFrame::ControlPlane)
-        }
+        AUTHORITY_FRAME_CONTROL_PLANE => read_control_plane_envelope(reader)
+            .map(|envelope| AuthorityTransportFrame::ControlPlane(Box::new(envelope))),
         AUTHORITY_FRAME_RAW_PTY_INPUT => {
             read_raw_pty_input_payload(reader).map(AuthorityTransportFrame::RawPtyInput)
         }
@@ -449,7 +449,7 @@ fn write_payload(
             write_string(writer, &payload.transport_session_id)?;
             write_string(writer, &payload.node_instance_id)?;
             write_u64(writer, payload.revision)?;
-            write_optional_string(writer, payload.source_session_name.as_deref())?;
+            write_optional_string(writer, payload.authority_host_session_name.as_deref())?;
             write_optional_string(writer, payload.selector.as_deref())?;
             write_static_string(writer, payload.availability)?;
             write_optional_static_string(writer, payload.session_role)?;
@@ -466,7 +466,7 @@ fn write_payload(
             write_string(writer, &payload.transport_session_id)?;
             write_string(writer, &payload.node_instance_id)?;
             write_u64(writer, payload.revision)?;
-            write_optional_string(writer, payload.source_session_name.as_deref())?;
+            write_optional_string(writer, payload.authority_host_session_name.as_deref())?;
         }
         ControlPlanePayload::TargetPublicationAck(payload) => {
             write_u8(writer, 73)?;
@@ -622,7 +622,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             transport_session_id: read_string(reader)?,
             node_instance_id: read_string(reader)?,
             revision: read_u64(reader)?,
-            source_session_name: read_optional_string(reader)?,
+            authority_host_session_name: read_optional_string(reader)?,
             selector: read_optional_string(reader)?,
             availability: read_known_static_string(reader)?,
             session_role: read_optional_static_string(reader)?,
@@ -638,7 +638,7 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             transport_session_id: read_string(reader)?,
             node_instance_id: read_string(reader)?,
             revision: read_u64(reader)?,
-            source_session_name: read_optional_string(reader)?,
+            authority_host_session_name: read_optional_string(reader)?,
         }),
         73 => ControlPlanePayload::TargetPublicationAck(TargetPublicationAckPayload {
             node_id: read_string(reader)?,
@@ -1211,7 +1211,7 @@ mod tests {
                 transport_session_id: "shell-1".to_string(),
                 node_instance_id: "node-inst-1".to_string(),
                 revision: 7,
-                source_session_name: Some("target-host-1".to_string()),
+                authority_host_session_name: Some("target-host-1".to_string()),
                 selector: Some("wa-local:shell-1".to_string()),
                 availability: "online",
                 session_role: Some("target-host"),
@@ -1360,7 +1360,7 @@ mod tests {
                     transport_session_id: "shell-1".to_string(),
                     node_instance_id: "node-inst-1".to_string(),
                     revision: 7,
-                    source_session_name: Some("target-host-1".to_string()),
+                    authority_host_session_name: Some("target-host-1".to_string()),
                     selector: Some("wk:shell".to_string()),
                     availability: "online",
                     session_role: Some("target-host"),

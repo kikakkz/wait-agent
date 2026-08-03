@@ -31,10 +31,10 @@ Priority: optional
 Architecture: amd64
 Maintainer: kikakkz <kikakkz@users.noreply.github.com>
 Depends: libevent-2.1-7 | libevent-2.1-6, libncurses6 | libncurses5
-Description: Terminal-native interaction scheduler for multi-agent workflows
- WaitAgent is a terminal multiplexer and workspace manager that lets
+Description: Ratatui-based terminal workspace for multi-agent workflows
+ WaitAgent is a ratatui-based terminal workspace manager that lets
  multiple AI agent sessions share one terminal. It provides session
- management, remote node aggregation, and tmux-native workspace UI.
+ management, remote node aggregation, and a ratatui workspace UI.
 Homepage: https://github.com/kikakkz/wait-agent
 EOF
 

@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY TMUX E2E SCRIPT. This script exercises the historical tmux-based
+# geometry scenarios and is kept for reference. It is not the active ratatui
+# smoke test; see e2e-ratatui-smoke.sh for the current end-to-end coverage.
+
 # geometry-3 e2e: authority coordinator on one host, isolated ports.
 # A (server, 17474) mirrors B (client node daemon, 17475).
 # Verifies: detached resize, small-client attach (kk-wins noop),

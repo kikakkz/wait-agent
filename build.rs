@@ -5,7 +5,7 @@ fn main() {
 }
 
 fn compile_agent_signal_sender() {
-    println!("cargo:rerun-if-changed=src/runtime/agent_signal_sender_bundle.c");
+    println!("cargo:rerun-if-changed=src/process/agent_signal_sender_bundle.c");
     let out_dir =
         std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR should be set by cargo"));
     let object = out_dir.join("waitagent-agent-signal-send");
@@ -18,7 +18,7 @@ fn compile_agent_signal_sender() {
             "-Wextra",
             "-o",
             object.to_str().expect("OUT_DIR path should be UTF-8"),
-            "src/runtime/agent_signal_sender_bundle.c",
+            "src/process/agent_signal_sender_bundle.c",
         ])
         .status()
         .expect("failed to invoke C compiler for agent signal sender");

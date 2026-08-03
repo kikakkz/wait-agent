@@ -1,6 +1,3 @@
-use std::fmt;
-use std::io;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSize {
     pub rows: u16,
@@ -81,23 +78,6 @@ impl ScreenState {
         }
     }
 }
-
-#[derive(Debug)]
-pub enum TerminalError {
-    Io(String, io::Error),
-    NotTty(String),
-}
-
-impl fmt::Display for TerminalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(context, error) => write!(f, "{context}: {error}"),
-            Self::NotTty(name) => write!(f, "{name} is not attached to a terminal"),
-        }
-    }
-}
-
-impl std::error::Error for TerminalError {}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ScreenCell {

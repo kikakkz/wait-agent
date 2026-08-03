@@ -1,5 +1,4 @@
 // Legacy tmux-era agent detector kept during the ratatui migration; most items are currently unused.
-#![allow(dead_code)]
 
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::interpreter_command_name_resolver::InterpreterCommandNameResolver;
@@ -55,6 +54,8 @@ pub trait AgentDetector: Send + Sync {
     /// Agents with a reliable input boundary can publish Input immediately.
     /// Agents whose prompt is visible while output is still streaming can ask
     /// the tmux metadata layer to wait until content above the prompt is stable.
+    // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+    #[allow(dead_code)]
     fn input_stability_policy(
         &self,
         _command_name: Option<&str>,
@@ -154,6 +155,7 @@ impl DetectorRegistry {
         current_command.to_string()
     }
 
+    #[cfg(test)]
     pub fn detect_command_name_from_argv_candidates(
         &self,
         current_command: &str,
@@ -230,19 +232,6 @@ impl DetectorRegistry {
         ManagedSessionTaskState::Running
     }
 
-    pub fn input_stability_policy(
-        &self,
-        command_name: Option<&str>,
-        pane_text: &str,
-    ) -> InputStabilityPolicy {
-        for detector in &self.detectors {
-            if let Some(policy) = detector.input_stability_policy(command_name, pane_text) {
-                return policy;
-            }
-        }
-        InputStabilityPolicy::StableContent
-    }
-
     pub fn agent_signal_matches_command(&self, agent: &str, command_name: &str) -> bool {
         if agent == command_name {
             return true;
@@ -278,6 +267,7 @@ impl DetectorRegistry {
     /// `pane_current_command` (`/proc/comm`) as the primary source, because
     /// programs like Chrome rewrite `comm` to profile names. Instead it uses
     /// `/proc/<pid>/cmdline` (argv[0]) as the authoritative source.
+    #[cfg(test)]
     pub fn display_command_name(
         &self,
         argv_candidates: &[Vec<String>],

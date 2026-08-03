@@ -26,7 +26,7 @@ cat > "$RPMBUILD_DIR/SPECS/waitagent.spec" <<EOF
 Name: waitagent
 Version: ${VERSION}
 Release: 1
-Summary: Terminal-native interaction scheduler for multi-agent workflows
+Summary: Ratatui-based terminal workspace for multi-agent workflows
 License: MIT
 URL: https://github.com/kikakkz/wait-agent
 Group: Applications/System
@@ -34,9 +34,9 @@ Requires: libevent, ncurses-libs
 BuildRoot: %{_tmppath}/%{name}-%{version}-root
 
 %description
-WaitAgent is a terminal multiplexer and workspace manager that lets
+WaitAgent is a ratatui-based terminal workspace manager that lets
 multiple AI agent sessions share one terminal. It provides session
-management, remote node aggregation, and tmux-native workspace UI.
+management, remote node aggregation, and a ratatui workspace UI.
 
 %install
 mkdir -p %{buildroot}/usr/bin

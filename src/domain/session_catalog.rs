@@ -1,5 +1,4 @@
 // Legacy tmux-era session catalog kept during the ratatui migration; most items are currently unused.
-#![allow(dead_code)]
 
 use crate::domain::workspace::WorkspaceSessionRole;
 use std::path::PathBuf;
@@ -143,24 +142,6 @@ impl ManagedSessionTaskState {
             _ => None,
         }
     }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Running => "RUNNING",
-            Self::Input => "INPUT",
-            Self::Confirm => "CONFIRM",
-            Self::Unknown => "UNKNOWN",
-        }
-    }
-
-    pub fn short_label(&self) -> &'static str {
-        match self {
-            Self::Running => "R",
-            Self::Input => "I",
-            Self::Confirm => "C",
-            Self::Unknown => "U",
-        }
-    }
 }
 
 impl Default for ManagedSessionTaskState {
@@ -199,6 +180,8 @@ impl SessionAvailability {
     }
 }
 
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleLocation {
     LocalWorkspace,
@@ -229,6 +212,8 @@ pub struct ManagedSessionRecord {
     pub task_state: ManagedSessionTaskState,
 }
 
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
 impl ManagedSessionRecord {
     pub fn session_instance_id(&self) -> &str {
         self.address.session_id()

@@ -1,4 +1,3 @@
-use crate::terminal::TerminalError;
 use std::fmt;
 use std::io;
 
@@ -6,7 +5,6 @@ use std::io;
 pub enum LifecycleError {
     Io(String, io::Error),
     Protocol(String),
-    Terminal(TerminalError),
 }
 
 impl fmt::Display for LifecycleError {
@@ -14,15 +12,8 @@ impl fmt::Display for LifecycleError {
         match self {
             Self::Io(context, error) => write!(f, "{context}: {error}"),
             Self::Protocol(message) => write!(f, "{message}"),
-            Self::Terminal(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for LifecycleError {}
-
-impl From<TerminalError> for LifecycleError {
-    fn from(value: TerminalError) -> Self {
-        Self::Terminal(value)
-    }
-}

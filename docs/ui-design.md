@@ -17,9 +17,9 @@ It focuses on:
 
 It complements:
 
-- [wait-agent-prd.md](wait-agent-prd.md)
-- [functional-design.md](functional-design.md)
-- [interaction-flows.md](interaction-flows.md)
+- [wait-agent-prd.md](archive/wait-agent-prd.md)
+- [functional-design.md](archive/functional-design.md)
+- [interaction-flows.md](archive/interaction-flows.md)
 
 ## 2. UI Principles
 

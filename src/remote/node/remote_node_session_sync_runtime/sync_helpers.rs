@@ -1,0 +1,1834 @@
+// Legacy tmux-era session-sync helpers kept during the ratatui migration; most items are currently unused.
+
+use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
+use crate::domain::agent_detector::SHELL_NAMES;
+use crate::domain::session_catalog::{
+    ManagedSessionRecord, ManagedSessionTaskState, SessionTransport,
+};
+use crate::infra::error_log::ERROR_LOG;
+use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
+use crate::infra::remote_grpc_proto::v1::{
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, RouteContext, TargetExited, TargetPublished,
+};
+use crate::infra::remote_grpc_transport::{
+    OutboundNodeSessionRequest, RemoteNodeSessionHandle, RemoteNodeTransportEvent,
+};
+use crate::infra::remote_protocol::{
+    ControlPlanePayload, NodeSessionChannel, ProtocolEnvelope, TargetPublicationAckPayload,
+    TargetPublicationAckStatus,
+};
+
+use crate::lifecycle::LifecycleError;
+use crate::remote::authority::remote_authority_transport_runtime::RemoteAuthorityCommand;
+use crate::remote::node::remote_node_session_runtime::{
+    map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
+};
+use crate::remote::node::remote_runtime_owner_runtime::RemoteTargetSourceBindingResolver;
+use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
+use std::collections::HashMap;
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::{
+    LocalAuthorityHostBackend, LocalSessionCatalog, LocalTargetExitObserver, LocalTargetFactory,
+    OutboundRemoteNodeTransport, SessionSyncAuthorityManager,
+};
+
+const SOURCE_PUBLICATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const SOURCE_PUBLICATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+const OWNER_COMMAND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalCatalogChangeReason {
+    LocalTargetExited { target_session_name: String },
+    LocalRuntimeChanged,
+}
+
+#[derive(Debug)]
+pub(crate) struct LocalCatalogChangeRequest {
+    pub(crate) reason: LocalCatalogChangeReason,
+    pub(crate) ack_tx: Option<mpsc::Sender<Result<LocalCatalogChangeAck, String>>>,
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+impl LocalCatalogChangeRequest {
+    #[cfg(test)]
+    pub(crate) fn notify(reason: LocalCatalogChangeReason) -> Self {
+        Self {
+            reason,
+            ack_tx: None,
+        }
+    }
+
+    fn with_ack(
+        reason: LocalCatalogChangeReason,
+        ack_tx: mpsc::Sender<Result<LocalCatalogChangeAck, String>>,
+    ) -> Self {
+        Self {
+            reason,
+            ack_tx: Some(ack_tx),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalCatalogChangeAck {
+    Published,
+    Queued,
+    Unchanged,
+}
+
+impl LocalCatalogChangeAck {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Queued => "queued",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+impl LocalCatalogChangeReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LocalTargetExited { .. } => "local-target-exited",
+            Self::LocalRuntimeChanged => "local-runtime-changed",
+        }
+    }
+
+    fn encode(&self) -> String {
+        match self {
+            Self::LocalTargetExited {
+                target_session_name,
+            } => format!("local-target-exited	{target_session_name}"),
+            Self::LocalRuntimeChanged => "local-runtime-changed".to_string(),
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let (reason, detail) = value.split_once('\t').unwrap_or((value, ""));
+        match reason {
+            "local-target-exited" if !detail.is_empty() => Some(Self::LocalTargetExited {
+                target_session_name: detail.to_string(),
+            }),
+            "local-runtime-changed" => Some(Self::LocalRuntimeChanged),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SourcePublicationState {
+    session: ManagedSessionRecord,
+    exited: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct PendingSourcePublication {
+    pub(super) target_id: String,
+    pub(super) revision: u64,
+    pub(super) envelope: GrpcNodeSessionEnvelope,
+    pub(super) retry_attempt: u32,
+    pub(super) next_retry_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct SourcePublicationRecord {
+    last_state: Option<SourcePublicationState>,
+    latest_revision: u64,
+    pending: Option<PendingSourcePublication>,
+    acked_revision: u64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SourcePublicationTracker {
+    records: HashMap<String, SourcePublicationRecord>,
+    connected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourcePublicationAckOutcome {
+    Cleared,
+    Retained,
+    Ignored,
+}
+
+impl SourcePublicationTracker {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn on_connected(&mut self) {
+        self.connected = true;
+        for record in self.records.values_mut() {
+            if let Some(pending) = record.pending.as_mut() {
+                pending.next_retry_at = None;
+            }
+        }
+    }
+
+    pub(super) fn on_disconnected(&mut self) {
+        self.connected = false;
+    }
+
+    pub(super) fn on_state_changed(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+    ) -> Option<PendingSourcePublication> {
+        self.on_state_changed_with_mode(
+            node_id,
+            session_instance_id,
+            next_message_id,
+            session,
+            SourcePublicationMode::Delta,
+        )
+    }
+
+    pub(super) fn on_baseline_state(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+    ) -> PendingSourcePublication {
+        self.on_state_changed_with_mode(
+            node_id,
+            session_instance_id,
+            next_message_id,
+            session,
+            SourcePublicationMode::FullBaseline,
+        )
+        // `SourcePublicationMode::FullBaseline` always produces a pending record by
+        // construction, so this unwrap guards an internal invariant.
+        .expect("full baseline publication should always create a pending record")
+    }
+
+    fn on_state_changed_with_mode(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        session: &ManagedSessionRecord,
+        mode: SourcePublicationMode,
+    ) -> Option<PendingSourcePublication> {
+        let target_id = format!("remote-peer:{node_id}:{}", session.address.session_id());
+        let state = SourcePublicationState {
+            session: session.clone(),
+            exited: false,
+        };
+        let record = self.records.entry(target_id.clone()).or_default();
+        if mode == SourcePublicationMode::Delta && record.last_state.as_ref() == Some(&state) {
+            return None;
+        }
+        record.latest_revision += 1;
+        record.last_state = Some(state);
+        next_message_id_increment(next_message_id);
+        let mut envelope = remote_session_published_envelope(
+            node_id,
+            session_instance_id,
+            *next_message_id,
+            session,
+        );
+        if let Some(Body::TargetPublished(payload)) = envelope.body.as_mut() {
+            payload.node_instance_id = session_instance_id.to_string();
+            payload.revision = record.latest_revision;
+        }
+        let pending = PendingSourcePublication {
+            target_id,
+            revision: record.latest_revision,
+            envelope,
+            retry_attempt: 0,
+            next_retry_at: None,
+        };
+        record.pending = Some(pending.clone());
+        Some(pending)
+    }
+
+    pub(super) fn on_target_exited(
+        &mut self,
+        node_id: &str,
+        session_instance_id: &str,
+        next_message_id: &mut u64,
+        transport_session_id: &str,
+    ) -> PendingSourcePublication {
+        let target_id = format!("remote-peer:{node_id}:{transport_session_id}");
+        let record = self.records.entry(target_id.clone()).or_default();
+        record.latest_revision += 1;
+        record.last_state = Some(SourcePublicationState {
+            session: exited_source_publication_state(node_id, transport_session_id),
+            exited: true,
+        });
+        next_message_id_increment(next_message_id);
+        let mut envelope = remote_session_exited_envelope(
+            node_id,
+            session_instance_id,
+            *next_message_id,
+            transport_session_id,
+        );
+        if let Some(Body::TargetExited(payload)) = envelope.body.as_mut() {
+            payload.node_instance_id = session_instance_id.to_string();
+            payload.revision = record.latest_revision;
+        }
+        let pending = PendingSourcePublication {
+            target_id,
+            revision: record.latest_revision,
+            envelope,
+            retry_attempt: 0,
+            next_retry_at: None,
+        };
+        record.pending = Some(pending.clone());
+        pending
+    }
+
+    pub(super) fn on_ack(
+        &mut self,
+        ack: &TargetPublicationAckPayload,
+    ) -> SourcePublicationAckOutcome {
+        let Some(record) = self.records.get_mut(&ack.target_id) else {
+            return SourcePublicationAckOutcome::Ignored;
+        };
+        let Some(pending) = record.pending.as_ref() else {
+            return SourcePublicationAckOutcome::Ignored;
+        };
+        if pending.revision != ack.revision {
+            return SourcePublicationAckOutcome::Ignored;
+        }
+        match ack.status {
+            TargetPublicationAckStatus::Applied | TargetPublicationAckStatus::StaleRevision => {
+                record.acked_revision = ack.revision;
+                record.pending = None;
+                SourcePublicationAckOutcome::Cleared
+            }
+            TargetPublicationAckStatus::Failed => SourcePublicationAckOutcome::Retained,
+        }
+    }
+
+    pub(super) fn on_publication_sent(&mut self, target_id: &str, revision: u64, now: Instant) {
+        let Some(record) = self.records.get_mut(target_id) else {
+            return;
+        };
+        let Some(pending) = record.pending.as_mut() else {
+            return;
+        };
+        if pending.revision != revision {
+            return;
+        }
+        pending.retry_attempt = pending.retry_attempt.saturating_add(1);
+        pending.next_retry_at = Some(now + source_publication_retry_delay(pending.retry_attempt));
+    }
+
+    pub(super) fn is_current_pending(&self, target_id: &str, revision: u64) -> bool {
+        self.records
+            .get(target_id)
+            .and_then(|record| record.pending.as_ref())
+            .is_some_and(|pending| pending.revision == revision)
+    }
+
+    pub(super) fn due_retry_publications(&self, now: Instant) -> Vec<PendingSourcePublication> {
+        if !self.connected {
+            return Vec::new();
+        }
+        self.records
+            .values()
+            .filter_map(|record| {
+                record
+                    .pending
+                    .as_ref()
+                    .filter(|pending| {
+                        pending
+                            .next_retry_at
+                            .is_some_and(|retry_at| retry_at <= now)
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+
+    pub(super) fn next_retry_delay(&self, now: Instant) -> Option<Duration> {
+        if !self.connected {
+            return None;
+        }
+        self.records
+            .values()
+            .filter_map(|record| record.pending.as_ref())
+            .filter_map(|pending| {
+                pending
+                    .next_retry_at
+                    .map(|retry_at| retry_at.saturating_duration_since(now))
+            })
+            .min()
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn pending_publications(&self) -> Vec<PendingSourcePublication> {
+        if !self.connected {
+            return Vec::new();
+        }
+        self.records
+            .values()
+            .filter_map(|record| record.pending.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePublicationMode {
+    Delta,
+    FullBaseline,
+}
+
+fn source_publication_retry_delay(attempt: u32) -> Duration {
+    let factor = 1_u32
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    SOURCE_PUBLICATION_RETRY_INITIAL_DELAY
+        .saturating_mul(factor)
+        .min(SOURCE_PUBLICATION_RETRY_MAX_DELAY)
+}
+
+fn exited_source_publication_state(
+    node_id: &str,
+    transport_session_id: &str,
+) -> ManagedSessionRecord {
+    ManagedSessionRecord {
+        address: crate::domain::session_catalog::ManagedSessionAddress::remote_peer(
+            node_id,
+            transport_session_id.to_string(),
+        ),
+        selector: None,
+        availability: crate::domain::session_catalog::SessionAvailability::Exited,
+        workspace_dir: None,
+        workspace_key: None,
+        session_role: None,
+        opened_by: Vec::new(),
+        attached_clients: 0,
+        window_count: 0,
+        command_name: None,
+        display_command_name: None,
+        current_path: None,
+        task_state: ManagedSessionTaskState::Unknown,
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionSyncEvent {
+    Transport(RemoteNodeTransportEvent),
+    AuthorityHostOutput(Box<ProtocolEnvelope<ControlPlanePayload>>),
+    LocalCatalogChanged(LocalCatalogChangeRequest),
+    RetryDue,
+    Stop,
+}
+
+pub(super) struct RunRemoteSessionSyncLoopArgs<G, T, O, F, A, P>
+where
+    P: crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
+{
+    pub gateway: G,
+    pub transport: T,
+    pub network: RemoteNetworkConfig,
+    pub local_target_exit_observer: O,
+    pub target_factory: F,
+    pub authority_backend: A,
+    pub publication_runtime: Option<RemoteTargetPublicationRuntime<P>>,
+    pub node_id: String,
+    pub endpoint_uri: String,
+    pub local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
+    pub reconnect_delay: Duration,
+}
+
+pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
+    args: RunRemoteSessionSyncLoopArgs<G, T, O, F, A, P>,
+    stop_rx: mpsc::Receiver<()>,
+) where
+    G: LocalSessionCatalog,
+    T: OutboundRemoteNodeTransport,
+    O: LocalTargetExitObserver,
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    P: crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
+    let RunRemoteSessionSyncLoopArgs {
+        gateway,
+        transport,
+        network,
+        local_target_exit_observer,
+        target_factory,
+        authority_backend,
+        publication_runtime,
+        node_id,
+        endpoint_uri,
+        local_catalog_rx,
+        reconnect_delay,
+    } = args;
+    let local_target_socket_name = gateway.local_target_socket_name().map(str::to_string);
+    let mut next_message_id = 0_u64;
+    let mut publication_tracker = SourcePublicationTracker::new();
+    let mut observed_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let mut observed_initialized = false;
+    let mut published_sessions = HashMap::<String, ManagedSessionRecord>::new();
+    let mut publication_dirty = false;
+    let (session_event_tx, session_event_rx) = mpsc::channel::<SessionSyncEvent>();
+    {
+        let session_event_tx = session_event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(request) = local_catalog_rx.recv() {
+                if session_event_tx
+                    .send(SessionSyncEvent::LocalCatalogChanged(request))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    }
+    {
+        let session_event_tx = session_event_tx.clone();
+        thread::spawn(move || {
+            if stop_rx.recv().is_ok() {
+                let _ = session_event_tx.send(SessionSyncEvent::Stop);
+            }
+        });
+    }
+    loop {
+        let (transport_event_tx, transport_event_rx) = mpsc::channel();
+        let _transport_guard = match transport.connect_outbound(
+            OutboundNodeSessionRequest {
+                node_id: node_id.clone(),
+                endpoint_uri: endpoint_uri.clone(),
+            },
+            transport_event_tx,
+        ) {
+            Ok(guard) => guard,
+            Err(_) => {
+                publication_tracker.on_disconnected();
+                match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
+                    ReconnectWaitOutcome::Stop => return,
+                    ReconnectWaitOutcome::LocalCatalogChanged(request) => {
+                        let ack = if observe_local_session_catalog(
+                            &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        ) {
+                            publication_dirty = true;
+                            LocalCatalogChangeAck::Queued
+                        } else {
+                            LocalCatalogChangeAck::Unchanged
+                        };
+                        acknowledge_local_catalog_change(request, Ok(ack));
+                    }
+                    ReconnectWaitOutcome::Elapsed => {}
+                }
+                continue;
+            }
+        };
+        {
+            let session_event_tx = session_event_tx.clone();
+            thread::spawn(move || {
+                while let Ok(event) = transport_event_rx.recv() {
+                    if session_event_tx
+                        .send(SessionSyncEvent::Transport(event))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+
+        let mut active_session = None;
+        let mut authority_manager = SessionSyncAuthorityManager::with_session_events(
+            network.clone(),
+            local_target_socket_name.clone(),
+            session_event_tx.clone(),
+            target_factory.clone(),
+            authority_backend.clone(),
+        );
+        let mut should_reconnect = false;
+
+        while !should_reconnect {
+            let event = match recv_session_sync_event(
+                &session_event_rx,
+                publication_tracker.next_retry_delay(Instant::now()),
+            ) {
+                Some(event) => event,
+                None => return,
+            };
+
+            match event {
+                SessionSyncEvent::Transport(event) => {
+                    let session_opened =
+                        matches!(event, RemoteNodeTransportEvent::SessionOpened { .. });
+                    let outcome = handle_transport_event(
+                        event,
+                        &mut active_session,
+                        &mut authority_manager,
+                        publication_runtime.as_ref(),
+                        &node_id,
+                    );
+                    should_reconnect |= outcome.should_reconnect;
+                    if outcome.should_reconnect {
+                        publication_tracker.on_disconnected();
+                    }
+                    handle_publication_ack_outcome(
+                        &mut publication_tracker,
+                        outcome.publication_ack.as_ref(),
+                    );
+                    if outcome.local_catalog_changed
+                        && observe_local_session_catalog(
+                            &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        )
+                    {
+                        publication_dirty = true;
+                        should_reconnect |= publish_observed_session_catalog(
+                            &node_id,
+                            active_session.as_ref(),
+                            &local_target_exit_observer,
+                            &mut SessionSyncPublicationContext {
+                                published: &mut published_sessions,
+                                observed: &observed_sessions,
+                                next_message_id: &mut next_message_id,
+                                publication_tracker: &mut publication_tracker,
+                            },
+                            SessionSyncMode::Delta,
+                            "local catalog transport event",
+                        );
+                        if !should_reconnect {
+                            publication_dirty = false;
+                        }
+                    }
+                    if session_opened {
+                        publication_tracker.on_connected();
+                        let had_pending_publication = publication_dirty;
+                        if observe_local_session_catalog(
+                            &gateway,
+                            &node_id,
+                            &mut observed_sessions,
+                            &mut observed_initialized,
+                        ) {
+                            publication_dirty = true;
+                        }
+                        should_reconnect |= publish_observed_session_catalog(
+                            &node_id,
+                            active_session.as_ref(),
+                            &local_target_exit_observer,
+                            &mut SessionSyncPublicationContext {
+                                published: &mut published_sessions,
+                                observed: &observed_sessions,
+                                next_message_id: &mut next_message_id,
+                                publication_tracker: &mut publication_tracker,
+                            },
+                            SessionSyncMode::FullBaseline,
+                            "SessionOpened",
+                        );
+                        if !should_reconnect && had_pending_publication {
+                            ERROR_LOG.log(
+                                "[diag-sync] replaying pending local catalog change after SessionOpened"
+                                    .to_string(),
+                            );
+                            publication_dirty = false;
+                        } else if !should_reconnect {
+                            publication_dirty = false;
+                        }
+                    }
+                }
+                SessionSyncEvent::RetryDue => {
+                    if let Some(session_handle) = active_session.as_ref() {
+                        let due = publication_tracker.due_retry_publications(Instant::now());
+                        if !due.is_empty() {
+                            ERROR_LOG.log(format!(
+                                "[diag-publication] retrying pending source publications count={}",
+                                due.len()
+                            ));
+                        }
+                        if let Err(error) = send_pending_source_publications(
+                            session_handle,
+                            &mut publication_tracker,
+                            due,
+                        ) {
+                            ERROR_LOG.log(format!(
+                                "[diag-publication] source publication retry failed, will reconnect: {error}"
+                            ));
+                            publication_tracker.on_disconnected();
+                            should_reconnect = true;
+                        }
+                    }
+                }
+                SessionSyncEvent::AuthorityHostOutput(envelope) => {
+                    let Some(session_handle) = active_session.as_ref() else {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] authority host output deferred without active session type={}",
+                            envelope.payload.message_type()
+                        ));
+                        continue;
+                    };
+                    if let Err(error) =
+                        send_authority_host_output_to_session(session_handle, &envelope)
+                    {
+                        ERROR_LOG.log(format!(
+                            "[diag-timing] authority host output send failed, will reconnect: {error}"
+                        ));
+                        publication_tracker.on_disconnected();
+                        should_reconnect = true;
+                    }
+                }
+                SessionSyncEvent::LocalCatalogChanged(request) => {
+                    let reason = request.reason.clone();
+                    ERROR_LOG.log_exit_latency(format!(
+                        "[diag-exit] sync_event_received reason={} stage=session_sync",
+                        reason.as_str()
+                    ));
+                    let ack = if observe_local_session_catalog(
+                        &gateway,
+                        &node_id,
+                        &mut observed_sessions,
+                        &mut observed_initialized,
+                    ) {
+                        publication_dirty = true;
+                        LocalCatalogChangeAck::Queued
+                    } else {
+                        LocalCatalogChangeAck::Unchanged
+                    };
+                    let mut ack = ack;
+                    if active_session.is_some() && publication_dirty {
+                        should_reconnect |= publish_observed_session_catalog(
+                            &node_id,
+                            active_session.as_ref(),
+                            &local_target_exit_observer,
+                            &mut SessionSyncPublicationContext {
+                                published: &mut published_sessions,
+                                observed: &observed_sessions,
+                                next_message_id: &mut next_message_id,
+                                publication_tracker: &mut publication_tracker,
+                            },
+                            SessionSyncMode::Delta,
+                            "local catalog change",
+                        );
+                        if !should_reconnect {
+                            publication_dirty = false;
+                            ack = LocalCatalogChangeAck::Published;
+                        }
+                    }
+                    ERROR_LOG.log(format!(
+                        "[diag-sync] local catalog change processed reason={} ack={} active_session={} dirty={} should_reconnect={}",
+                        reason.as_str(),
+                        ack.as_str(),
+                        active_session.is_some(),
+                        publication_dirty,
+                        should_reconnect
+                    ));
+                    acknowledge_local_catalog_change(request, Ok(ack));
+                }
+                SessionSyncEvent::Stop => return,
+            }
+        }
+
+        match wait_for_reconnect_delay_or_stop(&session_event_rx, reconnect_delay) {
+            ReconnectWaitOutcome::Stop => return,
+            ReconnectWaitOutcome::LocalCatalogChanged(request) => {
+                let ack = if observe_local_session_catalog(
+                    &gateway,
+                    &node_id,
+                    &mut observed_sessions,
+                    &mut observed_initialized,
+                ) {
+                    publication_dirty = true;
+                    LocalCatalogChangeAck::Queued
+                } else {
+                    LocalCatalogChangeAck::Unchanged
+                };
+                acknowledge_local_catalog_change(request, Ok(ack));
+            }
+            ReconnectWaitOutcome::Elapsed => {}
+        }
+        authority_manager.shutdown();
+    }
+}
+
+fn handle_publication_ack_outcome(
+    tracker: &mut SourcePublicationTracker,
+    ack: Option<&TargetPublicationAckPayload>,
+) {
+    let Some(ack) = ack else {
+        return;
+    };
+    match tracker.on_ack(ack) {
+        SourcePublicationAckOutcome::Cleared => ERROR_LOG.log(format!(
+            "[diag-publication] source publication ack cleared target={} revision={}",
+            ack.target_id, ack.revision
+        )),
+        SourcePublicationAckOutcome::Retained => ERROR_LOG.log(format!(
+            "[diag-publication] source publication ack failed target={} revision={}",
+            ack.target_id, ack.revision
+        )),
+        SourcePublicationAckOutcome::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+pub(super) fn sync_local_sessions_after_catalog_transport_event<G, O>(
+    gateway: &G,
+    node_id: &str,
+    session_handle: Option<&RemoteNodeSessionHandle>,
+    local_target_exit_observer: &O,
+    context: &mut SessionSyncPublicationContext<'_>,
+    reason: &str,
+) -> bool
+where
+    G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
+{
+    let Some(session_handle) = session_handle else {
+        return false;
+    };
+    if sync_local_sessions(
+        gateway,
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        context,
+        SessionSyncMode::Delta,
+    )
+    .is_err()
+    {
+        ERROR_LOG.log(format!(
+            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ));
+        context.publication_tracker.on_disconnected();
+        return true;
+    }
+    false
+}
+
+fn recv_session_sync_event(
+    session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
+    retry_delay: Option<Duration>,
+) -> Option<SessionSyncEvent> {
+    match retry_delay {
+        Some(delay) => match session_event_rx.recv_timeout(delay) {
+            Ok(event) => Some(event),
+            Err(mpsc::RecvTimeoutError::Timeout) => Some(SessionSyncEvent::RetryDue),
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        },
+        None => session_event_rx.recv().ok(),
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum ReconnectWaitOutcome {
+    Elapsed,
+    LocalCatalogChanged(LocalCatalogChangeRequest),
+    Stop,
+}
+
+pub(super) fn wait_for_reconnect_delay_or_stop(
+    session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
+    duration: Duration,
+) -> ReconnectWaitOutcome {
+    let deadline = Instant::now() + duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ReconnectWaitOutcome::Elapsed;
+        }
+        match session_event_rx.recv_timeout(remaining) {
+            Ok(SessionSyncEvent::Stop) => return ReconnectWaitOutcome::Stop,
+            Ok(SessionSyncEvent::LocalCatalogChanged(request)) => {
+                ERROR_LOG.log_exit_latency(format!(
+                    "[diag-exit] sync_event_queued_for_reconnect reason={} stage=session_sync",
+                    request.reason.as_str()
+                ));
+                return ReconnectWaitOutcome::LocalCatalogChanged(request);
+            }
+            Ok(_) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return ReconnectWaitOutcome::Elapsed;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ReconnectWaitOutcome::Stop,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct TransportEventOutcome {
+    pub(super) should_reconnect: bool,
+    pub(super) local_catalog_changed: bool,
+    pub(super) publication_ack: Option<TargetPublicationAckPayload>,
+}
+
+pub(super) fn handle_transport_event<F, A, P>(
+    event: RemoteNodeTransportEvent,
+    active_session: &mut Option<RemoteNodeSessionHandle>,
+    authority_manager: &mut SessionSyncAuthorityManager<F, A>,
+    publication_runtime: Option<&RemoteTargetPublicationRuntime<P>>,
+    node_id: &str,
+) -> TransportEventOutcome
+where
+    F: LocalTargetFactory,
+    A: LocalAuthorityHostBackend,
+    P: crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
+    match event {
+        RemoteNodeTransportEvent::SessionOpened { session } => {
+            *active_session = Some(session);
+            TransportEventOutcome::default()
+        }
+        RemoteNodeTransportEvent::EnvelopeReceived {
+            envelope: boxed_envelope,
+            ..
+        } => {
+            let Some(session_handle) = active_session.as_ref() else {
+                return TransportEventOutcome::default();
+            };
+            if let Some(event) = map_inbound_grpc_authority_event(*boxed_envelope) {
+                if let crate::remote::node::remote_node_session_runtime::GrpcAuthorityEvent::TargetPublicationAck(payload) = event {
+                    return TransportEventOutcome {
+                        publication_ack: Some(payload),
+                        ..TransportEventOutcome::default()
+                    };
+                }
+                return TransportEventOutcome {
+                    should_reconnect: false,
+                    local_catalog_changed: authority_manager.handle_event(session_handle, event),
+                    ..TransportEventOutcome::default()
+                };
+            }
+            TransportEventOutcome::default()
+        }
+        RemoteNodeTransportEvent::SessionClosed {
+            node_id: event_node_id,
+            ..
+        } => {
+            let node_id = event_node_id.as_str();
+            ERROR_LOG.log(format!(
+                "[diag-sync] SessionClosed for node {node_id}, will reconnect"
+            ));
+            if let Some(publication_runtime) = publication_runtime {
+                mark_discovered_remote_node_offline_best_effort(publication_runtime, node_id);
+            }
+            authority_manager.shutdown();
+            *active_session = None;
+            TransportEventOutcome {
+                should_reconnect: true,
+                ..TransportEventOutcome::default()
+            }
+        }
+        RemoteNodeTransportEvent::TransportFailed {
+            node_id: event_node_id,
+            message,
+            ..
+        } => {
+            let node_id = event_node_id.as_deref().unwrap_or(node_id);
+            ERROR_LOG.log(format!(
+                "[diag-sync] TransportFailed node={node_id} msg={message}, will reconnect"
+            ));
+            if let Some(publication_runtime) = publication_runtime {
+                mark_discovered_remote_node_offline_best_effort(publication_runtime, node_id);
+            }
+            authority_manager.shutdown();
+            *active_session = None;
+            TransportEventOutcome {
+                should_reconnect: true,
+                ..TransportEventOutcome::default()
+            }
+        }
+    }
+}
+
+fn mark_discovered_remote_node_offline_best_effort<P>(
+    publication_runtime: &RemoteTargetPublicationRuntime<P>,
+    node_id: &str,
+) where
+    P: crate::remote::publication::remote_target_publication_backend::RemoteTargetPublicationBackend,
+{
+    let publication_runtime = publication_runtime.clone();
+    let node_id = node_id.to_string();
+    thread::spawn(move || {
+        if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(&node_id) {
+            ERROR_LOG.log(format!(
+                "[diag-sync] failed to mark discovered remote node offline {node_id}: {error}"
+            ));
+        }
+    });
+}
+
+fn send_source_publication(
+    session_handle: &RemoteNodeSessionHandle,
+    tracker: &mut SourcePublicationTracker,
+    publication: &PendingSourcePublication,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    if !tracker.is_current_pending(&publication.target_id, publication.revision) {
+        return Ok(());
+    }
+    session_handle.send(publication.envelope.clone())?;
+    tracker.on_publication_sent(&publication.target_id, publication.revision, Instant::now());
+    Ok(())
+}
+
+fn send_authority_host_output_to_session(
+    session_handle: &RemoteNodeSessionHandle,
+    envelope: &ProtocolEnvelope<ControlPlanePayload>,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    let grpc = map_outbound_grpc_envelope(
+        session_handle.node_id(),
+        NodeSessionChannel::Authority,
+        envelope,
+    )
+    .map_err(|error| {
+        crate::infra::remote_grpc_transport::RemoteNodeTransportError::new(error.to_string())
+    })?;
+    ERROR_LOG.log(format!(
+        "[diag-timing] authority host output: forwarding envelope type={} to current gRPC session",
+        envelope.payload.message_type()
+    ));
+    session_handle.send(grpc)
+}
+
+fn send_pending_source_publications(
+    session_handle: &RemoteNodeSessionHandle,
+    tracker: &mut SourcePublicationTracker,
+    publications: Vec<PendingSourcePublication>,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    for publication in publications {
+        send_source_publication(session_handle, tracker, &publication)?;
+    }
+    Ok(())
+}
+
+fn observe_current_local_sessions<G>(
+    gateway: &G,
+    node_id: &str,
+    t_sync: Instant,
+) -> Option<HashMap<String, ManagedSessionRecord>>
+where
+    G: LocalSessionCatalog,
+{
+    let local_sessions = match gateway.list_local_sessions() {
+        Ok(sessions) => {
+            ERROR_LOG.log(format!(
+                "[diag-timing] sync_local_sessions: found {} local sessions",
+                sessions.len()
+            ));
+            ERROR_LOG.log(format!(
+                "[diag-newhost] sync_local_sessions list_local_sessions node={} sessions={} elapsed={:?}",
+                node_id,
+                sessions.len(),
+                t_sync.elapsed()
+            ));
+            sessions
+        }
+        Err(_) => {
+            ERROR_LOG
+                .log("[diag-timing] sync_local_sessions: list_local_sessions FAILED".to_string());
+            ERROR_LOG.log(format!(
+                "[diag-newhost] sync_local_sessions list_local_sessions FAILED node={} elapsed={:?}",
+                node_id,
+                t_sync.elapsed()
+            ));
+            return None;
+        }
+    };
+    let local_sessions: Vec<ManagedSessionRecord> = local_sessions
+        .into_iter()
+        .filter(|s| *s.address.transport() == SessionTransport::Local)
+        .collect();
+    ERROR_LOG.log(format!(
+        "[diag-timing] sync_local_sessions: after filter {} local sessions",
+        local_sessions.len()
+    ));
+    ERROR_LOG.log(format!(
+        "[diag-newhost] sync_local_sessions filter node={} local_sessions={} elapsed={:?}",
+        node_id,
+        local_sessions.len(),
+        t_sync.elapsed()
+    ));
+    Some(local_sessions_by_local_id(local_sessions))
+}
+
+fn observe_local_session_catalog<G>(
+    gateway: &G,
+    node_id: &str,
+    observed_sessions: &mut HashMap<String, ManagedSessionRecord>,
+    observed_initialized: &mut bool,
+) -> bool
+where
+    G: LocalSessionCatalog,
+{
+    let t_sync = Instant::now();
+    ERROR_LOG.log(format!(
+        "[diag-newhost] observe_local_sessions start node={}",
+        node_id
+    ));
+    let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
+        return false;
+    };
+    let changed = !*observed_initialized || *observed_sessions != current_sessions;
+    *observed_sessions = current_sessions;
+    *observed_initialized = true;
+    ERROR_LOG.log(format!(
+        "[diag-newhost] observe_local_sessions done node={} changed={} elapsed={:?}",
+        node_id,
+        changed,
+        t_sync.elapsed()
+    ));
+    changed
+}
+
+pub(super) struct SessionSyncPublicationContext<'a> {
+    published: &'a mut HashMap<String, ManagedSessionRecord>,
+    observed: &'a HashMap<String, ManagedSessionRecord>,
+    next_message_id: &'a mut u64,
+    publication_tracker: &'a mut SourcePublicationTracker,
+}
+
+fn publish_observed_session_catalog<O>(
+    node_id: &str,
+    session_handle: Option<&RemoteNodeSessionHandle>,
+    local_target_exit_observer: &O,
+    context: &mut SessionSyncPublicationContext<'_>,
+    mode: SessionSyncMode,
+    reason: &str,
+) -> bool
+where
+    O: LocalTargetExitObserver,
+{
+    let Some(session_handle) = session_handle else {
+        return false;
+    };
+    if publish_current_local_sessions(
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        context,
+        mode,
+    )
+    .is_err()
+    {
+        ERROR_LOG.log(format!(
+            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ));
+        context.publication_tracker.on_disconnected();
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+pub(super) fn sync_local_sessions<G, O>(
+    gateway: &G,
+    node_id: &str,
+    session_handle: &RemoteNodeSessionHandle,
+    local_target_exit_observer: &O,
+    context: &mut SessionSyncPublicationContext<'_>,
+    mode: SessionSyncMode,
+) -> Result<(), io::Error>
+where
+    G: LocalSessionCatalog,
+    O: LocalTargetExitObserver,
+{
+    let t_sync = Instant::now();
+    ERROR_LOG.log(format!(
+        "[diag-newhost] sync_local_sessions start node={}",
+        node_id
+    ));
+    let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
+        return Ok(());
+    };
+    let mut inner_context = SessionSyncPublicationContext {
+        published: context.published,
+        observed: &current_sessions,
+        next_message_id: context.next_message_id,
+        publication_tracker: context.publication_tracker,
+    };
+    publish_current_local_sessions(
+        node_id,
+        session_handle,
+        local_target_exit_observer,
+        &mut inner_context,
+        mode,
+    )
+}
+
+fn publish_current_local_sessions<O>(
+    node_id: &str,
+    session_handle: &RemoteNodeSessionHandle,
+    local_target_exit_observer: &O,
+    context: &mut SessionSyncPublicationContext<'_>,
+    mode: SessionSyncMode,
+) -> Result<(), io::Error>
+where
+    O: LocalTargetExitObserver,
+{
+    let t_sync = Instant::now();
+    let delta = compute_session_sync_delta(context.published, context.observed, mode);
+    ERROR_LOG.log(format!(
+        "[diag-newhost] sync_local_sessions delta node={} publish={} exit={} elapsed={:?}",
+        node_id,
+        delta.publish.len(),
+        delta.exit.len(),
+        t_sync.elapsed()
+    ));
+    for session in &delta.publish {
+        ERROR_LOG.log(format!(
+            "[diag-sync] publishing target node={} target={}",
+            node_id,
+            session.address.qualified_target()
+        ));
+    }
+    ERROR_LOG.log(format!(
+        "[diag-timing] sync_local_sessions: delta publish={} exit={}",
+        delta.publish.len(),
+        delta.exit.len()
+    ));
+
+    for session in &delta.publish {
+        let t_send = Instant::now();
+        let publication = match mode {
+            SessionSyncMode::Delta => {
+                let Some(publication) = context.publication_tracker.on_state_changed(
+                    node_id,
+                    session_handle.session_instance_id(),
+                    context.next_message_id,
+                    session,
+                ) else {
+                    continue;
+                };
+                publication
+            }
+            SessionSyncMode::FullBaseline => context.publication_tracker.on_baseline_state(
+                node_id,
+                session_handle.session_instance_id(),
+                context.next_message_id,
+                session,
+            ),
+        };
+        if let Err(error) =
+            send_source_publication(session_handle, context.publication_tracker, &publication)
+        {
+            ERROR_LOG.log(format!("[diag-sync] session_handle.send failed: {error}"));
+            ERROR_LOG.log(format!(
+                "[diag-newhost] sync_local_sessions publish_send FAILED node={} target={} elapsed={:?} total={:?}",
+                node_id,
+                session.address.qualified_target(),
+                t_send.elapsed(),
+                t_sync.elapsed()
+            ));
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()));
+        }
+        ERROR_LOG.log(format!(
+            "[diag-newhost] sync_local_sessions publish_send node={} target={} elapsed={:?} total={:?}",
+            node_id,
+            session.address.qualified_target(),
+            t_send.elapsed(),
+            t_sync.elapsed()
+        ));
+    }
+
+    for previous in &delta.exit {
+        let t_exit = Instant::now();
+        ERROR_LOG.log_exit_latency(format!(
+            "[diag-exit] sync_exit_start node={} target={} total={:?} stage=session_sync",
+            node_id,
+            previous.address.qualified_target(),
+            t_sync.elapsed()
+        ));
+        if previous.is_target_host() {
+            let t_observe = Instant::now();
+            if let Err(error) = local_target_exit_observer.observe_local_target_exit(
+                previous.address.server_id(),
+                previous.address.session_id(),
+            ) {
+                ERROR_LOG.log(format!(
+                    "[diag-sync] failed to observe local target exit socket={} target={}: {error}",
+                    previous.address.server_id(),
+                    previous.address.session_id()
+                ));
+            }
+            ERROR_LOG.log_exit_latency(format!(
+                "[diag-exit] sync_exit_observe_local node={} target={} elapsed={:?} total={:?} stage=session_sync",
+                node_id,
+                previous.address.qualified_target(),
+                t_observe.elapsed(),
+                t_sync.elapsed()
+            ));
+        }
+        let t_send = Instant::now();
+        let publication = context.publication_tracker.on_target_exited(
+            node_id,
+            session_handle.session_instance_id(),
+            context.next_message_id,
+            previous.address.session_id(),
+        );
+        send_source_publication(session_handle, context.publication_tracker, &publication)
+            .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
+        ERROR_LOG.log_exit_latency(format!(
+            "[diag-exit] sync_exit_send node={} target={} elapsed={:?} total={:?} exit_total={:?} stage=session_sync",
+            node_id,
+            previous.address.qualified_target(),
+            t_send.elapsed(),
+            t_sync.elapsed(),
+            t_exit.elapsed()
+        ));
+    }
+
+    *context.published = context.observed.clone();
+    ERROR_LOG.log(format!(
+        "[diag-newhost] sync_local_sessions done node={} elapsed={:?}",
+        node_id,
+        t_sync.elapsed()
+    ));
+    Ok(())
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn exportable_local_sessions_for_socket(
+    sessions: Vec<ManagedSessionRecord>,
+    socket_name: &str,
+    remote_target_resolver: &dyn RemoteTargetSourceBindingResolver,
+) -> Vec<ManagedSessionRecord> {
+    sessions
+        .into_iter()
+        .filter(|session| {
+            session.address.server_id() == socket_name
+                && session.is_workspace_session()
+                && session.availability
+                    != crate::domain::session_catalog::SessionAvailability::Exited
+        })
+        .map(|session| {
+            exported_session_record_for_socket(session, socket_name, remote_target_resolver)
+        })
+        .collect()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn exported_session_record_for_socket(
+    session: ManagedSessionRecord,
+    socket_name: &str,
+    remote_target_resolver: &dyn RemoteTargetSourceBindingResolver,
+) -> ManagedSessionRecord {
+    if !session.is_target_host() {
+        return session;
+    }
+    let Ok(remote_targets) = remote_target_resolver
+        .list_remote_targets_for_source_binding(socket_name, session.address.session_id())
+    else {
+        return session;
+    };
+    remote_targets
+        .into_iter()
+        .find(|target| target.is_target_host())
+        .map(|cached_remote_target| {
+            merge_cached_remote_identity_with_live_target_runtime(cached_remote_target, &session)
+        })
+        .unwrap_or(session)
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn merge_cached_remote_identity_with_live_target_runtime(
+    mut cached_remote_target: ManagedSessionRecord,
+    live_target: &ManagedSessionRecord,
+) -> ManagedSessionRecord {
+    cached_remote_target.availability = live_target.availability;
+    cached_remote_target.workspace_key = live_target.workspace_key.clone();
+    cached_remote_target.session_role = live_target.session_role;
+    cached_remote_target.attached_clients = live_target.attached_clients;
+    cached_remote_target.window_count = live_target.window_count;
+    if !live_target_uses_internal_waitagent_runtime(live_target) {
+        cached_remote_target.command_name = live_target.command_name.clone();
+        cached_remote_target.current_path = live_target.current_path.clone();
+        cached_remote_target.task_state = live_target.task_state;
+    }
+    cached_remote_target
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn overlay_workspace_runtime_onto_active_local_target_hosts(
+    sessions: Vec<ManagedSessionRecord>,
+    socket_name: &str,
+    active_targets: &HashMap<String, String>,
+) -> Vec<ManagedSessionRecord> {
+    let workspace_runtimes = sessions
+        .iter()
+        .filter(|session| session.is_workspace_chrome())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut sessions = sessions;
+    for workspace_runtime in workspace_runtimes {
+        let Some(active_target) = active_targets.get(workspace_runtime.address.session_id()) else {
+            continue;
+        };
+        let Some(active_target) = sessions.iter_mut().find(|session| {
+            session.address.server_id() == socket_name
+                && session.is_target_host()
+                && session.address.qualified_target() == *active_target
+        }) else {
+            continue;
+        };
+        if should_overlay_active_target_runtime(active_target, &workspace_runtime) {
+            active_target.command_name = workspace_runtime.command_name.clone();
+            active_target.current_path = workspace_runtime.current_path.clone();
+            active_target.task_state = workspace_runtime.task_state;
+        }
+    }
+    sessions
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn should_overlay_active_target_runtime(
+    session: &ManagedSessionRecord,
+    workspace_runtime: &ManagedSessionRecord,
+) -> bool {
+    if session_has_explicit_runtime(session) {
+        return false;
+    }
+    workspace_runtime
+        .command_name
+        .as_deref()
+        .is_some_and(|name| name != "waitagent")
+        && session
+            .command_name
+            .as_deref()
+            .is_none_or(|name| SHELL_NAMES.contains(&name))
+        && matches!(
+            session.task_state,
+            ManagedSessionTaskState::Unknown
+                | ManagedSessionTaskState::Running
+                | ManagedSessionTaskState::Input
+        )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn session_has_explicit_runtime(session: &ManagedSessionRecord) -> bool {
+    session
+        .command_name
+        .as_deref()
+        .is_some_and(|name| !name.is_empty())
+        && matches!(
+            session.task_state,
+            ManagedSessionTaskState::Input
+                | ManagedSessionTaskState::Running
+                | ManagedSessionTaskState::Confirm
+        )
+}
+
+pub(crate) fn local_sessions_by_local_id(
+    sessions: Vec<ManagedSessionRecord>,
+) -> HashMap<String, ManagedSessionRecord> {
+    sessions
+        .into_iter()
+        .map(|session| (session.address.id().as_str().to_string(), session))
+        .collect()
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn live_target_uses_internal_waitagent_runtime(session: &ManagedSessionRecord) -> bool {
+    session.command_name.as_deref() == Some("waitagent")
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionSyncDelta {
+    pub(crate) publish: Vec<ManagedSessionRecord>,
+    pub(crate) exit: Vec<ManagedSessionRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSyncMode {
+    Delta,
+    FullBaseline,
+}
+
+pub(crate) fn compute_session_sync_delta(
+    previous: &HashMap<String, ManagedSessionRecord>,
+    current: &HashMap<String, ManagedSessionRecord>,
+    mode: SessionSyncMode,
+) -> SessionSyncDelta {
+    let publish = current
+        .iter()
+        .filter_map(|(local_id, session)| {
+            if mode == SessionSyncMode::Delta
+                && previous
+                    .get(local_id)
+                    .is_some_and(|previous| session_records_equivalent_for_sync(previous, session))
+            {
+                None
+            } else {
+                Some(session.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    let exit = previous
+        .iter()
+        .filter_map(|(local_id, session)| {
+            if current.contains_key(local_id) {
+                None
+            } else {
+                Some(session.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    SessionSyncDelta { publish, exit }
+}
+
+fn session_records_equivalent_for_sync(
+    previous: &ManagedSessionRecord,
+    current: &ManagedSessionRecord,
+) -> bool {
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    if is_interactive_shell_state(&previous) && is_interactive_shell_state(&current) {
+        // Normalize Running/Input to Input only when the state hasn't
+        // actually changed.  This prevents spurious publications from
+        // prompt-character fluctuations (e.g. `$` vs `%` between polls),
+        // while still publishing a meaningful Running→Input transition
+        // (e.g. a command finished and the prompt just appeared).
+        if previous.task_state == current.task_state {
+            previous.task_state = ManagedSessionTaskState::Input;
+            current.task_state = ManagedSessionTaskState::Input;
+        }
+    }
+    previous == current
+}
+
+fn is_interactive_shell_state(session: &ManagedSessionRecord) -> bool {
+    session
+        .command_name
+        .as_deref()
+        .is_some_and(|name| SHELL_NAMES.contains(&name))
+        && matches!(
+            session.task_state,
+            ManagedSessionTaskState::Input | ManagedSessionTaskState::Running
+        )
+}
+
+pub(super) fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
+    match command {
+        RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
+    }
+}
+
+pub(super) fn remote_session_sync_error<E>(error: E) -> LifecycleError
+where
+    E: ToString,
+{
+    LifecycleError::Io(
+        "failed to start remote session sync runtime".to_string(),
+        io::Error::new(io::ErrorKind::Other, error.to_string()),
+    )
+}
+
+fn next_message_id_increment(next_message_id: &mut u64) {
+    *next_message_id = next_message_id.saturating_add(1);
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn timestamp_millis_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+pub(crate) fn remote_session_published_envelope(
+    node_id: &str,
+    session_instance_id: &str,
+    message_sequence: u64,
+    session: &ManagedSessionRecord,
+) -> GrpcNodeSessionEnvelope {
+    let target_id = format!("remote-peer:{node_id}:{}", session.address.session_id());
+    GrpcNodeSessionEnvelope {
+        message_id: format!("{node_id}-session-sync-{message_sequence}"),
+        sent_at: Some(timestamp_now()),
+        session_instance_id: session_instance_id.to_string(),
+        correlation_id: None,
+        route: Some(RouteContext {
+            authority_node_id: Some(node_id.to_string()),
+            target_id: Some(target_id.clone()),
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: Some(session.address.session_id().to_string()),
+        }),
+        body: Some(Body::TargetPublished(TargetPublished {
+            target_id,
+            authority_node_id: node_id.to_string(),
+            transport: "tmux".to_string(),
+            transport_session_id: session.address.session_id().to_string(),
+            selector: session.selector.clone(),
+            availability: session.availability.as_str().to_string(),
+            command_name: session.command_name.clone(),
+            display_command_name: session.display_command_name.clone(),
+            current_path: session
+                .current_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            attached_count: Some(session.attached_clients as u64),
+            session_role: session.session_role.map(|role| role.as_str().to_string()),
+            workspace_key: session.workspace_key.clone(),
+            window_count: Some(session.window_count as u64),
+            task_state: Some(session.task_state.as_str().to_string()),
+            node_instance_id: session_instance_id.to_string(),
+            revision: 0,
+        })),
+    }
+}
+
+pub(crate) fn remote_session_exited_envelope(
+    node_id: &str,
+    session_instance_id: &str,
+    message_sequence: u64,
+    transport_session_id: &str,
+) -> GrpcNodeSessionEnvelope {
+    let target_id = format!("remote-peer:{node_id}:{transport_session_id}");
+    GrpcNodeSessionEnvelope {
+        message_id: format!("{node_id}-session-sync-{message_sequence}"),
+        sent_at: Some(timestamp_now()),
+        session_instance_id: session_instance_id.to_string(),
+        correlation_id: None,
+        route: Some(RouteContext {
+            authority_node_id: Some(node_id.to_string()),
+            target_id: Some(target_id.clone()),
+            attachment_id: None,
+            console_id: None,
+            console_host_id: None,
+            session_id: Some(transport_session_id.to_string()),
+        }),
+        body: Some(Body::TargetExited(TargetExited {
+            target_id,
+            transport_session_id: transport_session_id.to_string(),
+            node_instance_id: session_instance_id.to_string(),
+            revision: 0,
+        })),
+    }
+}
+
+fn timestamp_now() -> prost_types::Timestamp {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    prost_types::Timestamp {
+        seconds: now.as_secs() as i64,
+        nanos: now.subsec_nanos() as i32,
+    }
+}
+
+pub(super) fn remote_session_sync_owner_args(
+    socket_name: &str,
+    network: &RemoteNetworkConfig,
+    ready_socket: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec![
+        "__remote-session-sync-owner".to_string(),
+        "--socket-name".to_string(),
+        socket_name.to_string(),
+    ];
+    if let Some(ready_socket) = ready_socket {
+        args.push("--ready-socket".to_string());
+        args.push(ready_socket.display().to_string());
+    }
+    prepend_global_network_args(args, network)
+}
+
+pub(crate) fn remote_session_sync_owner_socket_path(socket_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "waitagent-remote-session-sync-owner-{}.sock",
+        super::sanitize_path_component(socket_name)
+    ))
+}
+
+pub(crate) fn remote_session_sync_owner_available(socket_path: &Path) -> bool {
+    send_owner_command(socket_path, "ping\n").is_ok()
+}
+
+pub(crate) fn notify_remote_session_sync_owner(
+    socket_path: &Path,
+    reason: LocalCatalogChangeReason,
+) -> Result<(), LifecycleError> {
+    send_owner_command(
+        socket_path,
+        &format!("local-catalog-changed {}\n", reason.encode()),
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn signal_remote_session_sync_owner(
+    socket_path: &Path,
+    reason: LocalCatalogChangeReason,
+) -> Result<(), LifecycleError> {
+    send_owner_command_without_response(
+        socket_path,
+        &format!("local-catalog-changed {}\n", reason.encode()),
+    )
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(crate) fn shutdown_remote_session_sync_owner(socket_path: &Path) -> Result<(), LifecycleError> {
+    send_owner_command(socket_path, "shutdown\n")
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+pub(super) fn serve_owner_commands(
+    listener: UnixListener,
+    local_catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
+    shutdown_tx: mpsc::Sender<()>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let mut request = String::new();
+            let _ = stream.read_to_string(&mut request);
+            let response = match parse_owner_command(request.trim()) {
+                OwnerCommand::Ping => "ok\n".to_string(),
+                OwnerCommand::LocalCatalogChanged(reason) => {
+                    match request_local_catalog_change(&local_catalog_tx, reason) {
+                        Ok(ack) => format!("ok {}\n", ack.as_str()),
+                        Err(message) => format!("error {message}\n"),
+                    }
+                }
+                OwnerCommand::Shutdown => {
+                    if shutdown_tx.send(()).is_ok() {
+                        "ok\n".to_string()
+                    } else {
+                        "error shutdown-channel-closed\n".to_string()
+                    }
+                }
+                OwnerCommand::Invalid(message) => format!("error {message}\n"),
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    })
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn request_local_catalog_change(
+    local_catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
+    reason: LocalCatalogChangeReason,
+) -> Result<LocalCatalogChangeAck, String> {
+    let reason_label = reason.as_str();
+    let (ack_tx, ack_rx) = mpsc::channel();
+    local_catalog_tx
+        .send(LocalCatalogChangeRequest::with_ack(reason, ack_tx))
+        .map_err(|_| "local-catalog-channel-closed".to_string())?;
+    match ack_rx.recv_timeout(OWNER_COMMAND_ACK_TIMEOUT) {
+        Ok(Ok(ack)) => {
+            ERROR_LOG.log(format!(
+                "[diag-sync] owner local catalog command ack reason={reason_label} ack={}",
+                ack.as_str()
+            ));
+            Ok(ack)
+        }
+        Ok(Err(message)) => Err(message),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("local-catalog-ack-timeout".to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("local-catalog-ack-channel-closed".to_string())
+        }
+    }
+}
+
+fn acknowledge_local_catalog_change(
+    request: LocalCatalogChangeRequest,
+    result: Result<LocalCatalogChangeAck, String>,
+) {
+    if let Some(ack_tx) = request.ack_tx {
+        let _ = ack_tx.send(result);
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+enum OwnerCommand {
+    Ping,
+    LocalCatalogChanged(LocalCatalogChangeReason),
+    Shutdown,
+    Invalid(String),
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn parse_owner_command(request: &str) -> OwnerCommand {
+    if request.is_empty() || request == "ping" {
+        return OwnerCommand::Ping;
+    }
+    if let Some(reason) = request.strip_prefix("local-catalog-changed ") {
+        return LocalCatalogChangeReason::parse(reason)
+            .map(OwnerCommand::LocalCatalogChanged)
+            .unwrap_or_else(|| OwnerCommand::Invalid(format!("unknown-reason-{reason}")));
+    }
+    if request == "shutdown" {
+        return OwnerCommand::Shutdown;
+    }
+    OwnerCommand::Invalid("unknown-command".to_string())
+}
+
+fn send_owner_command(socket_path: &Path, command: &str) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(remote_session_sync_error)?;
+    stream
+        .write_all(command.as_bytes())
+        .map_err(remote_session_sync_error)?;
+    stream.shutdown(Shutdown::Write).ok();
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(remote_session_sync_error)?;
+    let response = response.trim();
+    if response == "ok" || response.strip_prefix("ok ").is_some() {
+        Ok(())
+    } else {
+        Err(LifecycleError::Protocol(format!(
+            "remote session sync owner rejected command `{}` with `{}`",
+            command.trim(),
+            response
+        )))
+    }
+}
+
+// TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
+#[allow(dead_code)]
+fn send_owner_command_without_response(
+    socket_path: &Path,
+    command: &str,
+) -> Result<(), LifecycleError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(remote_session_sync_error)?;
+    stream
+        .write_all(command.as_bytes())
+        .map_err(remote_session_sync_error)?;
+    stream.shutdown(Shutdown::Write).ok();
+    Ok(())
+}

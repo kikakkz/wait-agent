@@ -1,10 +1,13 @@
 // Legacy tmux-era workspace domain kept during the ratatui migration; most items are currently unused.
-#![allow(dead_code)]
 
+#[cfg(test)]
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,20 +33,22 @@ impl WorkspaceSessionRole {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceInstanceId(String);
 
+#[cfg(test)]
 impl WorkspaceInstanceId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    #[cfg(test)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceInstanceConfig {
     pub workspace_dir: PathBuf,
@@ -56,6 +61,7 @@ pub struct WorkspaceInstanceConfig {
     pub initial_program: Option<WorkspaceInitialProgram>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceInitialProgram {
     pub program: String,
@@ -63,8 +69,8 @@ pub struct WorkspaceInitialProgram {
     pub environment: Vec<(String, String)>,
 }
 
+#[cfg(test)]
 impl WorkspaceInstanceConfig {
-    #[cfg(test)]
     pub fn for_new_session(workspace_dir: &Path) -> Self {
         Self::for_new_session_with_size(workspace_dir, None, None)
     }
@@ -105,22 +111,9 @@ impl WorkspaceInstanceConfig {
             initial_program: None,
         }
     }
-
-    pub fn with_initial_program(
-        mut self,
-        program: impl Into<String>,
-        args: impl IntoIterator<Item = String>,
-        environment: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
-        self.initial_program = Some(WorkspaceInitialProgram {
-            program: program.into(),
-            args: args.into_iter().collect(),
-            environment: environment.into_iter().collect(),
-        });
-        self
-    }
 }
 
+#[cfg(test)]
 pub fn next_session_key() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

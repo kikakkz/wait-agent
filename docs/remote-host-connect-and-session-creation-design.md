@@ -52,9 +52,9 @@ The implementation must follow the existing WaitAgent architecture principles:
 4. One node connection multiplexes many logical sessions.
    Create-session messages use the existing node-scoped transport stream. The
    design must not add one SSH tunnel, gRPC stream, or socket per session.
-5. Tmux-native chrome remains the local UI substrate.
+5. Ratatui chrome remains the local UI substrate.
    Key bindings, footer/menu entrypoints, and sidebar selection state should use
-   tmux-native controls and session options where appropriate.
+   ratatui controls and session options where appropriate.
 6. Runtime code depends on repo-owned facades.
    Higher-level runtimes should call WaitAgent services and transport facades,
    not generated tonic stubs or ad hoc SSH shell strings directly.
@@ -300,7 +300,7 @@ Rules:
 
 ### 6.3 Remote Host Connect UI
 
-`Ctrl-W` should open a tmux-native popup/menu workflow.
+`Ctrl-W` should open a ratatui popup/menu workflow.
 
 Minimum accepted first version:
 

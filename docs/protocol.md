@@ -18,7 +18,7 @@ It complements:
 - [remote-session-foundation.md](remote-session-foundation.md)
 - [remote-node-connection-architecture.md](remote-node-connection-architecture.md)
 - [reliable-remote-publication-design.md](reliable-remote-publication-design.md)
-- [functional-design.md](functional-design.md)
+- [functional-design.md](archive/functional-design.md)
 
 ## 2. Scope
 

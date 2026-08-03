@@ -1,4 +1,8 @@
 #!/bin/bash
+# LEGACY TMUX E2E SCRIPT. This script exercises the historical tmux-based
+# geometry scenarios and is kept for reference. It is not the active ratatui
+# smoke test; see e2e-ratatui-smoke.sh for the current end-to-end coverage.
+
 # geometry-6 acceptance e2e (one-host simulation; 182 offline).
 # A (server, 17474) mirrors B (client node daemon, 17475) [+ B2 on 17476].
 # Verifies the acceptance matrix from task.geometry-6.

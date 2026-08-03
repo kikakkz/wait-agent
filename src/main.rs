@@ -5,9 +5,13 @@ mod command;
 mod domain;
 mod error;
 mod event;
+mod host;
 mod infra;
 mod lifecycle;
-mod runtime;
+mod ports;
+mod process;
+mod ratatui_node;
+mod remote;
 mod terminal;
 mod ui;
 

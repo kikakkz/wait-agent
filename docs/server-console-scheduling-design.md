@@ -21,7 +21,7 @@ It complements:
 
 - [remote-session-foundation.md](remote-session-foundation.md)
 - [architecture.md](architecture.md)
-- [interaction-flows.md](interaction-flows.md)
+- [interaction-flows.md](archive/interaction-flows.md)
 - [protocol.md](protocol.md)
 
 ## 2. Source Of Truth Rule

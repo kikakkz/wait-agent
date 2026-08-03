@@ -1,3 +1,4 @@
+use super::types::{MouseEncoding, MouseReportingMode};
 use super::*;
 
 #[test]

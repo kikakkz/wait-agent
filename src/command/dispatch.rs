@@ -1,9 +1,23 @@
+use crate::application::claude_hooks_config_service::ClaudeHooksConfigService;
+use crate::application::codex_hooks_config_service::CodexHooksConfigService;
+use crate::application::kimi_hooks_config_service::KimiHooksConfigService;
+use crate::application::remote_session_creation_service::{
+    GrpcRemoteSessionCreationTransport, RemoteSessionCreationService,
+};
+use crate::application::target_registry_service::TargetRegistryService;
 use crate::cli::{Command, RatatuiClientCommand, RatatuiNodeServerCommand, RemoteNetworkConfig};
 use crate::error::AppError;
-use crate::runtime::ratatui_client_runtime::RatatuiClientRuntime;
-use crate::runtime::ratatui_node_runtime::RatatuiNodeRuntime;
-use crate::runtime::ratatui_workspace_runtime::RatatuiWorkspaceRuntime;
+use crate::ports::hooks_config::HooksConfigPort;
+use crate::ports::session_creation::SessionCreationPort;
+use crate::ports::target_registry::TargetRegistryPort;
+use crate::process::agent_signal_sender_bundle::extract_agent_signal_sender;
+use crate::ratatui_node::client_runtime::RatatuiClientRuntime;
+use crate::ratatui_node::node_runtime::RatatuiNodeRuntime;
+use crate::ratatui_node::runtime::RatatuiTargetCatalogGateway;
+use crate::ratatui_node::workspace_runtime::RatatuiWorkspaceRuntime;
+use crate::remote::node::remote_runtime_owner_runtime::RemoteRuntimeOwnerRuntime;
 use crate::ui::banner::print_banner;
+use std::sync::Arc;
 
 // This dispatcher is the single command-side ownership boundary for the
 // accepted local default route. `workspace` and `attach` must continue to flow
@@ -87,7 +101,33 @@ impl CommandDispatcher {
         &self,
         _command: RatatuiNodeServerCommand,
     ) -> Result<RatatuiNodeRuntime, AppError> {
-        RatatuiNodeRuntime::from_network(self.network.clone()).map_err(AppError::from)
+        let network = self.network.clone();
+        let remote_owner = RemoteRuntimeOwnerRuntime::from_build_env_with_network(network.clone())?;
+
+        let target_gateway = RatatuiTargetCatalogGateway::new(remote_owner.clone());
+        let target_registry = TargetRegistryService::new(target_gateway);
+
+        let session_transport = GrpcRemoteSessionCreationTransport::new(network.clone());
+        let session_creation =
+            RemoteSessionCreationService::new(session_transport, target_registry.clone());
+        let session_creation_port: Arc<dyn SessionCreationPort> = Arc::new(session_creation);
+        let target_registry_port: Arc<dyn TargetRegistryPort> = Arc::new(target_registry);
+
+        let sender_path = extract_agent_signal_sender()?;
+        let hooks_config_ports: Vec<Box<dyn HooksConfigPort>> = vec![
+            Box::new(ClaudeHooksConfigService::from_env(sender_path.clone())),
+            Box::new(CodexHooksConfigService::from_env(sender_path.clone())),
+            Box::new(KimiHooksConfigService::from_env(sender_path)),
+        ];
+
+        RatatuiNodeRuntime::from_network(
+            network,
+            remote_owner,
+            session_creation_port,
+            target_registry_port,
+            hooks_config_ports,
+        )
+        .map_err(AppError::from)
     }
 
     fn ratatui_client(

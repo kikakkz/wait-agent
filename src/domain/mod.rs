@@ -1,6 +1,7 @@
 pub mod agent_detector;
 pub mod agent_detector_claude;
 pub mod agent_detector_codex;
+pub mod agent_detector_common;
 pub mod agent_detector_kimi;
 pub mod agent_detector_shell;
 pub mod agent_signal;

@@ -41,6 +41,40 @@ src/
 
 This layout may later be split into a workspace if the codebase grows, but a single crate is acceptable for the MVP.
 
+## Current ratatui mapping
+
+The implementation is currently migrating from the structure above. The active mapping is:
+
+| Target module | Current location | Planned location |
+|---------------|------------------|------------------|
+| `renderer` + `console` | `runtime::ratatui_node` | top-level `ratatui_node` or `renderer` |
+| `transport` + `server` | `runtime::remote_node`, `runtime::remote_authority`, `runtime::remote_publication` | top-level `remote/` or `transport/` |
+| `client` / SSH remote host | `runtime::remote_host` | top-level `host/` |
+| `pty` / process spawning | `runtime::workspace::sidecar_process_runtime`, `runtime::current_executable` | top-level `process/` |
+| `terminal` library | `terminal/` | `terminal/` |
+| `session` model | `domain/session_catalog.rs`, `domain/workspace.rs` | `session/` or `domain/` |
+| `app` use-case orchestration | `application/` | `application/` |
+| `config` / hooks | `application::*_hooks_config_service` | `infra/config/` or `runtime/config/` |
+
+The dependency direction target is:
+
+```text
+cli -> app
+app -> domain, infra, ports
+ratatui_node -> domain, infra, ports, terminal
+remote -> domain, infra, ports, terminal
+host -> domain, infra, ports
+process -> domain, infra
+terminal -> std only
+ports -> domain, infra
+```
+
+Forbidden:
+
+- `application` importing concrete `runtime` types
+- `runtime` importing `application` types
+- `runtime` remaining a catch-all module
+
 ## 3. Module Overview
 
 ### 3.1 `cli`
@@ -474,6 +508,6 @@ Questions to resolve:
 
 ## 11. Related Documents
 
-- [wait-agent-prd.md](wait-agent-prd.md)
+- [wait-agent-prd.md](archive/wait-agent-prd.md)
 - [architecture.md](architecture.md)
-- [functional-design.md](functional-design.md)
+- [functional-design.md](archive/functional-design.md)

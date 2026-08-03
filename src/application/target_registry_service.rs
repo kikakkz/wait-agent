@@ -1,34 +1,12 @@
 // Legacy tmux-era target registry kept during the ratatui migration; most items are currently unused.
-#![allow(dead_code)]
 
 use crate::domain::session_catalog::ManagedSessionRecord;
-use crate::domain::session_catalog::SessionAvailability;
-use crate::domain::session_catalog::SessionTransport;
-use crate::infra::error_log::ERROR_LOG;
-use std::collections::HashMap;
+use crate::ports::target_registry::{
+    TargetCatalogGateway, TargetRegistryError, TargetRegistryPort,
+};
 
-pub trait TargetCatalogGateway {
-    type Error;
-
-    fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, Self::Error>;
-}
-
-fn merge_targets_by_identity(groups: [Vec<ManagedSessionRecord>; 2]) -> Vec<ManagedSessionRecord> {
-    let mut merged = Vec::new();
-    let mut positions = HashMap::<String, usize>::new();
-    for targets in groups {
-        for target in targets {
-            let target_id = target.address.id().as_str().to_string();
-            if let Some(index) = positions.get(&target_id).copied() {
-                merged[index] = target;
-            } else {
-                positions.insert(target_id, merged.len());
-                merged.push(target);
-            }
-        }
-    }
-    merged
-}
+#[cfg(test)]
+use crate::domain::session_catalog::{SessionAvailability, SessionTransport};
 
 pub struct TargetRegistryService<G> {
     gateway: G,
@@ -68,14 +46,6 @@ where
             .collect())
     }
 
-    pub fn list_workspace_chrome_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        Ok(self
-            .list_targets()?
-            .into_iter()
-            .filter(ManagedSessionRecord::is_workspace_chrome)
-            .collect())
-    }
-
     #[allow(dead_code)]
     pub fn list_workspace_chrome_targets_on_authority(
         &self,
@@ -83,6 +53,46 @@ where
     ) -> Result<Vec<ManagedSessionRecord>, G::Error> {
         Ok(self
             .list_targets_on_authority(authority_id)?
+            .into_iter()
+            .filter(ManagedSessionRecord::is_workspace_chrome)
+            .collect())
+    }
+}
+
+impl<G> TargetRegistryPort for TargetRegistryService<G>
+where
+    G: TargetCatalogGateway + Send + Sync,
+    G::Error: ToString,
+{
+    fn list_targets(&self) -> Result<Vec<ManagedSessionRecord>, TargetRegistryError> {
+        self.gateway
+            .list_targets()
+            .map_err(|error| TargetRegistryError::new(error.to_string()))
+    }
+
+    fn list_targets_on_authority(
+        &self,
+        authority_id: &str,
+    ) -> Result<Vec<ManagedSessionRecord>, TargetRegistryError> {
+        self.list_targets()
+            .map(|targets| {
+                targets
+                    .into_iter()
+                    .filter(|target| target.address.authority_id() == authority_id)
+                    .collect()
+            })
+            .map_err(|error| TargetRegistryError::new(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+impl<G> TargetRegistryService<G>
+where
+    G: TargetCatalogGateway,
+{
+    pub fn list_workspace_chrome_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
+        Ok(self
+            .list_targets()?
             .into_iter()
             .filter(ManagedSessionRecord::is_workspace_chrome)
             .collect())
@@ -114,52 +124,9 @@ where
             .into_iter()
             .find(|target| target.matches_target(value)))
     }
-
-    pub fn find_target_on_authority(
-        &self,
-        authority_id: &str,
-        value: &str,
-    ) -> Result<Option<ManagedSessionRecord>, G::Error> {
-        Ok(self
-            .list_targets_on_authority(authority_id)?
-            .into_iter()
-            .find(|target| target.matches_target(value)))
-    }
-
-    pub fn resolve_target_on_authority_session(
-        &self,
-        authority_id: &str,
-        transport_session_id: &str,
-    ) -> Result<Option<ManagedSessionRecord>, G::Error> {
-        Ok(self
-            .list_targets_on_authority(authority_id)?
-            .into_iter()
-            .find(|target| target.address.session_id() == transport_session_id))
-    }
-
-    pub fn visible_targets_in_workspace(
-        &self,
-        authority_id: &str,
-        workspace_session_id: &str,
-        active_target: Option<&str>,
-    ) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        let t_visible = std::time::Instant::now();
-        let targets = self.list_targets()?;
-        let visible =
-            project_visible_targets(&targets, authority_id, workspace_session_id, active_target);
-        ERROR_LOG.log(format!(
-            "[diag-newhost] visible_targets authority={} workspace={} active={:?} targets={} visible={} elapsed={:?}",
-            authority_id,
-            workspace_session_id,
-            active_target,
-            targets.len(),
-            visible.len(),
-            t_visible.elapsed()
-        ));
-        Ok(visible)
-    }
 }
 
+#[cfg(test)]
 pub fn project_visible_targets(
     targets: &[ManagedSessionRecord],
     authority_id: &str,
@@ -194,12 +161,14 @@ pub fn project_visible_targets(
     visible_targets
 }
 
+#[cfg(test)]
 pub fn is_activation_target(target: &ManagedSessionRecord) -> bool {
     target.availability != SessionAvailability::Exited
         && ((target.address.transport() == &SessionTransport::Local && target.is_target_host())
             || target.address.transport() == &SessionTransport::RemotePeer)
 }
 
+#[cfg(test)]
 fn sort_targets_for_display(targets: &mut [ManagedSessionRecord]) {
     targets.sort_by(|left, right| {
         transport_sort_key(left)
@@ -219,6 +188,7 @@ fn sort_targets_for_display(targets: &mut [ManagedSessionRecord]) {
     });
 }
 
+#[cfg(test)]
 fn transport_sort_key(target: &ManagedSessionRecord) -> u8 {
     match target.address.transport() {
         SessionTransport::Local => 0,
