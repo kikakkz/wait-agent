@@ -649,11 +649,13 @@ impl RatatuiNodeRuntime {
 
         // Create the default local session with a reasonable initial size.
         // The client will send a RESIZE once it knows the terminal dimensions.
-        // Both the local TUI server and peer node servers (with --connect) create
-        // a default session on startup: the local server gives the user an
-        // interactive shell, and peer servers publish a target for remote viewers
-        // to attach to.
-        let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
+        // Only the local TUI server creates a local session here; peer node
+        // servers (with --connect) create an authority-host session once the
+        // event loops are running, because authority-host sessions must be
+        // registered with AuthorityHostIoLoop.
+        if network.connect.is_none() {
+            let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
+        }
 
         Ok(Self {
             network: network.clone(),
@@ -706,6 +708,19 @@ impl RatatuiNodeRuntime {
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
         self.shared.set_local_catalog_tx(catalog_tx);
+
+        // Peer node servers host a default authority-host session for remote
+        // viewers. Create it now that the IO loops are running; it will be
+        // published through the local catalog to the remote authority.
+        if self.network.connect.is_some() {
+            let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+            let _ = self.shared.state_sender().send(StateEvent::CreateAuthorityHostSession {
+                request_id: "default-peer-session".to_string(),
+                cols: 80,
+                rows: 24,
+                reply_tx,
+            });
+        }
 
         // Start the agent signal listener so agent hooks can deliver lifecycle
         // events (UserPromptSubmit, PermissionRequest, etc.) to this server.
