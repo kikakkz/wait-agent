@@ -561,9 +561,18 @@ fn send_bootstrap(state: &mut SessionState) {
         state.bootstrap_pending = false;
         return;
     }
+    let start = std::time::Instant::now();
     let bootstrap = bootstrap_ansi_for_term(&state.term);
+    let generated_bytes = bootstrap.len();
     let _ = state.output_tx.as_ref().unwrap().send(bootstrap);
     state.bootstrap_pending = false;
+    ERROR_LOG.log(format!(
+        "[timing] authority host bootstrap sent cols={} rows={} bytes={} elapsed_us={}",
+        state.term.grid().columns(),
+        state.term.grid().screen_lines(),
+        generated_bytes,
+        start.elapsed().as_micros()
+    ));
 }
 
 /// Render the current terminal screen as an ANSI byte sequence that reproduces

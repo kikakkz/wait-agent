@@ -307,6 +307,13 @@ fn apply_server_message(
                     }
                 }
             }
+            ERROR_LOG.log(format!(
+                "[timing] client snapshot active={} sessions={} main_lines={} main_len={}",
+                snapshot.active_target.as_deref().unwrap_or("none"),
+                snapshot.sessions.len(),
+                snapshot.main_lines.len(),
+                snapshot.main.len()
+            ));
         }
         ServerMessage::Response(response) => {
             if !response.ok {
@@ -410,6 +417,8 @@ fn handle_crossterm_event(
                     KeyCode::Enter if *focus == Focus::Sidebar => {
                         if let Some(session) = snapshot.sessions.get(*selected_index) {
                             snapshot.active_target = Some(session.id.clone());
+                            ERROR_LOG
+                                .log(format!("[timing] client ACTIVATE_TARGET {}", session.id));
                             let _ = writeln!(stream, "ACTIVATE_TARGET {}", session.id);
                             let _ = stream.flush();
                             *focus = Focus::Main;

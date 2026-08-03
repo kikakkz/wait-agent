@@ -181,6 +181,10 @@ impl RatatuiRemoteSession {
     /// If the ingress bridge has not connected yet, the size is stored and
     /// flushed automatically when the bridge is ready.
     pub fn send_open_mirror(&self, cols: u16, rows: u16) {
+        ERROR_LOG.log(format!(
+            "[timing] remote send_open_mirror target={} cols={cols} rows={rows}",
+            self.target_id
+        ));
         {
             let mut initial_cols = self.initial_cols.lock().unwrap_or_else(|e| e.into_inner());
             let mut initial_rows = self.initial_rows.lock().unwrap_or_else(|e| e.into_inner());
@@ -189,6 +193,10 @@ impl RatatuiRemoteSession {
         }
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
+            ERROR_LOG.log(format!(
+                "[timing] remote send_open_mirror target={} writer=None skipped",
+                self.target_id
+            ));
             return;
         };
         let payload = OpenMirrorRequestPayload {
@@ -218,6 +226,10 @@ impl RatatuiRemoteSession {
             &AuthorityTransportFrame::ControlPlane(envelope),
         );
         let _ = writer.flush();
+        ERROR_LOG.log(format!(
+            "[timing] remote send_open_mirror target={} writer flushed",
+            self.target_id
+        ));
     }
 
     /// Return whether the remote mirror has already been opened.
@@ -232,11 +244,19 @@ impl RatatuiRemoteSession {
     /// resizes the local observer so the first rendered frame already has the
     /// correct dimensions.
     pub fn open_mirror(&self, cols: u16, rows: u16) {
+        ERROR_LOG.log(format!(
+            "[timing] remote open_mirror target={} cols={cols} rows={rows}",
+            self.target_id
+        ));
         if self
             .opened
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_err()
         {
+            ERROR_LOG.log(format!(
+                "[timing] remote open_mirror target={} already opened",
+                self.target_id
+            ));
             return;
         }
         self.send_open_mirror(cols, rows);
@@ -250,7 +270,15 @@ impl RatatuiRemoteSession {
     /// default 80x24 request; the real size will be supplied by the first
     /// resize/activate from the TUI.
     fn flush_open_mirror(&self) {
+        ERROR_LOG.log(format!(
+            "[timing] remote flush_open_mirror target={}",
+            self.target_id
+        ));
         if !self.opened.load(Ordering::SeqCst) {
+            ERROR_LOG.log(format!(
+                "[timing] remote flush_open_mirror target={} not opened",
+                self.target_id
+            ));
             return;
         }
         let (cols, rows) = {
@@ -493,10 +521,19 @@ fn handle_authority_transport_stream(
     ));
 
     let mut output_seq: u64 = 0;
+    let mut first_output = true;
     while session.running.load(Ordering::Relaxed) {
         match read_authority_transport_frame(&mut stream) {
             Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                 output_seq = output_seq.max(payload.output_seq);
+                if first_output {
+                    first_output = false;
+                    ERROR_LOG.log(format!(
+                        "[timing] remote FIRST raw pty output for {target_id} seq={} bytes={}",
+                        payload.output_seq,
+                        payload.output_bytes.len()
+                    ));
+                }
                 ERROR_LOG.log(format!(
                     "[ratatui-remote-session] received raw pty output for {target_id} seq={} bytes={}",
                     payload.output_seq,
@@ -528,6 +565,14 @@ fn handle_authority_transport_stream(
                 }
                 ControlPlanePayload::RawPtyOutput(payload) => {
                     output_seq = output_seq.max(payload.output_seq);
+                    if first_output {
+                        first_output = false;
+                        ERROR_LOG.log(format!(
+                            "[timing] remote FIRST control raw pty output for {target_id} seq={} bytes={}",
+                            payload.output_seq,
+                            payload.output_bytes.len()
+                        ));
+                    }
                     ERROR_LOG.log(format!(
                         "[ratatui-remote-session] received control raw pty output for {target_id} seq={} bytes={}",
                         payload.output_seq,

@@ -744,6 +744,9 @@ fn activate_target(
     authority_host_io_tx: &AuthorityHostIoHandle,
     target_id: &str,
 ) -> CommandOutcome {
+    ERROR_LOG.log(format!(
+        "[timing] activate_target START target_id={target_id}"
+    ));
     // We are the single writer of SharedState, so the active target will not
     // change underneath us. Read it first so we can unregister the local TUI
     // console from the previously active authority-host session.
@@ -763,9 +766,15 @@ fn activate_target(
 
     if let Some(record) = record {
         if *record.address.transport() == SessionTransport::RemotePeer {
+            ERROR_LOG.log(format!(
+                "[timing] activate_target ensure_remote_session target_id={target_id}"
+            ));
             if let Err(error) = shared.ensure_remote_session(&record) {
                 return CommandOutcome::Error(error.to_string());
             }
+            ERROR_LOG.log(format!(
+                "[timing] activate_target ensure_remote_session DONE target_id={target_id}"
+            ));
         }
 
         if let Some(prev) = previous_target.as_deref() {
@@ -802,7 +811,13 @@ fn activate_target(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .unwrap_or((80, 24));
+            ERROR_LOG.log(format!(
+                "[timing] activate_target resize_active_remote_session target_id={target_id} cols={cols} rows={rows}"
+            ));
             shared.resize_active_remote_session(cols, rows);
+            ERROR_LOG.log(format!(
+                "[timing] activate_target resize_active_remote_session DONE target_id={target_id}"
+            ));
         }
 
         // Register the local TUI console on the newly active authority-host
@@ -830,6 +845,9 @@ fn activate_target(
             }
         }
 
+        ERROR_LOG.log(format!(
+            "[timing] activate_target END target_id={target_id}"
+        ));
         CommandOutcome::Ok
     } else {
         CommandOutcome::Error("unknown target".to_string())
