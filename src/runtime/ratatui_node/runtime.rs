@@ -649,11 +649,11 @@ impl RatatuiNodeRuntime {
 
         // Create the default local session with a reasonable initial size.
         // The client will send a RESIZE once it knows the terminal dimensions.
-        // Peer node servers (with --connect) should not create a default local
-        // session; they only host sessions requested by remote viewers.
-        if network.connect.is_none() {
-            let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
-        }
+        // Both the local TUI server and peer node servers (with --connect) create
+        // a default session on startup: the local server gives the user an
+        // interactive shell, and peer servers publish a target for remote viewers
+        // to attach to.
+        let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
 
         Ok(Self {
             network: network.clone(),
