@@ -1603,9 +1603,9 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin. 28 rows gives enough room for
-        // the framed sidebar headers/buttons plus the detail sections.
-        const POPUP_HEIGHT: u16 = 28;
+        // terminals to keep a visible margin. 24 rows is the compact target
+        // that fits the framed sidebar and detail sections.
+        const POPUP_HEIGHT: u16 = 24;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -1659,15 +1659,13 @@ impl HostSidebarGeometry {
         let available_for_lists = area.height.saturating_sub(FIXED_ROWS);
         let total_content = saved_content.saturating_add(proxy_content);
 
+        // Keep lists at their natural content height so action buttons sit
+        // directly underneath. If content does not fit, cap each list and let
+        // the List widget scroll the selected item into view.
         let (saved_list_height, proxy_list_height) = if total_content <= available_for_lists {
-            let leftover = available_for_lists.saturating_sub(total_content);
-            let saved_extra = leftover / 2;
-            (
-                saved_content.saturating_add(saved_extra),
-                proxy_content.saturating_add(leftover.saturating_sub(saved_extra)),
-            )
+            (saved_content, proxy_content)
         } else {
-            let min_each = 3_u16.min(available_for_lists / 2);
+            let min_each = 2_u16.min(available_for_lists / 2);
             if available_for_lists <= min_each.saturating_mul(2) {
                 (min_each, available_for_lists.saturating_sub(min_each))
             } else {
@@ -1719,14 +1717,12 @@ impl DetailsGeometry {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Min(6),    // Connection + Authentication cards
-                Constraint::Length(1), // blank
-                Constraint::Min(4),    // Options card
-                Constraint::Length(1), // blank
-                Constraint::Min(4),    // info box card
-                Constraint::Length(1), // blank
+                Constraint::Length(6), // Connection + Authentication cards
+                Constraint::Length(4), // Options card
+                Constraint::Length(4), // info box card
                 Constraint::Length(1), // buttons
                 Constraint::Length(1), // hint
+                Constraint::Min(1),    // absorb leftover vertical space
             ])
             .split(area);
         let top_columns = Layout::default()
@@ -1740,17 +1736,17 @@ impl DetailsGeometry {
             auth: sections[1].y.saturating_add(2).saturating_sub(area.y),
             password: sections[1].y.saturating_add(3).saturating_sub(area.y),
             sudo: sections[1].y.saturating_add(4).saturating_sub(area.y),
-            remember: sections[3].y.saturating_add(2).saturating_sub(area.y),
-            install_proxy: sections[3].y.saturating_add(3).saturating_sub(area.y),
+            remember: sections[2].y.saturating_add(2).saturating_sub(area.y),
+            install_proxy: sections[2].y.saturating_add(3).saturating_sub(area.y),
         };
         Self {
             header: sections[0],
             connection: top_columns[0],
             authentication: top_columns[1],
-            options: sections[3],
-            info: sections[5],
-            buttons: sections[7],
-            hint: sections[8],
+            options: sections[2],
+            info: sections[3],
+            buttons: sections[4],
+            hint: sections[5],
             rows,
         }
     }
@@ -1843,7 +1839,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         frame,
         geometry.new_host,
         button_block_content("+", "New Host"),
-        Alignment::Center,
+        Alignment::Left,
     );
 
     render_framed_block(
@@ -1869,7 +1865,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         frame,
         geometry.new_proxy,
         button_block_content("+", "New Proxy"),
-        Alignment::Center,
+        Alignment::Left,
     );
 }
 
@@ -2091,12 +2087,17 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
             Style::default().bg(Color::Green).fg(Color::Black),
         ));
     }
+
     let star = if state.selected >= state.profiles.len() {
         "☆"
     } else {
         "★"
     };
-    content.push(Span::raw("  "));
+    let star_width = star.width();
+    let content_width: usize = content.iter().map(|span| span.content.width()).sum();
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let padding = inner_width.saturating_sub(content_width).saturating_sub(star_width);
+    content.push(Span::raw(" ".repeat(padding)));
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
     render_framed_block(frame, area, Line::from(content), Alignment::Left);
@@ -4312,7 +4313,7 @@ mod tests {
 
         let popup = PopupGeometry::from_terminal_size((100, 30), &state);
         assert!(popup.sidebar.saved_list.height >= 1);
-        assert!(popup.sidebar.proxy_list.height >= 1);
+        assert!(popup.sidebar.proxy_header.height >= 1);
         assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
 
         state.selected = state.proxy_selection_index();
