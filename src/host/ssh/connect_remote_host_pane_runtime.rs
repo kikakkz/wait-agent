@@ -1769,7 +1769,7 @@ impl ProxyDetailsGeometry {
         // no_proxy needs 1 content row + 2 border rows.
         let proxy_height = area.height.min(5);
         let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
-        let no_proxy_y = area.y.saturating_add(proxy_height).saturating_add(1);
+        let no_proxy_y = area.y.saturating_add(proxy_height);
         let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
         let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
         let action_y = no_proxy_y
