@@ -1914,11 +1914,16 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
     let value_x = area.x.saturating_add(LABEL_WIDTH + 1);
     let value_width = area.width.saturating_sub(LABEL_WIDTH + 1);
     frame.render_widget(
-        Paragraph::new("no_proxy").alignment(Alignment::Right),
+        Paragraph::new(format!(
+            "{:<width$}",
+            "no_proxy",
+            width = LABEL_WIDTH as usize
+        )),
         Rect::new(area.x, area.y, LABEL_WIDTH, 1),
     );
     frame.render_widget(
         Paragraph::new(format!("auto: {}", no_proxy_for_install(&state.host, "")))
+            .alignment(Alignment::Right)
             .wrap(Wrap { trim: false }),
         Rect::new(value_x, area.y, value_width, area.height),
     );
@@ -2090,7 +2095,7 @@ where
     I: IntoIterator<Item = Row<'static>>,
 {
     let table =
-        Table::new(rows, [Constraint::Length(LABEL_WIDTH), Constraint::Min(20)]).column_spacing(1);
+        Table::new(rows, [Constraint::Length(LABEL_WIDTH), Constraint::Min(1)]).column_spacing(1);
     frame.render_widget(table, area);
 }
 
@@ -2183,15 +2188,17 @@ fn detail_row(
 ) -> Row<'static> {
     let style = detail_focus_style(state, focus);
     Row::new(vec![
-        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)).style(style),
-        Line::from(value.to_string()).style(style),
+        Line::from(format!("{label:<width$}", width = LABEL_WIDTH as usize)).style(style),
+        Line::from(value.to_string())
+            .style(style)
+            .alignment(Alignment::Right),
     ])
 }
 
 fn readonly_detail_row(label: &str, value: &str) -> Row<'static> {
     Row::new(vec![
-        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)),
-        Line::from(value.to_string()),
+        Line::from(format!("{label:<width$}", width = LABEL_WIDTH as usize)),
+        Line::from(value.to_string()).alignment(Alignment::Right),
     ])
 }
 
@@ -2205,8 +2212,8 @@ fn detail_focus_style(state: &ConnectRemoteHostState, focus: Focus) -> Style {
 
 fn password_row(label: &str, field: PasswordField, state: &ConnectRemoteHostState) -> Row<'static> {
     Row::new(vec![
-        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)),
-        password_control_line(field, state),
+        Line::from(format!("{label:<width$}", width = LABEL_WIDTH as usize)),
+        password_control_line(field, state).alignment(Alignment::Right),
     ])
 }
 
@@ -2283,8 +2290,8 @@ fn choice_row(
         Style::default()
     };
     Row::new(vec![
-        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)).style(label_style),
-        choice_line(value, focused),
+        Line::from(format!("{label:<width$}", width = LABEL_WIDTH as usize)).style(label_style),
+        choice_line(value, focused).alignment(Alignment::Right),
     ])
 }
 
@@ -2330,7 +2337,7 @@ fn auth_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
 }
 
 fn choice_line(segments: Vec<ChoiceSegment>, focused: bool) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = Vec::new();
     for (index, segment) in segments.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
@@ -2386,7 +2393,6 @@ fn password_display(state: &ConnectRemoteHostState) -> String {
     }
 }
 
-#[cfg(test)]
 fn sudo_password_display(state: &ConnectRemoteHostState) -> String {
     if state.sudo_mode == SudoMode::None {
         return "No sudo password".to_string();
@@ -2612,11 +2618,14 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
             EditField::HttpsProxy => rows.https_proxy,
             _ => return None,
         };
-        let value_width = state.edit_cursor as u16;
-        let desired_x = details
-            .x
-            .saturating_add(PROXY_VALUE_START)
-            .saturating_add(value_width);
+        let value_area_x = details.x.saturating_add(PROXY_VALUE_START);
+        let value_area_width = details.width.saturating_sub(PROXY_VALUE_START);
+        let desired_x = right_aligned_cursor_x(
+            value_area_x,
+            value_area_width,
+            &edit_field_display_text(state, field),
+            state.edit_cursor,
+        );
         let max_x = details.x.saturating_add(details.width.saturating_sub(1));
         return Some((desired_x.min(max_x), details.y.saturating_add(row)));
     }
@@ -2629,13 +2638,47 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         EditField::SudoPassword => rows.sudo,
         EditField::ProxyName | EditField::AllProxy | EditField::HttpsProxy => return None,
     };
-    let value_width = state.edit_cursor as u16;
-    let desired_x = details
-        .x
-        .saturating_add(DETAIL_VALUE_START)
-        .saturating_add(value_width);
+    let value_area_x = details.x.saturating_add(DETAIL_VALUE_START);
+    let value_area_width = details.width.saturating_sub(DETAIL_VALUE_START);
+    let desired_x = right_aligned_cursor_x(
+        value_area_x,
+        value_area_width,
+        &edit_field_display_text(state, field),
+        state.edit_cursor,
+    );
     let max_x = details.x.saturating_add(details.width.saturating_sub(1));
     Some((desired_x.min(max_x), details.y.saturating_add(row)))
+}
+
+fn edit_field_display_text(state: &ConnectRemoteHostState, field: EditField) -> String {
+    match field {
+        EditField::Host => host_display(state),
+        EditField::RemotePort => state.remote_port_preference.clone(),
+        EditField::SshUser => state.ssh_user.clone(),
+        EditField::KeyPath | EditField::SshPassword => password_display(state),
+        EditField::SudoPassword => sudo_password_display(state),
+        EditField::ProxyName => state.proxy_draft.name.clone(),
+        EditField::AllProxy => proxy_input_display(&state.proxy_draft.all_proxy),
+        EditField::HttpsProxy => proxy_input_display(&state.proxy_draft.https_proxy),
+    }
+}
+
+fn right_aligned_cursor_x(
+    value_area_x: u16,
+    value_area_width: u16,
+    display_text: &str,
+    cursor_chars: usize,
+) -> u16 {
+    let text_width = display_text.width() as u16;
+    let value_area_right = value_area_x
+        .saturating_add(value_area_width)
+        .saturating_sub(1);
+    let text_start = value_area_right
+        .saturating_sub(text_width.saturating_sub(1))
+        .max(value_area_x);
+    text_start
+        .saturating_add(cursor_chars as u16)
+        .min(value_area_right)
 }
 
 fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
@@ -4311,7 +4354,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.host);
-        assert_eq!(x, geometry.details.x + 17);
+        assert_eq!(x, geometry.details.x + 36);
     }
 
     #[test]
@@ -4327,7 +4370,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 17);
+        assert_eq!(x, geometry.details.x + 38);
     }
 
     #[test]
@@ -4345,7 +4388,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 17 + 3);
+        assert_eq!(x, geometry.details.x + 45);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4369,7 +4412,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 17 + 3);
+        assert_eq!(x, geometry.details.x + 45);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4572,7 +4615,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SshPassword));
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 17 + 6);
+        assert_eq!(x, geometry.details.x + 45);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -4599,7 +4642,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SudoPassword));
         assert_eq!(y, geometry.details.y + details.rows.sudo);
-        assert_eq!(x, geometry.details.x + 17 + 6);
+        assert_eq!(x, geometry.details.x + 45);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -4623,7 +4666,7 @@ mod tests {
 
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + 17 + 2,
+            column: geometry.details.x + 36,
             row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
@@ -4650,7 +4693,7 @@ mod tests {
 
         assert_eq!(password_display(&state), "******");
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 17 + 6);
+        assert_eq!(x, geometry.details.x + 45);
     }
 
     #[test]
@@ -4712,10 +4755,10 @@ mod tests {
         let focused = choice_line(selected.clone(), true);
         let inactive = choice_line(selected, false);
 
-        assert_eq!(focused.spans[1].content.as_ref(), "Password");
-        assert_eq!(inactive.spans[1].content.as_ref(), "Password");
-        assert_eq!(focused.spans[1].style, active_focus_style());
-        assert_eq!(inactive.spans[1].style, selected_host_style());
+        assert_eq!(focused.spans[0].content.as_ref(), "Password");
+        assert_eq!(inactive.spans[0].content.as_ref(), "Password");
+        assert_eq!(focused.spans[0].style, active_focus_style());
+        assert_eq!(inactive.spans[0].style, selected_host_style());
     }
 
     #[test]
