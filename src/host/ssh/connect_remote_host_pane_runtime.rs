@@ -1619,11 +1619,7 @@ impl PopupGeometry {
         );
         let host_width = host_list_width(state, body.width);
         let separator_width = u16::from(body.width > host_width);
-        let right_padding = DETAIL_RIGHT_PADDING.min(
-            body.width
-                .saturating_sub(host_width)
-                .saturating_sub(separator_width),
-        );
+        let right_padding = DETAIL_RIGHT_PADDING;
         let details_x = body
             .x
             .saturating_add(host_width)
@@ -2013,7 +2009,7 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
 
 const POPUP_WIDTH: u16 = 100;
 const HOST_LIST_WIDTH: u16 = 29;
-const DETAIL_RIGHT_PADDING: u16 = 2;
+const DETAIL_RIGHT_PADDING: u16 = 0;
 const SECTION_TITLE_INDENT: u16 = 2;
 const SECTION_CONTENT_INDENT: u16 = 0;
 const LABEL_WIDTH: u16 = 16;
@@ -4024,7 +4020,7 @@ mod tests {
         assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 22);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4063,7 +4059,7 @@ mod tests {
         assert_eq!(geometry.dialog.x, 20);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4163,7 +4159,7 @@ mod tests {
         assert_eq!(geometry.dialog.x, 20);
         assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 68);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4179,7 +4175,7 @@ mod tests {
         assert_eq!(geometry.dialog.x, 0);
         assert_eq!(geometry.dialog.width, 66);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 32);
+        assert_eq!(geometry.details.width, 34);
     }
 
     #[test]
@@ -4709,7 +4705,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.host);
-        assert_eq!(x, geometry.details.x + 36);
+        assert_eq!(x, geometry.details.x + 38);
     }
 
     #[test]
@@ -4725,7 +4721,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 38);
+        assert_eq!(x, geometry.details.x + 40);
     }
 
     #[test]
@@ -4743,7 +4739,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 45);
+        assert_eq!(x, geometry.details.x + 47);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4767,7 +4763,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 45);
+        assert_eq!(x, geometry.details.x + 47);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4970,7 +4966,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SshPassword));
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 45);
+        assert_eq!(x, geometry.details.x + 47);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -4997,7 +4993,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SudoPassword));
         assert_eq!(y, geometry.details.y + details.rows.sudo);
-        assert_eq!(x, geometry.details.x + 45);
+        assert_eq!(x, geometry.details.x + 47);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -5048,7 +5044,7 @@ mod tests {
 
         assert_eq!(password_display(&state), "******");
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 45);
+        assert_eq!(x, geometry.details.x + 47);
     }
 
     #[test]
