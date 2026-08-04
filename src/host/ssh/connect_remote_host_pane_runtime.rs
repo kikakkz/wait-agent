@@ -1703,7 +1703,10 @@ impl HostSidebarGeometry {
         let saved_list = Rect::new(area.x, saved_list_y, area.width, saved_list_height);
         let new_host_y = saved_list.y.saturating_add(saved_list.height);
         let new_host = Rect::new(area.x, new_host_y, area.width, BUTTON_HEIGHT);
-        let proxy_header_y = new_host.y.saturating_add(new_host.height).saturating_add(SECTION_GAP);
+        let proxy_header_y = new_host
+            .y
+            .saturating_add(new_host.height)
+            .saturating_add(SECTION_GAP);
         let proxy_header = Rect::new(area.x, proxy_header_y, area.width, HEADER_HEIGHT);
         let proxy_list_y = proxy_header.y.saturating_add(proxy_header.height);
         let proxy_list = Rect::new(area.x, proxy_list_y, area.width, proxy_list_height);
@@ -1839,7 +1842,12 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.saved_header,
-        header_block_content("▤", "Saved Hosts", state.profiles.len(), geometry.saved_header.width),
+        header_block_content(
+            "▤",
+            "Saved Hosts",
+            state.profiles.len(),
+            geometry.saved_header.width,
+        ),
         Alignment::Left,
         false,
     );
@@ -1882,7 +1890,12 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.new_proxy,
-        button_block_content("+", "New Proxy", geometry.new_proxy.width, new_proxy_selected),
+        button_block_content(
+            "+",
+            "New Proxy",
+            geometry.new_proxy.width,
+            new_proxy_selected,
+        ),
         Alignment::Left,
         new_proxy_selected,
     );
@@ -1933,7 +1946,9 @@ fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Li
         Span::raw("  "),
         Span::styled(
             title.to_string(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(spaces),
         Span::styled(
@@ -1977,13 +1992,12 @@ fn render_host_list(
     let items: Vec<ListItem<'static>> = (0..item_count)
         .map(|index| host_list_item(state, selection_offset + index))
         .collect();
-    let selected = if state.selected >= selection_offset
-        && state.selected < selection_offset + item_count
-    {
-        Some(state.selected - selection_offset)
-    } else {
-        None
-    };
+    let selected =
+        if state.selected >= selection_offset && state.selected < selection_offset + item_count {
+            Some(state.selected - selection_offset)
+        } else {
+            None
+        };
     let visible_height = area.height as usize;
     let selected_row = selected.unwrap_or(0);
     let max_offset = items.len().saturating_sub(visible_height);
@@ -2118,7 +2132,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     let star_width = star.width();
     let content_width: usize = content.iter().map(|span| span.content.width()).sum();
     let inner_width = area.width.saturating_sub(2) as usize;
-    let padding = inner_width.saturating_sub(content_width).saturating_sub(star_width);
+    let padding = inner_width
+        .saturating_sub(content_width)
+        .saturating_sub(star_width);
     content.push(Span::raw(" ".repeat(padding)));
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
@@ -2209,7 +2225,11 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
 
 fn proxy_button_texts(state: &ConnectRemoteHostState) -> (String, String, String) {
     let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
-    let active_label = if active { "✓  Active" } else { "✓  Set Active" };
+    let active_label = if active {
+        "✓  Active"
+    } else {
+        "✓  Set Active"
+    };
     (
         format!(" {active_label} "),
         " 💾  Save ".to_string(),
@@ -2247,9 +2267,7 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .bg(Color::Rgb(40, 44, 52))
-                .fg(Color::Gray)
+            Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Gray)
         }
     };
     frame.render_widget(
@@ -2267,9 +2285,7 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
     let delete_style = if state.focus == Focus::ProxyDelete {
         delete_focus_style()
     } else {
-        Style::default()
-            .bg(Color::Rgb(40, 44, 52))
-            .fg(Color::Red)
+        Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Red)
     };
     frame.render_widget(
         Paragraph::new(delete_text)
@@ -2453,8 +2469,11 @@ fn section_title(title: &str, icon: &str, icon_color: Color) -> Line<'static> {
 }
 
 fn modal_title(title: &str) -> Line<'static> {
-    Line::from(format!(" {title}"))
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+    Line::from(format!(" {title}")).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn render_detail_table<I>(frame: &mut Frame<'_>, area: Rect, rows: I)
@@ -2486,9 +2505,7 @@ fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else if state.focus == Focus::Hosts {
-        Style::default()
-            .bg(Color::Rgb(40, 44, 52))
-            .fg(Color::Gray)
+        Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Gray)
     } else {
         Style::default().bg(Color::Blue).fg(Color::White)
     };
@@ -2503,9 +2520,7 @@ fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
         let delete_style = if state.focus == Focus::Delete {
             delete_focus_style()
         } else {
-            Style::default()
-                .bg(Color::Rgb(40, 44, 52))
-                .fg(Color::Red)
+            Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::Red)
         };
         frame.render_widget(
             Paragraph::new(delete_text)
