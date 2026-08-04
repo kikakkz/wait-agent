@@ -484,18 +484,22 @@ impl ConnectRemoteHostState {
             KeyCode::Up => self.move_up(),
             KeyCode::Down => self.move_down(),
             KeyCode::Left => {
-                if self.focus.uses_horizontal_choice() {
-                    self.adjust_choice(-1);
-                } else if self.focus != Focus::Hosts {
-                    self.set_focus(Focus::Hosts);
+                match self.focus {
+                    Focus::ProxySave => self.set_focus(Focus::ProxyActive),
+                    Focus::ProxyDelete => self.set_focus(Focus::ProxySave),
+                    _ if self.focus.uses_horizontal_choice() => self.adjust_choice(-1),
+                    _ if self.focus != Focus::Hosts => self.set_focus(Focus::Hosts),
+                    _ => {}
                 }
                 PaneAction::None
             }
             KeyCode::Right => {
-                if self.focus == Focus::Hosts {
-                    self.set_focus(self.default_detail_focus());
-                } else if self.focus.uses_horizontal_choice() {
-                    self.adjust_choice(1);
+                match self.focus {
+                    Focus::ProxyActive => self.set_focus(Focus::ProxySave),
+                    Focus::ProxySave => self.set_focus(Focus::ProxyDelete),
+                    Focus::Hosts => self.set_focus(self.default_detail_focus()),
+                    _ if self.focus.uses_horizontal_choice() => self.adjust_choice(1),
+                    _ => {}
                 }
                 PaneAction::None
             }
@@ -794,10 +798,17 @@ impl ConnectRemoteHostState {
                 return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
         } else {
-            let mut next = self.prev_focus();
-            if next == Focus::Hosts {
-                next = self.default_detail_focus();
-            }
+            let next = match self.focus {
+                Focus::ProxySave | Focus::ProxyDelete => Focus::HttpsProxy,
+                _ => {
+                    let candidate = self.prev_focus();
+                    if candidate == Focus::Hosts {
+                        self.default_detail_focus()
+                    } else {
+                        candidate
+                    }
+                }
+            };
             self.set_focus(next);
         }
         PaneAction::None
