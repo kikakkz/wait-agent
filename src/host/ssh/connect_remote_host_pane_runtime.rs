@@ -1589,9 +1589,11 @@ impl PopupGeometry {
 
         // Keep the popup compact and centered, like the original popup,
         // instead of stretching to the full terminal height. The height is
-        // fixed relative to the terminal size so it does not jump when the
-        // selected menu item changes (e.g. Saved Host vs New Host).
-        let dialog_height = rows.saturating_sub(2).clamp(14, rows.max(1));
+        // fixed so it does not jump when the selected menu item changes
+        // (e.g. Saved Host vs New Host). It shrinks only on very small
+        // terminals to keep a visible margin.
+        const POPUP_HEIGHT: u16 = 18;
+        let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
         let dialog = Rect::new(x, y, width, dialog_height);
