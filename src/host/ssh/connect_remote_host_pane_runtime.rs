@@ -2011,7 +2011,7 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
     format!("{}@{}", profile.ssh_user, profile.host)
 }
 
-const POPUP_WIDTH: u16 = 120;
+const POPUP_WIDTH: u16 = 100;
 const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 2;
 const SECTION_TITLE_INDENT: u16 = 2;
@@ -4016,15 +4016,15 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
-        assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 120);
+        assert_eq!(geometry.dialog.x, 20);
+        assert_eq!(geometry.dialog.width, 100);
         // Height is fixed relative to the terminal, not to the selected item.
         assert_eq!(geometry.dialog.height, 24);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 22);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 86);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4060,10 +4060,10 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
-        assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 120);
+        assert_eq!(geometry.dialog.x, 20);
+        assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 86);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4160,10 +4160,10 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
-        assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 120);
+        assert_eq!(geometry.dialog.x, 20);
+        assert_eq!(geometry.dialog.width, 100);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 86);
+        assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
