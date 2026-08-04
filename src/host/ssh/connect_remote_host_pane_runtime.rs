@@ -1563,7 +1563,7 @@ impl PopupGeometry {
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
         // terminals to keep a visible margin.
-        const POPUP_HEIGHT: u16 = 18;
+        const POPUP_HEIGHT: u16 = 24;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -1601,12 +1601,18 @@ impl PopupGeometry {
 
 impl DetailsGeometry {
     fn from_area(area: Rect, _state: &ConnectRemoteHostState) -> Self {
+        // Sections are separated by blank rows so the details area does not
+        // feel crowded when the popup is tall. Min constraints let ratatui
+        // distribute extra height as breathing room while keeping each
+        // section's content anchored at the top.
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4), // title + 3 connection rows
-                Constraint::Length(4), // title + 3 authentication rows
-                Constraint::Length(3), // title + 2 options rows
+                Constraint::Min(4),    // Connection title + 3 rows
+                Constraint::Length(1), // blank
+                Constraint::Min(4),    // Authentication title + 3 rows
+                Constraint::Length(1), // blank
+                Constraint::Min(3),    // Options title + 2 rows
                 Constraint::Length(1), // blank
                 Constraint::Length(1), // buttons
                 Constraint::Length(1), // hint
@@ -1616,18 +1622,18 @@ impl DetailsGeometry {
             host: sections[0].y.saturating_add(1).saturating_sub(area.y),
             port: sections[0].y.saturating_add(2).saturating_sub(area.y),
             user: sections[0].y.saturating_add(3).saturating_sub(area.y),
-            auth: sections[1].y.saturating_add(1).saturating_sub(area.y),
-            password: sections[1].y.saturating_add(2).saturating_sub(area.y),
-            sudo: sections[1].y.saturating_add(3).saturating_sub(area.y),
-            remember: sections[2].y.saturating_add(1).saturating_sub(area.y),
-            install_proxy: sections[2].y.saturating_add(2).saturating_sub(area.y),
+            auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
+            password: sections[2].y.saturating_add(2).saturating_sub(area.y),
+            sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
+            remember: sections[4].y.saturating_add(1).saturating_sub(area.y),
+            install_proxy: sections[4].y.saturating_add(2).saturating_sub(area.y),
         };
         Self {
             connection: sections[0],
-            authentication: sections[1],
-            options: sections[2],
-            buttons: sections[4],
-            hint: sections[5],
+            authentication: sections[2],
+            options: sections[4],
+            buttons: sections[6],
+            hint: sections[7],
             rows,
         }
     }
@@ -1828,6 +1834,8 @@ const DETAIL_RIGHT_PADDING: u16 = 2;
 const SECTION_TITLE_INDENT: u16 = 2;
 const SECTION_CONTENT_INDENT: u16 = 4;
 const LABEL_WIDTH: u16 = 12;
+const DETAIL_VALUE_START: u16 = SECTION_CONTENT_INDENT + LABEL_WIDTH + 1;
+const PROXY_VALUE_START: u16 = LABEL_WIDTH + 1;
 
 fn popup_preferred_width(_state: &ConnectRemoteHostState) -> u16 {
     POPUP_WIDTH
@@ -1903,15 +1911,14 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
     if area.height == 0 {
         return;
     }
-    let label_width = 12;
-    let value_x = area.x.saturating_add(label_width + 1);
-    let value_width = area.width.saturating_sub(label_width + 1);
+    let value_x = area.x.saturating_add(LABEL_WIDTH + 1);
+    let value_width = area.width.saturating_sub(LABEL_WIDTH + 1);
     frame.render_widget(
-        Paragraph::new("no_proxy"),
-        Rect::new(area.x, area.y, label_width, 1),
+        Paragraph::new("no_proxy").alignment(Alignment::Right),
+        Rect::new(area.x, area.y, LABEL_WIDTH, 1),
     );
     frame.render_widget(
-        Paragraph::new(format!(" auto: {}", no_proxy_for_install(&state.host, "")))
+        Paragraph::new(format!("auto: {}", no_proxy_for_install(&state.host, "")))
             .wrap(Wrap { trim: false }),
         Rect::new(value_x, area.y, value_width, area.height),
     );
@@ -2174,13 +2181,18 @@ fn detail_row(
     state: &ConnectRemoteHostState,
     focus: Focus,
 ) -> Row<'static> {
-    let prefix = " ";
     let style = detail_focus_style(state, focus);
-    Row::new(vec![label.to_string(), format!("{prefix}{value}")]).style(style)
+    Row::new(vec![
+        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)).style(style),
+        Line::from(value.to_string()).style(style),
+    ])
 }
 
 fn readonly_detail_row(label: &str, value: &str) -> Row<'static> {
-    Row::new(vec![label.to_string(), format!(" {value}")])
+    Row::new(vec![
+        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)),
+        Line::from(value.to_string()),
+    ])
 }
 
 fn detail_focus_style(state: &ConnectRemoteHostState, focus: Focus) -> Style {
@@ -2193,21 +2205,19 @@ fn detail_focus_style(state: &ConnectRemoteHostState, focus: Focus) -> Style {
 
 fn password_row(label: &str, field: PasswordField, state: &ConnectRemoteHostState) -> Row<'static> {
     Row::new(vec![
-        Line::from(label.to_string()),
+        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)),
         password_control_line(field, state),
     ])
 }
 
 fn password_control_line(field: PasswordField, state: &ConnectRemoteHostState) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
     let value = password_control_value(field, state);
     let value_style = if state.focus == password_field_focus(field) {
         active_focus_style()
     } else {
         Style::default()
     };
-    spans.push(Span::styled(value, value_style));
-    Line::from(spans)
+    Line::from(vec![Span::styled(value, value_style)])
 }
 
 fn password_field_focus(field: PasswordField) -> Focus {
@@ -2273,7 +2283,7 @@ fn choice_row(
         Style::default()
     };
     Row::new(vec![
-        Line::from(label.to_string()).style(label_style),
+        Line::from(format!("{label:>width$}", width = LABEL_WIDTH as usize)).style(label_style),
         choice_line(value, focused),
     ])
 }
@@ -2603,7 +2613,10 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
             _ => return None,
         };
         let value_width = state.edit_cursor as u16;
-        let desired_x = details.x.saturating_add(14).saturating_add(value_width);
+        let desired_x = details
+            .x
+            .saturating_add(PROXY_VALUE_START)
+            .saturating_add(value_width);
         let max_x = details.x.saturating_add(details.width.saturating_sub(1));
         return Some((desired_x.min(max_x), details.y.saturating_add(row)));
     }
@@ -2617,7 +2630,10 @@ fn cursor_position(details: Rect, state: &ConnectRemoteHostState) -> Option<(u16
         EditField::ProxyName | EditField::AllProxy | EditField::HttpsProxy => return None,
     };
     let value_width = state.edit_cursor as u16;
-    let desired_x = details.x.saturating_add(14).saturating_add(value_width);
+    let desired_x = details
+        .x
+        .saturating_add(DETAIL_VALUE_START)
+        .saturating_add(value_width);
     let max_x = details.x.saturating_add(details.width.saturating_sub(1));
     Some((desired_x.min(max_x), details.y.saturating_add(row)))
 }
@@ -3215,9 +3231,9 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![saved_password_profile()];
         state.selected = state.proxy_selection_index();
-        let popup = PopupGeometry::from_terminal_size((100, 18), &state);
+        let popup = PopupGeometry::from_terminal_size((100, 26), &state);
         let details = ProxyDetailsGeometry::from_area(popup.details);
-        let output = rendered_text(100, 18, &state);
+        let output = rendered_text(100, 26, &state);
         let save_row = output
             .lines()
             .nth(details.save.y as usize)
@@ -3569,15 +3585,15 @@ mod tests {
         state.selected = 1;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+        let geometry = PopupGeometry::from_terminal_size((120, 26), &state);
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
         // Height is fixed relative to the terminal, not to the selected item.
-        assert_eq!(geometry.dialog.height, 16);
+        assert_eq!(geometry.dialog.height, 24);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
-        assert_eq!(geometry.hosts.height, 14);
+        assert_eq!(geometry.hosts.height, 22);
         assert_eq!(geometry.hosts.width, 29);
         assert_eq!(geometry.details.width, 66);
         assert_eq!(
@@ -3588,7 +3604,7 @@ mod tests {
         // Switching to New Host should not change the popup geometry.
         state.selected = state.profiles.len();
         let _ = state.sync_selected_profile();
-        let new_host_geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+        let new_host_geometry = PopupGeometry::from_terminal_size((120, 26), &state);
         assert_eq!(new_host_geometry.dialog.height, geometry.dialog.height);
         assert_eq!(new_host_geometry.hosts.height, geometry.hosts.height);
     }
@@ -3613,7 +3629,7 @@ mod tests {
         state.selected = 0;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+        let geometry = PopupGeometry::from_terminal_size((120, 26), &state);
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
@@ -4025,18 +4041,19 @@ mod tests {
         state.profiles = vec![saved_password_profile()];
         state.selected = 0;
         let _ = state.sync_selected_profile();
-        let popup = PopupGeometry::from_terminal_size((100, 18), &state);
+        let popup = PopupGeometry::from_terminal_size((100, 26), &state);
         let details = DetailsGeometry::from_area(popup.details, &state);
 
         assert_eq!(popup.details.y, 2);
-        assert_eq!(popup.details.height, 14);
-        assert_eq!(details.buttons.y, popup.details.y + 12);
+        assert_eq!(popup.details.height, 22);
         assert_eq!(details.buttons.height, 1);
+        assert_eq!(details.hint.height, 1);
+        assert_eq!(details.hint.y, details.buttons.y + 1);
         assert!(
             details.buttons.y + details.buttons.height <= popup.details.y + popup.details.height
         );
 
-        let output = rendered_text(100, 18, &state);
+        let output = rendered_text(100, 26, &state);
         assert!(output.contains("Connect Remote Host"));
         assert!(output.contains("Remember host"));
         assert!(output.contains("Use proxy"));
@@ -4054,7 +4071,7 @@ mod tests {
         state.status = Status::Working("Connecting...".to_string());
 
         assert_eq!(connect_label(&state), "Connect");
-        let output = rendered_text(100, 18, &state);
+        let output = rendered_text(100, 26, &state);
         assert!(output.contains("Connecting"));
         assert!(output.contains("Connecting..."));
         assert!(output.contains("Connect"));
@@ -4236,10 +4253,9 @@ mod tests {
     }
 
     fn assert_password_control_styles(line: Line<'static>, value_style: Style) {
-        assert_eq!(line.spans.len(), 2);
-        assert_eq!(line.spans[0].style, Style::default());
-        assert_eq!(line.spans[1].content.as_ref(), "******");
-        assert_eq!(line.spans[1].style, value_style);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content.as_ref(), "******");
+        assert_eq!(line.spans[0].style, value_style);
     }
 
     #[test]
@@ -4265,18 +4281,18 @@ mod tests {
         state.set_focus(Focus::Password);
 
         let password_line = password_control_line(PasswordField::Ssh, &state);
-        assert_eq!(password_line.spans.len(), 2);
+        assert_eq!(password_line.spans.len(), 1);
         assert_eq!(
-            password_line.spans[1].content.as_ref(),
+            password_line.spans[0].content.as_ref(),
             PASSWORD_EMPTY_PLACEHOLDER
         );
         assert_eq!(password_display(&state), PASSWORD_EMPTY_PLACEHOLDER);
 
         state.set_focus(Focus::Sudo);
         let sudo_line = password_control_line(PasswordField::Sudo, &state);
-        assert_eq!(sudo_line.spans.len(), 2);
+        assert_eq!(sudo_line.spans.len(), 1);
         assert_eq!(
-            sudo_line.spans[1].content.as_ref(),
+            sudo_line.spans[0].content.as_ref(),
             PASSWORD_EMPTY_PLACEHOLDER
         );
         assert_eq!(sudo_password_display(&state), PASSWORD_EMPTY_PLACEHOLDER);
@@ -4295,7 +4311,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.host);
-        assert_eq!(x, geometry.details.x + 14);
+        assert_eq!(x, geometry.details.x + 17);
     }
 
     #[test]
@@ -4311,7 +4327,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 14);
+        assert_eq!(x, geometry.details.x + 17);
     }
 
     #[test]
@@ -4329,7 +4345,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 14 + 3);
+        assert_eq!(x, geometry.details.x + 17 + 3);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4353,7 +4369,7 @@ mod tests {
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
-        assert_eq!(x, geometry.details.x + 14 + 3);
+        assert_eq!(x, geometry.details.x + 17 + 3);
 
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
@@ -4556,7 +4572,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SshPassword));
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 14 + 6);
+        assert_eq!(x, geometry.details.x + 17 + 6);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -4583,7 +4599,7 @@ mod tests {
 
         assert_eq!(state.editing, Some(EditField::SudoPassword));
         assert_eq!(y, geometry.details.y + details.rows.sudo);
-        assert_eq!(x, geometry.details.x + 14 + 6);
+        assert_eq!(x, geometry.details.x + 17 + 6);
         assert_eq!(
             state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
@@ -4607,7 +4623,7 @@ mod tests {
 
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + 14 + 2,
+            column: geometry.details.x + 17 + 2,
             row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
@@ -4634,7 +4650,7 @@ mod tests {
 
         assert_eq!(password_display(&state), "******");
         assert_eq!(y, geometry.details.y + details.rows.password);
-        assert_eq!(x, geometry.details.x + 14 + 6);
+        assert_eq!(x, geometry.details.x + 17 + 6);
     }
 
     #[test]
