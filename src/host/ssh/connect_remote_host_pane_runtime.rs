@@ -1605,7 +1605,7 @@ impl PopupGeometry {
         // (e.g. Saved Host vs New Host). It shrinks only on very small
         // terminals to keep a visible margin. 24 rows is the compact target
         // that fits the framed sidebar and detail sections.
-        const POPUP_HEIGHT: u16 = 24;
+        const POPUP_HEIGHT: u16 = 27;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -1651,7 +1651,7 @@ impl HostSidebarGeometry {
         const BUTTON_HEIGHT: u16 = 3;
         // Lists sit directly under their headers/buttons; only the two
         // sections (Saved Hosts vs Proxy Configuration) are separated.
-        const SECTION_GAP: u16 = 1;
+        const SECTION_GAP: u16 = 0;
         const FIXED_ROWS: u16 = HEADER_HEIGHT * 2 + BUTTON_HEIGHT * 2 + SECTION_GAP;
 
         let saved_content = state.profiles.len() as u16;
@@ -1710,43 +1710,39 @@ impl HostSidebarGeometry {
 impl DetailsGeometry {
     fn from_area(area: Rect, _state: &ConnectRemoteHostState) -> Self {
         // Layout inspired by the UI mock: header bar, then Connection and
-        // Authentication side-by-side inside bordered cards, then Options,
-        // an info box, action buttons, and a bottom hint bar. Heights
-        // account for the 1-cell borders around each card.
+        // Authentication stacked as full-width bordered cards, then Options,
+        // an info box, a spacer, action buttons, and a bottom hint bar.
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Length(6), // Connection + Authentication cards
+                Constraint::Length(6), // Connection card (Host/Port/Last Port/User)
+                Constraint::Length(5), // Authentication card
                 Constraint::Length(4), // Options card
                 Constraint::Length(4), // info box card
+                Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
                 Constraint::Length(1), // hint
-                Constraint::Min(1),    // absorb leftover vertical space
             ])
             .split(area);
-        let top_columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(sections[1]);
         let rows = DetailsRows {
-            host: sections[1].y.saturating_add(2).saturating_sub(area.y),
-            port: sections[1].y.saturating_add(3).saturating_sub(area.y),
-            user: sections[1].y.saturating_add(4).saturating_sub(area.y),
-            auth: sections[1].y.saturating_add(2).saturating_sub(area.y),
-            password: sections[1].y.saturating_add(3).saturating_sub(area.y),
-            sudo: sections[1].y.saturating_add(4).saturating_sub(area.y),
-            remember: sections[2].y.saturating_add(2).saturating_sub(area.y),
-            install_proxy: sections[2].y.saturating_add(3).saturating_sub(area.y),
+            host: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            port: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            user: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
+            password: sections[2].y.saturating_add(2).saturating_sub(area.y),
+            sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
+            remember: sections[3].y.saturating_add(1).saturating_sub(area.y),
+            install_proxy: sections[3].y.saturating_add(2).saturating_sub(area.y),
         };
         Self {
             header: sections[0],
-            connection: top_columns[0],
-            authentication: top_columns[1],
-            options: sections[2],
-            info: sections[3],
-            buttons: sections[4],
-            hint: sections[5],
+            connection: sections[1],
+            authentication: sections[2],
+            options: sections[3],
+            info: sections[4],
+            buttons: sections[6],
+            hint: sections[7],
             rows,
         }
     }
@@ -1838,7 +1834,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.new_host,
-        button_block_content("+", "New Host"),
+        button_block_content("+", "New Host", geometry.new_host.width),
         Alignment::Left,
     );
 
@@ -1864,7 +1860,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.new_proxy,
-        button_block_content("+", "New Proxy"),
+        button_block_content("+", "New Proxy", geometry.new_proxy.width),
         Alignment::Left,
     );
 }
@@ -1920,12 +1916,18 @@ fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Li
     ])
 }
 
-fn button_block_content(icon: &str, label: &str) -> Line<'static> {
+fn button_block_content(icon: &str, label: &str, width: u16) -> Line<'static> {
+    let left = format!("{icon} {label}");
+    let icon_width = icon.width();
+    let left_width = left.width();
+    let inner_width = width.saturating_sub(2) as usize;
+    let padding = inner_width.saturating_sub(left_width + icon_width);
+
     Line::from(vec![
         Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
         Span::raw(" "),
         Span::styled(label.to_string(), Style::default().fg(Color::Gray)),
-        Span::raw(" "),
+        Span::raw(" ".repeat(padding)),
         Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
     ])
 }
@@ -1976,13 +1978,13 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
     if selection < state.proxy_selection_index() {
         let profile = &state.profiles[selection];
         ListItem::new(Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Green)),
+            Span::styled(" ●  ", Style::default().fg(Color::Green)),
             Span::styled(saved_host_label(profile), Style::default().fg(Color::White)),
         ]))
     } else if selection == state.profiles.len() {
         ListItem::new(Line::from(vec![
-            Span::styled(" + ", Style::default().fg(Color::Gray)),
-            Span::styled(" New Host ", Style::default().fg(Color::Gray)),
+            Span::styled(" +  ", Style::default().fg(Color::Gray)),
+            Span::styled("New Host", Style::default().fg(Color::Gray)),
         ]))
     } else if selection < state.new_proxy_selection_index() {
         let index = selection - state.proxy_selection_index();
@@ -1994,13 +1996,13 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
             ("●", Color::Green)
         };
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {prefix} "), Style::default().fg(color)),
+            Span::styled(format!(" {prefix}  "), Style::default().fg(color)),
             Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
         ]))
     } else {
         ListItem::new(Line::from(vec![
-            Span::styled(" + ", Style::default().fg(Color::Gray)),
-            Span::styled(" New Proxy ", Style::default().fg(Color::Gray)),
+            Span::styled(" +  ", Style::default().fg(Color::Gray)),
+            Span::styled("New Proxy", Style::default().fg(Color::Gray)),
         ]))
     }
 }
@@ -2013,7 +2015,7 @@ const POPUP_WIDTH: u16 = 120;
 const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 2;
 const SECTION_TITLE_INDENT: u16 = 2;
-const SECTION_CONTENT_INDENT: u16 = 4;
+const SECTION_CONTENT_INDENT: u16 = 0;
 const LABEL_WIDTH: u16 = 16;
 const DETAIL_VALUE_START: u16 = SECTION_CONTENT_INDENT + LABEL_WIDTH + 1;
 const PROXY_VALUE_START: u16 = LABEL_WIDTH + 1;
@@ -2656,11 +2658,11 @@ fn icon_detail_row(
     state: &ConnectRemoteHostState,
     focus: Focus,
 ) -> Row<'static> {
-    detail_row(&format!("{icon} {label}"), value, state, focus)
+    detail_row(&format!("{icon}  {label}"), value, state, focus)
 }
 
 fn readonly_icon_detail_row(icon: &str, label: &str, value: &str) -> Row<'static> {
-    readonly_detail_row(&format!("{icon} {label}"), value)
+    readonly_detail_row(&format!("{icon}  {label}"), value)
 }
 
 fn icon_password_row(
@@ -2669,7 +2671,7 @@ fn icon_password_row(
     field: PasswordField,
     state: &ConnectRemoteHostState,
 ) -> Row<'static> {
-    password_row(&format!("{icon} {label}"), field, state)
+    password_row(&format!("{icon}  {label}"), field, state)
 }
 
 fn icon_choice_row(
@@ -2679,7 +2681,7 @@ fn icon_choice_row(
     state: &ConnectRemoteHostState,
     focus: Focus,
 ) -> Row<'static> {
-    choice_row(&format!("{icon} {label}"), value, state, focus)
+    choice_row(&format!("{icon}  {label}"), value, state, focus)
 }
 
 fn active_focus_style() -> Style {
