@@ -1890,7 +1890,7 @@ fn render_framed_block(
 
 fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Line<'static> {
     let count_text = format!("{count}");
-    let left = format!("{icon} {title}");
+    let left = format!("{icon}  {title}");
     let right = count_text.to_string();
     let inner_width = width.saturating_sub(2) as usize;
     let left_width = left.width();
@@ -1900,7 +1900,7 @@ fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Li
 
     Line::from(vec![
         Span::styled(icon.to_string(), Style::default().fg(Color::White)),
-        Span::raw(" "),
+        Span::raw("  "),
         Span::styled(
             title.to_string(),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -2383,7 +2383,7 @@ fn render_checkbox_row(
         Style::default()
     };
     frame.render_widget(
-        Paragraph::new(format!("{box_symbol} {label}")).style(style),
+        Paragraph::new(format!("{box_symbol}  {label}")).style(style),
         area,
     );
 }
@@ -2437,9 +2437,9 @@ where
 
 fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let connect_label = connect_label(state);
-    let connect_text = format!(" ▶ {}  <Enter> ", connect_label);
+    let connect_text = format!(" ▶  {}  <Enter> ", connect_label);
     let connect_width = connect_text.width() as u16;
-    let delete_text = " 🗑 Delete  <D> ".to_string();
+    let delete_text = " 🗑  Delete  <D> ".to_string();
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
@@ -2486,9 +2486,9 @@ fn button_action_from_x(
     buttons_area: Rect,
     state: &ConnectRemoteHostState,
 ) -> Option<Focus> {
-    let connect_text = format!(" ▶ {}  <Enter> ", connect_label(state));
+    let connect_text = format!(" ▶  {}  <Enter> ", connect_label(state));
     let connect_width = connect_text.width() as u16;
-    let delete_text = " 🗑 Delete  <D> ";
+    let delete_text = " 🗑  Delete  <D> ";
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
