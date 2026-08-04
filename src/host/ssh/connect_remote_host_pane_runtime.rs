@@ -1815,11 +1815,15 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     let geometry = HostSidebarGeometry::from_area(area, state);
     let hosts_focused = state.focus == Focus::Hosts;
 
+    let new_host_selected = state.selected == state.profiles.len();
+    let new_proxy_selected = state.selected == state.new_proxy_selection_index();
+
     render_framed_block(
         frame,
         geometry.saved_header,
         header_block_content("▤", "Saved Hosts", state.profiles.len(), geometry.saved_header.width),
         Alignment::Left,
+        false,
     );
     render_host_list(
         frame,
@@ -1832,8 +1836,9 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.new_host,
-        button_block_content("+", "New Host", geometry.new_host.width),
+        button_block_content("+", "New Host", geometry.new_host.width, new_host_selected),
         Alignment::Left,
+        new_host_selected,
     );
 
     render_framed_block(
@@ -1846,6 +1851,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
             geometry.proxy_header.width,
         ),
         Alignment::Left,
+        false,
     );
     render_host_list(
         frame,
@@ -1858,8 +1864,9 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.new_proxy,
-        button_block_content("+", "New Proxy", geometry.new_proxy.width),
+        button_block_content("+", "New Proxy", geometry.new_proxy.width, new_proxy_selected),
         Alignment::Left,
+        new_proxy_selected,
     );
 }
 
@@ -1868,20 +1875,26 @@ fn render_framed_block(
     area: Rect,
     content: Line<'static>,
     alignment: Alignment,
+    selected: bool,
 ) {
     if area.height < 3 {
         return;
     }
+    let (border_color, bg_color) = if selected {
+        (Color::Blue, Color::Blue)
+    } else {
+        (SECTION_BORDER, SECTION_BG)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(SECTION_BORDER))
-        .style(Style::default().bg(SECTION_BG));
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(bg_color));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(content)
             .alignment(alignment)
-            .style(Style::default().bg(SECTION_BG)),
+            .style(Style::default().bg(bg_color)),
         Rect::new(inner.x, inner.y, inner.width, inner.height),
     );
 }
@@ -1914,19 +1927,20 @@ fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Li
     ])
 }
 
-fn button_block_content(icon: &str, label: &str, width: u16) -> Line<'static> {
+fn button_block_content(icon: &str, label: &str, width: u16, selected: bool) -> Line<'static> {
     let left = format!("{icon} {label}");
     let icon_width = icon.width();
     let left_width = left.width();
     let inner_width = width.saturating_sub(2) as usize;
     let padding = inner_width.saturating_sub(left_width + icon_width);
+    let fg = if selected { Color::White } else { Color::Gray };
 
     Line::from(vec![
-        Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(icon.to_string(), Style::default().fg(fg)),
         Span::raw(" "),
-        Span::styled(label.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(label.to_string(), Style::default().fg(fg)),
         Span::raw(" ".repeat(padding)),
-        Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(icon.to_string(), Style::default().fg(fg)),
     ])
 }
 
@@ -1973,18 +1987,13 @@ fn render_host_list(
 }
 
 fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<'static> {
-    if selection < state.proxy_selection_index() {
+    if selection < state.profiles.len() {
         let profile = &state.profiles[selection];
         ListItem::new(Line::from(vec![
             Span::styled(" ●  ", Style::default().fg(Color::Green)),
             Span::styled(saved_host_label(profile), Style::default().fg(Color::White)),
         ]))
-    } else if selection == state.profiles.len() {
-        ListItem::new(Line::from(vec![
-            Span::styled(" +  ", Style::default().fg(Color::Gray)),
-            Span::raw("New Host"),
-        ]))
-    } else if selection < state.new_proxy_selection_index() {
+    } else {
         let index = selection - state.proxy_selection_index();
         let profile = &state.proxy_settings.profiles[index];
         let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
@@ -1996,11 +2005,6 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
         ListItem::new(Line::from(vec![
             Span::styled(format!(" {prefix}  "), Style::default().fg(color)),
             Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
-        ]))
-    } else {
-        ListItem::new(Line::from(vec![
-            Span::styled(" +  ", Style::default().fg(Color::Gray)),
-            Span::raw("New Proxy"),
         ]))
     }
 }
@@ -2099,7 +2103,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     content.push(Span::raw(" ".repeat(padding)));
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
-    render_framed_block(frame, area, Line::from(content), Alignment::Left);
+    render_framed_block(frame, area, Line::from(content), Alignment::Left, false);
 }
 
 fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
@@ -2178,7 +2182,7 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
     );
     frame.render_widget(
         Paragraph::new(format!("auto: {}", no_proxy_for_install(&state.host, "")))
-            .alignment(Alignment::Right)
+            .alignment(Alignment::Left)
             .wrap(Wrap { trim: false }),
         Rect::new(value_x, area.y, value_width, area.height),
     );
@@ -2198,28 +2202,34 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         .split(area);
     let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
     let active_label = if active { "Active" } else { "Set Active" };
+    let primary_style = |focused: bool| {
+        if focused {
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(Color::Blue).fg(Color::White)
+        }
+    };
     frame.render_widget(
         Paragraph::new(active_label)
-            .style(action_focus_style(
-                state.focus == Focus::ProxyActive,
-                Focus::ProxyActive,
-            ))
+            .style(primary_style(state.focus == Focus::ProxyActive))
             .alignment(Alignment::Center),
         columns[0],
     );
     frame.render_widget(
         Paragraph::new("Save")
-            .style(action_focus_style(
-                state.focus == Focus::ProxySave,
-                Focus::ProxySave,
-            ))
+            .style(primary_style(state.focus == Focus::ProxySave))
             .alignment(Alignment::Center),
         columns[1],
     );
     let delete_style = if state.focus == Focus::ProxyDelete {
         delete_focus_style()
     } else {
-        Style::default().fg(Color::Red)
+        Style::default()
+            .bg(Color::Rgb(40, 44, 52))
+            .fg(Color::Red)
     };
     frame.render_widget(
         Paragraph::new("Delete")
@@ -2608,20 +2618,6 @@ fn password_control_value(field: PasswordField, state: &ConnectRemoteHostState) 
         ),
         PasswordField::Sudo => "No sudo password".to_string(),
         PasswordField::Ssh => password_display(state),
-    }
-}
-
-fn action_focus_style(focused: bool, focus: Focus) -> Style {
-    if focused {
-        match focus {
-            Focus::Delete | Focus::ProxyDelete => delete_focus_style(),
-            _ => active_focus_style(),
-        }
-    } else {
-        match focus {
-            Focus::Delete | Focus::ProxyDelete => Style::default().fg(Color::Red),
-            _ => Style::default().add_modifier(Modifier::BOLD),
-        }
     }
 }
 
