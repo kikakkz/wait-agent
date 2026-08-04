@@ -691,18 +691,34 @@ impl ConnectRemoteHostState {
         if !point_in_rect(x, y, layout.dialog) {
             return PaneAction::None;
         }
-        if point_in_rect(x, y, layout.hosts) {
-            let row = y.saturating_sub(layout.hosts.y) as usize;
-            if let Some(selection) = selection_from_host_display_row(self, row) {
-                self.selected = selection;
+        if point_in_rect(x, y, layout.sidebar.saved_list) {
+            let row = y.saturating_sub(layout.sidebar.saved_list.y) as usize;
+            if row < self.profiles.len() {
+                self.selected = row;
                 self.set_focus(Focus::Hosts);
-                return if self.selected_proxy_config() {
-                    self.sync_selected_proxy();
-                    PaneAction::None
-                } else {
-                    PaneAction::LoadSecrets(self.sync_selected_profile())
-                };
+                return PaneAction::LoadSecrets(self.sync_selected_profile());
             }
+            return PaneAction::None;
+        }
+        if point_in_rect(x, y, layout.sidebar.new_host) {
+            self.selected = self.profiles.len();
+            self.set_focus(Focus::Hosts);
+            return PaneAction::LoadSecrets(self.sync_selected_profile());
+        }
+        if point_in_rect(x, y, layout.sidebar.proxy_list) {
+            let row = y.saturating_sub(layout.sidebar.proxy_list.y) as usize;
+            if row < self.proxy_settings.profiles.len() {
+                self.selected = self.proxy_selection_index().saturating_add(row);
+                self.set_focus(Focus::Hosts);
+                self.sync_selected_proxy();
+                return PaneAction::None;
+            }
+            return PaneAction::None;
+        }
+        if point_in_rect(x, y, layout.sidebar.new_proxy) {
+            self.selected = self.new_proxy_selection_index();
+            self.set_focus(Focus::Hosts);
+            self.sync_selected_proxy();
             return PaneAction::None;
         }
         if !point_in_rect(x, y, layout.details) {
@@ -1442,6 +1458,17 @@ struct PopupGeometry {
     dialog: Rect,
     hosts: Rect,
     details: Rect,
+    sidebar: HostSidebarGeometry,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostSidebarGeometry {
+    saved_header: Rect,
+    saved_list: Rect,
+    new_host: Rect,
+    proxy_header: Rect,
+    proxy_list: Rect,
+    new_proxy: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1576,8 +1603,9 @@ impl PopupGeometry {
         // instead of stretching to the full terminal height. The height is
         // fixed so it does not jump when the selected menu item changes
         // (e.g. Saved Host vs New Host). It shrinks only on very small
-        // terminals to keep a visible margin.
-        const POPUP_HEIGHT: u16 = 24;
+        // terminals to keep a visible margin. 28 rows gives enough room for
+        // the framed sidebar headers/buttons plus the detail sections.
+        const POPUP_HEIGHT: u16 = 28;
         let dialog_height = POPUP_HEIGHT.min(rows.saturating_sub(2)).max(14);
         let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
@@ -1605,10 +1633,82 @@ impl PopupGeometry {
             .saturating_sub(host_width)
             .saturating_sub(separator_width)
             .saturating_sub(right_padding);
+        let hosts = Rect::new(body.x, body.y, host_width, body.height);
+        let details = Rect::new(details_x, body.y, details_width, body.height);
+        let sidebar = HostSidebarGeometry::from_area(hosts, state);
         Self {
             dialog,
-            hosts: Rect::new(body.x, body.y, host_width, body.height),
-            details: Rect::new(details_x, body.y, details_width, body.height),
+            hosts,
+            details,
+            sidebar,
+        }
+    }
+}
+
+impl HostSidebarGeometry {
+    fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
+        const HEADER_HEIGHT: u16 = 3;
+        const BUTTON_HEIGHT: u16 = 3;
+        const GAP: u16 = 1;
+        const FIXED_ROWS: u16 = HEADER_HEIGHT * 2 + BUTTON_HEIGHT * 2 + GAP * 4;
+
+        let saved_content = state.profiles.len() as u16;
+        let proxy_content = state.proxy_settings.profiles.len() as u16;
+        let available_for_lists = area.height.saturating_sub(FIXED_ROWS);
+        let total_content = saved_content.saturating_add(proxy_content);
+
+        let (saved_list_height, proxy_list_height) = if total_content <= available_for_lists {
+            let leftover = available_for_lists.saturating_sub(total_content);
+            let saved_extra = leftover / 2;
+            (
+                saved_content.saturating_add(saved_extra),
+                proxy_content.saturating_add(leftover.saturating_sub(saved_extra)),
+            )
+        } else {
+            let min_each = 3_u16.min(available_for_lists / 2);
+            if available_for_lists <= min_each.saturating_mul(2) {
+                (min_each, available_for_lists.saturating_sub(min_each))
+            } else {
+                let extra = available_for_lists.saturating_sub(min_each.saturating_mul(2));
+                let saved_extra = if total_content == 0 {
+                    0
+                } else {
+                    (saved_content as u32 * extra as u32 / total_content as u32) as u16
+                };
+                (
+                    min_each.saturating_add(saved_extra),
+                    available_for_lists
+                        .saturating_sub(min_each)
+                        .saturating_sub(saved_extra),
+                )
+            }
+        };
+
+        let saved_header = Rect::new(area.x, area.y, area.width, HEADER_HEIGHT);
+        let saved_list_y = saved_header.y.saturating_add(saved_header.height).saturating_add(GAP);
+        let saved_list = Rect::new(area.x, saved_list_y, area.width, saved_list_height);
+        let new_host_y = saved_list.y.saturating_add(saved_list.height).saturating_add(GAP);
+        let new_host = Rect::new(area.x, new_host_y, area.width, BUTTON_HEIGHT);
+        let proxy_header_y = new_host.y.saturating_add(new_host.height).saturating_add(GAP);
+        let proxy_header = Rect::new(area.x, proxy_header_y, area.width, HEADER_HEIGHT);
+        let proxy_list_y = proxy_header
+            .y
+            .saturating_add(proxy_header.height)
+            .saturating_add(GAP);
+        let proxy_list = Rect::new(area.x, proxy_list_y, area.width, proxy_list_height);
+        let new_proxy_y = proxy_list
+            .y
+            .saturating_add(proxy_list.height)
+            .saturating_add(GAP);
+        let new_proxy = Rect::new(area.x, new_proxy_y, area.width, BUTTON_HEIGHT);
+
+        Self {
+            saved_header,
+            saved_list,
+            new_host,
+            proxy_header,
+            proxy_list,
+            new_proxy,
         }
     }
 }
@@ -1622,7 +1722,7 @@ impl DetailsGeometry {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // header bar
+                Constraint::Length(3), // framed header bar
                 Constraint::Min(6),    // Connection + Authentication cards
                 Constraint::Length(1), // blank
                 Constraint::Min(4),    // Options card
@@ -1726,140 +1826,72 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let rows = host_list_rows(state, area.width);
-    let items: Vec<ListItem<'static>> = rows.iter().map(|row| row.item.clone()).collect();
+    let geometry = HostSidebarGeometry::from_area(area, state);
     let hosts_focused = state.focus == Focus::Hosts;
-    let selected_row = host_list_display_row(state, state.selected);
-    let visible_height = area.height as usize;
-    let max_offset = items.len().saturating_sub(visible_height);
-    let offset = if selected_row >= visible_height {
-        (selected_row - visible_height + 1).min(max_offset)
-    } else {
-        0
-    };
-    let list = List::new(items)
-        .highlight_symbol("")
-        .highlight_style(if hosts_focused {
-            active_focus_style()
-        } else {
-            selected_host_style()
-        });
-    let mut list_state = ratatui::widgets::ListState::default()
-        .with_selected(Some(selected_row))
-        .with_offset(offset);
-    frame.render_stateful_widget(list, area, &mut list_state);
-}
 
-#[derive(Debug, Clone)]
-struct HostListRow {
-    selection: Option<usize>,
-    item: ListItem<'static>,
-}
+    render_framed_block(
+        frame,
+        geometry.saved_header,
+        header_block_content("▤", "Saved Hosts", state.profiles.len()),
+    );
+    render_host_list(
+        frame,
+        geometry.saved_list,
+        state,
+        hosts_focused,
+        0,
+        state.profiles.len(),
+    );
+    render_framed_block(
+        frame,
+        geometry.new_host,
+        button_block_content("+", "New Host"),
+    );
 
-fn host_list_rows(state: &ConnectRemoteHostState, width: u16) -> Vec<HostListRow> {
-    let mut rows = Vec::new();
-    let inner_width = width.saturating_sub(2);
-
-    // Saved Hosts header pill.
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(framed_header_line(
-            "▤",
-            "Saved Hosts",
-            state.profiles.len(),
-            inner_width,
-        )),
-    });
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(""),
-    });
-
-    // Saved host entries.
-    for (index, profile) in state.profiles.iter().enumerate() {
-        rows.push(HostListRow {
-            selection: Some(index),
-            item: ListItem::new(Line::from(vec![
-                Span::styled(" ● ", Style::default().fg(Color::Green)),
-                Span::styled(saved_host_label(profile), Style::default().fg(Color::White)),
-            ])),
-        });
-    }
-
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(""),
-    });
-    rows.push(HostListRow {
-        selection: Some(state.profiles.len()),
-        item: ListItem::new(framed_button_line("+", "New Host", inner_width)),
-    });
-
-    // Section separator.
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(""),
-    });
-
-    // Proxy Configuration header pill.
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(framed_header_line(
+    render_framed_block(
+        frame,
+        geometry.proxy_header,
+        header_block_content(
             "⛓",
             "Proxy Configuration",
             state.proxy_settings.profiles.len(),
-            inner_width,
-        )),
-    });
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(""),
-    });
+        ),
+    );
+    render_host_list(
+        frame,
+        geometry.proxy_list,
+        state,
+        hosts_focused,
+        state.proxy_selection_index(),
+        state.proxy_settings.profiles.len(),
+    );
+    render_framed_block(
+        frame,
+        geometry.new_proxy,
+        button_block_content("+", "New Proxy"),
+    );
+}
 
-    // Proxy entries.
-    for (index, profile) in state.proxy_settings.profiles.iter().enumerate() {
-        let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
-        let (prefix, color) = if active {
-            ("★", Color::Yellow)
-        } else {
-            ("●", Color::Green)
-        };
-        rows.push(HostListRow {
-            selection: Some(state.proxy_selection_index().saturating_add(index)),
-            item: ListItem::new(Line::from(vec![
-                Span::styled(format!(" {prefix} "), Style::default().fg(color)),
-                Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
-            ])),
-        });
+fn render_framed_block(frame: &mut Frame<'_>, area: Rect, content: Line<'static>) {
+    if area.height < 3 {
+        return;
     }
-
-    rows.push(HostListRow {
-        selection: None,
-        item: ListItem::new(""),
-    });
-    rows.push(HostListRow {
-        selection: Some(state.new_proxy_selection_index()),
-        item: ListItem::new(framed_button_line("+", "New Proxy", inner_width)),
-    });
-
-    rows
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SECTION_BORDER))
+        .style(Style::default().bg(SECTION_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(content)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(SECTION_BG)),
+        Rect::new(inner.x, inner.y, inner.width, inner.height),
+    );
 }
 
-fn host_list_display_row(state: &ConnectRemoteHostState, selection: usize) -> usize {
-    host_list_rows(state, u16::MAX)
-        .iter()
-        .position(|row| row.selection == Some(selection))
-        .unwrap_or(0)
-}
-
-fn selection_from_host_display_row(state: &ConnectRemoteHostState, row: usize) -> Option<usize> {
-    host_list_rows(state, u16::MAX)
-        .get(row)
-        .and_then(|host_row| host_row.selection)
-}
-
-fn framed_header_line(icon: &str, title: &str, count: usize, width: u16) -> Line<'static> {
-    let content = vec![
+fn header_block_content(icon: &str, title: &str, count: usize) -> Line<'static> {
+    Line::from(vec![
         Span::styled(icon.to_string(), Style::default().fg(Color::White)),
         Span::raw(" "),
         Span::styled(
@@ -1874,51 +1906,92 @@ fn framed_header_line(icon: &str, title: &str, count: usize, width: u16) -> Line
                 .bg(Color::Rgb(50, 55, 65))
                 .add_modifier(Modifier::BOLD),
         ),
-    ];
-    framed_line(width, content, Alignment::Left)
+    ])
 }
 
-fn framed_button_line(icon: &str, label: &str, width: u16) -> Line<'static> {
-    let content = vec![
+fn button_block_content(icon: &str, label: &str) -> Line<'static> {
+    Line::from(vec![
         Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
         Span::raw(" "),
         Span::styled(label.to_string(), Style::default().fg(Color::Gray)),
         Span::raw(" "),
         Span::styled(icon.to_string(), Style::default().fg(Color::Gray)),
-    ];
-    framed_line(width, content, Alignment::Center)
+    ])
 }
 
-fn framed_line(width: u16, content: Vec<Span<'static>>, align: Alignment) -> Line<'static> {
-    let content_width: usize = content
-        .iter()
-        .map(|span| span.content.width())
-        .sum();
-    let inner_width = width.saturating_sub(2) as usize;
-    let padding = inner_width.saturating_sub(content_width);
-    let (left_pad, right_pad) = match align {
-        Alignment::Center => {
-            let left = padding / 2;
-            (left, padding - left)
-        }
-        _ => {
-            let left = 1_usize.min(padding);
-            (left, padding - left)
-        }
+fn render_host_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &ConnectRemoteHostState,
+    hosts_focused: bool,
+    selection_offset: usize,
+    item_count: usize,
+) {
+    if area.height == 0 || item_count == 0 {
+        return;
+    }
+    let items: Vec<ListItem<'static>> = (0..item_count)
+        .map(|index| host_list_item(state, selection_offset + index))
+        .collect();
+    let selected = if state.selected >= selection_offset
+        && state.selected < selection_offset + item_count
+    {
+        Some(state.selected - selection_offset)
+    } else {
+        None
     };
-    let mut spans = Vec::with_capacity(content.len().saturating_add(4));
-    spans.push(Span::styled("┌", Style::default().fg(SECTION_BORDER)));
-    spans.push(Span::styled(
-        "─".repeat(left_pad),
-        Style::default().fg(SECTION_BORDER),
-    ));
-    spans.extend(content);
-    spans.push(Span::styled(
-        "─".repeat(right_pad),
-        Style::default().fg(SECTION_BORDER),
-    ));
-    spans.push(Span::styled("┐", Style::default().fg(SECTION_BORDER)));
-    Line::from(spans).style(Style::default().bg(SECTION_BG))
+    let visible_height = area.height as usize;
+    let selected_row = selected.unwrap_or(0);
+    let max_offset = items.len().saturating_sub(visible_height);
+    let offset = if selected_row >= visible_height {
+        (selected_row - visible_height + 1).min(max_offset)
+    } else {
+        0
+    };
+    let list = List::new(items)
+        .highlight_symbol("")
+        .highlight_style(if hosts_focused {
+            active_focus_style()
+        } else {
+            selected_host_style()
+        });
+    let mut list_state = ratatui::widgets::ListState::default()
+        .with_selected(selected)
+        .with_offset(offset);
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<'static> {
+    if selection < state.proxy_selection_index() {
+        let profile = &state.profiles[selection];
+        ListItem::new(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Green)),
+            Span::styled(saved_host_label(profile), Style::default().fg(Color::White)),
+        ]))
+    } else if selection == state.profiles.len() {
+        ListItem::new(Line::from(vec![
+            Span::styled(" + ", Style::default().fg(Color::Gray)),
+            Span::styled(" New Host ", Style::default().fg(Color::Gray)),
+        ]))
+    } else if selection < state.new_proxy_selection_index() {
+        let index = selection - state.proxy_selection_index();
+        let profile = &state.proxy_settings.profiles[index];
+        let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
+        let (prefix, color) = if active {
+            ("★", Color::Yellow)
+        } else {
+            ("●", Color::Green)
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {prefix} "), Style::default().fg(color)),
+            Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
+        ]))
+    } else {
+        ListItem::new(Line::from(vec![
+            Span::styled(" + ", Style::default().fg(Color::Gray)),
+            Span::styled(" New Proxy ", Style::default().fg(Color::Gray)),
+        ]))
+    }
 }
 
 fn saved_host_label(profile: &RemoteHostProfile) -> String {
@@ -2011,10 +2084,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     content.push(Span::raw("  "));
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
-    frame.render_widget(
-        Paragraph::new(framed_line(area.width, content, Alignment::Left)),
-        area,
-    );
+    render_framed_block(frame, area, Line::from(content));
 }
 
 fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
@@ -4220,13 +4290,11 @@ mod tests {
     fn proxy_configuration_is_global_left_nav_entry() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![saved_password_profile()];
+        state.proxy_settings = RemoteInstallProxySettings::default();
 
-        let rows = host_list_rows(&state, 27);
-        let selectable_rows = rows.iter().filter(|row| row.selection.is_some()).count();
-        assert_eq!(
-            selectable_rows,
-            state.profiles.len() + state.proxy_settings.profiles.len() + 2
-        );
+        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        assert!(popup.sidebar.saved_list.height >= 1);
+        assert!(popup.sidebar.proxy_list.height >= 1);
         assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
 
         state.selected = state.proxy_selection_index();
@@ -4255,18 +4323,20 @@ mod tests {
             ],
         };
 
-        assert_eq!(
-            host_list_display_row(&state, state.proxy_profile_selection_start()),
-            8
-        );
-        assert_eq!(
-            host_list_display_row(&state, state.proxy_profile_selection_start() + 1),
-            9
-        );
-        assert_eq!(
-            host_list_display_row(&state, state.new_proxy_selection_index()),
-            11
-        );
+        let popup = PopupGeometry::from_terminal_size((100, 30), &state);
+        assert!(popup.sidebar.proxy_list.height >= 2);
+
+        state.selected = state.proxy_profile_selection_start();
+        state.sync_selected_proxy();
+        assert_eq!(state.proxy_draft.name, "Home");
+
+        state.selected = state.proxy_profile_selection_start() + 1;
+        state.sync_selected_proxy();
+        assert_eq!(state.proxy_draft.name, "Office");
+
+        state.selected = state.new_proxy_selection_index();
+        state.sync_selected_proxy();
+        assert!(state.proxy_draft.name.is_empty());
     }
 
     #[test]
