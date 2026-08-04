@@ -1880,21 +1880,22 @@ fn render_framed_block(
     if area.height < 3 {
         return;
     }
-    let (border_color, bg_color) = if selected {
-        (Color::Blue, Color::Blue)
+    let border_color = SECTION_BORDER;
+    let (block_bg, content_bg) = if selected {
+        (SECTION_BG, Color::Blue)
     } else {
-        (SECTION_BORDER, SECTION_BG)
+        (SECTION_BG, SECTION_BG)
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(bg_color));
+        .style(Style::default().bg(block_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(content)
             .alignment(alignment)
-            .style(Style::default().bg(bg_color)),
+            .style(Style::default().bg(content_bg)),
         Rect::new(inner.x, inner.y, inner.width, inner.height),
     );
 }
