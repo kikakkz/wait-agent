@@ -1726,10 +1726,10 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let items = host_list_items(state);
     // Scroll the left menu so the selected item stays visible when the list
     // is longer than the popup body.
     let selected_row = display_row_from_selection(state, state.selected);
+    let items = host_list_items(state, selected_row);
     let visible_height = area.height as usize;
     let max_offset = items.len().saturating_sub(visible_height);
     let offset = if selected_row >= visible_height {
@@ -1744,7 +1744,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
                 .border_style(Style::default().fg(Color::DarkGray))
                 .style(Style::default().bg(DIALOG_BG)),
         )
-        .highlight_symbol("▶ ")
+        .highlight_symbol("")
         .highlight_style(if state.focus == Focus::Hosts {
             active_focus_style()
         } else {
@@ -1760,44 +1760,79 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
     format!("{}@{}", profile.ssh_user, profile.host)
 }
 
-fn host_list_items(state: &ConnectRemoteHostState) -> Vec<ListItem<'static>> {
+fn host_list_items(
+    state: &ConnectRemoteHostState,
+    selected_row: usize,
+) -> Vec<ListItem<'static>> {
     host_list_labels(state)
         .into_iter()
         .enumerate()
-        .map(|(index, label)| styled_host_list_item(state, index, &label))
+        .map(|(index, label)| styled_host_list_item(state, index, selected_row, &label))
         .collect()
 }
 
 fn styled_host_list_item(
     state: &ConnectRemoteHostState,
     index: usize,
+    selected_row: usize,
     label: &str,
 ) -> ListItem<'static> {
     let is_header = index == 0 || index == proxy_heading_display_row(state);
     let is_action = label.starts_with('+');
+    let is_selected = index == selected_row;
+
     if is_header {
-        ListItem::new(Line::from(Span::styled(
-            label.to_string(),
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::White),
-        )))
-    } else if is_action {
-        ListItem::new(Line::from(Span::styled(
-            label.to_string(),
-            Style::default().fg(Color::DarkGray),
-        )))
-    } else {
-        let icon = if label.contains('★') {
-            Span::styled("  ★ ", Style::default().fg(Color::Yellow))
+        let (icon, title, count) = if index == 0 {
+            ("▤", "Saved Hosts", state.profiles.len())
         } else {
-            Span::styled("  ● ", Style::default().fg(Color::Green))
+            ("⛓", "Proxy Configuration", state.proxy_settings.profiles.len())
         };
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" {icon} {title} "),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(HEADER_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {count} "),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(50, 55, 65))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::default().bg(HEADER_BG))
+    } else if is_action {
+        let text = label.trim_start_matches('+').trim_start();
+        ListItem::new(Line::from(vec![
+            Span::styled(" + ", Style::default().fg(Color::Gray).bg(ACTION_BG)),
+            Span::styled(
+                format!(" {text} "),
+                Style::default().fg(Color::Gray).bg(ACTION_BG),
+            ),
+        ]))
+    } else {
+        let is_active_proxy = label.contains('★');
         let text = label
             .trim_start_matches("  ● ")
             .trim_start_matches("  ★ ")
             .to_string();
-        ListItem::new(Line::from(vec![icon, Span::raw(text)]))
+        let (prefix, prefix_color) = if is_selected {
+            ("▶", Color::White)
+        } else if is_active_proxy {
+            ("★", Color::Yellow)
+        } else {
+            ("●", Color::Green)
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" {prefix} "),
+                Style::default().fg(prefix_color),
+            ),
+            Span::styled(text, Style::default().fg(Color::White)),
+        ]))
     }
 }
 
@@ -1840,7 +1875,7 @@ fn proxy_menu_label(
 ) -> String {
     let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
     if active {
-        format!("  ★ {} *", profile.name)
+        format!("  ★ {}", profile.name)
     } else {
         format!("  ● {}", profile.name)
     }
@@ -1917,6 +1952,7 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
 
 const DIALOG_BG: Color = Color::Rgb(22, 24, 30);
 const HEADER_BG: Color = Color::Rgb(32, 36, 43);
+const ACTION_BG: Color = Color::Rgb(40, 44, 52);
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     frame.render_widget(
@@ -1935,7 +1971,12 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     };
     let mut spans = vec![
         Span::styled("● ", Style::default().fg(status_color)),
-        Span::styled(host, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            host,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
     if state.selected < state.profiles.len() {
         spans.push(Span::raw("  "));
@@ -2114,6 +2155,7 @@ fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let block = section_block(
         "Connection",
+        "◎",
         SECTION_COLOR_CONNECTION,
         SECTION_BG_CONNECTION,
     );
@@ -2153,7 +2195,7 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let block = section_block("Authentication", SECTION_COLOR_AUTH, SECTION_BG_AUTH);
+    let block = section_block("Authentication", "◼", SECTION_COLOR_AUTH, SECTION_BG_AUTH);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let table_area = Rect::new(
@@ -2190,36 +2232,61 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
 }
 
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let block = section_block("Options", SECTION_COLOR_OPTIONS, SECTION_BG_OPTIONS);
+    let block = section_block("Options", "⚙", SECTION_COLOR_OPTIONS, SECTION_BG_OPTIONS);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let table_area = Rect::new(
+    let row_width = inner
+        .width
+        .saturating_sub(SECTION_CONTENT_INDENT)
+        .saturating_sub(1);
+    let remember_area = Rect::new(
         inner.x.saturating_add(SECTION_CONTENT_INDENT),
         inner.y,
-        inner.width.saturating_sub(SECTION_CONTENT_INDENT),
-        inner.height,
+        row_width,
+        1,
     );
-    let rows = vec![
-        icon_detail_row(
-            "☐",
-            "Remember host",
-            if state.remember { "☑" } else { "☐" },
-            state,
-            Focus::Remember,
-        ),
-        icon_detail_row(
-            "☐",
-            "Use proxy",
-            if state.use_install_proxy {
-                "☑"
-            } else {
-                "☐"
-            },
-            state,
-            Focus::InstallProxy,
-        ),
-    ];
-    render_detail_table(frame, table_area, rows);
+    let proxy_area = Rect::new(
+        inner.x.saturating_add(SECTION_CONTENT_INDENT),
+        inner.y.saturating_add(1),
+        row_width,
+        1,
+    );
+    render_checkbox_row(
+        frame,
+        remember_area,
+        state.remember,
+        "Remember host",
+        state,
+        Focus::Remember,
+    );
+    render_checkbox_row(
+        frame,
+        proxy_area,
+        state.use_install_proxy,
+        "Use proxy",
+        state,
+        Focus::InstallProxy,
+    );
+}
+
+fn render_checkbox_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    checked: bool,
+    label: &str,
+    state: &ConnectRemoteHostState,
+    focus: Focus,
+) {
+    let box_symbol = if checked { "☑" } else { "☐" };
+    let style = if state.focus == focus {
+        active_focus_style()
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{box_symbol} {label}")).style(style),
+        area,
+    );
 }
 
 const SECTION_COLOR_CONNECTION: Color = Color::Cyan;
@@ -2230,24 +2297,27 @@ const SECTION_BG_AUTH: Color = Color::Rgb(40, 24, 48);
 const SECTION_BG_OPTIONS: Color = Color::Rgb(46, 40, 22);
 const SECTION_BG_INFO: Color = Color::Rgb(32, 36, 43);
 
-fn section_block(title: &str, color: Color, bg: Color) -> Block<'static> {
+fn section_block(title: &str, icon: &str, color: Color, bg: Color) -> Block<'static> {
     Block::default()
-        .title(section_title(title, color))
+        .title(section_title(title, icon, color))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(color))
         .style(Style::default().bg(bg))
 }
 
-fn section_title(title: &str, color: Color) -> Line<'static> {
-    Line::from(format!(" {} {}", SECTION_TITLE_ICON, title))
+fn section_title(title: &str, icon: &str, color: Color) -> Line<'static> {
+    Line::from(format!(" {icon} {title}"))
         .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
 }
 
-const SECTION_TITLE_ICON: &str = "◈";
+fn modal_title(title: &str) -> Line<'static> {
+    Line::from(format!(" {title}"))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+}
 
 fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str, color: Color) {
     frame.render_widget(
-        Paragraph::new(section_title(title, color)),
+        Paragraph::new(section_title(title, "◈", color)),
         Rect::new(
             area.x.saturating_add(SECTION_TITLE_INDENT),
             area.y,
@@ -2268,9 +2338,9 @@ where
 
 fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let connect_label = connect_label(state);
-    let connect_text = format!(" {}  <Enter> ", connect_label);
+    let connect_text = format!(" ▶ {}  <Enter> ", connect_label);
     let connect_width = connect_text.width() as u16;
-    let delete_text = " Delete ".to_string();
+    let delete_text = " 🗑 Delete  <D> ".to_string();
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
@@ -2299,7 +2369,9 @@ fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
         let delete_style = if state.focus == Focus::Delete {
             delete_focus_style()
         } else {
-            Style::default().fg(Color::Red)
+            Style::default()
+                .bg(Color::Rgb(40, 44, 52))
+                .fg(Color::Red)
         };
         frame.render_widget(
             Paragraph::new(delete_text)
@@ -2315,9 +2387,9 @@ fn button_action_from_x(
     buttons_area: Rect,
     state: &ConnectRemoteHostState,
 ) -> Option<Focus> {
-    let connect_text = format!(" {}  <Enter> ", connect_label(state));
+    let connect_text = format!(" ▶ {}  <Enter> ", connect_label(state));
     let connect_width = connect_text.width() as u16;
-    let delete_text = " Delete ";
+    let delete_text = " 🗑 Delete  <D> ";
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
@@ -2717,7 +2789,7 @@ fn render_connecting_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState
         ConnectingGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Connecting", Color::White))
+        .title(modal_title("Connecting"))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     frame.render_widget(
@@ -2737,7 +2809,7 @@ fn render_connect_error_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostSt
         ConnectErrorGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Connect failed", Color::White))
+        .title(modal_title("Connect failed"))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     frame.render_widget(
@@ -2764,7 +2836,7 @@ fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) 
         DeleteConfirmGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Delete saved host", Color::White))
+        .title(modal_title("Delete saved host"))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     let message_area = Rect::new(
@@ -4215,7 +4287,7 @@ mod tests {
                     state.proxy_profile_selection_start() + 1
                 ))
                 .map(String::as_str),
-            Some("  ★ Office *")
+            Some("  ★ Office")
         );
         assert_eq!(
             labels
