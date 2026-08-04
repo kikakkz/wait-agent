@@ -1747,10 +1747,12 @@ impl DetailsGeometry {
 impl ProxyDetailsGeometry {
     fn from_area(area: Rect) -> Self {
         let bottom = area.y.saturating_add(area.height);
-        let proxy_height = area.height.min(4);
+        // Bordered cards: proxy config needs 3 content rows + 2 border rows;
+        // no_proxy needs 1 content row + 2 border rows.
+        let proxy_height = area.height.min(5);
         let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
-        let no_proxy_y = area.y.saturating_add(proxy_height);
-        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
+        let no_proxy_y = area.y.saturating_add(proxy_height).saturating_add(1);
+        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(3);
         let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
         let action_y = no_proxy_y
             .saturating_add(no_proxy_height)
@@ -1769,7 +1771,7 @@ impl ProxyDetailsGeometry {
             name: proxy.y.saturating_add(1).saturating_sub(area.y),
             all_proxy: proxy.y.saturating_add(2).saturating_sub(area.y),
             https_proxy: proxy.y.saturating_add(3).saturating_sub(area.y),
-            no_proxy: no_proxy.y.saturating_sub(area.y),
+            no_proxy: no_proxy.y.saturating_add(1).saturating_sub(area.y),
             action: save.y.saturating_sub(area.y),
         };
         Self {
@@ -1980,7 +1982,7 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
     } else if selection == state.profiles.len() {
         ListItem::new(Line::from(vec![
             Span::styled(" +  ", Style::default().fg(Color::Gray)),
-            Span::styled("New Host", Style::default().fg(Color::Gray)),
+            Span::raw("New Host"),
         ]))
     } else if selection < state.new_proxy_selection_index() {
         let index = selection - state.proxy_selection_index();
@@ -1998,7 +2000,7 @@ fn host_list_item(state: &ConnectRemoteHostState, selection: usize) -> ListItem<
     } else {
         ListItem::new(Line::from(vec![
             Span::styled(" +  ", Style::default().fg(Color::Gray)),
-            Span::styled("New Proxy", Style::default().fg(Color::Gray)),
+            Span::raw("New Proxy"),
         ]))
     }
 }
@@ -2010,7 +2012,6 @@ fn saved_host_label(profile: &RemoteHostProfile) -> String {
 const POPUP_WIDTH: u16 = 100;
 const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 0;
-const SECTION_TITLE_INDENT: u16 = 2;
 const SECTION_CONTENT_INDENT: u16 = 0;
 const LABEL_WIDTH: u16 = 16;
 const DETAIL_VALUE_START: u16 = SECTION_CONTENT_INDENT + LABEL_WIDTH + 1;
@@ -2137,15 +2138,16 @@ fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
             Focus::HttpsProxy,
         ),
     ];
-    render_section_title(frame, geometry.proxy, "Proxy Configuration", Color::Green);
-    let table_area = Rect::new(
-        geometry.proxy.x,
-        geometry.proxy.y.saturating_add(1),
-        geometry.proxy.width,
-        geometry.proxy.height.saturating_sub(1),
-    );
-    render_detail_table(frame, table_area, rows);
-    render_no_proxy(frame, geometry.no_proxy, state);
+    let proxy_block = section_block("Proxy Configuration", "⛓", SECTION_COLOR_CONNECTION);
+    let proxy_inner = proxy_block.inner(geometry.proxy);
+    frame.render_widget(proxy_block, geometry.proxy);
+    render_detail_table(frame, proxy_inner, rows);
+
+    let no_proxy_block = section_block("No Proxy", "⊘", SECTION_COLOR_OPTIONS);
+    let no_proxy_inner = no_proxy_block.inner(geometry.no_proxy);
+    frame.render_widget(no_proxy_block, geometry.no_proxy);
+    render_no_proxy(frame, no_proxy_inner, state);
+
     render_proxy_save(frame, geometry.save, state);
     render_status(frame, geometry.status, state);
 }
@@ -2410,18 +2412,6 @@ fn section_title(title: &str, icon: &str, icon_color: Color) -> Line<'static> {
 fn modal_title(title: &str) -> Line<'static> {
     Line::from(format!(" {title}"))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
-}
-
-fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str, color: Color) {
-    frame.render_widget(
-        Paragraph::new(section_title(title, "◈", color)),
-        Rect::new(
-            area.x.saturating_add(SECTION_TITLE_INDENT),
-            area.y,
-            area.width.saturating_sub(SECTION_TITLE_INDENT),
-            1,
-        ),
-    );
 }
 
 fn render_detail_table<I>(frame: &mut Frame<'_>, area: Rect, rows: I)
