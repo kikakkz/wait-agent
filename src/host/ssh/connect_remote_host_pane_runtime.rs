@@ -724,12 +724,24 @@ impl ConnectRemoteHostState {
         }
         let details = DetailsGeometry::from_area(layout.details, self);
         match row {
-            row if row == details.rows.host => self.set_focus(Focus::Host),
-            row if row == details.rows.port => self.set_focus(Focus::Port),
-            row if row == details.rows.user => self.set_focus(Focus::User),
-            row if row == details.rows.auth => self.set_focus(Focus::Auth),
-            row if row == details.rows.password => self.set_focus(Focus::Password),
-            row if row == details.rows.sudo => self.set_focus(Focus::Sudo),
+            row if row == details.rows.host && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::Host)
+            }
+            row if row == details.rows.port && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::Port)
+            }
+            row if row == details.rows.user && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::User)
+            }
+            row if row == details.rows.auth && point_in_rect(x, y, details.authentication) => {
+                self.set_focus(Focus::Auth)
+            }
+            row if row == details.rows.password && point_in_rect(x, y, details.authentication) => {
+                self.set_focus(Focus::Password)
+            }
+            row if row == details.rows.sudo && point_in_rect(x, y, details.authentication) => {
+                self.set_focus(Focus::Sudo)
+            }
             row if row == details.rows.remember => {
                 self.set_focus(Focus::Remember);
                 self.delete_confirm = DeleteConfirmState::Idle;
@@ -1434,9 +1446,11 @@ struct PopupGeometry {
 
 #[derive(Debug, Clone, Copy)]
 struct DetailsGeometry {
+    header: Rect,
     connection: Rect,
     authentication: Rect,
     options: Rect,
+    info: Rect,
     buttons: Rect,
     hint: Rect,
     rows: DetailsRows,
@@ -1601,39 +1615,46 @@ impl PopupGeometry {
 
 impl DetailsGeometry {
     fn from_area(area: Rect, _state: &ConnectRemoteHostState) -> Self {
-        // Sections are separated by blank rows so the details area does not
-        // feel crowded when the popup is tall. Min constraints let ratatui
-        // distribute extra height as breathing room while keeping each
-        // section's content anchored at the top.
+        // Layout inspired by the UI mock: header, then Connection and
+        // Authentication side-by-side, then Options, an info box, action
+        // buttons, and a bottom hint bar. Blank rows provide visual
+        // separation between sections.
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(4),    // Connection title + 3 rows
-                Constraint::Length(1), // blank
-                Constraint::Min(4),    // Authentication title + 3 rows
+                Constraint::Length(1), // header
+                Constraint::Min(5),    // Connection + Authentication
                 Constraint::Length(1), // blank
                 Constraint::Min(3),    // Options title + 2 rows
+                Constraint::Length(1), // blank
+                Constraint::Min(2),    // info box
                 Constraint::Length(1), // blank
                 Constraint::Length(1), // buttons
                 Constraint::Length(1), // hint
             ])
             .split(area);
+        let top_columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(sections[1]);
         let rows = DetailsRows {
-            host: sections[0].y.saturating_add(1).saturating_sub(area.y),
-            port: sections[0].y.saturating_add(2).saturating_sub(area.y),
-            user: sections[0].y.saturating_add(3).saturating_sub(area.y),
-            auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
-            password: sections[2].y.saturating_add(2).saturating_sub(area.y),
-            sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
-            remember: sections[4].y.saturating_add(1).saturating_sub(area.y),
-            install_proxy: sections[4].y.saturating_add(2).saturating_sub(area.y),
+            host: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            port: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            user: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            auth: sections[1].y.saturating_add(1).saturating_sub(area.y),
+            password: sections[1].y.saturating_add(2).saturating_sub(area.y),
+            sudo: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            remember: sections[3].y.saturating_add(1).saturating_sub(area.y),
+            install_proxy: sections[3].y.saturating_add(2).saturating_sub(area.y),
         };
         Self {
-            connection: sections[0],
-            authentication: sections[2],
-            options: sections[4],
-            buttons: sections[6],
-            hint: sections[7],
+            header: sections[0],
+            connection: top_columns[0],
+            authentication: top_columns[1],
+            options: sections[3],
+            info: sections[5],
+            buttons: sections[7],
+            hint: sections[8],
             rows,
         }
     }
@@ -1828,12 +1849,12 @@ fn proxy_heading_display_row(state: &ConnectRemoteHostState) -> usize {
     state.proxy_selection_index().saturating_add(1)
 }
 
-const POPUP_WIDTH: u16 = 100;
+const POPUP_WIDTH: u16 = 120;
 const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 2;
 const SECTION_TITLE_INDENT: u16 = 2;
 const SECTION_CONTENT_INDENT: u16 = 4;
-const LABEL_WIDTH: u16 = 12;
+const LABEL_WIDTH: u16 = 16;
 const DETAIL_VALUE_START: u16 = SECTION_CONTENT_INDENT + LABEL_WIDTH + 1;
 const PROXY_VALUE_START: u16 = LABEL_WIDTH + 1;
 
@@ -1860,11 +1881,67 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         return;
     }
     let geometry = DetailsGeometry::from_area(area, state);
+    render_header(frame, geometry.header, state);
     render_connection(frame, geometry.connection, state);
     render_authentication(frame, geometry.authentication, state);
     render_options(frame, geometry.options, state);
+    render_info_box(frame, geometry.info, state);
     render_action_buttons(frame, geometry.buttons, state);
     render_hint(frame, geometry.hint, state);
+}
+
+fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let host = if state.host.is_empty() {
+        "New Host".to_string()
+    } else {
+        format!("{}@{}", state.ssh_user, state.host)
+    };
+    let status_color = if state.selected >= state.profiles.len() {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    let mut spans = vec![
+        Span::styled("● ", Style::default().fg(status_color)),
+        Span::styled(host, Style::default().add_modifier(Modifier::BOLD)),
+    ];
+    if state.selected < state.profiles.len() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            " SSH ",
+            Style::default().bg(Color::Cyan).fg(Color::Black),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            " Saved ",
+            Style::default().bg(Color::Green).fg(Color::Black),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let star = if state.selected >= state.profiles.len() {
+        "☆"
+    } else {
+        "★"
+    };
+    let star_width = star.width() as u16;
+    if area.width > star_width {
+        frame.render_widget(
+            Paragraph::new(star).style(Style::default().fg(Color::Yellow)),
+            Rect::new(area.x + area.width - star_width, area.y, star_width, 1),
+        );
+    }
+}
+
+fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
+    if area.height == 0 {
+        return;
+    }
+    let text = "ⓘ Connect to the selected remote host via SSH.\n  All session settings will be applied after connection.";
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(Color::Gray)),
+        area,
+    );
 }
 
 fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -1884,7 +1961,7 @@ fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
             Focus::HttpsProxy,
         ),
     ];
-    render_section_title(frame, geometry.proxy, "Proxy Configuration");
+    render_section_title(frame, geometry.proxy, "Proxy Configuration", Color::Green);
     let table_area = Rect::new(
         geometry.proxy.x,
         geometry.proxy.y.saturating_add(1),
@@ -1995,7 +2072,7 @@ fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    render_section_title(frame, area, "Connection");
+    render_section_title(frame, area, "Connection", SECTION_COLOR_CONNECTION);
     let table_area = Rect::new(
         area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
@@ -2003,8 +2080,9 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         area.height.saturating_sub(1),
     );
     let mut rows = vec![
-        detail_row("Host", &host_display(state), state, Focus::Host),
-        detail_row(
+        icon_detail_row("●", "Host", &host_display(state), state, Focus::Host),
+        icon_detail_row(
+            "◆",
             "Listen Port",
             &state.remote_port_preference,
             state,
@@ -2012,37 +2090,59 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         ),
     ];
     if let Some(port) = state.last_remote_port {
-        rows.push(readonly_detail_row("Last Port", &port.to_string()));
+        rows.push(readonly_icon_detail_row(
+            "→",
+            "Last Port",
+            &port.to_string(),
+        ));
     }
-    rows.push(detail_row("SSH User", &state.ssh_user, state, Focus::User));
+    rows.push(icon_detail_row(
+        "◇",
+        "SSH User",
+        &state.ssh_user,
+        state,
+        Focus::User,
+    ));
     render_detail_table(frame, table_area, rows);
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    render_section_title(frame, area, "Authentication");
+    render_section_title(frame, area, "Authentication", SECTION_COLOR_AUTH);
     let table_area = Rect::new(
         area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
         area.width.saturating_sub(SECTION_CONTENT_INDENT),
         area.height.saturating_sub(1),
     );
-    let mut rows = vec![choice_row("Auth", auth_tabs(state), state, Focus::Auth)];
+    let mut rows = vec![icon_choice_row(
+        "○",
+        "Auth Method",
+        auth_tabs(state),
+        state,
+        Focus::Auth,
+    )];
     if state.auth == AuthChoice::Key {
-        rows.push(detail_row(
+        rows.push(icon_detail_row(
+            "■",
             "Key",
             &password_display(state),
             state,
             Focus::Password,
         ));
     } else {
-        rows.push(password_row("Password", PasswordField::Ssh, state));
+        rows.push(icon_password_row(
+            "■",
+            "Password",
+            PasswordField::Ssh,
+            state,
+        ));
     }
-    rows.push(password_row("Sudo", PasswordField::Sudo, state));
+    rows.push(icon_password_row("▲", "Sudo", PasswordField::Sudo, state));
     render_detail_table(frame, table_area, rows);
 }
 
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    render_section_title(frame, area, "Options");
+    render_section_title(frame, area, "Options", SECTION_COLOR_OPTIONS);
     let table_area = Rect::new(
         area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
@@ -2050,22 +2150,20 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
         area.height.saturating_sub(1),
     );
     let rows = vec![
-        detail_row(
-            "Save",
-            if state.remember {
-                "[x] Remember host"
-            } else {
-                "[ ] Do not save"
-            },
+        icon_detail_row(
+            "☐",
+            "Remember host",
+            if state.remember { "☑" } else { "☐" },
             state,
             Focus::Remember,
         ),
-        detail_row(
-            "Install",
+        icon_detail_row(
+            "☐",
+            "Use proxy",
             if state.use_install_proxy {
-                "[x] Use proxy"
+                "☑"
             } else {
-                "[ ] Do not use"
+                "☐"
             },
             state,
             Focus::InstallProxy,
@@ -2074,13 +2172,20 @@ fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
     render_detail_table(frame, table_area, rows);
 }
 
-fn section_title(title: &str) -> Line<'static> {
-    Line::from(title.to_string()).style(Style::default().add_modifier(Modifier::BOLD))
+const SECTION_COLOR_CONNECTION: Color = Color::Cyan;
+const SECTION_COLOR_AUTH: Color = Color::Magenta;
+const SECTION_COLOR_OPTIONS: Color = Color::Yellow;
+
+fn section_title(title: &str, color: Color) -> Line<'static> {
+    Line::from(format!(" {} {}", SECTION_TITLE_ICON, title))
+        .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
 }
 
-fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
+const SECTION_TITLE_ICON: &str = "◈";
+
+fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str, color: Color) {
     frame.render_widget(
-        Paragraph::new(section_title(title)),
+        Paragraph::new(section_title(title, color)),
         Rect::new(
             area.x.saturating_add(SECTION_TITLE_INDENT),
             area.y,
@@ -2100,34 +2205,43 @@ where
 }
 
 fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let connect_text = format!("[  {}  ]", connect_label(state));
+    let connect_label = connect_label(state);
+    let connect_text = format!(" {}  <Enter> ", connect_label);
     let connect_width = connect_text.width() as u16;
-    let delete_text = format!("[ {} ]", delete_label(state));
+    let delete_text = " Delete ".to_string();
     let delete_width = delete_text.width() as u16;
-    let gap = 4;
+    let gap = 2;
     let total_width = if state.has_saved_selection() {
         connect_width + gap + delete_width
     } else {
         connect_width
     };
     let start_x = area.x + (area.width.saturating_sub(total_width)) / 2;
+
+    let connect_style = if state.focus == Focus::Connect {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    };
     frame.render_widget(
         Paragraph::new(connect_text)
-            .style(action_focus_style(
-                state.focus == Focus::Connect,
-                Focus::Connect,
-            ))
+            .style(connect_style)
             .alignment(Alignment::Center),
         Rect::new(start_x, area.y, connect_width, 1),
     );
     if state.has_saved_selection() {
         let delete_x = start_x + connect_width + gap;
+        let delete_style = if state.focus == Focus::Delete {
+            delete_focus_style()
+        } else {
+            Style::default().fg(Color::Red)
+        };
         frame.render_widget(
             Paragraph::new(delete_text)
-                .style(action_focus_style(
-                    state.focus == Focus::Delete,
-                    Focus::Delete,
-                ))
+                .style(delete_style)
                 .alignment(Alignment::Center),
             Rect::new(delete_x, area.y, delete_width, 1),
         );
@@ -2139,11 +2253,11 @@ fn button_action_from_x(
     buttons_area: Rect,
     state: &ConnectRemoteHostState,
 ) -> Option<Focus> {
-    let connect_text = format!("[  {}  ]", connect_label(state));
+    let connect_text = format!(" {}  <Enter> ", connect_label(state));
     let connect_width = connect_text.width() as u16;
-    let delete_text = format!("[ {} ]", delete_label(state));
+    let delete_text = " Delete ";
     let delete_width = delete_text.width() as u16;
-    let gap = 4;
+    let gap = 2;
     let total_width = if state.has_saved_selection() {
         connect_width + gap + delete_width
     } else {
@@ -2164,19 +2278,28 @@ fn button_action_from_x(
 
 fn render_hint(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     frame.render_widget(
-        Paragraph::new(hint_text(state)).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(bottom_hint_text(state))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray)),
         area,
     );
 }
 
-fn hint_text(state: &ConnectRemoteHostState) -> &'static str {
+fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
     match state.focus {
-        Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next",
-        Focus::Auth => "←/→: switch auth · Tab: next",
-        Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next",
-        Focus::Connect => "Enter: connect · Tab: next",
-        Focus::Delete => "Enter: delete · Tab: next",
-        _ => "Tab/↑/↓: navigate · Enter: edit · Esc: back to list",
+        Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next".to_string(),
+        Focus::Auth => "←/→: switch auth · Tab: next".to_string(),
+        Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
+        Focus::Connect => "Enter: connect · Tab: next".to_string(),
+        Focus::Delete => "Enter: delete · Tab: next".to_string(),
+        _ => {
+            let base = "↑/↓ Select · Tab Switch · Enter Connect";
+            if state.has_saved_selection() {
+                format!("{base} · D Delete · Esc Back")
+            } else {
+                format!("{base} · Esc Back")
+            }
+        }
     }
 }
 
@@ -2293,6 +2416,39 @@ fn choice_row(
         Line::from(format!("{label:<width$}", width = LABEL_WIDTH as usize)).style(label_style),
         choice_line(value, focused).alignment(Alignment::Right),
     ])
+}
+
+fn icon_detail_row(
+    icon: &str,
+    label: &str,
+    value: &str,
+    state: &ConnectRemoteHostState,
+    focus: Focus,
+) -> Row<'static> {
+    detail_row(&format!("{icon} {label}"), value, state, focus)
+}
+
+fn readonly_icon_detail_row(icon: &str, label: &str, value: &str) -> Row<'static> {
+    readonly_detail_row(&format!("{icon} {label}"), value)
+}
+
+fn icon_password_row(
+    icon: &str,
+    label: &str,
+    field: PasswordField,
+    state: &ConnectRemoteHostState,
+) -> Row<'static> {
+    password_row(&format!("{icon} {label}"), field, state)
+}
+
+fn icon_choice_row(
+    icon: &str,
+    label: &str,
+    value: Vec<ChoiceSegment>,
+    state: &ConnectRemoteHostState,
+    focus: Focus,
+) -> Row<'static> {
+    choice_row(&format!("{icon} {label}"), value, state, focus)
 }
 
 fn active_focus_style() -> Style {
@@ -2443,6 +2599,7 @@ enum PasswordField {
     Sudo,
 }
 
+#[cfg(test)]
 fn delete_label(_state: &ConnectRemoteHostState) -> String {
     "Delete".to_string()
 }
@@ -2498,7 +2655,7 @@ fn render_connecting_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState
         ConnectingGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Connecting"))
+        .title(section_title("Connecting", Color::White))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     frame.render_widget(
@@ -2518,7 +2675,7 @@ fn render_connect_error_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostSt
         ConnectErrorGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Connect failed"))
+        .title(section_title("Connect failed", Color::White))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     frame.render_widget(
@@ -2545,7 +2702,7 @@ fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) 
         DeleteConfirmGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
     let block = Block::default()
-        .title(section_title("Delete saved host"))
+        .title(section_title("Delete saved host", Color::White))
         .borders(Borders::ALL);
     frame.render_widget(block, geometry.dialog);
     let message_area = Rect::new(
@@ -3628,17 +3785,17 @@ mod tests {
         state.selected = 1;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((120, 26), &state);
+        let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
         assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 100);
+        assert_eq!(geometry.dialog.width, 120);
         // Height is fixed relative to the terminal, not to the selected item.
         assert_eq!(geometry.dialog.height, 24);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
         assert_eq!(geometry.hosts.height, 22);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 86);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -3647,7 +3804,7 @@ mod tests {
         // Switching to New Host should not change the popup geometry.
         state.selected = state.profiles.len();
         let _ = state.sync_selected_profile();
-        let new_host_geometry = PopupGeometry::from_terminal_size((120, 26), &state);
+        let new_host_geometry = PopupGeometry::from_terminal_size((140, 26), &state);
         assert_eq!(new_host_geometry.dialog.height, geometry.dialog.height);
         assert_eq!(new_host_geometry.hosts.height, geometry.hosts.height);
     }
@@ -3672,12 +3829,12 @@ mod tests {
         state.selected = 0;
         let _ = state.sync_selected_profile();
 
-        let geometry = PopupGeometry::from_terminal_size((120, 26), &state);
+        let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
         assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 100);
+        assert_eq!(geometry.dialog.width, 120);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 86);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -3772,12 +3929,12 @@ mod tests {
         state.selected = state.proxy_profile_selection_start();
         state.sync_selected_proxy();
 
-        let geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+        let geometry = PopupGeometry::from_terminal_size((140, 26), &state);
 
         assert_eq!(geometry.dialog.x, 10);
-        assert_eq!(geometry.dialog.width, 100);
+        assert_eq!(geometry.dialog.width, 120);
         assert_eq!(geometry.hosts.width, 29);
-        assert_eq!(geometry.details.width, 66);
+        assert_eq!(geometry.details.width, 86);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
@@ -4102,7 +4259,7 @@ mod tests {
         assert!(output.contains("Use proxy"));
         assert!(output.contains("Connect"));
         assert!(output.contains("Delete"));
-        assert!(output.contains(hint_text(&state)));
+        assert!(output.contains(&bottom_hint_text(&state)));
     }
 
     #[test]
@@ -4264,7 +4421,7 @@ mod tests {
         let details = DetailsGeometry::from_area(geometry.details, &state);
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + 20,
+            column: geometry.details.x + geometry.details.width - 10,
             row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
@@ -4666,7 +4823,7 @@ mod tests {
 
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + 36,
+            column: geometry.details.x + geometry.details.width - 10,
             row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
