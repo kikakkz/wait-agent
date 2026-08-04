@@ -1752,7 +1752,7 @@ impl ProxyDetailsGeometry {
         let proxy_height = area.height.min(5);
         let proxy = Rect::new(area.x, area.y, area.width, proxy_height);
         let no_proxy_y = area.y.saturating_add(proxy_height).saturating_add(1);
-        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(3);
+        let no_proxy_height = bottom.saturating_sub(no_proxy_y).min(5);
         let no_proxy = Rect::new(area.x, no_proxy_y, area.width, no_proxy_height);
         let action_y = no_proxy_y
             .saturating_add(no_proxy_height)
@@ -2201,7 +2201,7 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         ])
         .split(area);
     let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
-    let active_label = if active { "Active" } else { "Set Active" };
+    let active_label = if active { "✓ Active" } else { "✓ Set Active" };
     let primary_style = |focused: bool| {
         if focused {
             Style::default()
@@ -2209,7 +2209,9 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().bg(Color::Blue).fg(Color::White)
+            Style::default()
+                .bg(Color::Rgb(40, 44, 52))
+                .fg(Color::Gray)
         }
     };
     frame.render_widget(
@@ -2219,7 +2221,7 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         columns[0],
     );
     frame.render_widget(
-        Paragraph::new("Save")
+        Paragraph::new("💾 Save")
             .style(primary_style(state.focus == Focus::ProxySave))
             .alignment(Alignment::Center),
         columns[1],
@@ -2232,7 +2234,7 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
             .fg(Color::Red)
     };
     frame.render_widget(
-        Paragraph::new("Delete")
+        Paragraph::new("🗑 Delete")
             .style(delete_style)
             .alignment(Alignment::Center),
         columns[2],
