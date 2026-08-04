@@ -26,6 +26,7 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct ConnectRemoteHostPaneRuntime {
@@ -483,11 +484,7 @@ impl ConnectRemoteHostState {
             KeyCode::Up => self.move_up(),
             KeyCode::Down => self.move_down(),
             KeyCode::Left => {
-                if self.focus == Focus::PasswordToggle {
-                    self.set_focus(Focus::Password);
-                } else if self.focus == Focus::SudoToggle {
-                    self.set_focus(Focus::Sudo);
-                } else if self.focus.uses_horizontal_choice() {
+                if self.focus.uses_horizontal_choice() {
                     self.adjust_choice(-1);
                 } else if self.focus != Focus::Hosts {
                     self.set_focus(Focus::Hosts);
@@ -497,11 +494,7 @@ impl ConnectRemoteHostState {
             KeyCode::Right => {
                 if self.focus == Focus::Hosts {
                     self.set_focus(self.default_detail_focus());
-                } else if self.focus == Focus::Password {
-                    self.set_focus(Focus::PasswordToggle);
-                } else if self.focus == Focus::Sudo {
-                    self.set_focus(Focus::SudoToggle);
-                } else {
+                } else if self.focus.uses_horizontal_choice() {
                     self.adjust_choice(1);
                 }
                 PaneAction::None
@@ -516,6 +509,8 @@ impl ConnectRemoteHostState {
                     self.remember = !self.remember;
                 } else if self.focus == Focus::InstallProxy {
                     self.use_install_proxy = !self.use_install_proxy;
+                } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
+                    self.toggle_password_visibility();
                 }
                 PaneAction::None
             }
@@ -599,6 +594,12 @@ impl ConnectRemoteHostState {
     }
 
     fn apply_edit_key(&mut self, key: KeyEvent, field: EditField) -> PaneAction {
+        if matches!(field, EditField::SshPassword | EditField::SudoPassword)
+            && key.code == KeyCode::Char(' ')
+        {
+            self.toggle_password_visibility();
+            return PaneAction::None;
+        }
         if matches!(
             (field, key.code),
             (
@@ -619,11 +620,6 @@ impl ConnectRemoteHostState {
         match key.code {
             KeyCode::Esc => self.set_focus(Focus::Hosts),
             KeyCode::Left => self.move_edit_cursor_left_or_leave(),
-            KeyCode::Right if field == EditField::SshPassword => {
-                if !self.move_edit_cursor_right(field) {
-                    self.set_focus(Focus::PasswordToggle);
-                }
-            }
             KeyCode::Right => {
                 self.move_edit_cursor_right(field);
             }
@@ -650,9 +646,7 @@ impl ConnectRemoteHostState {
             KeyCode::Down => return self.move_down(),
             KeyCode::Left => self.move_edit_cursor_left_or_leave(),
             KeyCode::Right => {
-                if !self.move_edit_cursor_right(EditField::SudoPassword) {
-                    self.set_focus(Focus::SudoToggle);
-                }
+                self.move_edit_cursor_right(EditField::SudoPassword);
             }
             KeyCode::Enter => self.set_focus(self.next_focus()),
             code if is_backspace_key(code, key.modifiers) => {
@@ -734,22 +728,8 @@ impl ConnectRemoteHostState {
             row if row == details.rows.port => self.set_focus(Focus::Port),
             row if row == details.rows.user => self.set_focus(Focus::User),
             row if row == details.rows.auth => self.set_focus(Focus::Auth),
-            row if row == details.rows.password => {
-                if password_visibility_button_hit(x, layout.details.x, self, PasswordField::Ssh) {
-                    self.set_focus(Focus::Password);
-                    self.toggle_password_visibility();
-                } else {
-                    self.set_focus(Focus::Password);
-                }
-            }
-            row if row == details.rows.sudo => {
-                if password_visibility_button_hit(x, layout.details.x, self, PasswordField::Sudo) {
-                    self.set_focus(Focus::Sudo);
-                    self.toggle_password_visibility();
-                } else {
-                    self.set_focus(Focus::Sudo);
-                }
-            }
+            row if row == details.rows.password => self.set_focus(Focus::Password),
+            row if row == details.rows.sudo => self.set_focus(Focus::Sudo),
             row if row == details.rows.remember => {
                 self.set_focus(Focus::Remember);
                 self.delete_confirm = DeleteConfirmState::Idle;
@@ -760,13 +740,15 @@ impl ConnectRemoteHostState {
                 self.delete_confirm = DeleteConfirmState::Idle;
                 self.use_install_proxy = !self.use_install_proxy;
             }
-            row if Some(row) == details.rows.delete => {
-                self.set_focus(Focus::Delete);
-                return self.delete_action();
-            }
-            row if row == details.rows.connect => {
-                self.set_focus(Focus::Connect);
-                return self.connect_action();
+            _ if point_in_rect(x, y, details.buttons) => {
+                if let Some(focus) = button_action_from_x(x, details.buttons, self) {
+                    self.set_focus(focus);
+                    return match focus {
+                        Focus::Connect => self.connect_action(),
+                        Focus::Delete => self.delete_action(),
+                        _ => PaneAction::None,
+                    };
+                }
             }
             _ => {}
         }
@@ -868,10 +850,10 @@ impl ConnectRemoteHostState {
 
     fn toggle_password_visibility_for(&mut self, focus: Focus) {
         match focus {
-            Focus::Password | Focus::PasswordToggle if self.auth == AuthChoice::Password => {
+            Focus::Password if self.auth == AuthChoice::Password => {
                 self.show_ssh_password = !self.show_ssh_password;
             }
-            Focus::Sudo | Focus::SudoToggle if self.sudo_mode != SudoMode::None => {
+            Focus::Sudo if self.sudo_mode != SudoMode::None => {
                 self.show_sudo_password = !self.show_sudo_password;
             }
             _ => {}
@@ -895,16 +877,8 @@ impl ConnectRemoteHostState {
                 PaneAction::None
             }
             Focus::Password => PaneAction::None,
-            Focus::PasswordToggle => {
-                self.toggle_password_visibility_for(Focus::PasswordToggle);
-                PaneAction::None
-            }
             Focus::Sudo => {
                 self.start_sudo_password_edit();
-                PaneAction::None
-            }
-            Focus::SudoToggle => {
-                self.toggle_password_visibility_for(Focus::SudoToggle);
                 PaneAction::None
             }
             Focus::Remember => {
@@ -1247,9 +1221,7 @@ enum Focus {
     User,
     Auth,
     Password,
-    PasswordToggle,
     Sudo,
-    SudoToggle,
     Remember,
     InstallProxy,
     Delete,
@@ -1465,7 +1437,8 @@ struct DetailsGeometry {
     connection: Rect,
     authentication: Rect,
     options: Rect,
-    status: Rect,
+    buttons: Rect,
+    hint: Rect,
     rows: DetailsRows,
 }
 
@@ -1479,8 +1452,6 @@ struct DetailsRows {
     sudo: u16,
     remember: u16,
     install_proxy: u16,
-    connect: u16,
-    delete: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1629,16 +1600,16 @@ impl PopupGeometry {
 }
 
 impl DetailsGeometry {
-    fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
-        let options_rows = if state.has_saved_selection() { 5 } else { 4 };
-        let options_height = 1 + options_rows;
+    fn from_area(area: Rect, _state: &ConnectRemoteHostState) -> Self {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
-                Constraint::Length(4),
-                Constraint::Length(options_height),
-                Constraint::Min(0),
+                Constraint::Length(4), // title + 3 connection rows
+                Constraint::Length(4), // title + 3 authentication rows
+                Constraint::Length(3), // title + 2 options rows
+                Constraint::Length(1), // blank
+                Constraint::Length(1), // buttons
+                Constraint::Length(1), // hint
             ])
             .split(area);
         let rows = DetailsRows {
@@ -1650,16 +1621,13 @@ impl DetailsGeometry {
             sudo: sections[1].y.saturating_add(3).saturating_sub(area.y),
             remember: sections[2].y.saturating_add(1).saturating_sub(area.y),
             install_proxy: sections[2].y.saturating_add(2).saturating_sub(area.y),
-            connect: sections[2].y.saturating_add(4).saturating_sub(area.y),
-            delete: state
-                .has_saved_selection()
-                .then(|| sections[2].y.saturating_add(5).saturating_sub(area.y)),
         };
         Self {
             connection: sections[0],
             authentication: sections[1],
             options: sections[2],
-            status: sections[3],
+            buttons: sections[4],
+            hint: sections[5],
             rows,
         }
     }
@@ -1884,7 +1852,8 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
     render_connection(frame, geometry.connection, state);
     render_authentication(frame, geometry.authentication, state);
     render_options(frame, geometry.options, state);
-    render_status(frame, geometry.status, state);
+    render_action_buttons(frame, geometry.buttons, state);
+    render_hint(frame, geometry.hint, state);
 }
 
 fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
@@ -1904,7 +1873,14 @@ fn render_proxy_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemote
             Focus::HttpsProxy,
         ),
     ];
-    render_detail_table(frame, geometry.proxy, "Proxy Configuration", rows);
+    render_section_title(frame, geometry.proxy, "Proxy Configuration");
+    let table_area = Rect::new(
+        geometry.proxy.x,
+        geometry.proxy.y.saturating_add(1),
+        geometry.proxy.width,
+        geometry.proxy.height.saturating_sub(1),
+    );
+    render_detail_table(frame, table_area, rows);
     render_no_proxy(frame, geometry.no_proxy, state);
     render_proxy_save(frame, geometry.save, state);
     render_status(frame, geometry.status, state);
@@ -2004,6 +1980,13 @@ fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    render_section_title(frame, area, "Connection");
+    let table_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let mut rows = vec![
         detail_row("Host", &host_display(state), state, Focus::Host),
         detail_row(
@@ -2017,10 +2000,17 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         rows.push(readonly_detail_row("Last Port", &port.to_string()));
     }
     rows.push(detail_row("SSH User", &state.ssh_user, state, Focus::User));
-    render_detail_table(frame, area, "Connection", rows);
+    render_detail_table(frame, table_area, rows);
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    render_section_title(frame, area, "Authentication");
+    let table_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let mut rows = vec![choice_row("Auth", auth_tabs(state), state, Focus::Auth)];
     if state.auth == AuthChoice::Key {
         rows.push(detail_row(
@@ -2033,54 +2023,140 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
         rows.push(password_row("Password", PasswordField::Ssh, state));
     }
     rows.push(password_row("Sudo", PasswordField::Sudo, state));
-    render_detail_table(frame, area, "Authentication", rows);
+    render_detail_table(frame, table_area, rows);
 }
 
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let mut rows = vec![detail_row(
-        "Save",
-        if state.remember {
-            "[x] Remember host"
-        } else {
-            "[ ] Do not save"
-        },
-        state,
-        Focus::Remember,
-    )];
-    rows.push(detail_row(
-        "Install",
-        if state.use_install_proxy {
-            "[x] Use proxy"
-        } else {
-            "[ ] Do not use"
-        },
-        state,
-        Focus::InstallProxy,
-    ));
-    rows.push(Row::new(vec![String::new(), String::new()]));
-    rows.push(connect_row(connect_label(state), state));
-    if state.has_saved_selection() {
-        rows.push(action_row(delete_label(state), state, Focus::Delete));
-    }
-    render_detail_table(frame, area, "Options", rows);
+    render_section_title(frame, area, "Options");
+    let table_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    let rows = vec![
+        detail_row(
+            "Save",
+            if state.remember {
+                "[x] Remember host"
+            } else {
+                "[ ] Do not save"
+            },
+            state,
+            Focus::Remember,
+        ),
+        detail_row(
+            "Install",
+            if state.use_install_proxy {
+                "[x] Use proxy"
+            } else {
+                "[ ] Do not use"
+            },
+            state,
+            Focus::InstallProxy,
+        ),
+    ];
+    render_detail_table(frame, table_area, rows);
 }
 
 fn section_title(title: &str) -> Line<'static> {
     Line::from(title.to_string()).style(Style::default().add_modifier(Modifier::BOLD))
 }
 
-fn render_detail_table<I>(frame: &mut Frame<'_>, area: Rect, title: &str, rows: I)
+fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
+    frame.render_widget(
+        Paragraph::new(section_title(title)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+}
+
+fn render_detail_table<I>(frame: &mut Frame<'_>, area: Rect, rows: I)
 where
     I: IntoIterator<Item = Row<'static>>,
 {
-    let table = Table::new(rows, [Constraint::Length(12), Constraint::Min(20)])
-        .block(
-            Block::default()
-                .title(section_title(title))
-                .borders(Borders::TOP),
-        )
-        .column_spacing(1);
+    let table = Table::new(rows, [Constraint::Length(12), Constraint::Min(20)]).column_spacing(1);
     frame.render_widget(table, area);
+}
+
+fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    let connect_text = format!("[  {}  ]", connect_label(state));
+    let connect_width = connect_text.width() as u16;
+    let delete_text = format!("[ {} ]", delete_label(state));
+    let delete_width = delete_text.width() as u16;
+    let gap = 4;
+    let total_width = if state.has_saved_selection() {
+        connect_width + gap + delete_width
+    } else {
+        connect_width
+    };
+    let start_x = area.x + (area.width.saturating_sub(total_width)) / 2;
+    frame.render_widget(
+        Paragraph::new(connect_text)
+            .style(action_focus_style(
+                state.focus == Focus::Connect,
+                Focus::Connect,
+            ))
+            .alignment(Alignment::Center),
+        Rect::new(start_x, area.y, connect_width, 1),
+    );
+    if state.has_saved_selection() {
+        let delete_x = start_x + connect_width + gap;
+        frame.render_widget(
+            Paragraph::new(delete_text)
+                .style(action_focus_style(
+                    state.focus == Focus::Delete,
+                    Focus::Delete,
+                ))
+                .alignment(Alignment::Center),
+            Rect::new(delete_x, area.y, delete_width, 1),
+        );
+    }
+}
+
+fn button_action_from_x(
+    x: u16,
+    buttons_area: Rect,
+    state: &ConnectRemoteHostState,
+) -> Option<Focus> {
+    let connect_text = format!("[  {}  ]", connect_label(state));
+    let connect_width = connect_text.width() as u16;
+    let delete_text = format!("[ {} ]", delete_label(state));
+    let delete_width = delete_text.width() as u16;
+    let gap = 4;
+    let total_width = if state.has_saved_selection() {
+        connect_width + gap + delete_width
+    } else {
+        connect_width
+    };
+    let start_x = buttons_area.x + (buttons_area.width.saturating_sub(total_width)) / 2;
+    if x >= start_x && x < start_x + connect_width {
+        return Some(Focus::Connect);
+    }
+    if state.has_saved_selection() {
+        let delete_start = start_x + connect_width + gap;
+        if x >= delete_start && x < delete_start + delete_width {
+            return Some(Focus::Delete);
+        }
+    }
+    None
+}
+
+fn render_hint(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
+    frame.render_widget(
+        Paragraph::new(hint_text(state)).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
+fn hint_text(state: &ConnectRemoteHostState) -> &'static str {
+    match state.focus {
+        Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next",
+        Focus::Auth => "←/→: switch auth · Tab: next",
+        Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next",
+        Focus::Connect => "Enter: connect · Tab: next",
+        Focus::Delete => "Enter: delete · Tab: next",
+        _ => "Tab/↑/↓: navigate · Enter: edit · Esc: back to list",
+    }
 }
 
 fn detail_row(
@@ -2115,34 +2191,21 @@ fn password_row(label: &str, field: PasswordField, state: &ConnectRemoteHostStat
 
 fn password_control_line(field: PasswordField, state: &ConnectRemoteHostState) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    let display = password_control_display(field, state);
-    let value_style = if state.focus == display.field_focus {
+    let value = password_control_value(field, state);
+    let value_style = if state.focus == password_field_focus(field) {
         active_focus_style()
     } else {
         Style::default()
     };
-    spans.push(Span::styled(display.value, value_style));
-    if display.toggle_available {
-        spans.push(Span::raw("  "));
-        let toggle_style = if state.focus == display.toggle_focus {
-            active_focus_style()
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(
-            password_visibility_label(display.show_plaintext),
-            toggle_style,
-        ));
-    }
+    spans.push(Span::styled(value, value_style));
     Line::from(spans)
 }
 
-struct PasswordControlDisplay {
-    value: String,
-    show_plaintext: bool,
-    field_focus: Focus,
-    toggle_focus: Focus,
-    toggle_available: bool,
+fn password_field_focus(field: PasswordField) -> Focus {
+    match field {
+        PasswordField::Ssh => Focus::Password,
+        PasswordField::Sudo => Focus::Sudo,
+    }
 }
 
 fn password_mask_preserve_length(state: &ConnectRemoteHostState, field: PasswordField) -> bool {
@@ -2153,62 +2216,25 @@ fn password_mask_preserve_length(state: &ConnectRemoteHostState, field: Password
     )
 }
 
-fn password_control_display(
-    field: PasswordField,
-    state: &ConnectRemoteHostState,
-) -> PasswordControlDisplay {
+fn password_control_value(field: PasswordField, state: &ConnectRemoteHostState) -> String {
     match field {
-        PasswordField::Ssh if state.auth == AuthChoice::Password => PasswordControlDisplay {
-            value: password_field_display(
-                &state.ssh_password,
-                state.password_mode == PasswordMode::Loading,
-                state.show_ssh_password,
-                PASSWORD_EMPTY_PLACEHOLDER,
-                password_mask_preserve_length(state, PasswordField::Ssh),
-            ),
-            show_plaintext: state.show_ssh_password,
-            field_focus: Focus::Password,
-            toggle_focus: Focus::PasswordToggle,
-            toggle_available: state.password_mode != PasswordMode::Loading,
-        },
-        PasswordField::Sudo if state.sudo_mode != SudoMode::None => PasswordControlDisplay {
-            value: password_field_display(
-                sudo_password_value(state),
-                state.sudo_mode == SudoMode::Loading,
-                state.show_sudo_password,
-                PASSWORD_EMPTY_PLACEHOLDER,
-                password_mask_preserve_length(state, PasswordField::Sudo),
-            ),
-            show_plaintext: state.show_sudo_password,
-            field_focus: Focus::Sudo,
-            toggle_focus: Focus::SudoToggle,
-            toggle_available: state.sudo_mode != SudoMode::Loading,
-        },
-        PasswordField::Sudo => PasswordControlDisplay {
-            value: "No sudo password".to_string(),
-            show_plaintext: false,
-            field_focus: Focus::Sudo,
-            toggle_focus: Focus::SudoToggle,
-            toggle_available: false,
-        },
-        PasswordField::Ssh => PasswordControlDisplay {
-            value: password_display(state),
-            show_plaintext: false,
-            field_focus: Focus::Password,
-            toggle_focus: Focus::PasswordToggle,
-            toggle_available: false,
-        },
+        PasswordField::Ssh if state.auth == AuthChoice::Password => password_field_display(
+            &state.ssh_password,
+            state.password_mode == PasswordMode::Loading,
+            state.show_ssh_password,
+            PASSWORD_EMPTY_PLACEHOLDER,
+            password_mask_preserve_length(state, PasswordField::Ssh),
+        ),
+        PasswordField::Sudo if state.sudo_mode != SudoMode::None => password_field_display(
+            sudo_password_value(state),
+            state.sudo_mode == SudoMode::Loading,
+            state.show_sudo_password,
+            PASSWORD_EMPTY_PLACEHOLDER,
+            password_mask_preserve_length(state, PasswordField::Sudo),
+        ),
+        PasswordField::Sudo => "No sudo password".to_string(),
+        PasswordField::Ssh => password_display(state),
     }
-}
-
-fn action_row(
-    value: impl Into<String>,
-    state: &ConnectRemoteHostState,
-    focus: Focus,
-) -> Row<'static> {
-    let focused = state.focus == focus;
-    let style = action_focus_style(focused, focus);
-    Row::new(vec![String::new(), format!(" {}", value.into())]).style(style)
 }
 
 fn action_focus_style(focused: bool, focus: Focus) -> Style {
@@ -2223,10 +2249,6 @@ fn action_focus_style(focused: bool, focus: Focus) -> Style {
             _ => Style::default().add_modifier(Modifier::BOLD),
         }
     }
-}
-
-fn connect_row(value: impl Into<String>, state: &ConnectRemoteHostState) -> Row<'static> {
-    action_row(value, state, Focus::Connect)
 }
 
 fn choice_row(
@@ -2328,7 +2350,7 @@ fn host_display(state: &ConnectRemoteHostState) -> String {
 
 fn password_display(state: &ConnectRemoteHostState) -> String {
     match state.auth {
-        AuthChoice::Password => password_field_with_toggle_display(
+        AuthChoice::Password => password_field_display(
             &state.ssh_password,
             state.password_mode == PasswordMode::Loading,
             state.show_ssh_password,
@@ -2350,34 +2372,13 @@ fn sudo_password_display(state: &ConnectRemoteHostState) -> String {
     if state.sudo_mode == SudoMode::None {
         return "No sudo password".to_string();
     }
-    password_field_with_toggle_display(
+    password_field_display(
         sudo_password_value(state),
         state.sudo_mode == SudoMode::Loading,
         state.show_sudo_password,
         PASSWORD_EMPTY_PLACEHOLDER,
         password_mask_preserve_length(state, PasswordField::Sudo),
     )
-}
-
-fn password_field_with_toggle_display(
-    value: &str,
-    loading: bool,
-    show_plaintext: bool,
-    empty_label: &str,
-    preserve_mask_length: bool,
-) -> String {
-    let value = password_field_display(
-        value,
-        loading,
-        show_plaintext,
-        empty_label,
-        preserve_mask_length,
-    );
-    if loading {
-        value
-    } else {
-        format!("{}  {}", value, password_visibility_label(show_plaintext))
-    }
 }
 
 fn password_field_display(
@@ -2415,48 +2416,6 @@ fn sudo_password_value(state: &ConnectRemoteHostState) -> &str {
 enum PasswordField {
     Ssh,
     Sudo,
-}
-
-fn password_visibility_label(show_plaintext: bool) -> &'static str {
-    if show_plaintext {
-        "Hide"
-    } else {
-        "Show"
-    }
-}
-
-fn password_visibility_button_hit(
-    x: u16,
-    details_x: u16,
-    state: &ConnectRemoteHostState,
-    field: PasswordField,
-) -> bool {
-    let (value, loading, show_plaintext, empty_label) = match field {
-        PasswordField::Ssh if state.auth == AuthChoice::Password => (
-            state.ssh_password.as_str(),
-            state.password_mode == PasswordMode::Loading,
-            state.show_ssh_password,
-            PASSWORD_EMPTY_PLACEHOLDER,
-        ),
-        PasswordField::Sudo if state.sudo_mode != SudoMode::None => (
-            sudo_password_value(state),
-            state.sudo_mode == SudoMode::Loading,
-            state.show_sudo_password,
-            PASSWORD_EMPTY_PLACEHOLDER,
-        ),
-        _ => return false,
-    };
-    if loading {
-        return false;
-    }
-    let field_start = details_x.saturating_add(14);
-    let value_width = password_field_display(value, loading, show_plaintext, empty_label, false)
-        .chars()
-        .count() as u16;
-    let button_start = field_start.saturating_add(value_width).saturating_add(2);
-    let button_end =
-        button_start.saturating_add(password_visibility_label(show_plaintext).len() as u16);
-    x >= button_start && x < button_end
 }
 
 fn delete_label(_state: &ConnectRemoteHostState) -> String {
@@ -3555,8 +3514,8 @@ mod tests {
         assert_eq!(state.sudo_mode, SudoMode::Saved);
         assert_eq!(state.ssh_password, "ssh-secret");
         assert_eq!(state.sudo_password, "sudo-secret");
-        assert_eq!(password_display(&state), "**********  Show");
-        assert_eq!(sudo_password_display(&state), "***********  Show");
+        assert_eq!(password_display(&state), "**********");
+        assert_eq!(sudo_password_display(&state), "***********");
         state.set_focus(Focus::Password);
         assert_eq!(state.ssh_password, "ssh-secret");
     }
@@ -4062,9 +4021,10 @@ mod tests {
 
         assert_eq!(popup.details.y, 2);
         assert_eq!(popup.details.height, 14);
-        assert_eq!(details.rows.delete, Some(13));
+        assert_eq!(details.buttons.y, popup.details.y + 12);
+        assert_eq!(details.buttons.height, 1);
         assert!(
-            popup.details.y + details.rows.delete.unwrap() < popup.details.y + popup.details.height
+            details.buttons.y + details.buttons.height <= popup.details.y + popup.details.height
         );
 
         let output = rendered_text(100, 18, &state);
@@ -4073,6 +4033,7 @@ mod tests {
         assert!(output.contains("Use proxy"));
         assert!(output.contains("Connect"));
         assert!(output.contains("Delete"));
+        assert!(output.contains(hint_text(&state)));
     }
 
     #[test]
@@ -4244,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn password_rows_style_only_the_focused_subcontrol() {
+    fn password_rows_style_only_the_focused_value() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = 0;
@@ -4255,42 +4216,21 @@ mod tests {
         assert_password_control_styles(
             password_control_line(PasswordField::Ssh, &state),
             active_focus_style(),
-            Style::default(),
-        );
-
-        state.set_focus(Focus::PasswordToggle);
-        assert_password_control_styles(
-            password_control_line(PasswordField::Ssh, &state),
-            Style::default(),
-            active_focus_style(),
         );
 
         state.set_focus(Focus::Sudo);
+        state.sudo_mode = SudoMode::Replace;
         assert_password_control_styles(
             password_control_line(PasswordField::Sudo, &state),
-            active_focus_style(),
-            Style::default(),
-        );
-
-        state.set_focus(Focus::SudoToggle);
-        assert_password_control_styles(
-            password_control_line(PasswordField::Sudo, &state),
-            Style::default(),
             active_focus_style(),
         );
     }
 
-    fn assert_password_control_styles(
-        line: Line<'static>,
-        input_style: Style,
-        toggle_style: Style,
-    ) {
+    fn assert_password_control_styles(line: Line<'static>, value_style: Style) {
+        assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].style, Style::default());
         assert_eq!(line.spans[1].content.as_ref(), "******");
-        assert_eq!(line.spans[1].style, input_style);
-        assert_eq!(line.spans[2].style, Style::default());
-        assert_eq!(line.spans[3].content.as_ref(), "Show");
-        assert_eq!(line.spans[3].style, toggle_style);
+        assert_eq!(line.spans[1].style, value_style);
     }
 
     #[test]
@@ -4316,27 +4256,21 @@ mod tests {
         state.set_focus(Focus::Password);
 
         let password_line = password_control_line(PasswordField::Ssh, &state);
+        assert_eq!(password_line.spans.len(), 2);
         assert_eq!(
             password_line.spans[1].content.as_ref(),
             PASSWORD_EMPTY_PLACEHOLDER
         );
-        assert_eq!(password_line.spans[3].content.as_ref(), "Show");
-        assert_eq!(
-            password_display(&state),
-            format!("{PASSWORD_EMPTY_PLACEHOLDER}  Show")
-        );
+        assert_eq!(password_display(&state), PASSWORD_EMPTY_PLACEHOLDER);
 
         state.set_focus(Focus::Sudo);
         let sudo_line = password_control_line(PasswordField::Sudo, &state);
+        assert_eq!(sudo_line.spans.len(), 2);
         assert_eq!(
             sudo_line.spans[1].content.as_ref(),
             PASSWORD_EMPTY_PLACEHOLDER
         );
-        assert_eq!(sudo_line.spans[3].content.as_ref(), "Show");
-        assert_eq!(
-            sudo_password_display(&state),
-            format!("{PASSWORD_EMPTY_PLACEHOLDER}  Show")
-        );
+        assert_eq!(sudo_password_display(&state), PASSWORD_EMPTY_PLACEHOLDER);
     }
 
     #[test]
@@ -4380,9 +4314,9 @@ mod tests {
         state.ssh_password = "abc".to_string();
         state.password_mode = PasswordMode::Enter;
 
-        assert_eq!(password_display(&state), "******  Show");
+        assert_eq!(password_display(&state), "******");
         state.set_focus(Focus::Password);
-        assert_eq!(password_display(&state), "***  Show");
+        assert_eq!(password_display(&state), "***");
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
@@ -4392,7 +4326,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
             PaneAction::None
         );
-        assert_eq!(password_display(&state), "**  Show");
+        assert_eq!(password_display(&state), "**");
     }
 
     #[test]
@@ -4404,9 +4338,9 @@ mod tests {
         state.sudo_password = "abc".to_string();
         state.sudo_mode = SudoMode::Replace;
 
-        assert_eq!(sudo_password_display(&state), "******  Show");
+        assert_eq!(sudo_password_display(&state), "******");
         state.set_focus(Focus::Sudo);
-        assert_eq!(sudo_password_display(&state), "***  Show");
+        assert_eq!(sudo_password_display(&state), "***");
 
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let (x, _) = cursor_position(geometry.details, &state).unwrap();
@@ -4416,7 +4350,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Backspace)),
             PaneAction::None
         );
-        assert_eq!(sudo_password_display(&state), "**  Show");
+        assert_eq!(sudo_password_display(&state), "**");
     }
 
     #[test]
@@ -4598,7 +4532,7 @@ mod tests {
     }
 
     #[test]
-    fn password_field_focus_has_cursor_and_right_enter_toggles_visibility() {
+    fn password_field_focus_has_cursor_and_space_toggles_visibility() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = 0;
@@ -4615,26 +4549,17 @@ mod tests {
         assert_eq!(y, geometry.details.y + details.rows.password);
         assert_eq!(x, geometry.details.x + 14 + 6);
         assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Right)),
-            PaneAction::None
-        );
-        assert_eq!(state.focus, Focus::PasswordToggle);
-        assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
         );
         assert!(state.show_ssh_password);
-        assert_eq!(password_display(&state), "secret  Hide");
-        assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Left)),
-            PaneAction::None
-        );
+        assert_eq!(password_display(&state), "secret");
         assert_eq!(state.focus, Focus::Password);
         assert_eq!(state.editing, Some(EditField::SshPassword));
     }
 
     #[test]
-    fn sudo_field_focus_has_cursor_and_right_enter_toggles_visibility() {
+    fn sudo_field_focus_has_cursor_and_space_toggles_visibility() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = 0;
@@ -4651,26 +4576,17 @@ mod tests {
         assert_eq!(y, geometry.details.y + details.rows.sudo);
         assert_eq!(x, geometry.details.x + 14 + 6);
         assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Right)),
-            PaneAction::None
-        );
-        assert_eq!(state.focus, Focus::SudoToggle);
-        assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Enter)),
+            state.apply_key(KeyEvent::from(KeyCode::Char(' '))),
             PaneAction::None
         );
         assert!(state.show_sudo_password);
-        assert_eq!(sudo_password_display(&state), "secret  Hide");
-        assert_eq!(
-            state.apply_key(KeyEvent::from(KeyCode::Left)),
-            PaneAction::None
-        );
+        assert_eq!(sudo_password_display(&state), "secret");
         assert_eq!(state.focus, Focus::Sudo);
         assert_eq!(state.editing, Some(EditField::SudoPassword));
     }
 
     #[test]
-    fn password_visibility_button_toggles_show_hide_state() {
+    fn password_row_click_focuses_without_toggling_visibility() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles.clear();
         state.selected = 0;
@@ -4682,14 +4598,15 @@ mod tests {
 
         state.apply_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + 14 + 6 + 2,
+            column: geometry.details.x + 14 + 2,
             row: geometry.details.y + details.rows.password,
             modifiers: crossterm::event::KeyModifiers::empty(),
         });
 
-        assert!(state.show_ssh_password);
-        assert_eq!(password_display(&state), "secret  Hide");
+        assert!(!state.show_ssh_password);
+        assert_eq!(password_display(&state), "******");
         assert_eq!(state.focus, Focus::Password);
+        assert_eq!(state.editing, Some(EditField::SshPassword));
     }
 
     #[test]
@@ -4706,7 +4623,7 @@ mod tests {
         let (x, y) = cursor_position(geometry.details, &state).unwrap();
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
-        assert_eq!(password_display(&state), "******  Show");
+        assert_eq!(password_display(&state), "******");
         assert_eq!(y, geometry.details.y + details.rows.password);
         assert_eq!(x, geometry.details.x + 14 + 6);
     }
@@ -4799,7 +4716,7 @@ mod tests {
         state.sudo_mode = SudoMode::SameAsSsh;
         state.set_focus(Focus::Sudo);
 
-        assert_eq!(sudo_password_display(&state), "**********  Show");
+        assert_eq!(sudo_password_display(&state), "**********");
         assert_eq!(state.editing, Some(EditField::SudoPassword));
         assert_eq!(state.sudo_mode, SudoMode::Replace);
         assert_eq!(state.sudo_password, "ssh-secret");
