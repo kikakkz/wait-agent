@@ -488,6 +488,9 @@ impl ConnectRemoteHostState {
                     Focus::Delete => self.set_focus(Focus::Connect),
                     Focus::ProxySave => self.set_focus(Focus::ProxyActive),
                     Focus::ProxyDelete => self.set_focus(Focus::ProxySave),
+                    Focus::Auth if self.auth == AuthChoice::Password => {
+                        self.set_focus(Focus::Hosts);
+                    }
                     _ if self.focus.uses_horizontal_choice() => self.adjust_choice(-1),
                     _ if self.focus != Focus::Hosts => self.set_focus(Focus::Hosts),
                     _ => {}
@@ -500,6 +503,7 @@ impl ConnectRemoteHostState {
                     Focus::ProxyActive => self.set_focus(Focus::ProxySave),
                     Focus::ProxySave => self.set_focus(Focus::ProxyDelete),
                     Focus::Hosts => self.set_focus(self.default_detail_focus()),
+                    Focus::Auth if self.auth == AuthChoice::Key => {}
                     _ if self.focus.uses_horizontal_choice() => self.adjust_choice(1),
                     _ => {}
                 }
