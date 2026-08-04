@@ -695,7 +695,11 @@ impl ConnectRemoteHostState {
             let inner = Block::default()
                 .borders(Borders::ALL)
                 .inner(layout.host_sections.saved_hosts);
-            let row = y.saturating_sub(inner.y) as usize;
+            let list_start = inner.y.saturating_add(2);
+            if y < list_start {
+                return PaneAction::None;
+            }
+            let row = y.saturating_sub(list_start) as usize;
             if row <= self.profiles.len() {
                 self.selected = row.min(self.profiles.len());
                 self.set_focus(Focus::Hosts);
@@ -707,7 +711,11 @@ impl ConnectRemoteHostState {
             let inner = Block::default()
                 .borders(Borders::ALL)
                 .inner(layout.host_sections.proxy_config);
-            let row = y.saturating_sub(inner.y) as usize;
+            let list_start = inner.y.saturating_add(2);
+            if y < list_start {
+                return PaneAction::None;
+            }
+            let row = y.saturating_sub(list_start) as usize;
             let proxy_items = self.proxy_settings.profiles.len() + 1;
             if row < proxy_items {
                 self.selected = self.proxy_selection_index().saturating_add(row);
@@ -1639,38 +1647,53 @@ impl PopupGeometry {
 
 impl HostListGeometry {
     fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
+        // Inset the cards by one cell from the hosts panel so they do not touch
+        // the popup border or the right separator.
+        let margin = 1_u16;
+        let container = Rect::new(
+            area.x.saturating_add(margin),
+            area.y.saturating_add(margin),
+            area.width.saturating_sub(margin.saturating_mul(2)),
+            area.height.saturating_sub(margin.saturating_mul(2)),
+        );
+
+        // Each card has a header row plus its content list, wrapped in a border.
         let saved_content = (state.profiles.len() + 1).max(1) as u16; // hosts + New Host
         let proxy_content = (state.proxy_settings.profiles.len() + 1).max(1) as u16; // proxies + New Proxy
-        let saved_natural = saved_content.saturating_add(2);
-        let proxy_natural = proxy_content.saturating_add(2);
-        let total_natural = saved_natural.saturating_add(proxy_natural);
-        let available = area.height;
+        let saved_natural = saved_content.saturating_add(3); // + header + borders
+        let proxy_natural = proxy_content.saturating_add(3);
+        let gap = 1_u16;
+        let total_natural = saved_natural.saturating_add(proxy_natural).saturating_add(gap);
+        let available = container.height;
 
         let (saved_height, proxy_height) = if total_natural <= available {
-            (saved_natural, proxy_natural)
+            // Let the proxy card absorb any leftover vertical space so the
+            // bottom of the sidebar does not look empty.
+            let leftover = available - total_natural;
+            (saved_natural, proxy_natural.saturating_add(leftover))
         } else {
             let min_each = 5_u16.min(available);
-            if available <= min_each.saturating_mul(2) {
-                let half = available / 2;
-                (half.max(3), available - half.max(3))
+            if available <= min_each.saturating_mul(2).saturating_add(gap) {
+                let half = available.saturating_sub(gap) / 2;
+                (half.max(3), available - gap - half.max(3))
             } else {
-                let extra = available - min_each.saturating_mul(2);
+                let extra = available - min_each.saturating_mul(2).saturating_sub(gap);
                 let saved_extra = (saved_content as u32 * extra as u32
                     / (saved_content.saturating_add(proxy_content)) as u32)
                     as u16;
                 (
                     min_each.saturating_add(saved_extra).max(3),
-                    available - min_each.saturating_add(saved_extra).max(3),
+                    available - gap - min_each.saturating_add(saved_extra).max(3),
                 )
             }
         };
 
         Self {
-            saved_hosts: Rect::new(area.x, area.y, area.width, saved_height),
+            saved_hosts: Rect::new(container.x, container.y, container.width, saved_height),
             proxy_config: Rect::new(
-                area.x,
-                area.y.saturating_add(saved_height),
-                area.width,
+                container.x,
+                container.y.saturating_add(saved_height).saturating_add(gap),
+                container.width,
                 proxy_height,
             ),
         }
@@ -1817,7 +1840,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
 fn host_section_title(title: &str, icon: &str, count: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!(" {icon} {title} "),
+            format!("  {icon} {title}  "),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -1856,18 +1879,31 @@ fn render_host_section(
     items: Vec<ListItem<'static>>,
     selected: Option<usize>,
 ) {
-    if area.height < 3 {
+    if area.height < 4 {
         return;
     }
     let block = Block::default()
-        .title(title_line)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(DIALOG_BG));
+        .border_style(Style::default().fg(SECTION_BORDER))
+        .style(Style::default().bg(SECTION_BG));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let visible_height = inner.height as usize;
+    // Header sits on the first inner row, leaving a blank row between it and
+    // the list so the title does not feel glued to the border or content.
+    let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(title_line).style(Style::default().bg(SECTION_BG)),
+        header_area,
+    );
+
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let visible_height = list_area.height as usize;
     let selected_row = selected.unwrap_or(0);
     let max_offset = items.len().saturating_sub(visible_height);
     let offset = if selected_row >= visible_height {
@@ -1885,7 +1921,7 @@ fn render_host_section(
     let mut list_state = ratatui::widgets::ListState::default()
         .with_selected(selected)
         .with_offset(offset);
-    frame.render_stateful_widget(list, inner, &mut list_state);
+    frame.render_stateful_widget(list, list_area, &mut list_state);
 }
 
 fn saved_host_label(profile: &RemoteHostProfile) -> String {
@@ -1982,6 +2018,8 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSt
 }
 
 const DIALOG_BG: Color = Color::Rgb(22, 24, 30);
+const SECTION_BG: Color = Color::Rgb(28, 31, 38);
+const SECTION_BORDER: Color = Color::Rgb(60, 65, 75);
 const HEADER_BG: Color = Color::Rgb(32, 36, 43);
 const ACTION_BG: Color = Color::Rgb(40, 44, 52);
 
