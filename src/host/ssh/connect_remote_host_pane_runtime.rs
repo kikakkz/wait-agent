@@ -1588,17 +1588,11 @@ impl PopupGeometry {
         let x = cols.saturating_sub(width) / 2;
 
         // Keep the popup compact and centered, like the original popup,
-        // instead of stretching to the full terminal height.
-        let label_count = host_list_labels(state).len() as u16;
-        let detail_rows = if state.selected_proxy_config() {
-            12
-        } else if state.has_saved_selection() {
-            14
-        } else {
-            13
-        };
-        let body_height = label_count.max(detail_rows).min(rows.saturating_sub(2));
-        let dialog_height = body_height + 2;
+        // instead of stretching to the full terminal height. The height is
+        // fixed relative to the terminal size so it does not jump when the
+        // selected menu item changes (e.g. Saved Host vs New Host).
+        let dialog_height = rows.saturating_sub(2).clamp(14, rows.max(1));
+        let body_height = dialog_height.saturating_sub(2);
         let y = rows.saturating_sub(dialog_height) / 2;
         let dialog = Rect::new(x, y, width, dialog_height);
         // Leave one column/row on each side for the border.
@@ -1744,10 +1738,18 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let items = host_list_labels(state)
-        .into_iter()
-        .map(ListItem::new)
-        .collect::<Vec<_>>();
+    let labels = host_list_labels(state);
+    // Scroll the left menu so the selected item stays visible when the list
+    // is longer than the popup body.
+    let selected_row = display_row_from_selection(state, state.selected);
+    let visible_height = area.height as usize;
+    let max_offset = labels.len().saturating_sub(visible_height);
+    let offset = if selected_row >= visible_height {
+        (selected_row - visible_height + 1).min(max_offset)
+    } else {
+        0
+    };
+    let items = labels.into_iter().map(ListItem::new).collect::<Vec<_>>();
     let list = List::new(items)
         .block(Block::default().borders(Borders::RIGHT))
         .highlight_style(if state.focus == Focus::Hosts {
@@ -1755,8 +1757,9 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         } else {
             selected_host_style()
         });
-    let mut list_state = ratatui::widgets::ListState::default();
-    list_state.select(Some(display_row_from_selection(state, state.selected)));
+    let mut list_state = ratatui::widgets::ListState::default()
+        .with_selected(Some(selected_row))
+        .with_offset(offset);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -3561,7 +3564,7 @@ mod tests {
     }
 
     #[test]
-    fn popup_geometry_uses_content_sized_dialog_for_short_profiles() {
+    fn popup_geometry_uses_terminal_sized_dialog_independent_of_selection() {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![RemoteHostProfile {
             name: "k@127.0.0.1".to_string(),
@@ -3584,16 +3587,24 @@ mod tests {
 
         assert_eq!(geometry.dialog.x, 10);
         assert_eq!(geometry.dialog.width, 100);
-        assert_eq!(geometry.dialog.height, 15);
+        // Height is fixed relative to the terminal, not to the selected item.
+        assert_eq!(geometry.dialog.height, 16);
         assert_eq!(geometry.hosts.y, 2);
         assert_eq!(geometry.details.y, 2);
-        assert_eq!(geometry.hosts.height, 13);
+        assert_eq!(geometry.hosts.height, 14);
         assert_eq!(geometry.hosts.width, 29);
         assert_eq!(geometry.details.width, 66);
         assert_eq!(
             geometry.details.x + geometry.details.width + DETAIL_RIGHT_PADDING,
             geometry.dialog.x + geometry.dialog.width - 1
         );
+
+        // Switching to New Host should not change the popup geometry.
+        state.selected = state.profiles.len();
+        let _ = state.sync_selected_profile();
+        let new_host_geometry = PopupGeometry::from_terminal_size((120, 18), &state);
+        assert_eq!(new_host_geometry.dialog.height, geometry.dialog.height);
+        assert_eq!(new_host_geometry.hosts.height, geometry.hosts.height);
     }
 
     #[test]
