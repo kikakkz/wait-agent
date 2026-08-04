@@ -485,6 +485,7 @@ impl ConnectRemoteHostState {
             KeyCode::Down => self.move_down(),
             KeyCode::Left => {
                 match self.focus {
+                    Focus::Delete => self.set_focus(Focus::Connect),
                     Focus::ProxySave => self.set_focus(Focus::ProxyActive),
                     Focus::ProxyDelete => self.set_focus(Focus::ProxySave),
                     _ if self.focus.uses_horizontal_choice() => self.adjust_choice(-1),
@@ -801,6 +802,7 @@ impl ConnectRemoteHostState {
         } else {
             let next = match self.focus {
                 Focus::ProxySave | Focus::ProxyDelete => Focus::HttpsProxy,
+                Focus::Delete => Focus::InstallProxy,
                 _ => {
                     let candidate = self.prev_focus();
                     if candidate == Focus::Hosts {
@@ -4268,7 +4270,7 @@ mod tests {
             state.apply_key(KeyEvent::from(KeyCode::Up)),
             PaneAction::None
         );
-        assert_eq!(state.focus, Focus::Connect);
+        assert_eq!(state.focus, Focus::InstallProxy);
 
         state.set_focus(Focus::Remember);
         assert_eq!(
