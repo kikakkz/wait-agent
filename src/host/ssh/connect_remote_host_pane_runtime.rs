@@ -2490,10 +2490,24 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     );
 }
 
+fn render_dim_overlay(frame: &mut Frame<'_>) {
+    // Darken the area behind a modal popup so the modal stands out the same
+    // way the main Connect Remote Host popup stands out against the workspace.
+    frame.render_widget(
+        Paragraph::new("").style(
+            Style::default()
+                .bg(Color::Black)
+                .add_modifier(Modifier::DIM),
+        ),
+        frame.size(),
+    );
+}
+
 fn render_connecting_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
     let Status::Working(message) = &state.status else {
         return;
     };
+    render_dim_overlay(frame);
     let geometry =
         ConnectingGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
@@ -2513,6 +2527,7 @@ fn render_connect_error_popup(frame: &mut Frame<'_>, state: &ConnectRemoteHostSt
     let Status::Error(message) = &state.status else {
         return;
     };
+    render_dim_overlay(frame);
     let geometry =
         ConnectErrorGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
@@ -2539,6 +2554,7 @@ fn render_delete_confirm(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) 
     else {
         return;
     };
+    render_dim_overlay(frame);
     let geometry =
         DeleteConfirmGeometry::from_terminal_size((frame.size().width, frame.size().height));
     frame.render_widget(Clear, geometry.dialog);
