@@ -2456,6 +2456,10 @@ fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
             .bg(Color::Blue)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
+    } else if state.focus == Focus::Hosts {
+        Style::default()
+            .bg(Color::Rgb(40, 44, 52))
+            .fg(Color::Gray)
     } else {
         Style::default().bg(Color::Blue).fg(Color::White)
     };
