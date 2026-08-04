@@ -1825,6 +1825,9 @@ fn proxy_heading_display_row(state: &ConnectRemoteHostState) -> usize {
 const POPUP_WIDTH: u16 = 100;
 const HOST_LIST_WIDTH: u16 = 29;
 const DETAIL_RIGHT_PADDING: u16 = 2;
+const SECTION_TITLE_INDENT: u16 = 2;
+const SECTION_CONTENT_INDENT: u16 = 4;
+const LABEL_WIDTH: u16 = 12;
 
 fn popup_preferred_width(_state: &ConnectRemoteHostState) -> u16 {
     POPUP_WIDTH
@@ -1982,9 +1985,9 @@ fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     render_section_title(frame, area, "Connection");
     let table_area = Rect::new(
-        area.x,
+        area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
-        area.width,
+        area.width.saturating_sub(SECTION_CONTENT_INDENT),
         area.height.saturating_sub(1),
     );
     let mut rows = vec![
@@ -2006,9 +2009,9 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     render_section_title(frame, area, "Authentication");
     let table_area = Rect::new(
-        area.x,
+        area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
-        area.width,
+        area.width.saturating_sub(SECTION_CONTENT_INDENT),
         area.height.saturating_sub(1),
     );
     let mut rows = vec![choice_row("Auth", auth_tabs(state), state, Focus::Auth)];
@@ -2029,9 +2032,9 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     render_section_title(frame, area, "Options");
     let table_area = Rect::new(
-        area.x,
+        area.x.saturating_add(SECTION_CONTENT_INDENT),
         area.y.saturating_add(1),
-        area.width,
+        area.width.saturating_sub(SECTION_CONTENT_INDENT),
         area.height.saturating_sub(1),
     );
     let rows = vec![
@@ -2066,7 +2069,12 @@ fn section_title(title: &str) -> Line<'static> {
 fn render_section_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
     frame.render_widget(
         Paragraph::new(section_title(title)),
-        Rect::new(area.x, area.y, area.width, 1),
+        Rect::new(
+            area.x.saturating_add(SECTION_TITLE_INDENT),
+            area.y,
+            area.width.saturating_sub(SECTION_TITLE_INDENT),
+            1,
+        ),
     );
 }
 
@@ -2074,7 +2082,8 @@ fn render_detail_table<I>(frame: &mut Frame<'_>, area: Rect, rows: I)
 where
     I: IntoIterator<Item = Row<'static>>,
 {
-    let table = Table::new(rows, [Constraint::Length(12), Constraint::Min(20)]).column_spacing(1);
+    let table =
+        Table::new(rows, [Constraint::Length(LABEL_WIDTH), Constraint::Min(20)]).column_spacing(1);
     frame.render_widget(table, area);
 }
 
