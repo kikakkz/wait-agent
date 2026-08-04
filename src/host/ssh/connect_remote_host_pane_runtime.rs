@@ -495,6 +495,7 @@ impl ConnectRemoteHostState {
             }
             KeyCode::Right => {
                 match self.focus {
+                    Focus::Connect => self.set_focus(Focus::Delete),
                     Focus::ProxyActive => self.set_focus(Focus::ProxySave),
                     Focus::ProxySave => self.set_focus(Focus::ProxyDelete),
                     Focus::Hosts => self.set_focus(self.default_detail_focus()),
@@ -840,7 +841,7 @@ impl ConnectRemoteHostState {
 
     fn default_detail_focus(&self) -> Focus {
         if self.selected_proxy_config() {
-            Focus::ProxyName
+            Focus::ProxyActive
         } else if self.selected >= self.profiles.len() {
             Focus::Host
         } else {
@@ -2461,9 +2462,9 @@ where
 
 fn render_action_buttons(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     let connect_label = connect_label(state);
-    let connect_text = format!(" ▶  {}  <Enter> ", connect_label);
+    let connect_text = format!(" ▶  {} ", connect_label);
     let connect_width = connect_text.width() as u16;
-    let delete_text = " 🗑  Delete  <D> ".to_string();
+    let delete_text = " 🗑  Delete ".to_string();
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
@@ -2514,9 +2515,9 @@ fn button_action_from_x(
     buttons_area: Rect,
     state: &ConnectRemoteHostState,
 ) -> Option<Focus> {
-    let connect_text = format!(" ▶  {}  <Enter> ", connect_label(state));
+    let connect_text = format!(" ▶  {} ", connect_label(state));
     let connect_width = connect_text.width() as u16;
-    let delete_text = " 🗑  Delete  <D> ";
+    let delete_text = " 🗑  Delete ";
     let delete_width = delete_text.width() as u16;
     let gap = 2;
     let total_width = if state.has_saved_selection() {
@@ -4334,7 +4335,7 @@ mod tests {
 
         state.selected = state.proxy_selection_index();
         state.set_focus(Focus::Hosts);
-        assert_eq!(state.default_detail_focus(), Focus::ProxyName);
+        assert_eq!(state.default_detail_focus(), Focus::ProxyActive);
         assert!(state.selected_profile().is_none());
     }
 
