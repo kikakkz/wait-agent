@@ -1649,8 +1649,10 @@ impl HostSidebarGeometry {
     fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
         const HEADER_HEIGHT: u16 = 3;
         const BUTTON_HEIGHT: u16 = 3;
-        const GAP: u16 = 1;
-        const FIXED_ROWS: u16 = HEADER_HEIGHT * 2 + BUTTON_HEIGHT * 2 + GAP * 4;
+        // Lists sit directly under their headers/buttons; only the two
+        // sections (Saved Hosts vs Proxy Configuration) are separated.
+        const SECTION_GAP: u16 = 1;
+        const FIXED_ROWS: u16 = HEADER_HEIGHT * 2 + BUTTON_HEIGHT * 2 + SECTION_GAP;
 
         let saved_content = state.profiles.len() as u16;
         let proxy_content = state.proxy_settings.profiles.len() as u16;
@@ -1685,21 +1687,15 @@ impl HostSidebarGeometry {
         };
 
         let saved_header = Rect::new(area.x, area.y, area.width, HEADER_HEIGHT);
-        let saved_list_y = saved_header.y.saturating_add(saved_header.height).saturating_add(GAP);
+        let saved_list_y = saved_header.y.saturating_add(saved_header.height);
         let saved_list = Rect::new(area.x, saved_list_y, area.width, saved_list_height);
-        let new_host_y = saved_list.y.saturating_add(saved_list.height).saturating_add(GAP);
+        let new_host_y = saved_list.y.saturating_add(saved_list.height);
         let new_host = Rect::new(area.x, new_host_y, area.width, BUTTON_HEIGHT);
-        let proxy_header_y = new_host.y.saturating_add(new_host.height).saturating_add(GAP);
+        let proxy_header_y = new_host.y.saturating_add(new_host.height).saturating_add(SECTION_GAP);
         let proxy_header = Rect::new(area.x, proxy_header_y, area.width, HEADER_HEIGHT);
-        let proxy_list_y = proxy_header
-            .y
-            .saturating_add(proxy_header.height)
-            .saturating_add(GAP);
+        let proxy_list_y = proxy_header.y.saturating_add(proxy_header.height);
         let proxy_list = Rect::new(area.x, proxy_list_y, area.width, proxy_list_height);
-        let new_proxy_y = proxy_list
-            .y
-            .saturating_add(proxy_list.height)
-            .saturating_add(GAP);
+        let new_proxy_y = proxy_list.y.saturating_add(proxy_list.height);
         let new_proxy = Rect::new(area.x, new_proxy_y, area.width, BUTTON_HEIGHT);
 
         Self {
@@ -1832,7 +1828,8 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
     render_framed_block(
         frame,
         geometry.saved_header,
-        header_block_content("▤", "Saved Hosts", state.profiles.len()),
+        header_block_content("▤", "Saved Hosts", state.profiles.len(), geometry.saved_header.width),
+        Alignment::Left,
     );
     render_host_list(
         frame,
@@ -1846,6 +1843,7 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         frame,
         geometry.new_host,
         button_block_content("+", "New Host"),
+        Alignment::Center,
     );
 
     render_framed_block(
@@ -1855,7 +1853,9 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
             "⛓",
             "Proxy Configuration",
             state.proxy_settings.profiles.len(),
+            geometry.proxy_header.width,
         ),
+        Alignment::Left,
     );
     render_host_list(
         frame,
@@ -1869,10 +1869,16 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         frame,
         geometry.new_proxy,
         button_block_content("+", "New Proxy"),
+        Alignment::Center,
     );
 }
 
-fn render_framed_block(frame: &mut Frame<'_>, area: Rect, content: Line<'static>) {
+fn render_framed_block(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    content: Line<'static>,
+    alignment: Alignment,
+) {
     if area.height < 3 {
         return;
     }
@@ -1884,13 +1890,22 @@ fn render_framed_block(frame: &mut Frame<'_>, area: Rect, content: Line<'static>
     frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(content)
-            .alignment(Alignment::Center)
+            .alignment(alignment)
             .style(Style::default().bg(SECTION_BG)),
         Rect::new(inner.x, inner.y, inner.width, inner.height),
     );
 }
 
-fn header_block_content(icon: &str, title: &str, count: usize) -> Line<'static> {
+fn header_block_content(icon: &str, title: &str, count: usize, width: u16) -> Line<'static> {
+    let count_text = format!("{count}");
+    let left = format!("{icon} {title}");
+    let right = count_text.to_string();
+    let inner_width = width.saturating_sub(2) as usize;
+    let left_width = left.width();
+    let right_width = right.width();
+    let padding = inner_width.saturating_sub(left_width + right_width);
+    let spaces = " ".repeat(padding);
+
     Line::from(vec![
         Span::styled(icon.to_string(), Style::default().fg(Color::White)),
         Span::raw(" "),
@@ -1898,9 +1913,9 @@ fn header_block_content(icon: &str, title: &str, count: usize) -> Line<'static> 
             title.to_string(),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
+        Span::raw(spaces),
         Span::styled(
-            format!("{count}"),
+            count_text,
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Rgb(50, 55, 65))
@@ -2084,7 +2099,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostSta
     content.push(Span::raw("  "));
     content.push(Span::styled(star, Style::default().fg(Color::Yellow)));
 
-    render_framed_block(frame, area, Line::from(content));
+    render_framed_block(frame, area, Line::from(content), Alignment::Left);
 }
 
 fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHostState) {
@@ -3640,7 +3655,10 @@ mod tests {
             .lines()
             .nth(details.save.y as usize)
             .expect("save row should render");
-        let save_col = save_row.find("Save").expect("Save should render") as u16;
+        let save_col = save_row
+            .find("Save")
+            .map(|index| display_width(&save_row[..index]))
+            .expect("Save should render") as u16;
 
         assert!(save_col > details.save.x + 8);
         assert!(save_col + 4 < details.save.x + details.save.width);
