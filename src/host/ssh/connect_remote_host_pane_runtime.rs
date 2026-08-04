@@ -691,17 +691,29 @@ impl ConnectRemoteHostState {
         if !point_in_rect(x, y, layout.dialog) {
             return PaneAction::None;
         }
-        if point_in_rect(x, y, layout.hosts) {
-            let row = y.saturating_sub(layout.hosts.y) as usize;
-            if let Some(selection) = selection_from_display_row(self, row) {
-                self.selected = selection;
+        if point_in_rect(x, y, layout.host_sections.saved_hosts) {
+            let inner = Block::default()
+                .borders(Borders::ALL)
+                .inner(layout.host_sections.saved_hosts);
+            let row = y.saturating_sub(inner.y) as usize;
+            if row <= self.profiles.len() {
+                self.selected = row.min(self.profiles.len());
                 self.set_focus(Focus::Hosts);
-                return if self.selected_proxy_config() {
-                    self.sync_selected_proxy();
-                    PaneAction::None
-                } else {
-                    PaneAction::LoadSecrets(self.sync_selected_profile())
-                };
+                return PaneAction::LoadSecrets(self.sync_selected_profile());
+            }
+            return PaneAction::None;
+        }
+        if point_in_rect(x, y, layout.host_sections.proxy_config) {
+            let inner = Block::default()
+                .borders(Borders::ALL)
+                .inner(layout.host_sections.proxy_config);
+            let row = y.saturating_sub(inner.y) as usize;
+            let proxy_items = self.proxy_settings.profiles.len() + 1;
+            if row < proxy_items {
+                self.selected = self.proxy_selection_index().saturating_add(row);
+                self.set_focus(Focus::Hosts);
+                self.sync_selected_proxy();
+                return PaneAction::None;
             }
             return PaneAction::None;
         }
@@ -1442,6 +1454,13 @@ struct PopupGeometry {
     dialog: Rect,
     hosts: Rect,
     details: Rect,
+    host_sections: HostListGeometry,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostListGeometry {
+    saved_hosts: Rect,
+    proxy_config: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1605,10 +1624,55 @@ impl PopupGeometry {
             .saturating_sub(host_width)
             .saturating_sub(separator_width)
             .saturating_sub(right_padding);
+        let host_sections = HostListGeometry::from_area(
+            Rect::new(body.x, body.y, host_width, body.height),
+            state,
+        );
         Self {
             dialog,
             hosts: Rect::new(body.x, body.y, host_width, body.height),
             details: Rect::new(details_x, body.y, details_width, body.height),
+            host_sections,
+        }
+    }
+}
+
+impl HostListGeometry {
+    fn from_area(area: Rect, state: &ConnectRemoteHostState) -> Self {
+        let saved_content = (state.profiles.len() + 1).max(1) as u16; // hosts + New Host
+        let proxy_content = (state.proxy_settings.profiles.len() + 1).max(1) as u16; // proxies + New Proxy
+        let saved_natural = saved_content.saturating_add(2);
+        let proxy_natural = proxy_content.saturating_add(2);
+        let total_natural = saved_natural.saturating_add(proxy_natural);
+        let available = area.height;
+
+        let (saved_height, proxy_height) = if total_natural <= available {
+            (saved_natural, proxy_natural)
+        } else {
+            let min_each = 5_u16.min(available);
+            if available <= min_each.saturating_mul(2) {
+                let half = available / 2;
+                (half.max(3), available - half.max(3))
+            } else {
+                let extra = available - min_each.saturating_mul(2);
+                let saved_extra = (saved_content as u32 * extra as u32
+                    / (saved_content.saturating_add(proxy_content)) as u32)
+                    as u16;
+                (
+                    min_each.saturating_add(saved_extra).max(3),
+                    available - min_each.saturating_add(saved_extra).max(3),
+                )
+            }
+        };
+
+        Self {
+            saved_hosts: Rect::new(area.x, area.y, area.width, saved_height),
+            proxy_config: Rect::new(
+                area.x,
+                area.y.saturating_add(saved_height),
+                area.width,
+                proxy_height,
+            ),
         }
     }
 }
@@ -1726,11 +1790,85 @@ fn render(frame: &mut Frame<'_>, state: &ConnectRemoteHostState) {
 }
 
 fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    // Scroll the left menu so the selected item stays visible when the list
-    // is longer than the popup body.
-    let selected_row = display_row_from_selection(state, state.selected);
-    let items = host_list_items(state, selected_row);
-    let visible_height = area.height as usize;
+    let geometry = HostListGeometry::from_area(area, state);
+    let hosts_focused = state.focus == Focus::Hosts;
+    render_host_section(
+        frame,
+        geometry.saved_hosts,
+        hosts_focused,
+        host_section_title("Saved Hosts", "▤", state.profiles.len()),
+        saved_host_list_items(state),
+        saved_host_list_selected(state),
+    );
+    render_host_section(
+        frame,
+        geometry.proxy_config,
+        hosts_focused,
+        host_section_title(
+            "Proxy Configuration",
+            "⛓",
+            state.proxy_settings.profiles.len(),
+        ),
+        proxy_config_list_items(state),
+        proxy_config_list_selected(state),
+    );
+}
+
+fn host_section_title(title: &str, icon: &str, count: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {icon} {title} "),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {count} "),
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(50, 55, 65))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn saved_host_list_selected(state: &ConnectRemoteHostState) -> Option<usize> {
+    if state.selected < state.proxy_selection_index() {
+        Some(state.selected)
+    } else {
+        None
+    }
+}
+
+fn proxy_config_list_selected(state: &ConnectRemoteHostState) -> Option<usize> {
+    if state.selected >= state.proxy_selection_index() {
+        Some(state.selected - state.proxy_selection_index())
+    } else {
+        None
+    }
+}
+
+fn render_host_section(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    hosts_focused: bool,
+    title_line: Line<'static>,
+    items: Vec<ListItem<'static>>,
+    selected: Option<usize>,
+) {
+    if area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .title(title_line)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(DIALOG_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible_height = inner.height as usize;
+    let selected_row = selected.unwrap_or(0);
     let max_offset = items.len().saturating_sub(visible_height);
     let offset = if selected_row >= visible_height {
         (selected_row - visible_height + 1).min(max_offset)
@@ -1738,175 +1876,68 @@ fn render_hosts(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostStat
         0
     };
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .style(Style::default().bg(DIALOG_BG)),
-        )
         .highlight_symbol("")
-        .highlight_style(if state.focus == Focus::Hosts {
+        .highlight_style(if hosts_focused {
             active_focus_style()
         } else {
             selected_host_style()
         });
     let mut list_state = ratatui::widgets::ListState::default()
-        .with_selected(Some(selected_row))
+        .with_selected(selected)
         .with_offset(offset);
-    frame.render_stateful_widget(list, area, &mut list_state);
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 fn saved_host_label(profile: &RemoteHostProfile) -> String {
     format!("{}@{}", profile.ssh_user, profile.host)
 }
 
-fn host_list_items(
-    state: &ConnectRemoteHostState,
-    selected_row: usize,
-) -> Vec<ListItem<'static>> {
-    host_list_labels(state)
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| styled_host_list_item(state, index, selected_row, &label))
-        .collect()
+fn saved_host_list_items(state: &ConnectRemoteHostState) -> Vec<ListItem<'static>> {
+    let mut items: Vec<ListItem<'static>> = state
+        .profiles
+        .iter()
+        .map(|profile| {
+            let text = saved_host_label(profile);
+            ListItem::new(Line::from(vec![
+                Span::styled(" ● ", Style::default().fg(Color::Green)),
+                Span::styled(text, Style::default().fg(Color::White)),
+            ]))
+        })
+        .collect();
+    items.push(action_list_item("New Host"));
+    items
 }
 
-fn styled_host_list_item(
-    state: &ConnectRemoteHostState,
-    index: usize,
-    selected_row: usize,
-    label: &str,
-) -> ListItem<'static> {
-    let is_header = index == 0 || index == proxy_heading_display_row(state);
-    let is_action = label.starts_with('+');
-    let is_selected = index == selected_row;
-
-    if is_header {
-        let (icon, title, count) = if index == 0 {
-            ("▤", "Saved Hosts", state.profiles.len())
-        } else {
-            ("⛓", "Proxy Configuration", state.proxy_settings.profiles.len())
-        };
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {icon} {title} "),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(HEADER_BG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {count} "),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Rgb(50, 55, 65))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]))
-        .style(Style::default().bg(HEADER_BG))
-    } else if is_action {
-        let text = label.trim_start_matches('+').trim_start();
-        ListItem::new(Line::from(vec![
-            Span::styled(" + ", Style::default().fg(Color::Gray).bg(ACTION_BG)),
-            Span::styled(
-                format!(" {text} "),
-                Style::default().fg(Color::Gray).bg(ACTION_BG),
-            ),
-        ]))
-    } else {
-        let is_active_proxy = label.contains('★');
-        let text = label
-            .trim_start_matches("  ● ")
-            .trim_start_matches("  ★ ")
-            .to_string();
-        let (prefix, prefix_color) = if is_selected {
-            ("▶", Color::White)
-        } else if is_active_proxy {
-            ("★", Color::Yellow)
-        } else {
-            ("●", Color::Green)
-        };
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {prefix} "),
-                Style::default().fg(prefix_color),
-            ),
-            Span::styled(text, Style::default().fg(Color::White)),
-        ]))
-    }
+fn proxy_config_list_items(state: &ConnectRemoteHostState) -> Vec<ListItem<'static>> {
+    let mut items: Vec<ListItem<'static>> = state
+        .proxy_settings
+        .profiles
+        .iter()
+        .map(|profile| {
+            let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
+            let (prefix, color) = if active {
+                ("★", Color::Yellow)
+            } else {
+                ("●", Color::Green)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {prefix} "), Style::default().fg(color)),
+                Span::styled(profile.name.clone(), Style::default().fg(Color::White)),
+            ]))
+        })
+        .collect();
+    items.push(action_list_item("New Proxy"));
+    items
 }
 
-fn host_list_labels(state: &ConnectRemoteHostState) -> Vec<String> {
-    let mut labels = vec![format!("Saved Hosts {}", state.profiles.len())];
-    let last_saved_host = state.profiles.len().saturating_sub(1);
-    labels.extend(
-        state
-            .profiles
-            .iter()
-            .enumerate()
-            .map(|(index, profile)| host_menu_label(profile, index == last_saved_host)),
-    );
-    labels.push("+ New Host".to_string());
-    labels.push(format!(
-        "Proxy Configuration {}",
-        state.proxy_settings.profiles.len()
-    ));
-    let last_proxy_profile = state.proxy_settings.profiles.len().saturating_sub(1);
-    labels.extend(
-        state
-            .proxy_settings
-            .profiles
-            .iter()
-            .enumerate()
-            .map(|(index, profile)| proxy_menu_label(state, profile, index == last_proxy_profile)),
-    );
-    labels.push("+ New Proxy".to_string());
-    labels
-}
-
-fn host_menu_label(profile: &RemoteHostProfile, _is_last: bool) -> String {
-    format!("  ● {}", saved_host_label(profile))
-}
-
-fn proxy_menu_label(
-    state: &ConnectRemoteHostState,
-    profile: &RemoteInstallProxyProfile,
-    _is_last: bool,
-) -> String {
-    let active = state.proxy_settings.active.as_deref() == Some(profile.name.as_str());
-    if active {
-        format!("  ★ {}", profile.name)
-    } else {
-        format!("  ● {}", profile.name)
-    }
-}
-
-fn selection_from_display_row(state: &ConnectRemoteHostState, row: usize) -> Option<usize> {
-    if row == 0 {
-        return None;
-    }
-    let proxy_heading_row = proxy_heading_display_row(state);
-    if row == proxy_heading_row {
-        return Some(state.proxy_selection_index());
-    }
-    let selection = if row < proxy_heading_row {
-        row - 1
-    } else {
-        row.saturating_sub(2)
-    };
-    (selection <= state.new_proxy_selection_index()).then_some(selection)
-}
-
-fn display_row_from_selection(state: &ConnectRemoteHostState, selection: usize) -> usize {
-    if selection < state.proxy_selection_index() {
-        selection.saturating_add(1)
-    } else {
-        selection.saturating_add(2)
-    }
-}
-
-fn proxy_heading_display_row(state: &ConnectRemoteHostState) -> usize {
-    state.proxy_selection_index().saturating_add(1)
+fn action_list_item(label: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::styled(" + ", Style::default().fg(Color::Gray).bg(ACTION_BG)),
+        Span::styled(
+            format!(" {label} "),
+            Style::default().fg(Color::Gray).bg(ACTION_BG),
+        ),
+    ]))
 }
 
 const POPUP_WIDTH: u16 = 120;
@@ -3532,19 +3563,6 @@ mod tests {
         }
     }
 
-    fn menu_text_column(label: &str) -> Option<usize> {
-        [
-            "Saved Hosts",
-            "New Host",
-            "New Proxy",
-            "Proxy Configuration",
-            "k@127.0.0.1",
-        ]
-        .into_iter()
-        .find_map(|text| label.find(text))
-        .map(|index| display_width(&label[..index]))
-    }
-
     fn rendered_text(width: u16, height: u16, state: &ConnectRemoteHostState) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4223,24 +4241,10 @@ mod tests {
         let mut state = ConnectRemoteHostState::load();
         state.profiles = vec![saved_password_profile()];
 
-        let labels = host_list_labels(&state);
-        assert!(labels.first().unwrap().contains("Saved Hosts"));
-        assert!(labels
-            .get(proxy_heading_display_row(&state))
-            .unwrap()
-            .contains("Proxy Configuration"));
-        assert!(labels.last().unwrap().contains("New Proxy"));
-        assert!(labels
-            .get(state.profiles.len() + 1)
-            .unwrap()
-            .contains("New Host"));
-        assert_eq!(menu_text_column(labels.first().unwrap()), Some(0));
-        assert_eq!(menu_text_column(labels.get(1).unwrap()), Some(4));
-        assert_eq!(
-            menu_text_column(labels.get(state.profiles.len() + 1).unwrap()),
-            Some(2)
-        );
-        assert_eq!(menu_text_column(labels.last().unwrap()), Some(2));
+        let saved_items = saved_host_list_items(&state);
+        let proxy_items = proxy_config_list_items(&state);
+        assert_eq!(saved_items.len(), state.profiles.len() + 1);
+        assert_eq!(proxy_items.len(), state.proxy_settings.profiles.len() + 1);
         assert_eq!(state.proxy_selection_index(), state.profiles.len() + 1);
 
         state.selected = state.proxy_selection_index();
@@ -4269,35 +4273,14 @@ mod tests {
             ],
         };
 
-        let labels = host_list_labels(&state);
-
-        assert_eq!(
-            labels
-                .get(display_row_from_selection(
-                    &state,
-                    state.proxy_profile_selection_start()
-                ))
-                .map(String::as_str),
-            Some("  ● Home")
-        );
-        assert_eq!(
-            labels
-                .get(display_row_from_selection(
-                    &state,
-                    state.proxy_profile_selection_start() + 1
-                ))
-                .map(String::as_str),
-            Some("  ★ Office")
-        );
-        assert_eq!(
-            labels
-                .get(display_row_from_selection(
-                    &state,
-                    state.new_proxy_selection_index()
-                ))
-                .map(String::as_str),
-            Some("+ New Proxy")
-        );
+        let items = proxy_config_list_items(&state);
+        assert_eq!(items.len(), 3);
+        state.selected = state.proxy_profile_selection_start();
+        assert_eq!(proxy_config_list_selected(&state), Some(0));
+        state.selected = state.proxy_profile_selection_start() + 1;
+        assert_eq!(proxy_config_list_selected(&state), Some(1));
+        state.selected = state.new_proxy_selection_index();
+        assert_eq!(proxy_config_list_selected(&state), Some(2));
     }
 
     #[test]
