@@ -732,7 +732,7 @@ impl ConnectRemoteHostState {
                 row if row == details.rows.all_proxy => self.set_focus(Focus::AllProxy),
                 row if row == details.rows.https_proxy => self.set_focus(Focus::HttpsProxy),
                 row if row == details.rows.action => {
-                    return proxy_action_from_x(x, details.save);
+                    return proxy_action_from_x(x, details.save, self);
                 }
                 _ => {}
             }
@@ -2189,20 +2189,39 @@ fn render_no_proxy(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostS
     );
 }
 
+fn proxy_button_texts(state: &ConnectRemoteHostState) -> (String, String, String) {
+    let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
+    let active_label = if active { "✓  Active" } else { "✓  Set Active" };
+    (
+        format!(" {active_label} "),
+        " 💾  Save ".to_string(),
+        " 🗑  Delete ".to_string(),
+    )
+}
+
+fn proxy_button_layout(area: Rect, state: &ConnectRemoteHostState) -> (Rect, Rect, Rect) {
+    let (active_text, save_text, delete_text) = proxy_button_texts(state);
+    let gap = 2;
+    let active_width = active_text.width() as u16;
+    let save_width = save_text.width() as u16;
+    let delete_width = delete_text.width() as u16;
+    let total_width = active_width + gap + save_width + gap + delete_width;
+    let start_x = area.x + (area.width.saturating_sub(total_width)) / 2;
+
+    let active = Rect::new(start_x, area.y, active_width, 1);
+    let save_x = start_x + active_width + gap;
+    let save = Rect::new(save_x, area.y, save_width, 1);
+    let delete_x = save_x + save_width + gap;
+    let delete = Rect::new(delete_x, area.y, delete_width, 1);
+    (active, save, delete)
+}
+
 fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
     if area.height == 0 {
         return;
     }
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(area);
-    let active = state.proxy_settings.active.as_deref() == Some(state.proxy_draft.name.as_str());
-    let active_label = if active { "✓ Active" } else { "✓ Set Active" };
+    let (active_text, save_text, delete_text) = proxy_button_texts(state);
+    let (active_area, save_area, delete_area) = proxy_button_layout(area, state);
     let primary_style = |focused: bool| {
         if focused {
             Style::default()
@@ -2216,16 +2235,16 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         }
     };
     frame.render_widget(
-        Paragraph::new(active_label)
+        Paragraph::new(active_text)
             .style(primary_style(state.focus == Focus::ProxyActive))
             .alignment(Alignment::Center),
-        columns[0],
+        active_area,
     );
     frame.render_widget(
-        Paragraph::new("💾 Save")
+        Paragraph::new(save_text)
             .style(primary_style(state.focus == Focus::ProxySave))
             .alignment(Alignment::Center),
-        columns[1],
+        save_area,
     );
     let delete_style = if state.focus == Focus::ProxyDelete {
         delete_focus_style()
@@ -2235,27 +2254,20 @@ fn render_proxy_save(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
             .fg(Color::Red)
     };
     frame.render_widget(
-        Paragraph::new("🗑 Delete")
+        Paragraph::new(delete_text)
             .style(delete_style)
             .alignment(Alignment::Center),
-        columns[2],
+        delete_area,
     );
 }
 
-fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(area);
-    if point_in_rect(x, area.y, columns[0]) {
+fn proxy_action_from_x(x: u16, area: Rect, state: &ConnectRemoteHostState) -> PaneAction {
+    let (active, save, delete) = proxy_button_layout(area, state);
+    if point_in_rect(x, area.y, active) {
         PaneAction::ActivateProxyConfig
-    } else if point_in_rect(x, area.y, columns[1]) {
+    } else if point_in_rect(x, area.y, save) {
         PaneAction::SaveProxyConfig
-    } else if point_in_rect(x, area.y, columns[2]) {
+    } else if point_in_rect(x, area.y, delete) {
         PaneAction::DeleteProxyConfig
     } else {
         PaneAction::None
