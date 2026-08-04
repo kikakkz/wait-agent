@@ -2111,8 +2111,8 @@ fn render_info_box(frame: &mut Frame<'_>, area: Rect, _state: &ConnectRemoteHost
     }
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(SECTION_BG_INFO));
+        .border_style(Style::default().fg(SECTION_BORDER_UNIFIED))
+        .style(Style::default().bg(SECTION_BG_UNIFIED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let text = "ⓘ Connect to the selected remote host via SSH. All session settings will be applied after connection.";
@@ -2252,12 +2252,7 @@ fn proxy_action_from_x(x: u16, area: Rect) -> PaneAction {
 }
 
 fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let block = section_block(
-        "Connection",
-        "◎",
-        SECTION_COLOR_CONNECTION,
-        SECTION_BG_CONNECTION,
-    );
+    let block = section_block("Connection", "◎", SECTION_COLOR_CONNECTION);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let table_area = Rect::new(
@@ -2294,7 +2289,7 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
 }
 
 fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let block = section_block("Authentication", "◼", SECTION_COLOR_AUTH, SECTION_BG_AUTH);
+    let block = section_block("Authentication", "◼", SECTION_COLOR_AUTH);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let table_area = Rect::new(
@@ -2331,7 +2326,7 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
 }
 
 fn render_options(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState) {
-    let block = section_block("Options", "⚙", SECTION_COLOR_OPTIONS, SECTION_BG_OPTIONS);
+    let block = section_block("Options", "⚙", SECTION_COLOR_OPTIONS);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let row_width = inner
@@ -2391,22 +2386,29 @@ fn render_checkbox_row(
 const SECTION_COLOR_CONNECTION: Color = Color::Cyan;
 const SECTION_COLOR_AUTH: Color = Color::Magenta;
 const SECTION_COLOR_OPTIONS: Color = Color::Yellow;
-const SECTION_BG_CONNECTION: Color = Color::Rgb(22, 33, 46);
-const SECTION_BG_AUTH: Color = Color::Rgb(40, 24, 48);
-const SECTION_BG_OPTIONS: Color = Color::Rgb(46, 40, 22);
-const SECTION_BG_INFO: Color = Color::Rgb(32, 36, 43);
+const SECTION_BG_UNIFIED: Color = Color::Rgb(32, 36, 43);
+const SECTION_BORDER_UNIFIED: Color = Color::Rgb(70, 75, 85);
 
-fn section_block(title: &str, icon: &str, color: Color, bg: Color) -> Block<'static> {
+fn section_block(title: &str, icon: &str, title_color: Color) -> Block<'static> {
     Block::default()
-        .title(section_title(title, icon, color))
+        .title(section_title(title, icon, title_color))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(color))
-        .style(Style::default().bg(bg))
+        .border_style(Style::default().fg(SECTION_BORDER_UNIFIED))
+        .style(Style::default().bg(SECTION_BG_UNIFIED))
 }
 
-fn section_title(title: &str, icon: &str, color: Color) -> Line<'static> {
-    Line::from(format!(" {icon} {title}"))
-        .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+fn section_title(title: &str, icon: &str, icon_color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(icon.to_string(), Style::default().fg(icon_color)),
+        Span::raw("  "),
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn modal_title(title: &str) -> Line<'static> {
