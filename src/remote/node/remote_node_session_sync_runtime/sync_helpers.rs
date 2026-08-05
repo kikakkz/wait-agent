@@ -1536,6 +1536,7 @@ pub(super) fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &
         RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::PasteFile(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }

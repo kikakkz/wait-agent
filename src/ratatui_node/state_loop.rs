@@ -1062,9 +1062,8 @@ fn handle_paste_file(
             CommandOutcome::Error("local session not found".to_string())
         }
         SessionTransport::RemotePeer => {
-            // Remote peer file paste is implemented in Phase 4 by forwarding the
-            // bytes over the gRPC bridge and caching them on the remote node.
-            CommandOutcome::Error("remote file paste is not yet implemented (Phase 4)".to_string())
+            shared.feed_remote_session_paste_file(target_id, filename_hint, &bytes);
+            CommandOutcome::Ok
         }
     }
 }

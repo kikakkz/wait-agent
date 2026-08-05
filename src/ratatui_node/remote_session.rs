@@ -3,7 +3,7 @@ use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload,
-    ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, AuthorityTransportFrame,
@@ -380,6 +380,85 @@ impl RatatuiRemoteSession {
         let _ = writer.flush();
     }
 
+    /// Forward a pasted file to the remote session.
+    ///
+    /// The file is split into ~1 MiB chunks and sent as `PasteFileRequest`
+    /// control-plane envelopes. The remote peer reassembles the chunks, caches
+    /// the file under its own `/tmp/waitagent/`, and injects the cached path
+    /// into the target shell as keyboard input.
+    pub fn send_paste_file(&self, filename_hint: &str, bytes: &[u8]) {
+        const CHUNK_SIZE: usize = 1024 * 1024;
+        let file_id = generate_paste_file_id();
+        let total_chunks = if bytes.is_empty() {
+            1
+        } else {
+            bytes.len().div_ceil(CHUNK_SIZE) as u32
+        };
+
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(writer) = guard.as_mut() else {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] send_paste_file dropped for {}: writer not ready",
+                self.target_id
+            ));
+            return;
+        };
+
+        ERROR_LOG.log(format!(
+            "[ratatui-remote-session] send_paste_file target={} file_id={file_id} bytes={} chunks={total_chunks}",
+            self.target_id,
+            bytes.len()
+        ));
+
+        for chunk_index in 0..total_chunks {
+            let start = (chunk_index as usize) * CHUNK_SIZE;
+            let end = (start + CHUNK_SIZE).min(bytes.len());
+            let chunk_bytes = bytes[start..end].to_vec();
+            let payload = PasteFileRequestPayload {
+                session_id: self.session_id.clone(),
+                target_id: self.target_id.clone(),
+                filename_hint: filename_hint.to_string(),
+                file_id: file_id.clone(),
+                total_chunks,
+                chunk_index,
+                chunk_bytes,
+            };
+            let envelope = ProtocolEnvelope {
+                protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
+                message_id: format!(
+                    "ratatui-paste-file-{file_id}-{chunk_index}-{}",
+                    now_millis()
+                ),
+                message_type: "paste_file_request",
+                timestamp: format!("{}Z", now_millis()),
+                sender_id: self.authority_node_id.clone(),
+                correlation_id: None,
+                session_id: Some(self.session_id.clone()),
+                target_id: Some(self.target_id.clone()),
+                attachment_id: None,
+                console_id: None,
+                payload: ControlPlanePayload::PasteFileRequest(payload),
+            };
+            if let Err(error) = write_authority_transport_frame(
+                writer,
+                &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
+            ) {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] send_paste_file target={} chunk={chunk_index} write_failed: {error}",
+                    self.target_id
+                ));
+                return;
+            }
+            if let Err(error) = writer.flush() {
+                ERROR_LOG.log(format!(
+                    "[ratatui-remote-session] send_paste_file target={} chunk={chunk_index} flush_failed: {error}",
+                    self.target_id
+                ));
+                return;
+            }
+        }
+    }
+
     /// Snapshot the rendered screen as plain/styled text lines and the cursor position.
     pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
@@ -688,6 +767,18 @@ fn now_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+/// Generate a short, collision-resistant identifier for a single paste file
+/// transfer. Falls back to a pid/timestamp string if the OS random source is
+/// unavailable.
+fn generate_paste_file_id() -> String {
+    let mut bytes = [0u8; 12];
+    if getrandom::fill(&mut bytes).is_ok() {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    } else {
+        format!("{}-{}", std::process::id(), now_millis())
+    }
 }
 
 #[cfg(test)]

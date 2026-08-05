@@ -734,6 +734,30 @@ impl SharedState {
         }
     }
 
+    /// Forward a pasted file to a specific remote session keyed by qualified target.
+    pub(crate) fn feed_remote_session_paste_file(
+        &self,
+        target_id: &str,
+        filename_hint: &str,
+        bytes: &[u8],
+    ) {
+        let session = {
+            let guard = self
+                .sessions
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.get(target_id).cloned()
+        };
+        if let Some(session) = session {
+            session.send_paste_file(filename_hint, bytes);
+        } else {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] feed_remote_session_paste_file: no remote session for {target_id}"
+            ));
+        }
+    }
+
     /// Remove all remote-peer sessions whose authority id matches the given
     /// node.  Called when a remote peer reconnects with a new node instance,
     /// which means any previous sessions hosted by that peer are stale.

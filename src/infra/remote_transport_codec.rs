@@ -6,9 +6,9 @@ use crate::infra::remote_protocol::{
     CreateSessionRequestPayload, ErrorPayload, MirrorBootstrapChunkPayload,
     MirrorBootstrapCompletePayload, NodeSessionChannel, NodeSessionEnvelope,
     OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
-    OpenTargetOkPayload, OpenTargetRejectedPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, ResizeAppliedPayload, ResizeAuthorityChangedPayload, ServerHelloPayload,
-    TargetExitedPayload, TargetGeometryChangedPayload, TargetOutputPayload,
+    OpenTargetOkPayload, OpenTargetRejectedPayload, PasteFileRequestPayload, ProtocolEnvelope,
+    RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload, ResizeAuthorityChangedPayload,
+    ServerHelloPayload, TargetExitedPayload, TargetGeometryChangedPayload, TargetOutputPayload,
     TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
 };
 use std::fmt;
@@ -387,6 +387,16 @@ fn write_payload(
             write_u8(writer, 18)?;
             write_raw_pty_input_payload(writer, payload)?;
         }
+        ControlPlanePayload::PasteFileRequest(payload) => {
+            write_u8(writer, 80)?;
+            write_string(writer, &payload.target_id)?;
+            write_string(writer, &payload.session_id)?;
+            write_string(writer, &payload.filename_hint)?;
+            write_string(writer, &payload.file_id)?;
+            write_u32(writer, payload.total_chunks)?;
+            write_u32(writer, payload.chunk_index)?;
+            write_bytes(writer, &payload.chunk_bytes)?;
+        }
         ControlPlanePayload::TargetOutput(payload) => {
             write_u8(writer, 7)?;
             write_string(writer, &payload.session_id)?;
@@ -571,6 +581,15 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             rows: read_optional_usize(reader)?,
         }),
         18 => ControlPlanePayload::RawPtyInput(read_raw_pty_input_payload(reader)?),
+        80 => ControlPlanePayload::PasteFileRequest(PasteFileRequestPayload {
+            target_id: read_string(reader)?,
+            session_id: read_string(reader)?,
+            filename_hint: read_string(reader)?,
+            file_id: read_string(reader)?,
+            total_chunks: read_u32(reader)?,
+            chunk_index: read_u32(reader)?,
+            chunk_bytes: read_bytes(reader)?,
+        }),
         7 => ControlPlanePayload::TargetOutput(TargetOutputPayload {
             session_id: read_string(reader)?,
             target_id: read_string(reader)?,

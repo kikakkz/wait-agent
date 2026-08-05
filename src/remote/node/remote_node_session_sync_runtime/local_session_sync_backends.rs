@@ -23,6 +23,7 @@ use crate::remote::node::remote_node_session_sync_runtime::{
     LIVE_AUTHORITY_SERVER_ID, SESSION_SYNC_AUTHORITY_ID,
 };
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -103,6 +104,7 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
         RemoteAuthorityCommand::OpenMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::CloseMirror(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::PasteFile(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }
@@ -116,6 +118,7 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::OpenMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::CloseMirror(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::PasteFile(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => None,
     };
@@ -127,6 +130,9 @@ fn authority_command_envelope(
             ControlPlanePayload::CloseMirrorRequest(payload)
         }
         RemoteAuthorityCommand::RawPtyInput(payload) => ControlPlanePayload::RawPtyInput(payload),
+        RemoteAuthorityCommand::PasteFile(payload) => {
+            ControlPlanePayload::PasteFileRequest(payload)
+        }
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
             ControlPlanePayload::Error(ErrorPayload {
@@ -189,6 +195,30 @@ pub(crate) fn sanitize_path_component(value: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+/// Reassembly buffer for a chunked `PasteFileRequest`.
+struct PasteFileAssembler {
+    filename_hint: String,
+    total_chunks: u32,
+    chunks: HashMap<u32, Vec<u8>>,
+}
+
+impl PasteFileAssembler {
+    fn is_complete(&self) -> bool {
+        self.chunks.len() as u32 == self.total_chunks
+    }
+
+    fn assemble(mut self) -> Vec<u8> {
+        let total_len: usize = self.chunks.values().map(|c| c.len()).sum();
+        let mut full = Vec::with_capacity(total_len);
+        for index in 0..self.total_chunks {
+            if let Some(chunk) = self.chunks.remove(&index) {
+                full.extend_from_slice(&chunk);
+            }
+        }
+        full
+    }
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
@@ -972,6 +1002,7 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
 
         let mut _input_seq: u64 = 1;
         let mut viewer_console_id: Option<String> = None;
+        let mut paste_file_assemblers = HashMap::<(String, String), PasteFileAssembler>::new();
         while running.load(Ordering::Relaxed) {
             match read_authority_transport_frame(&mut listener_stream) {
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => match envelope.payload {
@@ -1005,6 +1036,57 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                         mirror_active.store(false, Ordering::Relaxed);
                         if let Some(console_id) = viewer_console_id.take() {
                             session.unregister_console(&io_tx, console_id);
+                        }
+                    }
+                    ControlPlanePayload::PasteFileRequest(payload) => {
+                        ERROR_LOG.log(format!(
+                            "[ratatui-session-sync] target host received PasteFileRequest session={} target={} file_id={} chunk={}/{} bytes={}",
+                            payload.session_id,
+                            payload.target_id,
+                            payload.file_id,
+                            payload.chunk_index,
+                            payload.total_chunks,
+                            payload.chunk_bytes.len()
+                        ));
+                        let key = (payload.session_id.clone(), payload.file_id.clone());
+                        if paste_file_assemblers
+                            .get(&key)
+                            .map(|a| a.total_chunks != payload.total_chunks)
+                            .unwrap_or(false)
+                        {
+                            paste_file_assemblers.remove(&key);
+                        }
+                        let assembler =
+                            paste_file_assemblers.entry(key.clone()).or_insert_with(|| {
+                                PasteFileAssembler {
+                                    filename_hint: payload.filename_hint.clone(),
+                                    total_chunks: payload.total_chunks,
+                                    chunks: HashMap::new(),
+                                }
+                            });
+                        assembler
+                            .chunks
+                            .insert(payload.chunk_index, payload.chunk_bytes);
+                        if assembler.is_complete() {
+                            let assembler = paste_file_assemblers
+                                .remove(&key)
+                                .expect("paste file assembler exists");
+                            let filename_hint = assembler.filename_hint.clone();
+                            let full_bytes = assembler.assemble();
+                            match crate::ratatui_node::clipboard_cache::write_clipboard_file(
+                                &filename_hint,
+                                &full_bytes,
+                            ) {
+                                Ok(path) => {
+                                    let path_string = path.to_string_lossy().into_owned();
+                                    session.feed_input(&io_tx, path_string.into_bytes());
+                                }
+                                Err(error) => {
+                                    ERROR_LOG.log(format!(
+                                        "[ratatui-session-sync] failed to cache pasted file on authority host: {error}"
+                                    ));
+                                }
+                            }
                         }
                     }
                     _ => {}

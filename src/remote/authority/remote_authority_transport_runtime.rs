@@ -4,9 +4,9 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
-    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-    RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload, TargetGeometryChangedPayload,
-    TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, PasteFileRequestPayload, ProtocolEnvelope,
+    RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload,
+    TargetGeometryChangedPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -49,6 +49,7 @@ pub enum RemoteAuthorityCommand {
     OpenMirror(OpenMirrorRequestPayload),
     CloseMirror(CloseMirrorRequestPayload),
     RawPtyInput(RawPtyInputPayload),
+    PasteFile(PasteFileRequestPayload),
     ApplyResize(ApplyResizePayload),
     SyncRequest {
         expected_seq: u64,
@@ -499,6 +500,9 @@ fn command_from_control_plane_payload(
         }
         ControlPlanePayload::RawPtyInput(payload) => {
             Ok(RemoteAuthorityCommand::RawPtyInput(payload))
+        }
+        ControlPlanePayload::PasteFileRequest(payload) => {
+            Ok(RemoteAuthorityCommand::PasteFile(payload))
         }
         ControlPlanePayload::ApplyResize(payload) => {
             Ok(RemoteAuthorityCommand::ApplyResize(payload))

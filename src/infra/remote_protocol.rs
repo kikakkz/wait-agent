@@ -57,6 +57,7 @@ pub enum ControlPlanePayload {
     OpenTargetRejected(OpenTargetRejectedPayload),
     ResizeAuthorityChanged(ResizeAuthorityChangedPayload),
     RawPtyInput(RawPtyInputPayload),
+    PasteFileRequest(PasteFileRequestPayload),
     TargetOutput(TargetOutputPayload),
     RawPtyOutput(RawPtyOutputPayload),
     ApplyResize(ApplyResizePayload),
@@ -86,6 +87,7 @@ impl ControlPlanePayload {
             Self::OpenTargetRejected(_) => "open_target_rejected",
             Self::ResizeAuthorityChanged(_) => "resize_authority_changed",
             Self::RawPtyInput(_) => "raw_pty_input",
+            Self::PasteFileRequest(_) => "paste_file_request",
             Self::TargetOutput(_) => "target_output",
             Self::RawPtyOutput(_) => "raw_pty_output",
             Self::ApplyResize(_) => "apply_resize",
@@ -216,6 +218,17 @@ pub struct RawPtyInputPayload {
     pub console_host_id: String,
     pub input_seq: u64,
     pub input_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteFileRequestPayload {
+    pub session_id: String,
+    pub target_id: String,
+    pub filename_hint: String,
+    pub file_id: String,
+    pub total_chunks: u32,
+    pub chunk_index: u32,
+    pub chunk_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

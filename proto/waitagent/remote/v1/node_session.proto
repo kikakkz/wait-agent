@@ -50,6 +50,10 @@ message NodeSessionEnvelope {
     CreateSessionRequest create_session_request = 70;
     CreateSessionAccepted create_session_accepted = 71;
     CreateSessionRejected create_session_rejected = 72;
+
+    PasteFileRequest paste_file_request = 80;
+    PasteFileAccepted paste_file_accepted = 81;
+    PasteFileRejected paste_file_rejected = 82;
   }
 }
 
@@ -339,4 +343,28 @@ message TargetGeometryChanged {
   string session_id = 2;
   uint32 cols = 3;
   uint32 rows = 4;
+}
+
+message PasteFileRequest {
+  string target_id = 1;
+  string session_id = 2;
+  string filename_hint = 3;
+  string file_id = 4;
+  uint32 total_chunks = 5;
+  uint32 chunk_index = 6;
+  bytes chunk_bytes = 7;
+}
+
+message PasteFileAccepted {
+  string target_id = 1;
+  string session_id = 2;
+  string file_id = 3;
+  string cached_path = 4;
+}
+
+message PasteFileRejected {
+  string target_id = 1;
+  string session_id = 2;
+  string file_id = 3;
+  string reason = 4;
 }

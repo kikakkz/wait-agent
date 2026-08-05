@@ -8,9 +8,9 @@ use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, CreateSessionAccepted, CreateSessionRejected,
     CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
-    OpenMirrorRequest, PtyResizeApplied, RawPtyInput, RawPtyOutput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetGeometryChanged, TargetOutput as GrpcTargetOutput,
-    TargetPublicationAck as GrpcTargetPublicationAck,
+    OpenMirrorRequest, PasteFileRequest as GrpcPasteFileRequest, PtyResizeApplied, RawPtyInput,
+    RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited, TargetGeometryChanged,
+    TargetOutput as GrpcTargetOutput, TargetPublicationAck as GrpcTargetPublicationAck,
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
 };
@@ -22,8 +22,8 @@ use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
     CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
     NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
-    ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload,
-    TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
     TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
@@ -759,6 +759,21 @@ pub(crate) fn map_inbound_grpc_authority_event(
                 input_bytes: payload.input_bytes,
             }),
         )),
+        Some(GrpcBody::PasteFileRequest(payload)) => Some(GrpcAuthorityEvent::Command(
+            RemoteAuthorityCommand::PasteFile(PasteFileRequestPayload {
+                session_id: grpc_session_id(
+                    route_session_id,
+                    &payload.session_id,
+                    &payload.target_id,
+                ),
+                target_id: payload.target_id,
+                filename_hint: payload.filename_hint,
+                file_id: payload.file_id,
+                total_chunks: payload.total_chunks,
+                chunk_index: payload.chunk_index,
+                chunk_bytes: payload.chunk_bytes,
+            }),
+        )),
         Some(GrpcBody::ApplyPtyResize(payload)) => Some(GrpcAuthorityEvent::Command(
             RemoteAuthorityCommand::ApplyResize(ApplyResizePayload {
                 session_id: grpc_session_id(
@@ -925,6 +940,17 @@ pub(crate) fn map_outbound_grpc_envelope(
                 input_seq: payload.input_seq,
                 session_id: payload.session_id.clone(),
                 input_bytes: payload.input_bytes.clone(),
+            }))
+        }
+        (NodeSessionChannel::Authority, ControlPlanePayload::PasteFileRequest(payload)) => {
+            Some(GrpcBody::PasteFileRequest(GrpcPasteFileRequest {
+                target_id: payload.target_id.clone(),
+                session_id: payload.session_id.clone(),
+                filename_hint: payload.filename_hint.clone(),
+                file_id: payload.file_id.clone(),
+                total_chunks: payload.total_chunks,
+                chunk_index: payload.chunk_index,
+                chunk_bytes: payload.chunk_bytes.clone(),
             }))
         }
         (NodeSessionChannel::Authority, ControlPlanePayload::ApplyResize(payload)) => {

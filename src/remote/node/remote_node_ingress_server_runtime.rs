@@ -5,8 +5,9 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
     ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest,
-    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, RawPtyInput, RouteContext,
-    TargetExited as GrpcTargetExited, TargetPublicationAck as GrpcTargetPublicationAck,
+    NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, PasteFileRequest,
+    RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
+    TargetPublicationAck as GrpcTargetPublicationAck,
     TargetPublicationAckStatus as GrpcTargetPublicationAckStatus,
     TargetPublished as GrpcTargetPublished,
 };
@@ -17,8 +18,8 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
     BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
-    ProtocolEnvelope, TargetExitedPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    PasteFileRequestPayload, ProtocolEnvelope, TargetExitedPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
@@ -1766,6 +1767,7 @@ fn handle_transport_event<
                     | Some(Body::CloseMirrorRequest(_))
                     | Some(Body::ApplyPtyResize(_))
                     | Some(Body::RawPtyInput(_))
+                    | Some(Body::PasteFileRequest(_))
             );
             if is_command {
                 if let Some(active) = sessions.get(&session_instance_id) {
@@ -2328,6 +2330,9 @@ fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
         Some(Body::RawPtyInput(payload)) => {
             handle_raw_pty_input(node_id, &envelope, payload, session)
         }
+        Some(Body::PasteFileRequest(payload)) => {
+            handle_paste_file_request(node_id, &envelope, payload, session)
+        }
         Some(Body::Heartbeat(_)) | Some(Body::ClientHello(_)) | Some(Body::ServerHello(_)) => {
             Ok(())
         }
@@ -2858,6 +2863,42 @@ fn handle_raw_pty_input(
     )
 }
 
+fn handle_paste_file_request(
+    node_id: &str,
+    envelope: &GrpcNodeSessionEnvelope,
+    payload: &PasteFileRequest,
+    session: Option<&mut ActiveNodeIngressSession>,
+) -> Result<(), LifecycleError> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let session_id = route_session_id(envelope)
+        .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
+        .unwrap_or_else(|| payload.target_id.clone());
+    let target_id = route_target_id(envelope).unwrap_or_else(|| payload.target_id.clone());
+    bridge_output_to_authority_transports(
+        node_id,
+        session,
+        session_id,
+        target_id,
+        |transport, session_id, target_id| {
+            transport.send_payload(
+                session_id,
+                target_id,
+                ControlPlanePayload::PasteFileRequest(PasteFileRequestPayload {
+                    session_id: session_id.to_string(),
+                    target_id: target_id.to_string(),
+                    filename_hint: payload.filename_hint.clone(),
+                    file_id: payload.file_id.clone(),
+                    total_chunks: payload.total_chunks,
+                    chunk_index: payload.chunk_index,
+                    chunk_bytes: payload.chunk_bytes.clone(),
+                }),
+            )
+        },
+    )
+}
+
 fn bridge_output_to_authority_transports<F>(
     node_id: &str,
     session: &mut ActiveNodeIngressSession,
@@ -3193,6 +3234,25 @@ fn map_authority_command_to_grpc(
                 input_seq: payload.input_seq,
                 session_id: payload.session_id,
                 input_bytes: payload.input_bytes,
+            })),
+        ),
+        RemoteAuthorityCommand::PasteFile(payload) => (
+            Some(RouteContext {
+                authority_node_id: Some(session.node_id().to_string()),
+                target_id: Some(payload.target_id.clone()),
+                attachment_id: None,
+                console_id: None,
+                console_host_id: None,
+                session_id: Some(payload.session_id.clone()),
+            }),
+            Some(Body::PasteFileRequest(PasteFileRequest {
+                target_id: payload.target_id,
+                session_id: payload.session_id,
+                filename_hint: payload.filename_hint,
+                file_id: payload.file_id,
+                total_chunks: payload.total_chunks,
+                chunk_index: payload.chunk_index,
+                chunk_bytes: payload.chunk_bytes,
             })),
         ),
         RemoteAuthorityCommand::ApplyResize(payload) => (
