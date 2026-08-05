@@ -262,8 +262,7 @@ fn handle_clipboard_content(
                 );
             } else {
                 ERROR_LOG.log("[clipboard] not paths, sending as text".to_string());
-                let text = strip_trailing_newline(&text);
-                send_paste_text(stream, target_id, text);
+                send_paste_text(stream, target_id, &text);
             }
         }
         ClipboardContent::FileUris(uris) => {
@@ -404,19 +403,6 @@ fn send_paste_file(stream: &mut UnixStream, target_id: &str, filename_hint: &str
     let encoded = general_purpose::STANDARD.encode(bytes);
     let _ = writeln!(stream, "PASTE_FILE {target_id} {filename_hint} {encoded}");
     let _ = stream.flush();
-}
-
-/// Strip a single trailing line ending from pasted text.
-///
-/// Clipboard contents frequently include a trailing newline copied from the
-/// source application. Pasting that into a shell would execute the text
-/// immediately; removing one trailing newline avoids that surprise while
-/// preserving internal newlines and explicit user intent.
-fn strip_trailing_newline(text: &str) -> &str {
-    text.strip_suffix("\r\n")
-        .or_else(|| text.strip_suffix('\n'))
-        .or_else(|| text.strip_suffix('\r'))
-        .unwrap_or(text)
 }
 
 /// Send a PASTE_TEXT command with the given text to the server.
@@ -686,25 +672,16 @@ fn handle_crossterm_event(
         clipboard_tx,
     } = args;
     match event {
-        Event::Paste(text) => {
-            // Terminal paste events (Ctrl+V / Shift+Insert in bracketed-paste
-            // mode) already provide the pasted text. Use it directly for plain
-            // text to avoid the slow system-clipboard round-trip; only read the
-            // clipboard when the text is empty or looks like file paths/URIs.
+        Event::Paste(_text) => {
+            // Treat terminal paste events (Ctrl+V / Shift+Insert in bracketed-paste
+            // mode) the same as our own clipboard shortcut: read the system
+            // clipboard so we can handle files and URI lists, not just plain text.
             if *focus == Focus::Main
                 && error_log_state.is_none()
                 && settings_state.is_none()
                 && history_state.is_none()
             {
-                if let Some(target_id) = snapshot.active_target.as_deref() {
-                    let ctx = PlatformContext::detect();
-                    if text.is_empty() || ctx.parse_file_paths_from_text(&text).is_some() {
-                        spawn_clipboard_read(clipboard_tx.clone());
-                    } else {
-                        let text = strip_trailing_newline(&text);
-                        send_paste_text(stream, target_id, text);
-                    }
-                }
+                spawn_clipboard_read(clipboard_tx.clone());
             }
         }
         Event::Key(key) if key.kind == KeyEventKind::Press => {
