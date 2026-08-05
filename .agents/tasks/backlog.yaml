@@ -560,7 +560,7 @@ next:
     status: done
   - id: task.ratatui-clipboard-paste-to-main-pane
     title: '[epic] paste clipboard text, images, and files into the main pane'
-    status: in_progress
+    status: done
     design_ref:
       document: docs/ratatui-clipboard-paste-design.md
       authorizes: >
@@ -587,20 +587,8 @@ next:
       document: docs/ratatui-clipboard-paste-design.md
       authorizes: Section 6.2 PASTE_FILE command and Section 9 cache directory/filename conventions.
   - id: task.ratatui-clipboard-paste-phase4-remote-file-transfer
-    title: Phase 4 - remote peer file paste transport via chunked gRPC
-    status: in_progress
-    design_ref:
-      document: docs/ratatui-clipboard-paste-design.md
-      authorizes: Section 8 chunked FilePasteChunk/FilePasteComplete gRPC extension.
-  - id: task.ratatui-clipboard-paste-phase3-local-file-cache
-    title: Phase 3 - binary file/image paste with local /tmp/waitagent cache
-    status: backlog
-    design_ref:
-      document: docs/ratatui-clipboard-paste-design.md
-      authorizes: Section 6.2 PASTE_FILE command and Section 9 cache directory/filename conventions.
-  - id: task.ratatui-clipboard-paste-phase4-remote-file-transfer
     title: Phase 4 - remote peer file paste transport via gRPC/authority transport
-    status: backlog
+    status: done
     design_ref:
       document: docs/ratatui-clipboard-paste-design.md
       authorizes: Section 8 gRPC protocol extension and Section 4 remote session file semantics.

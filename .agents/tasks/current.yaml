@@ -1,46 +1,51 @@
-id: task.ratatui-phase-3-remote-reconnect
+id: task.ratatui-clipboard-paste-to-main-pane
 kind: task
 version: 1
-title: implement automatic reconnect for ratatui remote sessions
+title: '[epic] paste clipboard text, images, and files into the main pane'
 status: done
 priority: high
 design_ref:
-  doc: /root/.kimi-code/sessions/wd_wait-agent-ratatui_7ed27e3252ef/session_b2d1e8b6-65e7-4d81-8d58-f614fb12aedf/agents/main/plans/shatterstar-dove-dagger.md
-  section: "3. Design"
-  why:
-    - Phase 3 remote main pane renders remote sessions but removes them immediately on any authority transport drop.
-    - The remote node already keeps authority-host target sessions alive across inbound gRPC session loss and reuses them for new viewers.
-    - Local reconnect orchestration is the missing piece to make remote sessions resilient.
+  document: docs/ratatui-clipboard-paste-design.md
+  authorizes: >
+    Defines the PASTE_TEXT/PASTE_FILE client→server protocol, the
+    FilePasteRequest/FilePasteResponse gRPC extension, clipboard content
+    classification, and the per-session cache semantics required to land
+    this slice.
 source_of_truth:
   file: .agents/tasks/current.yaml
   reference: current
 depends_on:
-  - task.ratatui-phase-3-remote-main-pane.done
+  - task.ratatui-phase-4-remove-tmux.done
 done_criteria:
-  - Remote session stays in sidebar when authority transport drops, marked Offline.
-  - A reconnect worker retries the authority transport with exponential backoff.
-  - On successful reconnect the session returns to Online and resumes output.
-  - User-initiated close cancels the reconnect worker.
-  - After the retry budget is exhausted the session is removed.
+  - Text paste works for local and remote peer sessions without extra trailing newline.
+  - File path / URI paste resolves to local paths for local sessions and ships file bytes for remote peer sessions.
+  - Binary file / image paste caches to <temp>/waitagent/ and injects the cached path as keyboard input.
+  - Remote peer file paste uses chunked PasteFileRequest over the authority transport and reassembles on the remote node.
+  - Agent sessions (kimi, claude) receive @-prefixed file references; paths with spaces are quoted.
   - cargo fmt --check passes.
-  - cargo check passes.
-  - cargo build --bin waitagent succeeds.
-  - cargo test --release passes.
+  - cargo clippy -- -D warnings passes.
+  - cargo test --release ratatui session_sync passes.
 verification:
   - cargo fmt --check
-  - cargo check
-  - cargo build --bin waitagent --release
-  - cargo test --release
-  - manual: connect to 10.1.29.110, restart remote waitagent, verify session resumes
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - manual: paste text, file path, and image into local bash/kimi/claude sessions
+  - manual: paste file into remote peer session and verify it lands on remote /tmp/waitagent/
 touched_paths:
-  - src/runtime/ratatui_node/state_event.rs
-  - src/runtime/ratatui_node/remote_session.rs
-  - src/runtime/ratatui_node/state_loop.rs
-  - src/runtime/ratatui_node/reconnect_worker.rs
-  - src/runtime/ratatui_node/mod.rs
-  - src/runtime/ratatui_node/runtime.rs
-  - src/ui/sidebar.rs
-  - src/ui/snapshot.rs
+  - src/ratatui_node/clipboard_reader.rs
+  - src/ratatui_node/clipboard_platform.rs
+  - src/ratatui_node/clipboard_cache.rs
+  - src/ratatui_node/client_runtime.rs
+  - src/ratatui_node/client.rs
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/state_event.rs
+  - src/ratatui_node/remote_session.rs
+  - src/infra/remote_protocol.rs
+  - src/infra/remote_transport_codec.rs
+  - src/remote/node/remote_node_session_runtime.rs
+  - src/remote/node/remote_node_session_sync_runtime/local_session_sync_backends.rs
+  - proto/waitagent/remote/v1/node_session.proto
 notes:
-  - Remote node restart that loses the target session is out of scope; the session closes after the retry budget.
-  - Local sessions and authority-host sessions do not need reconnect.
+  - Implementation uses ControlPlanePayload::PasteFileRequest over the existing authority transport frame instead of separate FilePasteChunk/FilePasteComplete proto messages.
+  - Shift+P shortcut was removed; Ctrl+V and Shift+Insert unified to read system clipboard for file support.
+  - Trailing newline normalization lives in clipboard_reader.rs because the artifact originates from clipboard content (e.g. Windows apps store trailing \r\n).
