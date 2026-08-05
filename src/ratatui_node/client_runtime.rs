@@ -289,7 +289,7 @@ fn handle_file_paths(
     if is_local {
         let path_string = paths
             .iter()
-            .map(|p| ctx.path_for_input(p))
+            .map(|p| format!("@{}", ctx.path_for_input(p)))
             .collect::<Vec<_>>()
             .join(" ");
         send_paste_text(stream, target_id, &path_string);
@@ -333,7 +333,8 @@ fn handle_binary_file(
     if is_local {
         match ctx.write_temp_file(filename_hint, bytes) {
             Ok(path) => {
-                send_paste_text(stream, target_id, &ctx.path_for_input(&path));
+                let path_with_at = format!("@{}", ctx.path_for_input(&path));
+                send_paste_text(stream, target_id, &path_with_at);
             }
             Err(error) => {
                 *status_message = Some((
