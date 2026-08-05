@@ -89,6 +89,20 @@ pub fn read_clipboard() -> Result<ClipboardContent, String> {
     })
 }
 
+/// Strip a single trailing line ending from text fetched from the clipboard.
+///
+/// Windows applications frequently store a trailing `\r\n` when copying text.
+/// When the TUI injects clipboard bytes as keyboard input, that trailing newline
+/// would execute the command or add an unwanted blank line. Removing one
+/// trailing newline normalizes the clipboard content without destroying
+/// intentional multi-line text.
+fn normalize_clipboard_text(text: &str) -> &str {
+    text.strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .or_else(|| text.strip_suffix('\r'))
+        .unwrap_or(text)
+}
+
 /// WSL-only combined clipboard read: text + file-drop list in one powershell.exe call.
 fn read_clipboard_wsl() -> Result<Option<ClipboardContent>, String> {
     let bytes = run_command_bytes(
@@ -100,8 +114,9 @@ fn read_clipboard_wsl() -> Result<Option<ClipboardContent>, String> {
         serde_json::from_str(&json).map_err(|e| format!("invalid WSL clipboard JSON: {e}"))?;
 
     if let Some(text) = parsed.text {
+        let text = normalize_clipboard_text(&text);
         if !text.trim().is_empty() {
-            return Ok(Some(classify_text(&text)));
+            return Ok(Some(classify_text(text)));
         }
     }
 
@@ -142,7 +157,7 @@ fn read_text() -> Result<String, String> {
         match backend() {
             Ok(text) => {
                 ERROR_LOG.log(format!("[clipboard-reader] text backend {name} ok"));
-                return Ok(text);
+                return Ok(normalize_clipboard_text(&text).to_string());
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -479,6 +494,24 @@ mod tests {
             }
             other => panic!("expected plain text fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_clipboard_text_strips_one_trailing_newline() {
+        assert_eq!(normalize_clipboard_text("hello\r\n"), "hello");
+        assert_eq!(normalize_clipboard_text("hello\n"), "hello");
+        assert_eq!(normalize_clipboard_text("hello\r"), "hello");
+    }
+
+    #[test]
+    fn normalize_clipboard_text_preserves_internal_newlines() {
+        assert_eq!(normalize_clipboard_text("line1\nline2\n"), "line1\nline2");
+    }
+
+    #[test]
+    fn normalize_clipboard_text_leaves_clean_text_unchanged() {
+        assert_eq!(normalize_clipboard_text("hello"), "hello");
+        assert_eq!(normalize_clipboard_text("line1\nline2"), "line1\nline2");
     }
 
     #[test]
