@@ -717,6 +717,9 @@ fn map_local_authority_event(
         ControlPlanePayload::RawPtyInput(payload) => Ok(RemoteNodeAuthorityEvent::Command(
             RemoteAuthorityCommand::RawPtyInput(payload),
         )),
+        ControlPlanePayload::PasteFileRequest(payload) => Ok(RemoteNodeAuthorityEvent::Command(
+            RemoteAuthorityCommand::PasteFile(payload),
+        )),
         ControlPlanePayload::ApplyResize(payload) => Ok(RemoteNodeAuthorityEvent::Command(
             RemoteAuthorityCommand::ApplyResize(payload),
         )),

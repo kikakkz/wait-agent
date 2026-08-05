@@ -209,11 +209,13 @@ impl RatatuiRemoteSession {
             raw_pty_passthrough: true,
             bootstrap_mode: BootstrapMode::VisibleOnly,
         };
+        let now = now_millis();
+        let timestamp = format!("{now}Z");
         let envelope = ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!("ratatui-open-mirror-{}", now_millis()),
+            message_id: format!("ratatui-open-mirror-{now}"),
             message_type: "open_mirror_request",
-            timestamp: format!("{}Z", now_millis()),
+            timestamp,
             sender_id: self.authority_node_id.clone(),
             correlation_id: None,
             session_id: Some(self.session_id.clone()),
@@ -360,11 +362,13 @@ impl RatatuiRemoteSession {
             cols: cols as usize,
             rows: rows as usize,
         };
+        let now = now_millis();
+        let timestamp = format!("{now}Z");
         let envelope = ProtocolEnvelope {
             protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!("ratatui-resize-{}", now_millis()),
+            message_id: format!("ratatui-resize-{now}"),
             message_type: "apply_resize",
-            timestamp: format!("{}Z", now_millis()),
+            timestamp,
             sender_id: self.authority_node_id.clone(),
             correlation_id: None,
             session_id: Some(self.session_id.clone()),
@@ -395,21 +399,16 @@ impl RatatuiRemoteSession {
             bytes.len().div_ceil(CHUNK_SIZE) as u32
         };
 
-        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(writer) = guard.as_mut() else {
-            ERROR_LOG.log(format!(
-                "[ratatui-remote-session] send_paste_file dropped for {}: writer not ready",
-                self.target_id
-            ));
-            return;
-        };
-
         ERROR_LOG.log(format!(
             "[ratatui-remote-session] send_paste_file target={} file_id={file_id} bytes={} chunks={total_chunks}",
             self.target_id,
             bytes.len()
         ));
 
+        // Encode all chunks into a single buffer before acquiring the writer lock
+        // so other input is not blocked while we slice and frame a large file.
+        let timestamp = format!("{}Z", now_millis());
+        let mut encoded = Vec::with_capacity(bytes.len().saturating_add(bytes.len() / 8));
         for chunk_index in 0..total_chunks {
             let start = (chunk_index as usize) * CHUNK_SIZE;
             let end = (start + CHUNK_SIZE).min(bytes.len());
@@ -425,12 +424,9 @@ impl RatatuiRemoteSession {
             };
             let envelope = ProtocolEnvelope {
                 protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-                message_id: format!(
-                    "ratatui-paste-file-{file_id}-{chunk_index}-{}",
-                    now_millis()
-                ),
+                message_id: format!("ratatui-paste-file-{file_id}-{chunk_index}-{timestamp}"),
                 message_type: "paste_file_request",
-                timestamp: format!("{}Z", now_millis()),
+                timestamp: timestamp.clone(),
                 sender_id: self.authority_node_id.clone(),
                 correlation_id: None,
                 session_id: Some(self.session_id.clone()),
@@ -440,22 +436,37 @@ impl RatatuiRemoteSession {
                 payload: ControlPlanePayload::PasteFileRequest(payload),
             };
             if let Err(error) = write_authority_transport_frame(
-                writer,
+                &mut encoded,
                 &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
             ) {
                 ERROR_LOG.log(format!(
-                    "[ratatui-remote-session] send_paste_file target={} chunk={chunk_index} write_failed: {error}",
+                    "[ratatui-remote-session] send_paste_file target={} chunk={chunk_index} encode_failed: {error}",
                     self.target_id
                 ));
                 return;
             }
-            if let Err(error) = writer.flush() {
-                ERROR_LOG.log(format!(
-                    "[ratatui-remote-session] send_paste_file target={} chunk={chunk_index} flush_failed: {error}",
-                    self.target_id
-                ));
-                return;
-            }
+        }
+
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(writer) = guard.as_mut() else {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] send_paste_file dropped for {}: writer not ready",
+                self.target_id
+            ));
+            return;
+        };
+        if let Err(error) = writer.write_all(&encoded) {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] send_paste_file target={} write_failed: {error}",
+                self.target_id
+            ));
+            return;
+        }
+        if let Err(error) = writer.flush() {
+            ERROR_LOG.log(format!(
+                "[ratatui-remote-session] send_paste_file target={} flush_failed: {error}",
+                self.target_id
+            ));
         }
     }
 
@@ -769,15 +780,23 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
 /// Generate a short, collision-resistant identifier for a single paste file
 /// transfer. Falls back to a pid/timestamp string if the OS random source is
-/// unavailable.
+/// unavailable; nanosecond precision reduces the chance of collisions when
+/// multiple pastes happen in rapid succession.
 fn generate_paste_file_id() -> String {
     let mut bytes = [0u8; 12];
     if getrandom::fill(&mut bytes).is_ok() {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     } else {
-        format!("{}-{}", std::process::id(), now_millis())
+        format!("{}-{}", std::process::id(), now_nanos())
     }
 }
 

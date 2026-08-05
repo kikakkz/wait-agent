@@ -202,11 +202,34 @@ struct PasteFileAssembler {
     filename_hint: String,
     total_chunks: u32,
     chunks: HashMap<u32, Vec<u8>>,
+    last_received: Instant,
 }
 
+/// How long an incomplete `PasteFileAssembler` may stay in memory before it is
+/// discarded. This bounds the memory growth when chunks are lost or a transfer
+/// is abandoned mid-way.
+const PASTE_FILE_ASSEMBLER_TIMEOUT: Duration = Duration::from_secs(300);
+
 impl PasteFileAssembler {
+    fn new(filename_hint: String, total_chunks: u32) -> Self {
+        Self {
+            filename_hint,
+            total_chunks,
+            chunks: HashMap::new(),
+            last_received: Instant::now(),
+        }
+    }
+
     fn is_complete(&self) -> bool {
         self.chunks.len() as u32 == self.total_chunks
+    }
+
+    fn is_stale(&self) -> bool {
+        self.last_received.elapsed() >= PASTE_FILE_ASSEMBLER_TIMEOUT
+    }
+
+    fn touch(&mut self) {
+        self.last_received = Instant::now();
     }
 
     fn assemble(mut self) -> Vec<u8> {
@@ -1049,6 +1072,9 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                             payload.chunk_bytes.len()
                         ));
                         let key = (payload.session_id.clone(), payload.file_id.clone());
+                        // Discard incomplete transfers whose last chunk arrived
+                        // long enough ago that the transfer is clearly abandoned.
+                        paste_file_assemblers.retain(|_, assembler| !assembler.is_stale());
                         if paste_file_assemblers
                             .get(&key)
                             .map(|a| a.total_chunks != payload.total_chunks)
@@ -1058,33 +1084,32 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                         }
                         let assembler =
                             paste_file_assemblers.entry(key.clone()).or_insert_with(|| {
-                                PasteFileAssembler {
-                                    filename_hint: payload.filename_hint.clone(),
-                                    total_chunks: payload.total_chunks,
-                                    chunks: HashMap::new(),
-                                }
+                                PasteFileAssembler::new(
+                                    payload.filename_hint.clone(),
+                                    payload.total_chunks,
+                                )
                             });
+                        assembler.touch();
                         assembler
                             .chunks
                             .insert(payload.chunk_index, payload.chunk_bytes);
                         if assembler.is_complete() {
-                            let assembler = paste_file_assemblers
-                                .remove(&key)
-                                .expect("paste file assembler exists");
-                            let filename_hint = assembler.filename_hint.clone();
-                            let full_bytes = assembler.assemble();
-                            match crate::ratatui_node::clipboard_cache::write_clipboard_file(
-                                &filename_hint,
-                                &full_bytes,
-                            ) {
-                                Ok(path) => {
-                                    let path_string = path.to_string_lossy().into_owned();
-                                    session.feed_input(&io_tx, path_string.into_bytes());
-                                }
-                                Err(error) => {
-                                    ERROR_LOG.log(format!(
-                                        "[ratatui-session-sync] failed to cache pasted file on authority host: {error}"
-                                    ));
+                            if let Some(assembler) = paste_file_assemblers.remove(&key) {
+                                let filename_hint = assembler.filename_hint.clone();
+                                let full_bytes = assembler.assemble();
+                                match crate::ratatui_node::clipboard_cache::write_clipboard_file(
+                                    &filename_hint,
+                                    &full_bytes,
+                                ) {
+                                    Ok(path) => {
+                                        let path_string = path.to_string_lossy().into_owned();
+                                        session.feed_input(&io_tx, path_string.into_bytes());
+                                    }
+                                    Err(error) => {
+                                        ERROR_LOG.log(format!(
+                                            "[ratatui-session-sync] failed to cache pasted file on authority host: {error}"
+                                        ));
+                                    }
                                 }
                             }
                         }

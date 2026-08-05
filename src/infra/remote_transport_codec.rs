@@ -1001,9 +1001,9 @@ mod tests {
         BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
         CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
         NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload,
-        OpenMirrorRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
-        TargetGeometryChangedPayload, TargetOutputPayload, TargetPublicationAckPayload,
-        TargetPublicationAckStatus, TargetPublishedPayload,
+        OpenMirrorRequestPayload, PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
+        RawPtyOutputPayload, TargetGeometryChangedPayload, TargetOutputPayload,
+        TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
     };
 
     #[test]
@@ -1304,6 +1304,38 @@ mod tests {
                 rows: 40,
                 raw_pty_passthrough: false,
                 bootstrap_mode: BootstrapMode::Full,
+            }),
+        };
+        let mut bytes = Vec::new();
+
+        write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+        let decoded =
+            read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_paste_file_request() {
+        let envelope = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-paste-file".to_string(),
+            message_type: "paste_file_request",
+            timestamp: "2026-08-05T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: None,
+            session_id: Some("shell-1".to_string()),
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::PasteFileRequest(PasteFileRequestPayload {
+                session_id: "shell-1".to_string(),
+                target_id: "remote-peer:peer-a:shell-1".to_string(),
+                filename_hint: "screenshot.png".to_string(),
+                file_id: "aabbccdd1122".to_string(),
+                total_chunks: 2,
+                chunk_index: 1,
+                chunk_bytes: b"binary paste data".to_vec(),
             }),
         };
         let mut bytes = Vec::new();

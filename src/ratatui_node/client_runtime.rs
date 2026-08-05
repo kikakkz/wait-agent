@@ -202,6 +202,27 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
 ///
 /// Local sessions receive path strings directly. Remote sessions have file
 /// bytes forwarded so the remote peer node can cache the file locally.
+/// Detected agent sessions that understand Kimi/Claude-style `@path` file references.
+fn session_accepts_at_reference(command_name: &str) -> bool {
+    matches!(command_name, "kimi" | "claude")
+}
+
+/// Format a local file path for injection into the active session.
+///
+/// Agent sessions that understand `@` references get `@/path/to/file`;
+/// plain shells and other agents receive the raw path. Paths containing
+/// whitespace are quoted so the reference does not break on spaces.
+fn format_file_reference(path: &str, supports_at: bool) -> String {
+    if !supports_at {
+        return path.to_string();
+    }
+    if path.contains(char::is_whitespace) {
+        format!("\"@{}\"", path)
+    } else {
+        format!("@{}", path)
+    }
+}
+
 fn handle_clipboard_content(
     ctx: &PlatformContext,
     stream: &mut UnixStream,
@@ -212,11 +233,10 @@ fn handle_clipboard_content(
     let Some(target_id) = snapshot.active_target.as_deref() else {
         return;
     };
-    let is_local = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.id == target_id)
-        .map(|s| s.transport == "local")
+    let session = snapshot.sessions.iter().find(|s| s.id == target_id);
+    let is_local = session.map(|s| s.transport == "local").unwrap_or(false);
+    let supports_at = session
+        .map(|s| session_accepts_at_reference(&s.command_name))
         .unwrap_or(false);
 
     match content {
@@ -231,14 +251,30 @@ fn handle_clipboard_content(
                     paths.len(),
                     paths
                 ));
-                handle_file_paths(ctx, stream, target_id, is_local, status_message, &paths);
+                handle_file_paths(
+                    ctx,
+                    stream,
+                    target_id,
+                    is_local,
+                    supports_at,
+                    status_message,
+                    &paths,
+                );
             } else {
                 ERROR_LOG.log("[clipboard] not paths, sending as text".to_string());
                 send_paste_text(stream, target_id, &text);
             }
         }
         ClipboardContent::FileUris(uris) => {
-            handle_file_uris(ctx, stream, target_id, is_local, status_message, &uris);
+            handle_file_uris(
+                ctx,
+                stream,
+                target_id,
+                is_local,
+                supports_at,
+                status_message,
+                &uris,
+            );
         }
         ClipboardContent::BinaryFile {
             filename_hint,
@@ -249,6 +285,7 @@ fn handle_clipboard_content(
                 stream,
                 target_id,
                 is_local,
+                supports_at,
                 status_message,
                 &filename_hint,
                 &bytes,
@@ -262,6 +299,7 @@ fn handle_file_uris(
     stream: &mut UnixStream,
     target_id: &str,
     is_local: bool,
+    supports_at: bool,
     status_message: &mut Option<(String, Instant)>,
     uris: &[String],
 ) {
@@ -275,7 +313,15 @@ fn handle_file_uris(
             }
         }
     }
-    handle_file_paths(ctx, stream, target_id, is_local, status_message, &paths);
+    handle_file_paths(
+        ctx,
+        stream,
+        target_id,
+        is_local,
+        supports_at,
+        status_message,
+        &paths,
+    );
 }
 
 fn handle_file_paths(
@@ -283,13 +329,14 @@ fn handle_file_paths(
     stream: &mut UnixStream,
     target_id: &str,
     is_local: bool,
+    supports_at: bool,
     status_message: &mut Option<(String, Instant)>,
     paths: &[std::path::PathBuf],
 ) {
     if is_local {
         let path_string = paths
             .iter()
-            .map(|p| format!("@{}", ctx.path_for_input(p)))
+            .map(|p| format_file_reference(&ctx.path_for_input(p), supports_at))
             .collect::<Vec<_>>()
             .join(" ");
         send_paste_text(stream, target_id, &path_string);
@@ -321,11 +368,13 @@ fn handle_file_paths(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_binary_file(
     ctx: &PlatformContext,
     stream: &mut UnixStream,
     target_id: &str,
     is_local: bool,
+    supports_at: bool,
     status_message: &mut Option<(String, Instant)>,
     filename_hint: &str,
     bytes: &[u8],
@@ -333,8 +382,8 @@ fn handle_binary_file(
     if is_local {
         match ctx.write_temp_file(filename_hint, bytes) {
             Ok(path) => {
-                let path_with_at = format!("@{}", ctx.path_for_input(&path));
-                send_paste_text(stream, target_id, &path_with_at);
+                let path_ref = format_file_reference(&ctx.path_for_input(&path), supports_at);
+                send_paste_text(stream, target_id, &path_ref);
             }
             Err(error) => {
                 *status_message = Some((
