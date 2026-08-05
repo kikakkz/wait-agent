@@ -52,6 +52,7 @@ pub struct RatatuiNodeRuntime {
     shared: Arc<SharedState>,
     remote_owner: RemoteRuntimeOwnerRuntime,
     hooks_config_ports: Vec<Box<dyn HooksConfigPort>>,
+    settings_store: crate::infra::settings_store::SettingsStore,
 }
 
 /// Lock hierarchy for all `SharedState` fields:
@@ -70,6 +71,7 @@ pub struct RatatuiNodeRuntime {
 /// broadcast snapshots.
 pub(crate) struct SharedState {
     pub(crate) network: RemoteNetworkConfig,
+    pub(crate) public_endpoint_override: Mutex<Option<String>>,
     pub(crate) start_time: Instant,
     pub(crate) shutdown: AtomicBool,
     pub(crate) agent_signal: AgentSignalState,
@@ -129,8 +131,10 @@ impl SharedState {
             .to_string_lossy()
             .to_string();
         let agent_signal_token = random_token()?;
+        let public_endpoint_override = network.public_endpoint.clone();
         Ok(Arc::new(Self {
             network,
+            public_endpoint_override: Mutex::new(public_endpoint_override),
             start_time: Instant::now(),
             shutdown: AtomicBool::new(false),
             agent_signal: AgentSignalState {
@@ -484,6 +488,30 @@ impl SharedState {
         format!("local#{}", self.network.port)
     }
 
+    /// Return the public endpoint label advertised to remote peers.
+    ///
+    /// Uses the runtime override if one has been set, otherwise falls back to
+    /// the CLI-provided or network-discovered value.
+    pub(crate) fn advertised_public_endpoint_label(&self) -> String {
+        let override_value = self
+            .public_endpoint_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        override_value.unwrap_or_else(|| self.network.advertised_public_endpoint_label())
+    }
+
+    /// Update the runtime public endpoint override.
+    ///
+    /// This is the only way the public endpoint may change while the server is
+    /// running; it must be called from `StateEventLoop` so that the single-writer
+    /// invariant is preserved.
+    pub(crate) fn set_public_endpoint_override(&self, endpoint: Option<String>) {
+        if let Ok(mut guard) = self.public_endpoint_override.lock() {
+            *guard = endpoint;
+        }
+    }
+
     /// Spawn a real local PTY session and register it in the catalog.
     /// Called once during server startup before `StateEventLoop` is running.
     /// This is the only allowed direct mutation of `SharedState` outside the
@@ -831,6 +859,7 @@ impl RatatuiNodeRuntime {
         session_creation_port: Arc<dyn SessionCreationPort>,
         target_registry_port: Arc<dyn TargetRegistryPort>,
         hooks_config_ports: Vec<Box<dyn HooksConfigPort>>,
+        settings_store: crate::infra::settings_store::SettingsStore,
     ) -> Result<Self, LifecycleError> {
         let mut shared = SharedState::new(network.clone())?;
         if let Some(state) = Arc::get_mut(&mut shared) {
@@ -853,6 +882,7 @@ impl RatatuiNodeRuntime {
             shared,
             remote_owner,
             hooks_config_ports,
+            settings_store,
         })
     }
 
@@ -895,6 +925,7 @@ impl RatatuiNodeRuntime {
             &authority_host_io,
             client_writer.clone(),
             self.remote_owner.clone(),
+            self.settings_store.clone(),
         )?;
         self.shared.set_state_tx(state_event_loop.sender());
         self.shared
@@ -1168,5 +1199,29 @@ mod runtime_tests {
 
         let snapshot = build_snapshot(0, &shared);
         assert_eq!(snapshot.active_target, Some(target));
+    }
+
+    #[test]
+    fn shared_state_public_endpoint_override_is_advertised() {
+        let mut network = RemoteNetworkConfig::default();
+        network.public_endpoint = Some("cli.example:17474".to_string());
+        let shared = SharedState::new(network).expect("SharedState::new should succeed");
+
+        assert_eq!(
+            shared.advertised_public_endpoint_label(),
+            "cli.example:17474"
+        );
+
+        shared.set_public_endpoint_override(Some("runtime.example:7474".to_string()));
+        assert_eq!(
+            shared.advertised_public_endpoint_label(),
+            "runtime.example:7474"
+        );
+
+        shared.set_public_endpoint_override(None);
+        assert_eq!(
+            shared.advertised_public_endpoint_label(),
+            "cli.example:17474"
+        );
     }
 }

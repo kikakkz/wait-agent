@@ -1,7 +1,10 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
+use crate::ratatui_node::clipboard_platform::PlatformContext;
+use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardContent};
 use crate::ratatui_node::logical_key::LogicalKey;
 use crate::ratatui_node::node_runtime::{
     ratatui_socket_path, ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson,
@@ -9,7 +12,10 @@ use crate::ratatui_node::node_runtime::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
@@ -29,11 +35,20 @@ use std::time::{Duration, Instant};
 pub struct RatatuiClientRuntime {
     port: u16,
     network: RemoteNetworkConfig,
+    settings_store: SettingsStore,
 }
 
 impl RatatuiClientRuntime {
-    pub fn from_port(port: u16, network: RemoteNetworkConfig) -> Result<Self, LifecycleError> {
-        Ok(Self { port, network })
+    pub fn from_port(
+        port: u16,
+        network: RemoteNetworkConfig,
+        settings_store: SettingsStore,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            port,
+            network,
+            settings_store,
+        })
     }
 
     pub fn run(&self) -> Result<(), LifecycleError> {
@@ -124,6 +139,9 @@ impl RatatuiClientRuntime {
             }
         });
 
+        // Channel for asynchronous clipboard reads initiated by Ctrl+V / Shift+Insert.
+        let (clipboard_tx, clipboard_rx) = unbounded::<Result<ClipboardContent, String>>();
+
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = restore_terminal();
@@ -139,8 +157,11 @@ impl RatatuiClientRuntime {
             snapshot,
             server_rx,
             crossterm_rx,
+            clipboard_rx,
+            clipboard_tx,
             self.port,
             &self.network,
+            &self.settings_store,
         );
         let _ = restore_terminal();
 
@@ -151,7 +172,7 @@ impl RatatuiClientRuntime {
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
@@ -159,7 +180,9 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, LeaveAlternateScreen)?;
+    // Ignore errors during cleanup so a partially restored terminal still
+    // leaves raw mode and the alternate screen.
+    let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
     Ok(())
 }
 
@@ -173,6 +196,180 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
     } else {
         (cols.saturating_sub(33).max(1), chrome_rows)
     }
+}
+
+/// Handle classified clipboard content for the active session.
+///
+/// Local sessions receive path strings directly. Remote sessions have file
+/// bytes forwarded so the remote peer node can cache the file locally.
+fn handle_clipboard_content(
+    ctx: &PlatformContext,
+    stream: &mut UnixStream,
+    snapshot: &RatatuiSnapshot,
+    status_message: &mut Option<(String, Instant)>,
+    content: ClipboardContent,
+) {
+    let Some(target_id) = snapshot.active_target.as_deref() else {
+        return;
+    };
+    let is_local = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == target_id)
+        .map(|s| s.transport == "local")
+        .unwrap_or(false);
+
+    match content {
+        ClipboardContent::PlainText(text) => {
+            ERROR_LOG.log(format!(
+                "[clipboard] plain text {} bytes, attempting path parse",
+                text.len()
+            ));
+            if let Some(paths) = ctx.parse_file_paths_from_text(&text) {
+                ERROR_LOG.log(format!(
+                    "[clipboard] parsed as {} path(s): {:?}",
+                    paths.len(),
+                    paths
+                ));
+                handle_file_paths(ctx, stream, target_id, is_local, status_message, &paths);
+            } else {
+                ERROR_LOG.log("[clipboard] not paths, sending as text".to_string());
+                send_paste_text(stream, target_id, &text);
+            }
+        }
+        ClipboardContent::FileUris(uris) => {
+            handle_file_uris(ctx, stream, target_id, is_local, status_message, &uris);
+        }
+        ClipboardContent::BinaryFile {
+            filename_hint,
+            bytes,
+        } => {
+            handle_binary_file(
+                ctx,
+                stream,
+                target_id,
+                is_local,
+                status_message,
+                &filename_hint,
+                &bytes,
+            );
+        }
+    }
+}
+
+fn handle_file_uris(
+    ctx: &PlatformContext,
+    stream: &mut UnixStream,
+    target_id: &str,
+    is_local: bool,
+    status_message: &mut Option<(String, Instant)>,
+    uris: &[String],
+) {
+    let mut paths = Vec::with_capacity(uris.len());
+    for uri in uris {
+        match ctx.resolve_file_uri(uri) {
+            Some(path) => paths.push(path),
+            None => {
+                *status_message = Some((format!("invalid file URI: {uri}"), Instant::now()));
+                return;
+            }
+        }
+    }
+    handle_file_paths(ctx, stream, target_id, is_local, status_message, &paths);
+}
+
+fn handle_file_paths(
+    ctx: &PlatformContext,
+    stream: &mut UnixStream,
+    target_id: &str,
+    is_local: bool,
+    status_message: &mut Option<(String, Instant)>,
+    paths: &[std::path::PathBuf],
+) {
+    if is_local {
+        let path_string = paths
+            .iter()
+            .map(|p| ctx.path_for_input(p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        send_paste_text(stream, target_id, &path_string);
+        return;
+    }
+
+    if paths.len() > 1 {
+        *status_message = Some((
+            "pasting multiple remote files at once is not yet supported".to_string(),
+            Instant::now(),
+        ));
+        return;
+    }
+
+    let Some(path) = paths.first() else {
+        return;
+    };
+    match ctx.read_file(path) {
+        Ok(bytes) => {
+            let hint = path.file_name().and_then(|n| n.to_str()).unwrap_or("paste");
+            send_paste_file(stream, target_id, hint, &bytes);
+        }
+        Err(error) => {
+            *status_message = Some((
+                format!("failed to read file {}: {error}", path.display()),
+                Instant::now(),
+            ));
+        }
+    }
+}
+
+fn handle_binary_file(
+    ctx: &PlatformContext,
+    stream: &mut UnixStream,
+    target_id: &str,
+    is_local: bool,
+    status_message: &mut Option<(String, Instant)>,
+    filename_hint: &str,
+    bytes: &[u8],
+) {
+    if is_local {
+        match ctx.write_temp_file(filename_hint, bytes) {
+            Ok(path) => {
+                send_paste_text(stream, target_id, &ctx.path_for_input(&path));
+            }
+            Err(error) => {
+                *status_message = Some((
+                    format!("failed to cache pasted file: {error}"),
+                    Instant::now(),
+                ));
+            }
+        }
+        return;
+    }
+
+    send_paste_file(stream, target_id, filename_hint, bytes);
+}
+
+/// Send a PASTE_FILE command with the given bytes to the server.
+fn send_paste_file(stream: &mut UnixStream, target_id: &str, filename_hint: &str, bytes: &[u8]) {
+    let encoded = general_purpose::STANDARD.encode(bytes);
+    let _ = writeln!(stream, "PASTE_FILE {target_id} {filename_hint} {encoded}");
+    let _ = stream.flush();
+}
+
+/// Send a PASTE_TEXT command with the given text to the server.
+fn send_paste_text(stream: &mut UnixStream, target_id: &str, text: &str) {
+    let encoded = general_purpose::STANDARD.encode(text.as_bytes());
+    let _ = writeln!(stream, "PASTE_TEXT {target_id} {encoded}");
+    let _ = stream.flush();
+}
+
+/// Spawn a background thread that reads and classifies the system clipboard
+/// content, then sends the result back on the supplied channel.
+fn spawn_clipboard_read(tx: crossbeam_channel::Sender<Result<ClipboardContent, String>>) {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(read_clipboard)
+            .unwrap_or_else(|_| Err("clipboard read panicked".to_string()));
+        let _ = tx.send(result);
+    });
 }
 
 /// Send a RESIZE command with the current main-pane size to the server.
@@ -237,6 +434,43 @@ struct HistoryState {
 struct ErrorLogState {
     entries: Vec<(u128, String)>,
     scroll_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsFocus {
+    Input,
+    History,
+    SaveCheckbox,
+    ApplyButton,
+    ClearButton,
+    CancelButton,
+}
+
+#[derive(Debug, Clone)]
+struct SettingsState {
+    input: String,
+    selected_history: usize,
+    save_persist: bool,
+    focus: SettingsFocus,
+    history: Vec<String>,
+}
+
+impl SettingsState {
+    fn new(snapshot: &RatatuiSnapshot, history: Vec<String>) -> Self {
+        let input = snapshot
+            .footer
+            .public_endpoint
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        Self {
+            input,
+            selected_history: 0,
+            save_persist: false,
+            focus: SettingsFocus::Input,
+            history,
+        }
+    }
 }
 
 fn parse_server_message(line: &str) -> ServerMessage {
@@ -355,10 +589,13 @@ struct HandleCrosstermEventArgs<'a> {
     sidebar_hidden: &'a mut bool,
     history_state: &'a mut Option<HistoryState>,
     error_log_state: &'a mut Option<ErrorLogState>,
+    settings_state: &'a mut Option<SettingsState>,
     status_message: &'a mut Option<(String, Instant)>,
     port: u16,
     network: &'a RemoteNetworkConfig,
+    settings_store: &'a SettingsStore,
     crossterm_rx: &'a Receiver<Event>,
+    clipboard_tx: &'a crossbeam_channel::Sender<Result<ClipboardContent, String>>,
 }
 
 /// `false` to break (e.g. user detached).
@@ -376,16 +613,36 @@ fn handle_crossterm_event(
         sidebar_hidden,
         history_state,
         error_log_state,
+        settings_state,
         status_message,
         port,
         network,
+        settings_store,
         crossterm_rx,
+        clipboard_tx,
     } = args;
     match event {
+        Event::Paste(_text) => {
+            // Treat terminal paste events (Ctrl+V / Shift+Insert in bracketed-paste
+            // mode) the same as our own clipboard shortcut: read the system
+            // clipboard so we can handle files and URI lists, not just plain text.
+            if *focus == Focus::Main
+                && error_log_state.is_none()
+                && settings_state.is_none()
+                && history_state.is_none()
+            {
+                spawn_clipboard_read(clipboard_tx.clone());
+            }
+        }
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             // Error-log popup takes precedence over other overlays.
             if error_log_state.is_some() {
                 return handle_error_log_key(key, error_log_state);
+            }
+
+            // Settings popup takes precedence over history and main input.
+            if settings_state.is_some() {
+                return handle_settings_key(key, settings_state, stream, snapshot, status_message);
             }
 
             // History mode consumes navigation keys until exited.
@@ -407,6 +664,17 @@ fn handle_crossterm_event(
                 match key.code {
                     KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         *prefix_pressed = true;
+                    }
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && *focus == Focus::Main =>
+                    {
+                        spawn_clipboard_read(clipboard_tx.clone());
+                    }
+                    KeyCode::Insert
+                        if key.modifiers.contains(KeyModifiers::SHIFT) && *focus == Focus::Main =>
+                    {
+                        spawn_clipboard_read(clipboard_tx.clone());
                     }
                     KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         *sidebar_hidden = false;
@@ -474,10 +742,24 @@ fn handle_crossterm_event(
                             None
                         } else {
                             Some(ErrorLogState {
-                                entries: ERROR_LOG.entries(),
-                                scroll_offset: 0,
+                                entries: ERROR_LOG.recent_entries(10_000),
+                                // Start at the bottom so the most recent log
+                                // lines are visible immediately.
+                                scroll_offset: usize::MAX,
                             })
                         };
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        *history_state = None;
+                        *error_log_state = None;
+                        if settings_state.is_some() {
+                            *settings_state = None;
+                        } else {
+                            let history = settings_store.public_history().unwrap_or_default();
+                            *settings_state = Some(SettingsState::new(snapshot, history));
+                        }
                     }
                     KeyCode::Char('s') | KeyCode::Char('S')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -514,6 +796,7 @@ fn handle_crossterm_event(
                                     sidebar_hidden: *sidebar_hidden,
                                     history_state: None,
                                     error_log_state: None,
+                                    settings_state: None,
                                     active_target: snapshot.active_target.as_deref(),
                                     status_message: status_message
                                         .as_ref()
@@ -562,14 +845,18 @@ fn handle_crossterm_event(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     mut terminal: Terminal<CrosstermBackend<io::Stdout>>,
     stream: &mut UnixStream,
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
     crossterm_rx: Receiver<Event>,
+    clipboard_rx: Receiver<Result<ClipboardContent, String>>,
+    clipboard_tx: crossbeam_channel::Sender<Result<ClipboardContent, String>>,
     port: u16,
     network: &RemoteNetworkConfig,
+    settings_store: &SettingsStore,
 ) -> Result<(), LifecycleError> {
     let mut prefix_pressed = false;
     let mut focus = Focus::Main;
@@ -577,6 +864,7 @@ fn run_event_loop(
     let mut sidebar_hidden = false;
     let mut history_state: Option<HistoryState> = None;
     let mut error_log_state: Option<ErrorLogState> = None;
+    let mut settings_state: Option<SettingsState> = None;
     let mut last_active_target: Option<String> = None;
     let mut status_message: Option<(String, Instant)> = None;
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
@@ -622,13 +910,35 @@ fn run_event_loop(
                         sidebar_hidden: &mut sidebar_hidden,
                         history_state: &mut history_state,
                         error_log_state: &mut error_log_state,
+                        settings_state: &mut settings_state,
                         status_message: &mut status_message,
                         port,
                         network,
+                        settings_store,
                         crossterm_rx: &crossterm_rx,
+                        clipboard_tx: &clipboard_tx,
                     },
                 )? {
                     break;
+                }
+            }
+            recv(clipboard_rx) -> result => {
+                let ctx = PlatformContext::detect();
+                ERROR_LOG.log(format!("[clipboard] detected context={ctx:?}"));
+                match result {
+                    Ok(Ok(content)) => {
+                        handle_clipboard_content(
+                            &ctx,
+                            stream,
+                            &snapshot,
+                            &mut status_message,
+                            content,
+                        );
+                    }
+                    Ok(Err(error)) => {
+                        status_message = Some((format!("clipboard error: {error}"), Instant::now()));
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -666,10 +976,13 @@ fn run_event_loop(
                             sidebar_hidden: &mut sidebar_hidden,
                             history_state: &mut history_state,
                             error_log_state: &mut error_log_state,
+                            settings_state: &mut settings_state,
                             status_message: &mut status_message,
                             port,
                             network,
+                            settings_store,
                             crossterm_rx: &crossterm_rx,
+                            clipboard_tx: &clipboard_tx,
                         },
                     )? {
                         return Ok(());
@@ -699,6 +1012,7 @@ fn run_event_loop(
                         sidebar_hidden,
                         history_state: history_state.as_ref(),
                         error_log_state: error_log_state.as_ref(),
+                        settings_state: settings_state.as_ref(),
                         active_target: snapshot.active_target.as_deref(),
                         status_message: status_message.as_ref().map(|(text, _)| text.as_str()),
                         dim_background: false,
@@ -780,9 +1094,158 @@ fn handle_error_log_key(
         KeyCode::PageDown => {
             state.scroll_offset = state.scroll_offset.saturating_add(10);
         }
+        KeyCode::Home | KeyCode::Char('g') => {
+            state.scroll_offset = 0;
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            state.scroll_offset = usize::MAX;
+        }
         _ => {}
     }
     Ok(true)
+}
+
+fn handle_settings_key(
+    key: KeyEvent,
+    settings_state: &mut Option<SettingsState>,
+    stream: &mut UnixStream,
+    _snapshot: &RatatuiSnapshot,
+    status_message: &mut Option<(String, Instant)>,
+) -> Result<bool, LifecycleError> {
+    let Some(state) = settings_state.as_mut() else {
+        return Ok(true);
+    };
+
+    match key.code {
+        KeyCode::Char('p') | KeyCode::Char('P')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            *settings_state = None;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            *settings_state = None;
+        }
+        KeyCode::Tab => {
+            state.focus = next_settings_focus(state.focus);
+            if state.focus == SettingsFocus::History && state.history.is_empty() {
+                state.focus = next_settings_focus(state.focus);
+            }
+        }
+        KeyCode::BackTab => {
+            state.focus = prev_settings_focus(state.focus);
+            if state.focus == SettingsFocus::History && state.history.is_empty() {
+                state.focus = prev_settings_focus(state.focus);
+            }
+        }
+        KeyCode::Enter => match state.focus {
+            SettingsFocus::ApplyButton => {
+                apply_settings(state, stream, status_message)?;
+                *settings_state = None;
+            }
+            SettingsFocus::ClearButton => {
+                let save = state.save_persist;
+                send_set_public(stream, None, save)?;
+                *settings_state = None;
+            }
+            SettingsFocus::CancelButton => {
+                *settings_state = None;
+            }
+            SettingsFocus::SaveCheckbox => {
+                state.save_persist = !state.save_persist;
+            }
+            SettingsFocus::History => {
+                if let Some(value) = state.history.get(state.selected_history) {
+                    state.input = value.clone();
+                }
+            }
+            SettingsFocus::Input => {}
+        },
+        KeyCode::Char(' ') if state.focus == SettingsFocus::SaveCheckbox => {
+            state.save_persist = !state.save_persist;
+        }
+        KeyCode::Char(' ') if state.focus == SettingsFocus::History => {
+            if let Some(value) = state.history.get(state.selected_history) {
+                state.input = value.clone();
+                state.focus = SettingsFocus::Input;
+            }
+        }
+        KeyCode::Up if state.focus == SettingsFocus::History && state.selected_history > 0 => {
+            state.selected_history -= 1;
+        }
+        KeyCode::Down
+            if state.focus == SettingsFocus::History
+                && state.selected_history + 1 < state.history.len() =>
+        {
+            state.selected_history += 1;
+        }
+        _ => {
+            if state.focus == SettingsFocus::Input {
+                match key.code {
+                    KeyCode::Char(ch) => state.input.push(ch),
+                    KeyCode::Backspace => {
+                        state.input.pop();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn next_settings_focus(focus: SettingsFocus) -> SettingsFocus {
+    match focus {
+        SettingsFocus::Input => SettingsFocus::History,
+        SettingsFocus::History => SettingsFocus::SaveCheckbox,
+        SettingsFocus::SaveCheckbox => SettingsFocus::ApplyButton,
+        SettingsFocus::ApplyButton => SettingsFocus::ClearButton,
+        SettingsFocus::ClearButton => SettingsFocus::CancelButton,
+        SettingsFocus::CancelButton => SettingsFocus::Input,
+    }
+}
+
+fn prev_settings_focus(focus: SettingsFocus) -> SettingsFocus {
+    match focus {
+        SettingsFocus::Input => SettingsFocus::CancelButton,
+        SettingsFocus::History => SettingsFocus::Input,
+        SettingsFocus::SaveCheckbox => SettingsFocus::History,
+        SettingsFocus::ApplyButton => SettingsFocus::SaveCheckbox,
+        SettingsFocus::ClearButton => SettingsFocus::ApplyButton,
+        SettingsFocus::CancelButton => SettingsFocus::ClearButton,
+    }
+}
+
+fn apply_settings(
+    state: &mut SettingsState,
+    stream: &mut UnixStream,
+    status_message: &mut Option<(String, Instant)>,
+) -> Result<(), LifecycleError> {
+    let endpoint = state.input.trim();
+    if endpoint.is_empty() {
+        *status_message = Some((
+            "public endpoint cannot be empty; use Clear to remove".to_string(),
+            Instant::now(),
+        ));
+        return Ok(());
+    }
+    send_set_public(stream, Some(endpoint.to_string()), state.save_persist)
+}
+
+fn send_set_public(
+    stream: &mut UnixStream,
+    endpoint: Option<String>,
+    save: bool,
+) -> Result<(), LifecycleError> {
+    let line = match endpoint {
+        Some(endpoint) => format!("SET_PUBLIC {endpoint}{}", if save { " SAVE" } else { "" }),
+        None => format!("CLEAR_PUBLIC{}", if save { " SAVE" } else { "" }),
+    };
+    writeln!(stream, "{line}").map_err(|error| {
+        LifecycleError::Io("failed to send SET_PUBLIC command".to_string(), error)
+    })?;
+    stream.flush().map_err(|error| {
+        LifecycleError::Io("failed to flush SET_PUBLIC command".to_string(), error)
+    })
 }
 
 fn key_event_to_logical_key(key: &KeyEvent) -> Option<LogicalKey> {
@@ -798,6 +1261,7 @@ struct RenderArgs<'a> {
     sidebar_hidden: bool,
     history_state: Option<&'a HistoryState>,
     error_log_state: Option<&'a ErrorLogState>,
+    settings_state: Option<&'a SettingsState>,
     active_target: Option<&'a str>,
     status_message: Option<&'a str>,
     dim_background: bool,
@@ -811,6 +1275,7 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
         sidebar_hidden,
         history_state,
         error_log_state,
+        settings_state,
         active_target,
         status_message,
         dim_background,
@@ -932,6 +1397,10 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
     if let Some(error_log) = error_log_state {
         render_error_log_popup(frame, error_log, outer[0]);
     }
+
+    if let Some(settings) = settings_state {
+        render_settings_popup(frame, settings, snapshot, outer[0]);
+    }
 }
 
 /// Viewport coordinates for a history buffer rendered inside a given height.
@@ -1040,57 +1509,292 @@ fn render_history_footer_line(
 fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
     let popup = centered_rect(90, 85, area);
 
+    // Dim the area behind the popup by drawing a solid black overlay over the
+    // entire area. This fully obscures underlying borders (e.g. the sidebar
+    // separator) instead of merely dimming them.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        area,
+    );
+
+    let block = Block::default()
+        .style(Style::default().bg(Color::Black))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(
+            Line::from(vec![
+                Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
+                Span::styled("Error Log", Style::default().add_modifier(Modifier::BOLD)),
+            ])
+            .alignment(ratatui::layout::Alignment::Center),
+        );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let width = inner.width as usize;
+    // Reserve the bottom row for the position/hint footer; the rest is content.
+    let content_height = inner.height.saturating_sub(1) as usize;
+    let total_lines = state.entries.len();
+    let max_offset = total_lines.saturating_sub(content_height);
+    let offset = state.scroll_offset.min(max_offset);
+
+    let mut lines = Vec::new();
+    for (_, message) in state.entries.iter().skip(offset).take(content_height) {
+        lines.push(Line::from(truncate_display_width(message, width)));
+    }
+    while lines.len() < content_height {
+        lines.push(Line::from(""));
+    }
+
+    let visible_bottom = (offset + lines.len()).min(total_lines.max(1));
+    let position_text = if total_lines == 0 {
+        "[empty]".to_string()
+    } else {
+        format!("[{}-{} / {}]", offset + 1, visible_bottom, total_lines)
+    };
+    let footer_text = format!(
+        "{}  ·  Ctrl-E/Esc/q close · Home/g top · End/G bottom · ↑↓/PgUp/PgDn scroll",
+        position_text
+    );
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        footer_text,
+        Style::default().fg(Color::Gray).bg(Color::Black),
+    )]));
+
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: content_height as u16,
+    };
+    let footer_area = Rect {
+        x: inner.x,
+        y: inner.y + content_height as u16,
+        width: inner.width,
+        height: 1,
+    };
+
+    let content = Paragraph::new(lines)
+        .style(Style::default().bg(Color::Black))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(content, content_area);
+    frame.render_widget(footer, footer_area);
+}
+
+fn render_settings_popup(
+    frame: &mut Frame,
+    state: &SettingsState,
+    snapshot: &RatatuiSnapshot,
+    area: Rect,
+) {
+    let popup = centered_rect(70, 70, area);
+
     // Dim the area behind the popup.
     let dim = Paragraph::new("").style(Style::default().bg(Color::Black));
     frame.render_widget(dim, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title("Error Log");
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Settings (Ctrl-P to close) ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    if inner.width < 10 || inner.height < 8 {
+        return;
+    }
+
+    // Vertical layout: listen, input, history, checkbox, buttons, hint.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .margin(1)
+        .split(inner);
+
+    let listen_value = snapshot
+        .footer
+        .listener_endpoint
+        .clone()
+        .unwrap_or_else(|| "(unknown)".to_string());
+    render_settings_readonly_row(frame, "Listen", &listen_value, rows[0], false);
+
+    let public_value = if state.input.is_empty() {
+        "(use listen)".to_string()
+    } else {
+        state.input.clone()
+    };
+    render_settings_input_row(
+        frame,
+        "Public",
+        &public_value,
+        rows[1],
+        state.focus == SettingsFocus::Input,
+    );
+
+    render_settings_history(frame, state, rows[2], state.focus == SettingsFocus::History);
+
+    let checkbox_label = if state.save_persist {
+        "[x] Save for next startup"
+    } else {
+        "[ ] Save for next startup"
+    };
+    render_settings_selectable_row(
+        frame,
+        checkbox_label,
+        rows[3],
+        state.focus == SettingsFocus::SaveCheckbox,
+    );
+
+    render_settings_buttons(frame, state.focus, rows[4]);
+}
+
+fn render_settings_readonly_row(
+    frame: &mut Frame,
+    label: &str,
+    value: &str,
+    area: Rect,
+    focused: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(format!(" {label} "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = truncate_display_width(value, inner.width as usize);
+    let paragraph = Paragraph::new(Line::from(vec![Span::styled(
+        text,
+        Style::default().fg(Color::White),
+    )]));
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_settings_input_row(
+    frame: &mut Frame,
+    label: &str,
+    value: &str,
+    area: Rect,
+    focused: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(format!(" {label} "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let style = if focused {
+        Style::default().fg(Color::White).bg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let text = truncate_display_width(value, inner.width as usize);
+    let text_width = display_width(&text);
+    let paragraph = Paragraph::new(Line::from(vec![Span::styled(text.clone(), style)]));
+    frame.render_widget(paragraph, inner);
+
+    if focused {
+        let cursor_x = inner.x + (text_width as u16).min(inner.width.saturating_sub(1));
+        let cursor_y = inner.y;
+        frame.set_cursor(cursor_x, cursor_y);
+    }
+}
+
+fn render_settings_history(frame: &mut Frame, state: &SettingsState, area: Rect, focused: bool) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(" History ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.history.is_empty() {
+        let paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            "(no history)",
+            Style::default().fg(Color::Gray),
+        )]));
+        frame.render_widget(paragraph, inner);
+        return;
+    }
+
     let width = inner.width as usize;
     let height = inner.height as usize;
-    let total_lines = state.entries.len();
-    let max_offset = total_lines.saturating_sub(height);
-    let offset = state.scroll_offset.min(max_offset);
-
     let mut lines = Vec::new();
-    for (_, message) in state.entries.iter().skip(offset).take(height) {
-        lines.push(Line::from(truncate_display_width(message, width)));
+    let start = if state.selected_history + 1 > height {
+        state.selected_history + 1 - height
+    } else {
+        0
+    };
+    for (idx, value) in state.history.iter().enumerate().skip(start).take(height) {
+        let is_selected = idx == state.selected_history;
+        let style = if is_selected && focused {
+            Style::default().bg(Color::Blue).fg(Color::White)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![Span::styled(
+            truncate_display_width(value, width),
+            style,
+        )]));
     }
     while lines.len() < height {
         lines.push(Line::from(""));
     }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
-    let footer_text = format!(
-        "{} lines · Ctrl-E/Esc/q close · Up/Down/PgUp/PgDn scroll",
-        total_lines
-    );
-    let footer = Paragraph::new(Line::from(vec![Span::styled(
-        footer_text,
-        Style::default().fg(Color::Gray),
-    )]));
-
-    let content_height = inner.height.saturating_sub(1);
-    let content_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: content_height,
+fn render_settings_selectable_row(frame: &mut Frame, label: &str, area: Rect, focused: bool) {
+    let style = if focused {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    } else {
+        Style::default().fg(Color::White)
     };
-    let footer_area = Rect {
-        x: inner.x,
-        y: inner.y + content_height,
-        width: inner.width,
-        height: 1,
-    };
+    let paragraph = Paragraph::new(Line::from(vec![Span::styled(label, style)]));
+    frame.render_widget(paragraph, area);
+}
 
-    let content = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(content, content_area);
-    frame.render_widget(footer, footer_area);
+fn render_settings_buttons(frame: &mut Frame, focus: SettingsFocus, area: Rect) {
+    let labels = [
+        (SettingsFocus::ApplyButton, "Apply"),
+        (SettingsFocus::ClearButton, "Clear"),
+        (SettingsFocus::CancelButton, "Cancel"),
+    ];
+    let constraints: Vec<Constraint> = labels.iter().map(|_| Constraint::Ratio(1, 3)).collect();
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    for (idx, (button_focus, label)) in labels.iter().enumerate() {
+        let focused = focus == *button_focus;
+        let style = if focused {
+            Style::default().bg(Color::Green).fg(Color::Black)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let text = right_align(label, cols[idx].width as usize);
+        let paragraph = Paragraph::new(Line::from(vec![Span::styled(text, style)]));
+        frame.render_widget(paragraph, cols[idx]);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1458,10 +2162,6 @@ fn render_footer_line(
 
     let mut left_spans = Vec::new();
 
-    if let Some(listener) = &snapshot.footer.listener_endpoint {
-        left_spans.push(Span::styled("Listen ", accent_style));
-        left_spans.push(Span::styled(format!("{} ", listener), muted_style));
-    }
     if let Some(connect) = &snapshot.footer.connect_endpoint {
         left_spans.push(Span::styled("· Connect ", accent_style));
         left_spans.push(Span::styled(format!("{} ", connect), muted_style));
@@ -1480,7 +2180,7 @@ fn render_footer_line(
 
     let toggle_label = if sidebar_hidden { "Show" } else { "Hide" };
     let menu_text = format!(
-        "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs",
+        "Ctrl-G {} · Ctrl-N New · Ctrl-W Conn · Ctrl-S Remote · Ctrl-O Hist · Ctrl-E Logs · Ctrl-P Sett",
         toggle_label
     );
 

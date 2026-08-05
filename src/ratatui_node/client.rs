@@ -124,6 +124,14 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
         "LIST_SESSIONS" => Some(ClientCommand::ListSessions),
         "CREATE_LOCAL_SESSION" => Some(ClientCommand::CreateLocalSession),
         "DETACH_ALL" => Some(ClientCommand::DetachAll),
+        "CLEAR_PUBLIC" => Some(ClientCommand::SetPublic {
+            endpoint: None,
+            save: false,
+        }),
+        "SET_PUBLIC" => Some(ClientCommand::SetPublic {
+            endpoint: None,
+            save: false,
+        }),
         _ => {
             if let Some(args) = trimmed.strip_prefix("ACTIVATE_TARGET ") {
                 Some(ClientCommand::ActivateTarget {
@@ -147,6 +155,27 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                     .ok()
                     .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                     .map(|key| ClientCommand::Input { target_id, key })
+            } else if let Some(args) = trimmed.strip_prefix("PASTE_TEXT ") {
+                let mut parts = args.splitn(2, ' ');
+                let target_id = parts.next().unwrap_or("").to_string();
+                let encoded = parts.next().unwrap_or("");
+                general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|text| ClientCommand::PasteText { target_id, text })
+            } else if let Some(args) = trimmed.strip_prefix("PASTE_FILE ") {
+                let mut parts = args.splitn(3, ' ');
+                let target_id = parts.next().unwrap_or("").to_string();
+                let filename_hint = parts.next().unwrap_or("paste").to_string();
+                let encoded = parts.next().unwrap_or("");
+                general_purpose::STANDARD.decode(encoded).ok().map(|bytes| {
+                    ClientCommand::PasteFile {
+                        target_id,
+                        filename_hint,
+                        bytes,
+                    }
+                })
             } else if let Some(args) = trimmed.strip_prefix("GET_HISTORY ") {
                 Some(ClientCommand::GetHistory {
                     target_id: args.to_string(),
@@ -155,6 +184,28 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                 Some(ClientCommand::CreateRemoteSession {
                     authority_node_id: args.to_string(),
                 })
+            } else if let Some(args) = trimmed.strip_prefix("SET_PUBLIC ") {
+                let trimmed_args = args.trim();
+                let save = trimmed_args.ends_with(" SAVE");
+                let endpoint_part = if save {
+                    trimmed_args
+                        .strip_suffix(" SAVE")
+                        .unwrap_or(trimmed_args)
+                        .trim()
+                } else {
+                    trimmed_args
+                };
+                if endpoint_part.is_empty() {
+                    Some(ClientCommand::SetPublic {
+                        endpoint: None,
+                        save,
+                    })
+                } else {
+                    Some(ClientCommand::SetPublic {
+                        endpoint: Some(endpoint_part.to_string()),
+                        save,
+                    })
+                }
             } else {
                 trimmed
                     .strip_prefix("CLOSE_SESSION ")
@@ -191,6 +242,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_paste_text_command() {
+        let text = "hello world\nline two";
+        let encoded = general_purpose::STANDARD.encode(text.as_bytes());
+        let line = format!("PASTE_TEXT local#9999:1 {encoded}");
+        let command = parse_command(&line);
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::PasteText {
+                    ref target_id,
+                    ref text,
+                }) if target_id == "local#9999:1" && text == "hello world\nline two"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
+    fn parse_paste_file_command() {
+        let bytes = b"file contents";
+        let encoded = general_purpose::STANDARD.encode(bytes);
+        let line = format!("PASTE_FILE local#9999:1 report.txt {encoded}");
+        let command = parse_command(&line);
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::PasteFile {
+                    ref target_id,
+                    ref filename_hint,
+                    ref bytes,
+                }) if target_id == "local#9999:1" && filename_hint == "report.txt" && bytes == b"file contents"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
     fn parse_input_command_with_spaced_json() {
         let encoded =
             "eyJjb2RlIjogeyJraW5kIjogIkNoYXIiLCAidmFsdWUiOiAiZSJ9LCAibW9kaWZpZXJzIjoge319";
@@ -203,6 +291,66 @@ mod tests {
                     ref target_id,
                     key: super::super::logical_key::LogicalKey { code: super::super::logical_key::KeyCode::Char('e'), .. }
                 }) if target_id == "local#9999:1"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_public_command_with_endpoint() {
+        let command = parse_command("SET_PUBLIC nat.example:17474");
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::SetPublic {
+                    endpoint: Some(ref endpoint),
+                    save: false,
+                }) if endpoint == "nat.example:17474"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_public_command_with_save_flag() {
+        let command = parse_command("SET_PUBLIC nat.example:17474 SAVE");
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::SetPublic {
+                    endpoint: Some(ref endpoint),
+                    save: true,
+                }) if endpoint == "nat.example:17474"
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_public_command_without_endpoint_clears() {
+        let command = parse_command("SET_PUBLIC");
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::SetPublic {
+                    endpoint: None,
+                    save: false,
+                })
+            ),
+            "unexpected command: {command:?}"
+        );
+    }
+
+    #[test]
+    fn parse_clear_public_command() {
+        let command = parse_command("CLEAR_PUBLIC");
+        assert!(
+            matches!(
+                command,
+                Some(ClientCommand::SetPublic {
+                    endpoint: None,
+                    save: false,
+                })
             ),
             "unexpected command: {command:?}"
         );

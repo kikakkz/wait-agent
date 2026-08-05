@@ -112,12 +112,25 @@ pub(crate) enum ClientCommand {
     Resize { cols: u16, rows: u16 },
     /// Forward a logical keyboard key to a specific session.
     Input { target_id: String, key: LogicalKey },
+    /// Paste plain text into a specific session.
+    PasteText { target_id: String, text: String },
+    /// Paste a file whose bytes should be cached on the receiving node.
+    PasteFile {
+        target_id: String,
+        filename_hint: String,
+        bytes: Vec<u8>,
+    },
     /// Request the full scrollback history for a session.
     GetHistory { target_id: String },
     /// Create a new remote session on the authority of the selected target.
     CreateRemoteSession { authority_node_id: String },
     /// Close a session and cancel any pending reconnect for it.
     CloseSession { target_id: String },
+    /// Set or clear the public endpoint advertised to remote peers.
+    SetPublic {
+        endpoint: Option<String>,
+        save: bool,
+    },
 }
 
 /// Reply returned by `StateEventLoop` for control commands.

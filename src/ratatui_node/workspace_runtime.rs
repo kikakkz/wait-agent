@@ -1,5 +1,6 @@
 use crate::cli::RemoteNetworkConfig;
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
 use crate::process::session_leader::spawn_session_leader;
@@ -247,7 +248,12 @@ impl RatatuiWorkspaceRuntime {
             ));
         }
 
-        RatatuiClientRuntime::from_port(port, self.network.clone())?.run()
+        RatatuiClientRuntime::from_port(
+            port,
+            self.network.clone(),
+            SettingsStore::new(SettingsStore::default_path()),
+        )?
+        .run()
     }
 
     fn start_node_server(&self) -> Result<(), LifecycleError> {

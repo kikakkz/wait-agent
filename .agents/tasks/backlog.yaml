@@ -559,8 +559,51 @@ next:
     title: remove tmux backend once ratatui path is stable
     status: done
   - id: task.ratatui-clipboard-paste-to-main-pane
-    title: paste clipboard text, images, and files into the main pane; cache images/files locally and show the cached path in the input area
+    title: '[epic] paste clipboard text, images, and files into the main pane'
+    status: in_progress
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: >
+        Defines the PASTE_TEXT/PASTE_FILE client→server protocol, the
+        FilePasteRequest/FilePasteResponse gRPC extension, clipboard content
+        classification, and the per-session cache semantics required to land
+        this slice.
+  - id: task.ratatui-clipboard-paste-phase1-text
+    title: Phase 1 - text paste via bracketed paste and system clipboard fallback
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 5 (client clipboard handling) and Section 6/7 (PASTE_TEXT protocol).
+  - id: task.ratatui-clipboard-paste-phase2-file-path
+    title: Phase 2 - clipboard classification and local session file path paste
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 4 paste semantics table (local session path row) and Section 5.2 clipboard content classification.
+  - id: task.ratatui-clipboard-paste-phase3-local-file-cache
+    title: Phase 3 - binary file/image paste with local /tmp/waitagent cache
+    status: done
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 6.2 PASTE_FILE command and Section 9 cache directory/filename conventions.
+  - id: task.ratatui-clipboard-paste-phase4-remote-file-transfer
+    title: Phase 4 - remote peer file paste transport via chunked gRPC
+    status: in_progress
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 8 chunked FilePasteChunk/FilePasteComplete gRPC extension.
+  - id: task.ratatui-clipboard-paste-phase3-local-file-cache
+    title: Phase 3 - binary file/image paste with local /tmp/waitagent cache
     status: backlog
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 6.2 PASTE_FILE command and Section 9 cache directory/filename conventions.
+  - id: task.ratatui-clipboard-paste-phase4-remote-file-transfer
+    title: Phase 4 - remote peer file paste transport via gRPC/authority transport
+    status: backlog
+    design_ref:
+      document: docs/ratatui-clipboard-paste-design.md
+      authorizes: Section 8 gRPC protocol extension and Section 4 remote session file semantics.
   - id: task.ratatui-agent-sessions-hotkey
     title: add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host
     status: backlog

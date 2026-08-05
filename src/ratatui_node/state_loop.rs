@@ -4,6 +4,7 @@ use crate::domain::session_catalog::{
     ManagedSessionTaskState, SessionAvailability, SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
+use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
 use crate::ports::session_creation::RemoteSessionCreationRequest;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +53,7 @@ impl StateEventLoop {
         authority_host_io: &AuthorityHostIoLoop,
         client_writer: ClientWriterHandle,
         remote_owner: RemoteRuntimeOwnerRuntime,
+        settings_store: SettingsStore,
     ) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<StateEvent>();
         let authority_host_io_tx = authority_host_io.sender();
@@ -63,6 +65,7 @@ impl StateEventLoop {
                 authority_host_io_tx,
                 client_writer,
                 remote_owner,
+                settings_store,
             ) {
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] loop exited with error: {error}"
@@ -84,6 +87,7 @@ fn run_state_event_loop(
     authority_host_io_tx: AuthorityHostIoHandle,
     client_writer: ClientWriterHandle,
     remote_owner: RemoteRuntimeOwnerRuntime,
+    settings_store: SettingsStore,
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
     let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
@@ -163,6 +167,7 @@ fn run_state_event_loop(
                     &mut reconnect_handles,
                     client_id,
                     command,
+                    &settings_store,
                 );
             }
 
@@ -375,6 +380,7 @@ fn handle_client_command_event(
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     client_id: u64,
     command: ClientCommand,
+    settings_store: &SettingsStore,
 ) {
     if let ClientCommand::GetHistory { target_id } = &command {
         let response = build_history_response(shared, target_id);
@@ -399,6 +405,7 @@ fn handle_client_command_event(
             client_writer,
             connected_clients,
             command,
+            settings_store,
         )
     };
     let response: ControlResponse = outcome.into();
@@ -676,6 +683,7 @@ static TEST_BROADCAST_THREAD_ID: std::sync::Mutex<Option<std::thread::ThreadId>>
 static TEST_BROADCAST_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[allow(clippy::too_many_arguments)]
 fn handle_client_command(
     shared: &Arc<SharedState>,
     remote_owner: &RemoteRuntimeOwnerRuntime,
@@ -684,6 +692,7 @@ fn handle_client_command(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     command: ClientCommand,
+    settings_store: &SettingsStore,
 ) -> CommandOutcome {
     match command {
         ClientCommand::Attach => CommandOutcome::Ok,
@@ -827,6 +836,23 @@ fn handle_client_command(
             CommandOutcome::Ok
         }
 
+        ClientCommand::PasteText { target_id, text } => {
+            route_paste_text(shared, authority_host_io_tx, &target_id, text);
+            CommandOutcome::Ok
+        }
+
+        ClientCommand::PasteFile {
+            target_id,
+            filename_hint,
+            bytes,
+        } => handle_paste_file(
+            shared,
+            authority_host_io_tx,
+            &target_id,
+            &filename_hint,
+            bytes,
+        ),
+
         ClientCommand::GetHistory { .. } => {
             // Handled directly in the event-loop dispatcher above.
             CommandOutcome::Ok
@@ -838,6 +864,25 @@ fn handle_client_command(
                 broadcast_snapshot(shared, client_writer, connected_clients);
             }
             outcome
+        }
+
+        ClientCommand::SetPublic { endpoint, save } => {
+            shared.set_public_endpoint_override(endpoint.clone());
+            match endpoint {
+                Some(ref endpoint) => {
+                    let _ = settings_store.set_public(endpoint, save);
+                }
+                None => {
+                    let _ = settings_store.clear_public();
+                }
+            }
+            broadcast_snapshot(shared, client_writer, connected_clients);
+            match endpoint {
+                Some(endpoint) => {
+                    CommandOutcome::Message(format!("public endpoint set to {endpoint}"))
+                }
+                None => CommandOutcome::Message("public endpoint cleared".to_string()),
+            }
         }
 
         ClientCommand::CloseSession { .. } => {
@@ -895,6 +940,133 @@ fn create_authority_host_session(
         session_id,
         target_id,
     })
+}
+
+fn route_paste_text(
+    shared: &SharedState,
+    authority_host_io_tx: &AuthorityHostIoHandle,
+    target_id: &str,
+    text: String,
+) {
+    let record = {
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(target_id).cloned()
+    };
+    let Some(record) = record else {
+        return;
+    };
+    let bytes = text.into_bytes();
+    match record.address.transport() {
+        SessionTransport::Local => {
+            let local_session = {
+                let guard = shared
+                    .sessions
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(target_id).cloned()
+            };
+            if let Some(session) = local_session {
+                session.feed_input(bytes);
+                return;
+            }
+            if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
+                let is_host = {
+                    let guard = shared
+                        .sessions
+                        .authority_host_sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.contains_key(&session_id)
+                };
+                if is_host {
+                    let _ = authority_host_io_tx
+                        .send(AuthorityHostIoRequest::WriteInput { session_id, bytes });
+                }
+            }
+        }
+        SessionTransport::RemotePeer => {
+            shared.feed_remote_session_input(target_id, bytes);
+        }
+    }
+}
+
+fn handle_paste_file(
+    shared: &SharedState,
+    _authority_host_io_tx: &AuthorityHostIoHandle,
+    target_id: &str,
+    filename_hint: &str,
+    bytes: Vec<u8>,
+) -> CommandOutcome {
+    let record = {
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(target_id).cloned()
+    };
+    let Some(record) = record else {
+        return CommandOutcome::Error("unknown target".to_string());
+    };
+
+    match record.address.transport() {
+        SessionTransport::Local => {
+            let cached_path =
+                match super::clipboard_cache::write_clipboard_file(filename_hint, &bytes) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return CommandOutcome::Error(format!(
+                            "failed to cache pasted file: {error}"
+                        ))
+                    }
+                };
+
+            let local_session = {
+                let guard = shared
+                    .sessions
+                    .local_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(target_id).cloned()
+            };
+            if let Some(session) = local_session {
+                let path_string = cached_path.to_string_lossy().into_owned();
+                session.feed_input(path_string.into_bytes());
+                return CommandOutcome::Ok;
+            }
+
+            if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
+                let is_host = {
+                    let guard = shared
+                        .sessions
+                        .authority_host_sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.contains_key(&session_id)
+                };
+                if is_host {
+                    let path_string = cached_path.to_string_lossy().into_owned();
+                    let _ = _authority_host_io_tx.send(AuthorityHostIoRequest::WriteInput {
+                        session_id,
+                        bytes: path_string.into_bytes(),
+                    });
+                    return CommandOutcome::Ok;
+                }
+            }
+
+            CommandOutcome::Error("local session not found".to_string())
+        }
+        SessionTransport::RemotePeer => {
+            // Remote peer file paste is implemented in Phase 4 by forwarding the
+            // bytes over the gRPC bridge and caching them on the remote node.
+            CommandOutcome::Error("remote file paste is not yet implemented (Phase 4)".to_string())
+        }
+    }
 }
 
 fn route_input(
@@ -1316,6 +1488,7 @@ mod state_loop_tests {
                 super::super::authority_host_io_loop::AuthorityHostIoHandle::dangling(),
                 client_writer_for_loop,
                 remote_owner,
+                SettingsStore::new(std::env::temp_dir().join("waitagent-test-settings.toml")),
             );
         });
         (shared, tx, client_writer, handle)

@@ -24,8 +24,12 @@ requires = "libevent, ncurses-libs"
 aes = "0.9"
 base64 = "0.22"
 cbc = "0.2"
+# image-data enables binary clipboard (image) reads; pin image to 0.25.9 because
+# 0.25.10 requires Rust 1.88.0 while the project toolchain is pinned to 1.86.0.
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+image = { version = "=0.25.9", default-features = false }
 crossbeam-channel = "0.5"
-crossterm = "0.27.0"
+crossterm = { version = "0.27.0", features = ["bracketed-paste"] }
 getrandom = "0.4"
 hmac = "0.13"
 libc = "0.2"

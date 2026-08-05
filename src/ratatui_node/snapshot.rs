@@ -203,6 +203,7 @@ pub struct FooterState {
     pub active_session: String,
     pub sessions: Vec<SessionSummary>,
     pub listener_endpoint: Option<String>,
+    pub public_endpoint: Option<String>,
     pub connect_endpoint: Option<String>,
     pub remote_count: usize,
 }
@@ -282,6 +283,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
             active_session: active_session_id,
             sessions: vec![],
             listener_endpoint: Some(shared.network.advertised_listener_label().to_string()),
+            public_endpoint: Some(shared.advertised_public_endpoint_label().to_string()),
             connect_endpoint: shared.network.connect_endpoint_uri(),
             remote_count: sessions
                 .iter()
@@ -334,6 +336,7 @@ mod snapshot_tests {
                     client_count: 2,
                 }],
                 listener_endpoint: Some("0.0.0.0:17474".to_string()),
+                public_endpoint: Some("0.0.0.0:17474".to_string()),
                 connect_endpoint: None,
                 remote_count: 0,
             },

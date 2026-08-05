@@ -7,6 +7,7 @@ use crate::application::remote_session_creation_service::{
 use crate::application::target_registry_service::TargetRegistryService;
 use crate::cli::{Command, RatatuiClientCommand, RatatuiNodeServerCommand, RemoteNetworkConfig};
 use crate::error::AppError;
+use crate::infra::settings_store::SettingsStore;
 use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
@@ -29,9 +30,15 @@ pub struct CommandDispatcher {
 
 impl CommandDispatcher {
     pub fn from_build_env_with_network_and_command(
-        network: RemoteNetworkConfig,
+        mut network: RemoteNetworkConfig,
         _command: &Command,
     ) -> Result<Self, AppError> {
+        if network.public_endpoint.is_none() {
+            let store = SettingsStore::default_path();
+            if let Ok(Some(endpoint)) = SettingsStore::new(store).saved_public_endpoint() {
+                network.public_endpoint = Some(endpoint);
+            }
+        }
         Ok(Self { network })
     }
 
@@ -126,6 +133,7 @@ impl CommandDispatcher {
             session_creation_port,
             target_registry_port,
             hooks_config_ports,
+            SettingsStore::new(SettingsStore::default_path()),
         )
         .map_err(AppError::from)
     }
@@ -134,7 +142,11 @@ impl CommandDispatcher {
         &self,
         _command: RatatuiClientCommand,
     ) -> Result<RatatuiClientRuntime, AppError> {
-        RatatuiClientRuntime::from_port(self.network.port, self.network.clone())
-            .map_err(AppError::from)
+        RatatuiClientRuntime::from_port(
+            self.network.port,
+            self.network.clone(),
+            SettingsStore::new(SettingsStore::default_path()),
+        )
+        .map_err(AppError::from)
     }
 }

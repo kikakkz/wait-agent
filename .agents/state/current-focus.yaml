@@ -1,13 +1,14 @@
 kind: state
 version: 1
-current_task: task.ratatui-clipboard-paste-to-main-pane
+current_task: task.ratatui-clipboard-paste-phase4-remote-file-transfer
 focus_statement: >
   Completed the remote-node stale-sidebar-after-resume fix: outbound --connect
   now signals RemoteNodeOffline, authority keepalive uses a wall-clock anchor
   plus an active resume probe, and tests pass. The remaining backlog before
-  task.ratatui-phase-5-cloud is task.ratatui-clipboard-paste-to-main-pane and
-  task.ratatui-agent-sessions-hotkey. Next step is to write the governing
-  design document for the clipboard-paste task before implementation.
+  task.ratatui-phase-5-cloud is the ratatui-clipboard-paste epic and
+  task.ratatui-agent-sessions-hotkey. Phases 1-3 are done. Current focus is
+  Phase 4: remote peer file paste transport via chunked gRPC
+  (FilePasteChunk/FilePasteComplete).
 last_updated_from:
   file: .agents/tasks/backlog.yaml
-  reference: ratatui-clipboard-paste-to-main-pane
+  reference: ratatui-clipboard-paste-phase2-file-path
