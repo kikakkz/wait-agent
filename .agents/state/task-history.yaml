@@ -72,3 +72,13 @@ history:
     source_of_truth:
       file: conversation follow-up
       reference: remote activation from sidebar after remote exit
+  - task_id: task.bug-remote-node-offline-after-resume
+    status: done
+    summary: >
+      outbound --connect path now signals RemoteNodeOffline on session/transport
+      failure; authority transport keepalive uses a wall-clock anchor and sends
+      an active Ping after local suspend/resume; OS TCP keepalive kept as-is;
+      added unit tests for missing-Pong timeout and offline event signal.
+    source_of_truth:
+      file: conversation follow-up
+      reference: remote node offline after local resume

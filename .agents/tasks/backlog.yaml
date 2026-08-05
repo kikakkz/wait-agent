@@ -21,7 +21,7 @@ active:
     status: done
   - id: task.ratatui-replace-tmux
     title: replace tmux with ratatui as the local workspace UI substrate
-    status: in_progress
+    status: done
   - id: task.ratatui-phase-0-skeleton
     title: add --ratatui flag and tmux-style multi-session server/client skeleton with attach/detach/ls/stop
     status: done
@@ -527,13 +527,13 @@ next:
     status: done
   - id: task.bug-geometry-shared-chrome-window
     title: fix geometry re-sync when the remote view shares the server's workspace chrome window, and stop storm-time geometry churn
-    status: ready
+    status: superseded
   - id: task.bug-remote-main-slot-reconnect-seq-fatal
     title: fix direct raw output seq tracker never reset on reconnect, gap recovery re-delivers old seqs and kills the pane process
-    status: ready
+    status: superseded
   - id: task.bug-remote-main-slot-snapshot-clobber
     title: fix stale-geometry observer snapshot painting over live raw output on presence flaps
-    status: ready
+    status: superseded
   - id: task.ratatui-phase-1-footer
     title: render real footer status bar with ratatui widget
     status: done
@@ -551,16 +551,22 @@ next:
     status: done
   - id: task.ratatui-phase-3-remote-reconnect
     title: implement automatic reconnect for ratatui remote sessions
-    status: in_progress
+    status: done
   - id: task.ratatui-phase-3-bottom-menu-shortcuts
     title: implement ratatui footer shortcuts (Ctrl-G sidebar, Ctrl-O history, Ctrl-E logs, Ctrl-S remote create)
     status: done
   - id: task.ratatui-phase-4-remove-tmux
     title: remove tmux backend once ratatui path is stable
     status: done
+  - id: task.ratatui-clipboard-paste-to-main-pane
+    title: paste clipboard text, images, and files into the main pane; cache images/files locally and show the cached path in the input area
+    status: backlog
+  - id: task.ratatui-agent-sessions-hotkey
+    title: add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host
+    status: backlog
   - id: task.ratatui-phase-5-cloud
     title: activate distributed control topologies on the server/client foundation
-    status: ready
+    status: backlog
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice

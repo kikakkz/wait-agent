@@ -179,6 +179,46 @@ mod tests {
     }
 
     #[test]
+    fn register_authority_stream_disconnects_when_pong_missing() {
+        let registry = RemoteConnectionRegistry::new();
+        let (tx, rx) = mpsc::channel();
+        let (mut client, server) = UnixStream::pair().expect("stream pair should open");
+
+        write_registration_frame(&mut client, "peer-a").expect("registration frame should encode");
+        register_authority_stream_with_timeouts(
+            server,
+            registry.clone(),
+            "peer-a".to_string(),
+            tx,
+            Duration::from_millis(20),
+            Duration::from_millis(60),
+        )
+        .expect("authority stream should register");
+
+        assert_connected(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("connected event should arrive"),
+            "peer-a",
+        );
+        let frame = read_authority_transport_frame(&mut client)
+            .expect("idle reader should send keepalive ping");
+        assert_eq!(frame, AuthorityTransportFrame::Ping);
+
+        // Do not reply to the Ping; the server should eventually time out.
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("should disconnect after keepalive timeout");
+        assert_eq!(
+            event,
+            AuthorityTransportEvent::Disconnected {
+                authority_id: "peer-a".to_string(),
+                generation: 1,
+            }
+        );
+        assert!(!registry.has_connection("peer-a"));
+    }
+
+    #[test]
     fn register_authority_stream_requests_sync_on_raw_output_gap() {
         let registry = RemoteConnectionRegistry::new();
         let (tx, rx) = mpsc::channel();

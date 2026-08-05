@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const QUEUED_AUTHORITY_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const AUTHORITY_TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(15);
@@ -290,13 +290,17 @@ pub(super) fn register_authority_stream_with_timeouts(
 
     thread::spawn(move || {
         let mut last_received = Instant::now();
+        let mut last_received_wall = SystemTime::now();
         let mut keepalive_sent_at: Option<Instant> = None;
+        let mut keepalive_sent_at_wall: Option<SystemTime> = None;
         let mut next_expected_output_seq: u64 = 1;
         while connected.load(Ordering::Relaxed) {
             match read_authority_transport_frame(&mut stream) {
                 Ok(AuthorityTransportFrame::Ping) => {
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                     // Respond with Pong to confirm liveness.
                     let mut buf = Vec::new();
                     if write_authority_transport_frame(&mut buf, &AuthorityTransportFrame::Pong)
@@ -308,11 +312,15 @@ pub(super) fn register_authority_stream_with_timeouts(
                 Ok(AuthorityTransportFrame::Pong) => {
                     // Remote side is alive; reset idle timer.
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                 }
                 Ok(AuthorityTransportFrame::ControlPlane(envelope)) => {
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                     if reader_tx
                         .send(AuthorityTransportEvent::Envelope {
                             authority_id: node_id.clone(),
@@ -326,7 +334,9 @@ pub(super) fn register_authority_stream_with_timeouts(
                 }
                 Ok(AuthorityTransportFrame::RawPtyOutput(payload)) => {
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                     if payload.output_seq > 0
                         && payload.output_seq != next_expected_output_seq
                         && next_expected_output_seq > 1
@@ -369,15 +379,21 @@ pub(super) fn register_authority_stream_with_timeouts(
                     // here the frame was misrouted. Consume silently rather than
                     // crashing the reader thread.
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                 }
                 Ok(AuthorityTransportFrame::SyncRequest { .. }) => {
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                 }
                 Ok(AuthorityTransportFrame::InputCongestion(_)) => {
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                 }
                 Ok(AuthorityTransportFrame::SyncResponse {
                     session_id,
@@ -388,7 +404,9 @@ pub(super) fn register_authority_stream_with_timeouts(
                     // Remote peer is replaying frames we requested.
                     // Deliver as RawPtyOutput so the display path processes them.
                     last_received = Instant::now();
+                    last_received_wall = SystemTime::now();
                     keepalive_sent_at = None;
+                    keepalive_sent_at_wall = None;
                     if reader_tx
                         .send(AuthorityTransportEvent::RawPtyOutput {
                             authority_id: node_id.clone(),
@@ -406,8 +424,23 @@ pub(super) fn register_authority_stream_with_timeouts(
                     }
                 }
                 Err(ref e) if e.is_read_timeout() => {
-                    if let Some(sent_at) = keepalive_sent_at {
-                        if sent_at.elapsed() >= ping_timeout {
+                    let now_instant = Instant::now();
+                    let now_wall = SystemTime::now();
+                    let mono_since_recv = now_instant.saturating_duration_since(last_received);
+                    let wall_since_recv = now_wall
+                        .duration_since(last_received_wall)
+                        .unwrap_or_default();
+
+                    // If we already sent a Ping, decide timeout using both monotonic
+                    // and wall-clock time. Wall-clock catches local suspend/resume
+                    // (e.g. WSL2 sleep) where Instant may not advance.
+                    if let (Some(sent_at), Some(sent_at_wall)) =
+                        (keepalive_sent_at, keepalive_sent_at_wall)
+                    {
+                        let mono_since_sent = now_instant.saturating_duration_since(sent_at);
+                        let wall_since_sent =
+                            now_wall.duration_since(sent_at_wall).unwrap_or_default();
+                        if mono_since_sent >= ping_timeout || wall_since_sent >= ping_timeout {
                             ERROR_LOG.log(
                                 "[diag-timing] reader thread: keepalive timed out, exiting"
                                     .to_string(),
@@ -416,7 +449,15 @@ pub(super) fn register_authority_stream_with_timeouts(
                         }
                         continue;
                     }
-                    if last_received.elapsed() >= ping_interval {
+
+                    // Send a keepalive Ping if monotonic time says we're idle, or if
+                    // wall-clock time says we're idle, or if wall-clock has jumped
+                    // ahead of monotonic time (resume after suspend).
+                    let wall_jump = wall_since_recv.saturating_sub(mono_since_recv);
+                    if mono_since_recv >= ping_interval
+                        || wall_since_recv >= ping_interval
+                        || wall_jump >= ping_interval
+                    {
                         let mut buf = Vec::new();
                         if let Err(error) = write_authority_transport_frame(
                             &mut buf,
@@ -433,7 +474,8 @@ pub(super) fn register_authority_stream_with_timeouts(
                             ));
                             break;
                         }
-                        keepalive_sent_at = Some(Instant::now());
+                        keepalive_sent_at = Some(now_instant);
+                        keepalive_sent_at_wall = Some(now_wall);
                     }
                 }
                 Err(ref e) => {

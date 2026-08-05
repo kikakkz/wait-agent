@@ -113,6 +113,20 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         })
     }
 
+    #[cfg(test)]
+    pub fn with_network_backend_and_noop_owner(
+        network: RemoteNetworkConfig,
+        backend: B,
+    ) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            remote_runtime_owner: RemoteRuntimeOwnerClient::Noop,
+            backend,
+            current_executable: std::path::PathBuf::new(),
+            network,
+            discover_live_workspaces: true,
+        })
+    }
+
     pub fn shutdown_socket_sidecars(&self, socket_name: &str) -> Result<(), LifecycleError> {
         let mut first_error = None;
         if let Err(error) = self

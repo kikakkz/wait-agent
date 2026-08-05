@@ -1,12 +1,13 @@
 kind: state
 version: 1
-current_task: task.ratatui-phase-3-remote-reconnect
+current_task: task.ratatui-clipboard-paste-to-main-pane
 focus_statement: >
-  Starting ratatui migration completion queue: implement automatic reconnect for
-  ratatui remote sessions. Currently a remote session disappears from the local
-  sidebar as soon as the authority transport drops; the session should survive the
-  disconnect, reconnect when the remote node comes back, and resume output without
-  requiring the user to Ctrl-W again. Next step is plan-mode design.
+  Completed the remote-node stale-sidebar-after-resume fix: outbound --connect
+  now signals RemoteNodeOffline, authority keepalive uses a wall-clock anchor
+  plus an active resume probe, and tests pass. The remaining backlog before
+  task.ratatui-phase-5-cloud is task.ratatui-clipboard-paste-to-main-pane and
+  task.ratatui-agent-sessions-hotkey. Next step is to write the governing
+  design document for the clipboard-paste task before implementation.
 last_updated_from:
   file: .agents/tasks/backlog.yaml
-  reference: task.ratatui-phase-3-remote-reconnect.in_progress
+  reference: ratatui-clipboard-paste-to-main-pane

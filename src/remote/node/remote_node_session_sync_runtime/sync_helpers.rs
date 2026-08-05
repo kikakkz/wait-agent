@@ -968,6 +968,11 @@ fn mark_discovered_remote_node_offline_best_effort<P>(
                 "[diag-sync] failed to mark discovered remote node offline {node_id}: {error}"
             ));
         }
+        if let Err(error) = publication_runtime.signal_remote_node_offline(&node_id) {
+            ERROR_LOG.log(format!(
+                "[diag-sync] failed to signal remote node offline {node_id}: {error}"
+            ));
+        }
     });
 }
 
@@ -1831,4 +1836,49 @@ fn send_owner_command_without_response(
         .map_err(remote_session_sync_error)?;
     stream.shutdown(Shutdown::Write).ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ratatui_node::runtime::SharedState;
+    use crate::ratatui_node::state_event::StateEvent;
+    use crate::remote::publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend;
+    use std::sync::mpsc;
+
+    #[test]
+    fn mark_discovered_remote_node_offline_best_effort_signals_remote_node_offline() {
+        let port = (std::process::id() as u16 % 10_000) + 30_000;
+        let network = RemoteNetworkConfig {
+            port,
+            connect: None,
+            node_id: Some("test-node".to_string()),
+            public_endpoint: None,
+        };
+        let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
+        let (tx, rx) = mpsc::channel();
+        shared.set_state_tx(tx);
+        let backend = RatatuiRemoteTargetPublicationBackend::new(shared, network.clone());
+        let runtime =
+            RemoteTargetPublicationRuntime::with_network_backend_and_noop_owner(network, backend)
+                .expect("runtime should construct");
+
+        mark_discovered_remote_node_offline_best_effort(&runtime, "peer-a");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut found = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(StateEvent::RemoteNodeOffline { node_id }) => {
+                    assert_eq!(node_id, "peer-a");
+                    found = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(error) => panic!("channel closed before RemoteNodeOffline: {error:?}"),
+            }
+        }
+        assert!(found, "expected RemoteNodeOffline event for peer-a");
+    }
 }
