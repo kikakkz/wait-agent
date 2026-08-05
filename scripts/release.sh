@@ -50,22 +50,23 @@ if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
     exit 1
 fi
 
-# Enforce version continuity: for 0.0.x releases, the current patch must be
-# exactly one greater than the latest existing 0.0.x tag. This prevents tags
-# like v0.0.191 being created when v0.0.190 was never released.
-LATEST_0_0_TAG=$(git tag --list 'v0.0.*' --sort=-v:refname | head -n1 || true)
-if [[ -n "$LATEST_0_0_TAG" ]]; then
-    LATEST_PATCH=$(sed 's/^v0\.0\.//' <<<"$LATEST_0_0_TAG")
+# Enforce version continuity: the current patch must be exactly one greater than
+# the latest existing tag with the same major.minor prefix. This prevents tags
+# like v0.1.6 being created when v0.1.5 was never released.
+VERSION_PREFIX=$(awk -F. '{print $1"."$2}' <<<"$VERSION")
+LATEST_PREFIX_TAG=$(git tag --list "v$VERSION_PREFIX.*" --sort=-v:refname | head -n1 || true)
+if [[ -n "$LATEST_PREFIX_TAG" ]]; then
+    LATEST_PATCH=$(awk -F. '{print $NF}' <<<"$LATEST_PREFIX_TAG")
     EXPECTED_PATCH=$((LATEST_PATCH + 1))
-    EXPECTED_VERSION="0.0.$EXPECTED_PATCH"
+    EXPECTED_VERSION="$VERSION_PREFIX.$EXPECTED_PATCH"
     if [[ "$VERSION" != "$EXPECTED_VERSION" ]]; then
         if [[ "$SKIP_CONTINUITY_CHECK" == true ]]; then
             echo "warning: skipping version continuity check" >&2
-            echo "         latest released tag is $LATEST_0_0_TAG" >&2
+            echo "         latest released tag is $LATEST_PREFIX_TAG" >&2
             echo "         expected $EXPECTED_VERSION, but Cargo.toml has $VERSION" >&2
         else
             echo "error: version continuity check failed" >&2
-            echo "       latest released tag is $LATEST_0_0_TAG" >&2
+            echo "       latest released tag is $LATEST_PREFIX_TAG" >&2
             echo "       expected Cargo.toml version to release is $EXPECTED_VERSION" >&2
             echo "       but Cargo.toml currently has $VERSION" >&2
             echo "       use --skip-continuity-check to override" >&2
