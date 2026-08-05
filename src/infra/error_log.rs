@@ -97,7 +97,9 @@ fn parse_entry(line: &str) -> Option<(u128, String)> {
     let secs: u128 = line[1..11].parse().ok()?;
     let millis: u128 = line[12..15].parse().ok()?;
     let ts = secs * 1000 + millis;
-    let msg = line[16..].to_string();
+    let msg = line
+        .find(']')
+        .map(|idx| line[idx + 1..].trim_start().to_string())?;
     Some((ts, msg))
 }
 
