@@ -2184,7 +2184,7 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         let style = if is_selected {
             Style::default().bg(Color::Blue).fg(Color::White)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().bg(Color::Black).fg(Color::White)
         };
         let title_text = entry
             .title
