@@ -316,6 +316,7 @@ pub struct ListAgentSessionsRequestPayload {
 pub struct AgentSessionEntryPayload {
     pub id: String,
     pub title: Option<String>,
+    pub last_prompt: Option<String>,
     pub cwd: Option<String>,
     pub updated_at_seconds: Option<i64>,
     pub updated_at_nanos: Option<i32>,

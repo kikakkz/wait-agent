@@ -2937,6 +2937,7 @@ fn handle_list_agent_sessions_response(
                         .map(|entry| AgentSessionEntryPayload {
                             id: entry.id.clone(),
                             title: entry.title.clone(),
+                            last_prompt: entry.last_prompt.clone(),
                             cwd: entry.cwd.clone(),
                             updated_at_seconds: entry.updated_at.as_ref().map(|ts| ts.seconds),
                             updated_at_nanos: entry.updated_at.as_ref().map(|ts| ts.nanos),

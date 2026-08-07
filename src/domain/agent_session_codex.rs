@@ -143,6 +143,7 @@ fn parse_history_line(line: &str) -> Option<AgentSession> {
     Some(AgentSession {
         id,
         title,
+        last_prompt: None,
         cwd: None,
         updated_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(ts_secs)),
     })
@@ -199,6 +200,7 @@ fn parse_rollout_path(path: &Path) -> Option<AgentSession> {
     Some(AgentSession {
         id,
         title: None,
+        last_prompt: None,
         cwd: None,
         updated_at: Some(updated_at),
     })
@@ -395,6 +397,7 @@ mod tests {
         let session = AgentSession {
             id: "sess-x".into(),
             title: None,
+            last_prompt: None,
             cwd: None,
             updated_at: None,
         };

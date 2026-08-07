@@ -606,6 +606,7 @@ fn map_agent_session_payload(payload: AgentSessionEntryPayload) -> AgentSessionE
     AgentSessionEntry {
         id: payload.id,
         title: payload.title,
+        last_prompt: payload.last_prompt,
         cwd: payload.cwd,
         updated_at_seconds: payload.updated_at_seconds,
         updated_at_nanos: payload.updated_at_nanos,

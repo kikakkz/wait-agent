@@ -1097,6 +1097,7 @@ fn handle_list_agent_sessions(
                         .map(|session| AgentSessionEntry {
                             id: session.id,
                             title: session.title,
+                            last_prompt: session.last_prompt,
                             cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
                             updated_at_seconds: session.updated_at.and_then(|time| {
                                 time.duration_since(std::time::UNIX_EPOCH)

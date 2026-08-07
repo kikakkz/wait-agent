@@ -129,6 +129,7 @@ fn parse_index_line(line: &str, home: &Path) -> Option<AgentSession> {
     let mut session = AgentSession {
         id,
         title: None,
+        last_prompt: None,
         cwd,
         updated_at: None,
     };
@@ -138,13 +139,11 @@ fn parse_index_line(line: &str, home: &Path) -> Option<AgentSession> {
             session.title = state_value
                 .get("title")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    state_value
-                        .get("lastPrompt")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                });
+                .map(|s| s.to_string());
+            session.last_prompt = state_value
+                .get("lastPrompt")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             session.updated_at = state_value.get("updatedAt").and_then(parse_kimi_updated_at);
 
@@ -315,12 +314,13 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session_a");
         assert_eq!(sessions[0].title.as_deref(), Some("Session A"));
+        assert_eq!(sessions[0].last_prompt.as_deref(), Some("prompt a"));
         assert_eq!(sessions[0].cwd, Some(PathBuf::from("/tmp/a")));
         assert!(sessions[0].updated_at.is_some());
     }
 
     #[test]
-    fn list_sessions_title_fallback_to_last_prompt() {
+    fn list_sessions_last_prompt_without_title() {
         let home = make_temp_home();
         let session_dir = home.join("sessions").join("session_b");
         fs::create_dir_all(&session_dir).unwrap();
@@ -351,7 +351,8 @@ mod tests {
         cleanup(&home);
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title.as_deref(), Some("fallback prompt"));
+        assert_eq!(sessions[0].title.as_deref(), None);
+        assert_eq!(sessions[0].last_prompt.as_deref(), Some("fallback prompt"));
     }
 
     #[test]
@@ -427,6 +428,7 @@ mod tests {
         let session = AgentSession {
             id: "session_x".into(),
             title: None,
+            last_prompt: None,
             cwd: None,
             updated_at: None,
         };

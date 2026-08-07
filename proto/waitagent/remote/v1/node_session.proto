@@ -394,4 +394,5 @@ message AgentSessionEntry {
   optional string title = 2;
   optional string cwd = 3;
   optional google.protobuf.Timestamp updated_at = 4;
+  optional string last_prompt = 5;
 }

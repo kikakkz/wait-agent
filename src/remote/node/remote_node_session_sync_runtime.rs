@@ -546,6 +546,7 @@ fn map_agent_session_to_payload(session: AgentSession) -> AgentSessionEntryPaylo
     AgentSessionEntryPayload {
         id: session.id,
         title: session.title,
+        last_prompt: session.last_prompt,
         cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
         updated_at_seconds,
         updated_at_nanos,

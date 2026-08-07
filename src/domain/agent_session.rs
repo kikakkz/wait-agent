@@ -7,6 +7,7 @@ use std::time::SystemTime;
 pub struct AgentSession {
     pub id: String,
     pub title: Option<String>,
+    pub last_prompt: Option<String>,
     pub cwd: Option<PathBuf>,
     pub updated_at: Option<SystemTime>,
 }
@@ -127,6 +128,7 @@ mod tests {
             Ok(vec![AgentSession {
                 id: "dummy-1".into(),
                 title: Some("Dummy Session".into()),
+                last_prompt: None,
                 cwd: Some(PathBuf::from("/tmp")),
                 updated_at: None,
             }])

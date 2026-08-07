@@ -712,6 +712,7 @@ fn open_agent_sessions_popup(
                 .map(|session| AgentSessionEntry {
                     id: session.id,
                     title: session.title,
+                    last_prompt: session.last_prompt,
                     cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
                     updated_at_seconds: session.updated_at.and_then(|time| {
                         time.duration_since(std::time::UNIX_EPOCH)
@@ -1454,6 +1455,7 @@ fn handle_agent_sessions_key(
             let session = AgentSession {
                 id: entry_id,
                 title: entry_title,
+                last_prompt: entry.last_prompt.clone(),
                 cwd: entry_cwd,
                 updated_at: entry_updated_at,
             };
@@ -2102,28 +2104,28 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
     let popup = centered_rect(80, 70, area);
     render_popup_background(frame, popup);
 
-    let remote_tag = if state.is_remote { " [remote]" } else { "" };
-    let title = format!("{} sessions{}", state.agent, remote_tag);
     let block = Block::default()
         .style(Style::default().bg(Color::Black))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(
             Line::from(vec![Span::styled(
-                title,
-                Style::default().add_modifier(Modifier::BOLD),
+                "Sessions",
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(Color::White),
             )])
             .alignment(ratatui::layout::Alignment::Center),
         );
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    if inner.width < 10 || inner.height < 4 {
+    if inner.width < 10 || inner.height < 5 {
         return;
     }
 
     let width = inner.width as usize;
-    // Reserve the bottom row for the hint footer; the rest is content.
+    // Reserve the bottom row for the position footer; the rest is content.
     let content_height = inner.height.saturating_sub(1) as usize;
 
     if state.loading {
@@ -2131,7 +2133,7 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             "Loading sessions...",
             Style::default().fg(Color::Gray),
         )])];
-        render_agent_sessions_content(frame, lines, inner);
+        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
         return;
     }
 
@@ -2140,7 +2142,7 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             truncate_display_width(error, width),
             Style::default().fg(Color::Red),
         )])];
-        render_agent_sessions_content(frame, lines, inner);
+        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
         return;
     }
 
@@ -2154,13 +2156,13 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             message,
             Style::default().fg(Color::Gray),
         )])];
-        render_agent_sessions_content(frame, lines, inner);
+        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
         return;
     }
 
-    // Each session is rendered as a two-line card: title on the first line and
-    // indented cwd + relative time on the second line.
-    const ROW_HEIGHT: usize = 2;
+    // Each session is rendered as a three-line card to match Kimi's own
+    // session picker: title + time, id + cwd, and a preview of the last prompt.
+    const ROW_HEIGHT: usize = 3;
     let visible_rows = content_height / ROW_HEIGHT;
     let start = if state.selected_index + 1 > visible_rows {
         state.selected_index + 1 - visible_rows
@@ -2182,7 +2184,7 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         } else {
             Style::default().bg(Color::Black).fg(Color::White)
         };
-        let meta_style = if is_selected {
+        let dim_style = if is_selected {
             base_style
         } else {
             Style::default().fg(Color::Gray).patch(base_style)
@@ -2192,44 +2194,84 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             .title
             .as_deref()
             .filter(|t| !t.is_empty())
+            .or_else(|| entry.last_prompt.as_deref().filter(|t| !t.is_empty()))
             .unwrap_or(&entry.id);
-        let prefix = if is_selected { "▸ " } else { "  " };
-        let title_body_width = width.saturating_sub(display_width(prefix));
-        let title_body = truncate_display_width(title_text, title_body_width);
-        let title_display_width = display_width(prefix) + display_width(&title_body);
-        let title_padded = format!(
-            "{}{}{}",
-            prefix,
-            title_body,
-            " ".repeat(width.saturating_sub(title_display_width))
+        let time_text = entry
+            .updated_at_seconds
+            .map(format_relative_time)
+            .unwrap_or_default();
+        let title_line = build_padded_two_column_line(
+            title_text,
+            &time_text,
+            width,
+            base_style.add_modifier(Modifier::BOLD),
+            dim_style,
         );
-        lines.push(Line::from(vec![Span::styled(title_padded, base_style)]));
+        lines.push(title_line);
 
-        let mut meta_parts = Vec::new();
-        if let Some(cwd) = entry.cwd.as_deref().filter(|c| !c.is_empty()) {
-            meta_parts.push(cwd.to_string());
-        }
-        if let Some(secs) = entry.updated_at_seconds {
-            let time_text = format_relative_time(secs);
-            if !time_text.is_empty() {
-                meta_parts.push(time_text);
-            }
-        }
-        let meta_text = if meta_parts.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", meta_parts.join(" · "))
-        };
-        let meta = truncate_display_width(&meta_text, width);
-        let meta_display_width = display_width(&meta);
-        let meta_padded = format!("{}{}", meta, " ".repeat(width - meta_display_width));
-        lines.push(Line::from(vec![Span::styled(meta_padded, meta_style)]));
+        let id_text = entry.id.clone();
+        let cwd_text = entry.cwd.as_deref().unwrap_or("");
+        let meta_line =
+            build_padded_two_column_line(&id_text, cwd_text, width, dim_style, dim_style);
+        lines.push(meta_line);
+
+        let preview_prefix = "› ";
+        let preview_text = entry
+            .last_prompt
+            .as_deref()
+            .filter(|t| !t.is_empty() && Some(*t) != entry.title.as_deref())
+            .unwrap_or("");
+        let preview_width = width.saturating_sub(display_width(preview_prefix));
+        let preview_body = truncate_display_width(preview_text, preview_width);
+        let preview_display_width = display_width(preview_prefix) + display_width(&preview_body);
+        let preview_padded = format!(
+            "{}{}{}",
+            preview_prefix,
+            preview_body,
+            " ".repeat(width.saturating_sub(preview_display_width))
+        );
+        lines.push(Line::from(vec![Span::styled(preview_padded, dim_style)]));
     }
 
-    render_agent_sessions_content(frame, lines, inner);
+    let visible_count = lines.len() / ROW_HEIGHT;
+    render_agent_sessions_content(
+        frame,
+        lines,
+        inner,
+        start,
+        visible_count,
+        state.entries.len(),
+    );
 }
 
-fn render_agent_sessions_content(frame: &mut Frame, lines: Vec<Line<'static>>, inner: Rect) {
+/// Build a full-width line with left-aligned and right-aligned text.
+fn build_padded_two_column_line(
+    left: &str,
+    right: &str,
+    width: usize,
+    left_style: Style,
+    right_style: Style,
+) -> Line<'static> {
+    let left_truncated = truncate_display_width(left, width);
+    let left_width = display_width(&left_truncated);
+    let right_truncated = truncate_display_width(right, width.saturating_sub(left_width + 1));
+    let right_width = display_width(&right_truncated);
+    let fill = width.saturating_sub(left_width + right_width);
+    Line::from(vec![
+        Span::styled(left_truncated, left_style),
+        Span::styled(" ".repeat(fill), left_style),
+        Span::styled(right_truncated, right_style),
+    ])
+}
+
+fn render_agent_sessions_content(
+    frame: &mut Frame,
+    lines: Vec<Line<'static>>,
+    inner: Rect,
+    start: usize,
+    visible_count: usize,
+    total: usize,
+) {
     let content_height = inner.height.saturating_sub(1) as usize;
     let mut padded = lines;
     while padded.len() < content_height {
@@ -2254,8 +2296,19 @@ fn render_agent_sessions_content(frame: &mut Frame, lines: Vec<Line<'static>>, i
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(content, content_area);
 
+    let visible_bottom = (start + visible_count).min(total);
+    let footer_text = if total == 0 {
+        "↑/↓ navigate · Enter resume · Esc/q close".to_string()
+    } else {
+        format!(
+            "↑/↓ navigate · Enter resume · Esc/q close · {}-{} / {}",
+            start + 1,
+            visible_bottom,
+            total
+        )
+    };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        "↑/↓ select · Enter resume · Esc/q close",
+        footer_text,
         Style::default().fg(Color::Gray).bg(Color::Black),
     )]));
     frame.render_widget(footer, footer_area);
@@ -2783,6 +2836,7 @@ mod agent_sessions_ui_tests {
         let entries = vec![AgentSessionEntry {
             id: "session-1".to_string(),
             title: Some("Test Session".to_string()),
+            last_prompt: Some("last prompt".to_string()),
             cwd: Some("/tmp".to_string()),
             updated_at_seconds: Some(1_000_000),
             updated_at_nanos: None,

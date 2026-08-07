@@ -1071,6 +1071,7 @@ pub(crate) fn map_outbound_grpc_envelope(
                     .map(|entry| GrpcAgentSessionEntry {
                         id: entry.id.clone(),
                         title: entry.title.clone(),
+                        last_prompt: entry.last_prompt.clone(),
                         cwd: entry.cwd.clone(),
                         updated_at: match (entry.updated_at_seconds, entry.updated_at_nanos) {
                             (Some(secs), Some(nanos)) => Some(prost_types::Timestamp {

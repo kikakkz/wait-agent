@@ -730,6 +730,7 @@ fn write_agent_session_entry(
 ) -> Result<(), RemoteTransportCodecError> {
     write_string(writer, &entry.id)?;
     write_optional_string(writer, entry.title.as_deref())?;
+    write_optional_string(writer, entry.last_prompt.as_deref())?;
     write_optional_string(writer, entry.cwd.as_deref())?;
     write_optional_i64(writer, entry.updated_at_seconds)?;
     write_optional_i32(writer, entry.updated_at_nanos)?;
@@ -742,6 +743,7 @@ fn read_agent_session_entry(
     Ok(AgentSessionEntryPayload {
         id: read_string(reader)?,
         title: read_optional_string(reader)?,
+        last_prompt: read_optional_string(reader)?,
         cwd: read_optional_string(reader)?,
         updated_at_seconds: read_optional_i64(reader)?,
         updated_at_nanos: read_optional_i32(reader)?,
@@ -1498,6 +1500,7 @@ mod tests {
                         AgentSessionEntryPayload {
                             id: "session-1".to_string(),
                             title: Some("Demo Session".to_string()),
+                            last_prompt: Some("last prompt".to_string()),
                             cwd: Some("/tmp/demo".to_string()),
                             updated_at_seconds: Some(1_756_435_200),
                             updated_at_nanos: Some(0),
@@ -1505,6 +1508,7 @@ mod tests {
                         AgentSessionEntryPayload {
                             id: "session-2".to_string(),
                             title: None,
+                            last_prompt: None,
                             cwd: None,
                             updated_at_seconds: None,
                             updated_at_nanos: None,
