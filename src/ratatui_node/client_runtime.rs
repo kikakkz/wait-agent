@@ -2160,9 +2160,11 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         return;
     }
 
-    // Each session is rendered as a three-line card to match Kimi's own
-    // session picker: title + time, id + cwd, and a preview of the last prompt.
-    const ROW_HEIGHT: usize = 3;
+    // Each session is rendered as a four-line card (three content lines plus a
+    // trailing blank line) to match Kimi's own session picker: a `>` prefixed
+    // title with a timestamp, an indented id + cwd line, and an indented last
+    // prompt preview introduced by `›`.
+    const ROW_HEIGHT: usize = 4;
     let visible_rows = content_height / ROW_HEIGHT;
     let start = if state.selected_index + 1 > visible_rows {
         state.selected_index + 1 - visible_rows
@@ -2200,8 +2202,10 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             .updated_at_seconds
             .map(format_relative_time)
             .unwrap_or_default();
+        let title_prefix = "> ";
+        let title_left = format!("{}{}", title_prefix, title_text);
         let title_line = build_padded_two_column_line(
-            title_text,
+            &title_left,
             &time_text,
             width,
             base_style.add_modifier(Modifier::BOLD),
@@ -2209,13 +2213,16 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         );
         lines.push(title_line);
 
+        let indent = "  ";
         let id_text = entry.id.clone();
         let cwd_text = entry.cwd.as_deref().unwrap_or("");
+        let meta_left = format!("{}{}", indent, id_text);
+        let meta_right = format!("{}{}", indent, cwd_text);
         let meta_line =
-            build_padded_two_column_line(&id_text, cwd_text, width, dim_style, dim_style);
+            build_padded_two_column_line(&meta_left, &meta_right, width, dim_style, dim_style);
         lines.push(meta_line);
 
-        let preview_prefix = "› ";
+        let preview_prefix = "  › ";
         let preview_text = entry
             .last_prompt
             .as_deref()
@@ -2231,6 +2238,12 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
             " ".repeat(width.saturating_sub(preview_display_width))
         );
         lines.push(Line::from(vec![Span::styled(preview_padded, dim_style)]));
+
+        // Blank line separating entries.
+        lines.push(Line::from(vec![Span::styled(
+            " ".repeat(width),
+            Style::default().bg(Color::Black),
+        )]));
     }
 
     let visible_count = lines.len() / ROW_HEIGHT;
