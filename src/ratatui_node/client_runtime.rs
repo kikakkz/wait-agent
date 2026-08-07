@@ -2189,7 +2189,7 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         let dim_style = if is_selected {
             base_style
         } else {
-            Style::default().fg(Color::Gray).patch(base_style)
+            base_style.patch(Style::default().fg(Color::Gray))
         };
 
         let title_text = entry
