@@ -146,10 +146,7 @@ fn parse_index_line(line: &str, home: &Path) -> Option<AgentSession> {
                         .map(|s| s.to_string())
                 });
 
-            session.updated_at = state_value
-                .get("updatedAt")
-                .and_then(|v| v.as_str())
-                .and_then(parse_iso8601_utc_to_system_time);
+            session.updated_at = state_value.get("updatedAt").and_then(parse_kimi_updated_at);
 
             if session.cwd.is_none() {
                 session.cwd = state_value
@@ -168,6 +165,19 @@ fn parse_index_line(line: &str, home: &Path) -> Option<AgentSession> {
 ///
 /// This is intentionally narrow: it covers the format produced by Kimi Code's
 /// `state.json` without pulling in a full date-time library.
+/// Parse a Kimi `updatedAt` value, which may be either an ISO-8601 UTC string
+/// (legacy format) or a Unix timestamp in milliseconds (version 2 state files).
+fn parse_kimi_updated_at(value: &serde_json::Value) -> Option<SystemTime> {
+    match value {
+        serde_json::Value::String(text) => parse_iso8601_utc_to_system_time(text),
+        serde_json::Value::Number(number) => {
+            let millis = number.as_i64()?;
+            Some(SystemTime::UNIX_EPOCH + Duration::from_millis(millis as u64))
+        }
+        _ => None,
+    }
+}
+
 fn parse_iso8601_utc_to_system_time(text: &str) -> Option<SystemTime> {
     let text = text.strip_suffix('Z')?;
     let (date_part, time_part) = text.split_once('T')?;
@@ -431,6 +441,16 @@ mod tests {
         let st = parse_iso8601_utc_to_system_time("2026-07-13T09:21:28.024Z").unwrap();
         let since = st.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         // 2026-07-13 09:21:28 UTC
+        assert_eq!(since.as_secs(), 1_783_934_488);
+        assert_eq!(since.subsec_millis(), 24);
+    }
+
+    #[test]
+    fn parse_integer_updated_at_round_trip() {
+        let millis = 1_783_934_488_024i64;
+        let value = serde_json::json!(millis);
+        let st = parse_kimi_updated_at(&value).unwrap();
+        let since = st.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(since.as_secs(), 1_783_934_488);
         assert_eq!(since.subsec_millis(), 24);
     }
