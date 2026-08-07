@@ -2120,10 +2120,11 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
 
     // Fill the popup interior with a solid black background so empty lines
     // and padding do not leak the underlying session content through.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        inner,
-    );
+    // A Block widget does not reliably paint the interior when it has no
+    // borders, so mutate the buffer directly.
+    frame
+        .buffer_mut()
+        .set_style(inner, Style::default().bg(Color::Black));
 
     if inner.width < 10 || inner.height < 4 {
         return;
