@@ -1,15 +1,17 @@
 // Legacy tmux-era transport codec kept during the ratatui migration; `write_registration_frame` is used only in tests/dead modules.
 
 use crate::infra::remote_protocol::{
-    ApplyResizePayload, BootstrapMode, ClientHelloPayload, CloseMirrorRequestPayload,
-    ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
-    CreateSessionRequestPayload, ErrorPayload, MirrorBootstrapChunkPayload,
-    MirrorBootstrapCompletePayload, NodeSessionChannel, NodeSessionEnvelope,
-    OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
-    OpenTargetOkPayload, OpenTargetRejectedPayload, PasteFileRequestPayload, ProtocolEnvelope,
-    RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload, ResizeAuthorityChangedPayload,
-    ServerHelloPayload, TargetExitedPayload, TargetGeometryChangedPayload, TargetOutputPayload,
-    TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
+    AgentSessionEntryPayload, ApplyResizePayload, BootstrapMode, ClientHelloPayload,
+    CloseMirrorRequestPayload, ControlPlanePayload, CreateSessionAcceptedPayload,
+    CreateSessionRejectedPayload, CreateSessionRequestPayload, ErrorPayload,
+    ListAgentSessionsRejectedPayload, ListAgentSessionsRequestPayload,
+    ListAgentSessionsResponsePayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
+    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload,
+    OpenMirrorRequestPayload, OpenTargetOkPayload, OpenTargetRejectedPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    ResizeAppliedPayload, ResizeAuthorityChangedPayload, ServerHelloPayload, TargetExitedPayload,
+    TargetGeometryChangedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload,
 };
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -454,6 +456,27 @@ fn write_payload(
             write_static_string(writer, payload.code)?;
             write_string(writer, &payload.message)?;
         }
+        ControlPlanePayload::ListAgentSessionsRequest(payload) => {
+            write_u8(writer, 90)?;
+            write_string(writer, &payload.request_id)?;
+            write_string(writer, &payload.target_id)?;
+            write_string(writer, &payload.agent)?;
+        }
+        ControlPlanePayload::ListAgentSessionsResponse(payload) => {
+            write_u8(writer, 91)?;
+            write_string(writer, &payload.request_id)?;
+            let len = u32::try_from(payload.sessions.len())
+                .map_err(|_| RemoteTransportCodecError::new("session list too long"))?;
+            write_u32(writer, len)?;
+            for entry in &payload.sessions {
+                write_agent_session_entry(writer, entry)?;
+            }
+        }
+        ControlPlanePayload::ListAgentSessionsRejected(payload) => {
+            write_u8(writer, 92)?;
+            write_string(writer, &payload.request_id)?;
+            write_string(writer, &payload.reason)?;
+        }
         ControlPlanePayload::TargetPublished(payload) => {
             write_u8(writer, 9)?;
             write_string(writer, &payload.transport_session_id)?;
@@ -637,6 +660,27 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
             code: read_known_static_string(reader)?,
             message: read_string(reader)?,
         }),
+        90 => ControlPlanePayload::ListAgentSessionsRequest(ListAgentSessionsRequestPayload {
+            request_id: read_string(reader)?,
+            target_id: read_string(reader)?,
+            agent: read_string(reader)?,
+        }),
+        91 => {
+            let request_id = read_string(reader)?;
+            let len = read_u32(reader)? as usize;
+            let mut sessions = Vec::with_capacity(len);
+            for _ in 0..len {
+                sessions.push(read_agent_session_entry(reader)?);
+            }
+            ControlPlanePayload::ListAgentSessionsResponse(ListAgentSessionsResponsePayload {
+                request_id,
+                sessions,
+            })
+        }
+        92 => ControlPlanePayload::ListAgentSessionsRejected(ListAgentSessionsRejectedPayload {
+            request_id: read_string(reader)?,
+            reason: read_string(reader)?,
+        }),
         9 => ControlPlanePayload::TargetPublished(TargetPublishedPayload {
             transport_session_id: read_string(reader)?,
             node_instance_id: read_string(reader)?,
@@ -677,6 +721,30 @@ fn read_payload(reader: &mut impl Read) -> Result<ControlPlanePayload, RemoteTra
                 "unknown control-plane payload tag `{other}`"
             )));
         }
+    })
+}
+
+fn write_agent_session_entry(
+    writer: &mut impl Write,
+    entry: &AgentSessionEntryPayload,
+) -> Result<(), RemoteTransportCodecError> {
+    write_string(writer, &entry.id)?;
+    write_optional_string(writer, entry.title.as_deref())?;
+    write_optional_string(writer, entry.cwd.as_deref())?;
+    write_optional_i64(writer, entry.updated_at_seconds)?;
+    write_optional_i32(writer, entry.updated_at_nanos)?;
+    Ok(())
+}
+
+fn read_agent_session_entry(
+    reader: &mut impl Read,
+) -> Result<AgentSessionEntryPayload, RemoteTransportCodecError> {
+    Ok(AgentSessionEntryPayload {
+        id: read_string(reader)?,
+        title: read_optional_string(reader)?,
+        cwd: read_optional_string(reader)?,
+        updated_at_seconds: read_optional_i64(reader)?,
+        updated_at_nanos: read_optional_i32(reader)?,
     })
 }
 
@@ -930,6 +998,58 @@ fn read_optional_usize(reader: &mut impl Read) -> Result<Option<usize>, RemoteTr
     })
 }
 
+fn write_optional_i64(
+    writer: &mut impl Write,
+    value: Option<i64>,
+) -> Result<(), RemoteTransportCodecError> {
+    match value {
+        Some(value) => {
+            write_u8(writer, 1)?;
+            write_i64(writer, value)?;
+        }
+        None => write_u8(writer, 0)?,
+    }
+    Ok(())
+}
+
+fn read_optional_i64(reader: &mut impl Read) -> Result<Option<i64>, RemoteTransportCodecError> {
+    Ok(match read_u8(reader)? {
+        0 => None,
+        1 => Some(read_i64(reader)?),
+        other => {
+            return Err(RemoteTransportCodecError::new(format!(
+                "invalid optional-i64 tag `{other}`"
+            )));
+        }
+    })
+}
+
+fn write_optional_i32(
+    writer: &mut impl Write,
+    value: Option<i32>,
+) -> Result<(), RemoteTransportCodecError> {
+    match value {
+        Some(value) => {
+            write_u8(writer, 1)?;
+            write_i32(writer, value)?;
+        }
+        None => write_u8(writer, 0)?,
+    }
+    Ok(())
+}
+
+fn read_optional_i32(reader: &mut impl Read) -> Result<Option<i32>, RemoteTransportCodecError> {
+    Ok(match read_u8(reader)? {
+        0 => None,
+        1 => Some(read_i32(reader)?),
+        other => {
+            return Err(RemoteTransportCodecError::new(format!(
+                "invalid optional-i32 tag `{other}`"
+            )));
+        }
+    })
+}
+
 fn write_usize(writer: &mut impl Write, value: usize) -> Result<(), RemoteTransportCodecError> {
     let value = u64::try_from(value)
         .map_err(|_| RemoteTransportCodecError::new("usize too large for transport frame"))?;
@@ -965,6 +1085,28 @@ fn read_u32(reader: &mut impl Read) -> Result<u32, RemoteTransportCodecError> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn write_i64(writer: &mut impl Write, value: i64) -> Result<(), RemoteTransportCodecError> {
+    writer.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_i64(reader: &mut impl Read) -> Result<i64, RemoteTransportCodecError> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+fn write_i32(writer: &mut impl Write, value: i32) -> Result<(), RemoteTransportCodecError> {
+    writer.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_i32(reader: &mut impl Read) -> Result<i32, RemoteTransportCodecError> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
 fn write_bool(writer: &mut impl Write, value: bool) -> Result<(), RemoteTransportCodecError> {
     write_u8(writer, if value { 1 } else { 0 })
 }
@@ -998,12 +1140,14 @@ mod tests {
         write_node_session_envelope, write_registration_frame, AuthorityTransportFrame,
     };
     use crate::infra::remote_protocol::{
-        BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
+        AgentSessionEntryPayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
         CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
-        NodeSessionChannel, NodeSessionEnvelope, OpenMirrorAcceptedPayload,
-        OpenMirrorRequestPayload, PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload,
-        RawPtyOutputPayload, TargetGeometryChangedPayload, TargetOutputPayload,
-        TargetPublicationAckPayload, TargetPublicationAckStatus, TargetPublishedPayload,
+        ListAgentSessionsRejectedPayload, ListAgentSessionsRequestPayload,
+        ListAgentSessionsResponsePayload, NodeSessionChannel, NodeSessionEnvelope,
+        OpenMirrorAcceptedPayload, OpenMirrorRequestPayload, PasteFileRequestPayload,
+        ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload, TargetGeometryChangedPayload,
+        TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
+        TargetPublishedPayload,
     };
 
     #[test]
@@ -1313,6 +1457,88 @@ mod tests {
             read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
 
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn control_plane_envelope_round_trips_list_agent_sessions_messages() {
+        let request = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-list-req".to_string(),
+            message_type: "list_agent_sessions_request",
+            timestamp: "2026-08-06T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: None,
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::ListAgentSessionsRequest(
+                ListAgentSessionsRequestPayload {
+                    request_id: "req-1".to_string(),
+                    target_id: "remote-peer:peer-a:shell-1".to_string(),
+                    agent: "kimi".to_string(),
+                },
+            ),
+        };
+        let response = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-list-resp".to_string(),
+            message_type: "list_agent_sessions_response",
+            timestamp: "2026-08-06T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: None,
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::ListAgentSessionsResponse(
+                ListAgentSessionsResponsePayload {
+                    request_id: "req-1".to_string(),
+                    sessions: vec![
+                        AgentSessionEntryPayload {
+                            id: "session-1".to_string(),
+                            title: Some("Demo Session".to_string()),
+                            cwd: Some("/tmp/demo".to_string()),
+                            updated_at_seconds: Some(1_756_435_200),
+                            updated_at_nanos: Some(0),
+                        },
+                        AgentSessionEntryPayload {
+                            id: "session-2".to_string(),
+                            title: None,
+                            cwd: None,
+                            updated_at_seconds: None,
+                            updated_at_nanos: None,
+                        },
+                    ],
+                },
+            ),
+        };
+        let rejected = ProtocolEnvelope {
+            protocol_version: "1.1".to_string(),
+            message_id: "msg-list-rejected".to_string(),
+            message_type: "list_agent_sessions_rejected",
+            timestamp: "2026-08-06T00:00:00Z".to_string(),
+            sender_id: "peer-a".to_string(),
+            correlation_id: Some("req-1".to_string()),
+            session_id: None,
+            target_id: Some("remote-peer:peer-a:shell-1".to_string()),
+            attachment_id: None,
+            console_id: None,
+            payload: ControlPlanePayload::ListAgentSessionsRejected(
+                ListAgentSessionsRejectedPayload {
+                    request_id: "req-1".to_string(),
+                    reason: "unknown agent".to_string(),
+                },
+            ),
+        };
+
+        for envelope in [request, response, rejected] {
+            let mut bytes = Vec::new();
+            write_control_plane_envelope(&mut bytes, &envelope).expect("envelope should encode");
+            let decoded =
+                read_control_plane_envelope(&mut bytes.as_slice()).expect("envelope should decode");
+            assert_eq!(decoded, envelope);
+        }
     }
 
     #[test]

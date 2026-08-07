@@ -748,6 +748,31 @@ impl SharedState {
         }
     }
 
+    /// Forward a ListAgentSessions request to a specific remote session keyed by
+    /// qualified target.
+    pub(crate) fn feed_remote_session_list_agent_sessions(
+        &self,
+        target_id: &str,
+        request_id: &str,
+        agent: &str,
+    ) {
+        let session = {
+            let guard = self
+                .sessions
+                .remote_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.get(target_id).cloned()
+        };
+        if let Some(session) = session {
+            session.send_list_agent_sessions(request_id, agent);
+        } else {
+            ERROR_LOG.log(format!(
+                "[ratatui-node] feed_remote_session_list_agent_sessions: no remote session for {target_id}"
+            ));
+        }
+    }
+
     /// Forward a pasted file to a specific remote session keyed by qualified target.
     pub(crate) fn feed_remote_session_paste_file(
         &self,

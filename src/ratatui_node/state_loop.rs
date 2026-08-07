@@ -1,4 +1,5 @@
 use crate::domain::agent_detector::{accepts_at_reference, DetectorRegistry};
+use crate::domain::agent_session::{AgentSessionError, AgentSessionRegistry};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::{
     ManagedSessionTaskState, SessionAvailability, SessionTransport,
@@ -25,7 +26,9 @@ use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
     HistoryResponse, ServerStatus, SessionView,
 };
-use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
+use super::state_event::{
+    AgentSessionEntry, ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent,
+};
 use crate::host::ssh::remote_host_connect_runtime::{
     RemoteHostConnectRequest, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
 };
@@ -92,6 +95,7 @@ fn run_state_event_loop(
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
     let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
+    let mut pending_agent_session_requests: HashMap<String, u64> = HashMap::new();
 
     while let Ok(event) = rx.recv() {
         match event {
@@ -166,6 +170,7 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &mut reconnect_handles,
+                    &mut pending_agent_session_requests,
                     client_id,
                     command,
                     &settings_store,
@@ -256,6 +261,24 @@ fn run_state_event_loop(
                     &mut reconnect_handles,
                     node_id,
                 );
+            }
+
+            StateEvent::RemoteAgentSessionsReceived {
+                target_id: _,
+                request_id,
+                result,
+            } => {
+                if let Some(client_id) = pending_agent_session_requests.remove(&request_id) {
+                    let outcome = match result {
+                        Ok(entries) => {
+                            CommandOutcome::Data(serde_json::to_value(&entries).unwrap_or_default())
+                        }
+                        Err(message) => CommandOutcome::Error(message),
+                    };
+                    let response: ControlResponse = outcome.into();
+                    let payload = response_json(&response);
+                    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+                }
             }
         }
     }
@@ -379,6 +402,7 @@ fn handle_client_command_event(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    pending_agent_session_requests: &mut HashMap<String, u64>,
     client_id: u64,
     command: ClientCommand,
     settings_store: &SettingsStore,
@@ -387,6 +411,20 @@ fn handle_client_command_event(
         let response = build_history_response(shared, target_id);
         let payload = history_response_json(&response);
         client_writer.send(ClientWriterRequest::Write { client_id, payload });
+        return;
+    }
+
+    if let ClientCommand::ListAgentSessions { target_id, agent } = &command {
+        match handle_list_agent_sessions(shared, target_id, agent) {
+            ListAgentSessionsOutcome::Immediate(outcome) => {
+                let response: ControlResponse = outcome.into();
+                let payload = response_json(&response);
+                client_writer.send(ClientWriterRequest::Write { client_id, payload });
+            }
+            ListAgentSessionsOutcome::Pending { request_id } => {
+                pending_agent_session_requests.insert(request_id, client_id);
+            }
+        }
         return;
     }
 
@@ -859,6 +897,11 @@ fn handle_client_command(
             CommandOutcome::Ok
         }
 
+        ClientCommand::ListAgentSessions { .. } => {
+            // Handled directly in the event-loop dispatcher above.
+            CommandOutcome::Ok
+        }
+
         ClientCommand::CreateRemoteSession { authority_node_id } => {
             let outcome = create_remote_session_on_authority(shared, &authority_node_id);
             if matches!(outcome, CommandOutcome::Message(_)) {
@@ -1013,6 +1056,87 @@ fn route_paste_text(
             shared.feed_remote_session_input(target_id, bytes);
         }
     }
+}
+
+enum ListAgentSessionsOutcome {
+    Immediate(CommandOutcome),
+    Pending { request_id: String },
+}
+
+fn handle_list_agent_sessions(
+    shared: &SharedState,
+    target_id: &str,
+    agent: &str,
+) -> ListAgentSessionsOutcome {
+    let record = {
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(target_id).cloned()
+    };
+    let Some(record) = record else {
+        return ListAgentSessionsOutcome::Immediate(CommandOutcome::Error(
+            "unknown target".to_string(),
+        ));
+    };
+
+    match record.address.transport() {
+        SessionTransport::Local => {
+            let registry = AgentSessionRegistry::default();
+            match registry.list_for(agent) {
+                Ok(sessions) => {
+                    let entries: Vec<AgentSessionEntry> = sessions
+                        .into_iter()
+                        .map(|session| AgentSessionEntry {
+                            id: session.id,
+                            title: session.title,
+                            cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
+                            updated_at_seconds: session.updated_at.and_then(|time| {
+                                time.duration_since(std::time::UNIX_EPOCH)
+                                    .ok()
+                                    .map(|duration| duration.as_secs() as i64)
+                            }),
+                            updated_at_nanos: session.updated_at.and_then(|time| {
+                                time.duration_since(std::time::UNIX_EPOCH)
+                                    .ok()
+                                    .map(|duration| duration.subsec_nanos() as i32)
+                            }),
+                        })
+                        .collect();
+                    ListAgentSessionsOutcome::Immediate(CommandOutcome::Data(
+                        serde_json::to_value(&entries).unwrap_or_default(),
+                    ))
+                }
+                Err(AgentSessionError::HomeNotFound) => {
+                    ListAgentSessionsOutcome::Immediate(CommandOutcome::Data(
+                        serde_json::to_value(Vec::<AgentSessionEntry>::new()).unwrap_or_default(),
+                    ))
+                }
+                Err(error) => {
+                    ListAgentSessionsOutcome::Immediate(CommandOutcome::Error(error.to_string()))
+                }
+            }
+        }
+        SessionTransport::RemotePeer => {
+            let request_id = format!(
+                "list-agent-sessions-{}-{}-{}",
+                std::process::id(),
+                now_millis_state_loop(),
+                agent
+            );
+            shared.feed_remote_session_list_agent_sessions(target_id, &request_id, agent);
+            ListAgentSessionsOutcome::Pending { request_id }
+        }
+    }
+}
+
+fn now_millis_state_loop() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn handle_paste_file(

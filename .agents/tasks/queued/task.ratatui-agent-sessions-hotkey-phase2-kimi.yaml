@@ -1,0 +1,41 @@
+id: task.ratatui-agent-sessions-hotkey-phase2-kimi
+kind: task
+version: 1
+title: implement AgentSessionProvider trait, registry, and Kimi session provider
+status: done
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 5, 6, 7.2
+  why:
+    - Establishes the plugin trait and registry that all agent-specific session providers will implement.
+    - Kimi has the most clearly documented on-disk layout (session_index.jsonl + per-session state.json), making it the right first provider.
+    - Provides the foundation for the UI hotkey popup in phase 5.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase2-kimi.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-clipboard-paste-to-main-pane.done
+done_criteria:
+  - `AgentSessionProvider` trait exists in `src/domain/agent_session.rs` with `name`, `list_sessions`, and `resume_command`.
+  - `AgentSessionRegistry` exists and can dispatch by agent name.
+  - `src/domain/mod.rs` exposes the new modules.
+  - `KimiSessionProvider` resolves `KIMI_CODE_HOME` -> `~/.kimi-code` -> `~/.kimi` and reads `session_index.jsonl`.
+  - `KimiSessionProvider` reads per-session `state.json` to obtain title, lastPrompt, workDir, and updatedAt.
+  - Missing/unknown fields are handled gracefully (defensive parsing).
+  - Unit tests with temporary fixture directories pass.
+  - `cargo fmt --check` and `cargo clippy -- -D warnings` pass.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - unit tests for Kimi provider fixture parsing
+touched_paths:
+  - src/domain/agent_session.rs
+  - src/domain/agent_session_kimi.rs
+  - src/domain/mod.rs
+notes:
+  - Keep the trait independent of `AgentDetector`; link them only by agent name string at the UI layer.
+  - Do not add a direct filesystem dependency to the existing detector code.
+  - `sessionId` values are strings like `session_<uuid>`; preserve them exactly for `kimi --session <id>`.

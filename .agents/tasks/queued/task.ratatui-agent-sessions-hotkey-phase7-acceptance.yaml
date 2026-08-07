@@ -1,0 +1,39 @@
+id: task.ratatui-agent-sessions-hotkey-phase7-acceptance
+kind: task
+version: 1
+title: end-to-end acceptance and documentation for agent sessions hotkey
+status: backlog
+priority: high
+design_ref:
+  doc: docs/ratatui-agent-sessions-hotkey-design.md
+  section: 9, 10, 11
+  why:
+    - The feature must be verified across all three agents and both local/remote target types before the epic closes.
+    - Documentation and tests must reflect the actual on-disk schemas and the remote peer protocol discovered during design.
+source_of_truth:
+  file: .agents/tasks/queued/task.ratatui-agent-sessions-hotkey-phase7-acceptance.yaml
+  reference: queued
+depends_on:
+  - task.ratatui-agent-sessions-hotkey-phase6-ui.done
+done_criteria:
+  - Manual end-to-end verification for Kimi, Codex, and Claude local sessions.
+  - Manual end-to-end verification for Kimi, Codex, and Claude remote peer sessions (two-node setup).
+  - Verify the hotkey does not trigger when overlays or sidebar are active.
+  - Verify empty/missing agent data directories produce a clear user message on both local and remote nodes.
+  - Verify remote node offline / unsupported protocol produces a clear error message.
+  - Update `docs/ratatui-agent-sessions-hotkey-design.md` status from Draft to Accepted if no design changes were needed.
+  - Update `AGENTS.md` if new conventions were introduced.
+  - All unit tests pass; no new warnings from `cargo clippy -- -D warnings`.
+  - `cargo test --release ratatui session_sync` passes.
+verification:
+  - cargo fmt --check
+  - cargo clippy -- -D warnings
+  - cargo test --release ratatui session_sync
+  - manual end-to-end across local and remote peer bash/kimi/codex/claude sessions
+touched_paths:
+  - docs/ratatui-agent-sessions-hotkey-design.md
+  - AGENTS.md
+  - tests/cli_smoke.rs
+notes:
+  - If manual testing reveals schema drift not covered by defensive parsing, open a follow-up task rather than expanding this slice.
+  - Keep acceptance evidence in the task notes for future reference.

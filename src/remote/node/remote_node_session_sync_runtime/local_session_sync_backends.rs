@@ -108,6 +108,7 @@ fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &str {
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::PasteFile(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
+        RemoteAuthorityCommand::ListAgentSessionsRequest(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }
 }
@@ -122,6 +123,13 @@ fn authority_command_envelope(
         RemoteAuthorityCommand::RawPtyInput(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::PasteFile(payload) => Some(payload.session_id.clone()),
         RemoteAuthorityCommand::ApplyResize(payload) => Some(payload.session_id.clone()),
+        RemoteAuthorityCommand::ListAgentSessionsRequest(payload) => Some(
+            payload
+                .target_id
+                .rsplit_once(':')
+                .map(|(_, id)| id.to_string())
+                .unwrap_or_else(|| payload.target_id.clone()),
+        ),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => None,
     };
     let payload = match command {
@@ -136,6 +144,9 @@ fn authority_command_envelope(
             ControlPlanePayload::PasteFileRequest(payload)
         }
         RemoteAuthorityCommand::ApplyResize(payload) => ControlPlanePayload::ApplyResize(payload),
+        RemoteAuthorityCommand::ListAgentSessionsRequest(payload) => {
+            ControlPlanePayload::ListAgentSessionsRequest(payload)
+        }
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
             ControlPlanePayload::Error(ErrorPayload {
                 code: "local_sync_request_not_routable",

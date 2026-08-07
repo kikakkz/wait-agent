@@ -3,10 +3,11 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
-    MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
-    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, PasteFileRequestPayload, ProtocolEnvelope,
-    RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload,
-    TargetGeometryChangedPayload, TargetOutputPayload, REMOTE_PROTOCOL_VERSION,
+    ListAgentSessionsRequestPayload, MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload,
+    OpenMirrorAcceptedPayload, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    ResizeAppliedPayload, TargetExitedPayload, TargetGeometryChangedPayload, TargetOutputPayload,
+    REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, write_control_plane_envelope,
@@ -51,6 +52,7 @@ pub enum RemoteAuthorityCommand {
     RawPtyInput(RawPtyInputPayload),
     PasteFile(PasteFileRequestPayload),
     ApplyResize(ApplyResizePayload),
+    ListAgentSessionsRequest(ListAgentSessionsRequestPayload),
     SyncRequest {
         expected_seq: u64,
         received_seq: u64,
@@ -506,6 +508,9 @@ fn command_from_control_plane_payload(
         }
         ControlPlanePayload::ApplyResize(payload) => {
             Ok(RemoteAuthorityCommand::ApplyResize(payload))
+        }
+        ControlPlanePayload::ListAgentSessionsRequest(payload) => {
+            Ok(RemoteAuthorityCommand::ListAgentSessionsRequest(payload))
         }
         other => Err(RemoteAuthorityTransportError::new(format!(
             "unexpected authority command `{}`",

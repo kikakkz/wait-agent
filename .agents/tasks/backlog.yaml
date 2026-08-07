@@ -593,8 +593,53 @@ next:
       document: docs/ratatui-clipboard-paste-design.md
       authorizes: Section 8 gRPC protocol extension and Section 4 remote session file semantics.
   - id: task.ratatui-agent-sessions-hotkey
-    title: add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host
+    title: '[epic] add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host'
     status: backlog
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      status: accepted
+      authorizes: >
+        Defines the AgentSessionProvider plugin trait, AgentSessionRegistry,
+        per-agent session source paths (Kimi, Codex, Claude), JSONL parsing
+        strategy, path resolution with environment-variable overrides,
+        remote peer session read path via NodeSessionService protocol, and the
+        TUI hotkey popup behavior for listing and resuming agent sessions.
+  - id: task.ratatui-agent-sessions-hotkey-phase2-kimi
+    title: Phase 2 - implement AgentSessionProvider trait, registry, and Kimi session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 5 (trait/registry), Section 6 (Kimi path resolution), and Section 7.2 (Kimi JSONL parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase3-codex
+    title: Phase 3 - implement Codex session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 4.2 (Codex session source) and Section 7.3 (Codex history.jsonl parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase4-claude
+    title: Phase 4 - implement Claude session provider
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 4.3 (Claude session source) and Section 7.4 (Claude history.jsonl and project scan parsing).
+  - id: task.ratatui-agent-sessions-hotkey-phase5-protocol
+    title: Phase 5 - implement ListAgentSessions protocol for remote peer sessions
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 5.5 (remote peer session read path and NodeSessionService protocol extension).
+  - id: task.ratatui-agent-sessions-hotkey-phase6-ui
+    title: Phase 6 - implement hotkey popup for local and remote peer agent sessions
+    status: done
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 8 (UI behavior, hotkey, popup, local/remote path selection, command injection).
+  - id: task.ratatui-agent-sessions-hotkey-phase7-acceptance
+    title: Phase 7 - end-to-end acceptance and documentation for agent sessions hotkey
+    status: backlog
+    design_ref:
+      document: docs/ratatui-agent-sessions-hotkey-design.md
+      authorizes: Section 9 (error handling), Section 10 (testing), and Section 11 (limitations).
   - id: task.ratatui-phase-5-cloud
     title: activate distributed control topologies on the server/client foundation
     status: backlog

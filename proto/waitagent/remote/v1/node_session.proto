@@ -54,6 +54,10 @@ message NodeSessionEnvelope {
     PasteFileRequest paste_file_request = 80;
     PasteFileAccepted paste_file_accepted = 81;
     PasteFileRejected paste_file_rejected = 82;
+
+    ListAgentSessionsRequest list_agent_sessions_request = 90;
+    ListAgentSessionsResponse list_agent_sessions_response = 91;
+    ListAgentSessionsRejected list_agent_sessions_rejected = 92;
   }
 }
 
@@ -367,4 +371,27 @@ message PasteFileRejected {
   string session_id = 2;
   string file_id = 3;
   string reason = 4;
+}
+
+message ListAgentSessionsRequest {
+  string request_id = 1;
+  string target_id = 2;
+  string agent = 3;
+}
+
+message ListAgentSessionsResponse {
+  string request_id = 1;
+  repeated AgentSessionEntry sessions = 2;
+}
+
+message ListAgentSessionsRejected {
+  string request_id = 1;
+  string reason = 2;
+}
+
+message AgentSessionEntry {
+  string id = 1;
+  optional string title = 2;
+  optional string cwd = 3;
+  optional google.protobuf.Timestamp updated_at = 4;
 }
