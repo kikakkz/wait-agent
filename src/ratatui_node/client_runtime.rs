@@ -1,5 +1,4 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
-use crate::domain::agent_session::{AgentSession, AgentSessionRegistry};
 use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::settings_store::SettingsStore;
@@ -13,7 +12,6 @@ use crate::ratatui_node::node_runtime::{
     ratatui_socket_path, ControlResponse, HistoryResponse, RatatuiSnapshot, ServerMessageJson,
     SessionView,
 };
-use crate::ratatui_node::state_event::AgentSessionEntry;
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver};
 use crossterm::event::{
@@ -470,17 +468,6 @@ struct ErrorLogState {
     scroll_offset: usize,
 }
 
-#[derive(Debug, Clone)]
-struct AgentSessionsState {
-    target_id: String,
-    agent: String,
-    is_remote: bool,
-    selected_index: usize,
-    entries: Vec<AgentSessionEntry>,
-    error: Option<String>,
-    loading: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsFocus {
     Input,
@@ -551,7 +538,6 @@ fn apply_server_message(
     last_active_target: &mut Option<String>,
     status_message: &mut Option<(String, Instant)>,
     history_state: &mut Option<HistoryState>,
-    agent_sessions_state: &mut Option<AgentSessionsState>,
     focus: Focus,
     message: ServerMessage,
 ) {
@@ -594,9 +580,7 @@ fn apply_server_message(
             ));
         }
         ServerMessage::Response(response) => {
-            if let Some(state) = agent_sessions_state.as_mut() {
-                apply_list_agent_sessions_response(&response, state);
-            } else if !response.ok {
+            if !response.ok {
                 if let Some(message) = response.message {
                     *status_message = Some((message, Instant::now()));
                 }
@@ -627,41 +611,11 @@ fn apply_server_message(
     }
 }
 
-/// Apply a control response to an open agent-sessions popup state.
-fn apply_list_agent_sessions_response(response: &ControlResponse, state: &mut AgentSessionsState) {
-    if let Some(data) = response.data.clone() {
-        match serde_json::from_value::<Vec<AgentSessionEntry>>(data) {
-            Ok(entries) => {
-                state.loading = false;
-                state.error = None;
-                state.entries = entries;
-                state.selected_index = 0;
-            }
-            Err(error) => {
-                state.loading = false;
-                state.error = Some(format!("failed to parse session list: {error}"));
-            }
-        }
-    } else if !response.ok {
-        state.loading = false;
-        state.error = Some(
-            response
-                .message
-                .clone()
-                .unwrap_or_else(|| "unknown error".to_string()),
-        );
-    }
-}
-
-/// Open the agent-sessions popup for the active session.
-///
-/// For local sessions the registry is queried directly on the client. For
-/// remote-peer sessions a `LIST_AGENT_SESSIONS` command is sent to the local
-/// node server, which forwards the request to the remote peer.
-fn open_agent_sessions_popup(
-    snapshot: &RatatuiSnapshot,
-    agent_sessions_state: &mut Option<AgentSessionsState>,
+/// Send the agent-specific session-management slash command for the active
+/// target. Each agent is responsible for its own session picker / resume UI.
+fn send_agent_session_command(
     stream: &mut UnixStream,
+    snapshot: &RatatuiSnapshot,
     status_message: &mut Option<(String, Instant)>,
 ) {
     let Some(target_id) = snapshot.active_target.as_deref() else {
@@ -673,81 +627,31 @@ fn open_agent_sessions_popup(
         return;
     };
     let Some(agent) = session.agent_command_name.as_deref() else {
-        *agent_sessions_state = Some(AgentSessionsState {
-            target_id: target_id.to_string(),
-            agent: session.command_name.clone(),
-            is_remote: session.transport != "local",
-            selected_index: 0,
-            entries: Vec::new(),
-            error: Some(format!(
-                "No session list available for {}",
-                session.command_name
-            )),
-            loading: false,
-        });
+        *status_message = Some((
+            format!("no session shortcut for {}", session.command_name),
+            Instant::now(),
+        ));
         return;
     };
 
-    let is_remote = session.transport != "local";
-    if is_remote {
-        *agent_sessions_state = Some(AgentSessionsState {
-            target_id: target_id.to_string(),
-            agent: agent.to_string(),
-            is_remote: true,
-            selected_index: 0,
-            entries: Vec::new(),
-            error: None,
-            loading: true,
-        });
-        let _ = writeln!(stream, "LIST_AGENT_SESSIONS {target_id} {agent}");
-        let _ = stream.flush();
-        return;
-    }
+    let command = match agent {
+        "kimi" => "/sessions",
+        "codex" => "/resume",
+        "claude" => "/resume",
+        _ => {
+            *status_message = Some((format!("no session shortcut for {agent}"), Instant::now()));
+            return;
+        }
+    };
 
-    let registry = AgentSessionRegistry::default();
-    match registry.list_for(agent) {
-        Ok(sessions) => {
-            let entries: Vec<AgentSessionEntry> = sessions
-                .into_iter()
-                .map(|session| AgentSessionEntry {
-                    id: session.id,
-                    title: session.title,
-                    last_prompt: session.last_prompt,
-                    cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
-                    updated_at_seconds: session.updated_at.and_then(|time| {
-                        time.duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|duration| duration.as_secs() as i64)
-                    }),
-                    updated_at_nanos: session.updated_at.and_then(|time| {
-                        time.duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|duration| duration.subsec_nanos() as i32)
-                    }),
-                })
-                .collect();
-            *agent_sessions_state = Some(AgentSessionsState {
-                target_id: target_id.to_string(),
-                agent: agent.to_string(),
-                is_remote: false,
-                selected_index: 0,
-                entries,
-                error: None,
-                loading: false,
-            });
-        }
-        Err(error) => {
-            *agent_sessions_state = Some(AgentSessionsState {
-                target_id: target_id.to_string(),
-                agent: agent.to_string(),
-                is_remote: false,
-                selected_index: 0,
-                entries: Vec::new(),
-                error: Some(error.to_string()),
-                loading: false,
-            });
-        }
-    }
+    send_paste_text(stream, target_id, command);
+    let enter_key = LogicalKey {
+        code: LogicalKeyCode::Enter,
+        modifiers: LogicalKeyModifiers::default(),
+    };
+    let encoded = general_purpose::STANDARD.encode(enter_key.to_json());
+    let _ = writeln!(stream, "INPUT {target_id} {encoded}");
+    let _ = stream.flush();
 }
 
 /// Handle a single crossterm event. Returns `true` to continue the loop,
@@ -762,7 +666,6 @@ struct HandleCrosstermEventArgs<'a> {
     history_state: &'a mut Option<HistoryState>,
     error_log_state: &'a mut Option<ErrorLogState>,
     settings_state: &'a mut Option<SettingsState>,
-    agent_sessions_state: &'a mut Option<AgentSessionsState>,
     status_message: &'a mut Option<(String, Instant)>,
     port: u16,
     network: &'a RemoteNetworkConfig,
@@ -787,7 +690,6 @@ fn handle_crossterm_event(
         history_state,
         error_log_state,
         settings_state,
-        agent_sessions_state,
         status_message,
         port,
         network,
@@ -804,7 +706,6 @@ fn handle_crossterm_event(
                 && error_log_state.is_none()
                 && settings_state.is_none()
                 && history_state.is_none()
-                && agent_sessions_state.is_none()
             {
                 spawn_clipboard_read(clipboard_tx.clone());
             }
@@ -818,16 +719,6 @@ fn handle_crossterm_event(
             // Settings popup takes precedence over history and main input.
             if settings_state.is_some() {
                 return handle_settings_key(key, settings_state, stream, snapshot, status_message);
-            }
-
-            // Agent sessions popup consumes navigation keys until exited.
-            if agent_sessions_state.is_some() {
-                return handle_agent_sessions_key(
-                    key,
-                    agent_sessions_state,
-                    stream,
-                    status_message,
-                );
             }
 
             // History mode consumes navigation keys until exited.
@@ -855,8 +746,7 @@ fn handle_crossterm_event(
                             && *focus == Focus::Main
                             && error_log_state.is_none()
                             && settings_state.is_none()
-                            && history_state.is_none()
-                            && agent_sessions_state.is_none() =>
+                            && history_state.is_none() =>
                     {
                         spawn_clipboard_read(clipboard_tx.clone());
                     }
@@ -865,8 +755,7 @@ fn handle_crossterm_event(
                             && *focus == Focus::Main
                             && error_log_state.is_none()
                             && settings_state.is_none()
-                            && history_state.is_none()
-                            && agent_sessions_state.is_none() =>
+                            && history_state.is_none() =>
                     {
                         spawn_clipboard_read(clipboard_tx.clone());
                     }
@@ -922,18 +811,12 @@ fn handle_crossterm_event(
                     KeyCode::Char('h') | KeyCode::Char('H')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
-                        open_agent_sessions_popup(
-                            snapshot,
-                            agent_sessions_state,
-                            stream,
-                            status_message,
-                        );
+                        send_agent_session_command(stream, snapshot, status_message);
                     }
                     KeyCode::Char('o') | KeyCode::Char('O')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         *error_log_state = None;
-                        *agent_sessions_state = None;
                         if let Some(target_id) = snapshot.active_target.as_deref() {
                             let _ = writeln!(stream, "GET_HISTORY {}", target_id);
                             let _ = stream.flush();
@@ -943,7 +826,6 @@ fn handle_crossterm_event(
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         *history_state = None;
-                        *agent_sessions_state = None;
                         *error_log_state = if error_log_state.is_some() {
                             None
                         } else {
@@ -960,7 +842,6 @@ fn handle_crossterm_event(
                     {
                         *history_state = None;
                         *error_log_state = None;
-                        *agent_sessions_state = None;
                         if settings_state.is_some() {
                             *settings_state = None;
                         } else {
@@ -993,7 +874,6 @@ fn handle_crossterm_event(
                         let _ = stream.flush();
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        *agent_sessions_state = None;
                         let render_background = |frame: &mut Frame| {
                             render(
                                 frame,
@@ -1005,7 +885,6 @@ fn handle_crossterm_event(
                                     history_state: None,
                                     error_log_state: None,
                                     settings_state: None,
-                                    agent_sessions_state: None,
                                     active_target: snapshot.active_target.as_deref(),
                                     status_message: status_message
                                         .as_ref()
@@ -1074,7 +953,6 @@ fn run_event_loop(
     let mut history_state: Option<HistoryState> = None;
     let mut error_log_state: Option<ErrorLogState> = None;
     let mut settings_state: Option<SettingsState> = None;
-    let mut agent_sessions_state: Option<AgentSessionsState> = None;
     let mut last_active_target: Option<String> = None;
     let mut status_message: Option<(String, Instant)> = None;
     const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
@@ -1094,7 +972,6 @@ fn run_event_loop(
                         &mut last_active_target,
                         &mut status_message,
                         &mut history_state,
-                        &mut agent_sessions_state,
                         focus,
                         message,
                     ),
@@ -1122,7 +999,6 @@ fn run_event_loop(
                         history_state: &mut history_state,
                         error_log_state: &mut error_log_state,
                         settings_state: &mut settings_state,
-                        agent_sessions_state: &mut agent_sessions_state,
                         status_message: &mut status_message,
                         port,
                         network,
@@ -1164,7 +1040,6 @@ fn run_event_loop(
                     &mut last_active_target,
                     &mut status_message,
                     &mut history_state,
-                    &mut agent_sessions_state,
                     focus,
                     message,
                 ),
@@ -1190,7 +1065,6 @@ fn run_event_loop(
                             history_state: &mut history_state,
                             error_log_state: &mut error_log_state,
                             settings_state: &mut settings_state,
-                            agent_sessions_state: &mut agent_sessions_state,
                             status_message: &mut status_message,
                             port,
                             network,
@@ -1227,12 +1101,9 @@ fn run_event_loop(
                         history_state: history_state.as_ref(),
                         error_log_state: error_log_state.as_ref(),
                         settings_state: settings_state.as_ref(),
-                        agent_sessions_state: agent_sessions_state.as_ref(),
                         active_target: snapshot.active_target.as_deref(),
                         status_message: status_message.as_ref().map(|(text, _)| text.as_str()),
-                        dim_background: error_log_state.is_some()
-                            || settings_state.is_some()
-                            || agent_sessions_state.is_some(),
+                        dim_background: error_log_state.is_some() || settings_state.is_some(),
                     },
                 )
             })
@@ -1410,83 +1281,6 @@ fn handle_settings_key(
     Ok(true)
 }
 
-fn handle_agent_sessions_key(
-    key: KeyEvent,
-    agent_sessions_state: &mut Option<AgentSessionsState>,
-    stream: &mut UnixStream,
-    status_message: &mut Option<(String, Instant)>,
-) -> Result<bool, LifecycleError> {
-    let Some(state) = agent_sessions_state.as_mut() else {
-        return Ok(true);
-    };
-
-    match key.code {
-        KeyCode::Char('h') | KeyCode::Char('H')
-            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            *agent_sessions_state = None;
-        }
-        KeyCode::Esc | KeyCode::Char('q') => {
-            *agent_sessions_state = None;
-        }
-        KeyCode::Up if state.selected_index > 0 => {
-            state.selected_index -= 1;
-        }
-        KeyCode::Down if state.selected_index + 1 < state.entries.len() => {
-            state.selected_index += 1;
-        }
-        KeyCode::Enter => {
-            if state.loading || state.error.is_some() {
-                *agent_sessions_state = None;
-                return Ok(true);
-            }
-            let Some(entry) = state.entries.get(state.selected_index) else {
-                *agent_sessions_state = None;
-                return Ok(true);
-            };
-            let target_id = state.target_id.clone();
-            let agent = state.agent.clone();
-            let entry_id = entry.id.clone();
-            let entry_title = entry.title.clone();
-            let entry_cwd = entry.cwd.as_deref().map(std::path::PathBuf::from);
-            let entry_updated_at = entry.updated_at_seconds.and_then(|secs| {
-                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
-            });
-            let session = AgentSession {
-                id: entry_id,
-                title: entry_title,
-                last_prompt: entry.last_prompt.clone(),
-                cwd: entry_cwd,
-                updated_at: entry_updated_at,
-            };
-            let registry = AgentSessionRegistry::default();
-            match registry.provider_for(&agent) {
-                Some(provider) => {
-                    let command = provider.resume_command(&session);
-                    let command_text = format!("{} {}", command.program, command.args.join(" "));
-                    send_paste_text(stream, &target_id, &command_text);
-                    let enter_key = LogicalKey {
-                        code: LogicalKeyCode::Enter,
-                        modifiers: LogicalKeyModifiers::default(),
-                    };
-                    let encoded = general_purpose::STANDARD.encode(enter_key.to_json());
-                    let _ = writeln!(stream, "INPUT {target_id} {encoded}");
-                    let _ = stream.flush();
-                }
-                None => {
-                    *status_message = Some((
-                        format!("no resume provider for agent {agent}"),
-                        Instant::now(),
-                    ));
-                }
-            }
-            *agent_sessions_state = None;
-        }
-        _ => {}
-    }
-    Ok(true)
-}
-
 fn next_settings_focus(focus: SettingsFocus) -> SettingsFocus {
     match focus {
         SettingsFocus::Input => SettingsFocus::History,
@@ -1556,7 +1350,6 @@ struct RenderArgs<'a> {
     history_state: Option<&'a HistoryState>,
     error_log_state: Option<&'a ErrorLogState>,
     settings_state: Option<&'a SettingsState>,
-    agent_sessions_state: Option<&'a AgentSessionsState>,
     active_target: Option<&'a str>,
     status_message: Option<&'a str>,
     dim_background: bool,
@@ -1571,7 +1364,6 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
         history_state,
         error_log_state,
         settings_state,
-        agent_sessions_state,
         active_target,
         status_message,
         dim_background,
@@ -1696,10 +1488,6 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
 
     if let Some(settings) = settings_state {
         render_settings_popup(frame, settings, snapshot, outer[0]);
-    }
-
-    if let Some(agent_sessions) = agent_sessions_state {
-        render_agent_sessions_popup(frame, agent_sessions, outer[0]);
     }
 }
 
@@ -2097,252 +1885,6 @@ fn render_settings_buttons(frame: &mut Frame, focus: SettingsFocus, area: Rect) 
         let text = right_align(label, cols[idx].width as usize);
         let paragraph = Paragraph::new(Line::from(vec![Span::styled(text, style)]));
         frame.render_widget(paragraph, cols[idx]);
-    }
-}
-
-fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, area: Rect) {
-    let popup = centered_rect(80, 70, area);
-    render_popup_background(frame, popup);
-
-    let block = Block::default()
-        .style(Style::default().bg(Color::Black))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(
-            Line::from(vec![Span::styled(
-                "Sessions",
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .fg(Color::White),
-            )])
-            .alignment(ratatui::layout::Alignment::Center),
-        );
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    if inner.width < 10 || inner.height < 5 {
-        return;
-    }
-
-    let width = inner.width as usize;
-    // Reserve the bottom row for the position footer; the rest is content.
-    let content_height = inner.height.saturating_sub(1) as usize;
-
-    if state.loading {
-        let lines = vec![Line::from(vec![Span::styled(
-            "Loading sessions...",
-            Style::default().fg(Color::Gray),
-        )])];
-        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
-        return;
-    }
-
-    if let Some(error) = &state.error {
-        let lines = vec![Line::from(vec![Span::styled(
-            truncate_display_width(error, width),
-            Style::default().fg(Color::Red),
-        )])];
-        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
-        return;
-    }
-
-    if state.entries.is_empty() {
-        let message = if state.is_remote {
-            format!("No remote sessions found for {}", state.agent)
-        } else {
-            format!("No local sessions found for {}", state.agent)
-        };
-        let lines = vec![Line::from(vec![Span::styled(
-            message,
-            Style::default().fg(Color::Gray),
-        )])];
-        render_agent_sessions_content(frame, lines, inner, 0, 0, 0);
-        return;
-    }
-
-    // Each session is rendered as a four-line card (three content lines plus a
-    // trailing blank line) to match Kimi's own session picker: a `>` prefixed
-    // title with a timestamp, an indented id + cwd line, and an indented last
-    // prompt preview introduced by `›`.
-    const ROW_HEIGHT: usize = 4;
-    let visible_rows = content_height / ROW_HEIGHT;
-    let start = if state.selected_index + 1 > visible_rows {
-        state.selected_index + 1 - visible_rows
-    } else {
-        0
-    };
-
-    let mut lines = Vec::new();
-    for (idx, entry) in state
-        .entries
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible_rows)
-    {
-        let is_selected = idx == state.selected_index;
-        let base_style = if is_selected {
-            Style::default().bg(Color::Blue).fg(Color::White)
-        } else {
-            Style::default().bg(Color::Black).fg(Color::White)
-        };
-        let dim_style = if is_selected {
-            base_style
-        } else {
-            base_style.patch(Style::default().fg(Color::Gray))
-        };
-
-        let title_text = entry
-            .title
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .or_else(|| entry.last_prompt.as_deref().filter(|t| !t.is_empty()))
-            .unwrap_or(&entry.id);
-        let time_text = entry
-            .updated_at_seconds
-            .map(format_relative_time)
-            .unwrap_or_default();
-        let title_prefix = "> ";
-        let title_left = format!("{}{}", title_prefix, title_text);
-        let title_line = build_padded_two_column_line(
-            &title_left,
-            &time_text,
-            width,
-            base_style.add_modifier(Modifier::BOLD),
-            dim_style,
-        );
-        lines.push(title_line);
-
-        let indent = "  ";
-        let id_text = entry.id.clone();
-        let cwd_text = entry.cwd.as_deref().unwrap_or("");
-        let meta_left = format!("{}{}", indent, id_text);
-        let meta_right = format!("{}{}", indent, cwd_text);
-        let meta_line =
-            build_padded_two_column_line(&meta_left, &meta_right, width, dim_style, dim_style);
-        lines.push(meta_line);
-
-        let preview_prefix = "  › ";
-        let preview_text = entry
-            .last_prompt
-            .as_deref()
-            .filter(|t| !t.is_empty() && Some(*t) != entry.title.as_deref())
-            .unwrap_or("");
-        let preview_width = width.saturating_sub(display_width(preview_prefix));
-        let preview_body = truncate_display_width(preview_text, preview_width);
-        let preview_display_width = display_width(preview_prefix) + display_width(&preview_body);
-        let preview_padded = format!(
-            "{}{}{}",
-            preview_prefix,
-            preview_body,
-            " ".repeat(width.saturating_sub(preview_display_width))
-        );
-        lines.push(Line::from(vec![Span::styled(preview_padded, dim_style)]));
-
-        // Blank line separating entries.
-        lines.push(Line::from(vec![Span::styled(
-            " ".repeat(width),
-            Style::default().bg(Color::Black),
-        )]));
-    }
-
-    let visible_count = lines.len() / ROW_HEIGHT;
-    render_agent_sessions_content(
-        frame,
-        lines,
-        inner,
-        start,
-        visible_count,
-        state.entries.len(),
-    );
-}
-
-/// Build a full-width line with left-aligned and right-aligned text.
-fn build_padded_two_column_line(
-    left: &str,
-    right: &str,
-    width: usize,
-    left_style: Style,
-    right_style: Style,
-) -> Line<'static> {
-    let left_truncated = truncate_display_width(left, width);
-    let left_width = display_width(&left_truncated);
-    let right_truncated = truncate_display_width(right, width.saturating_sub(left_width + 1));
-    let right_width = display_width(&right_truncated);
-    let fill = width.saturating_sub(left_width + right_width);
-    Line::from(vec![
-        Span::styled(left_truncated, left_style),
-        Span::styled(" ".repeat(fill), left_style),
-        Span::styled(right_truncated, right_style),
-    ])
-}
-
-fn render_agent_sessions_content(
-    frame: &mut Frame,
-    lines: Vec<Line<'static>>,
-    inner: Rect,
-    start: usize,
-    visible_count: usize,
-    total: usize,
-) {
-    let content_height = inner.height.saturating_sub(1) as usize;
-    let mut padded = lines;
-    while padded.len() < content_height {
-        padded.push(Line::from(""));
-    }
-
-    let content_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: content_height as u16,
-    };
-    let footer_area = Rect {
-        x: inner.x,
-        y: inner.y + content_height as u16,
-        width: inner.width,
-        height: 1,
-    };
-
-    let content = Paragraph::new(padded)
-        .style(Style::default().bg(Color::Black))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(content, content_area);
-
-    let visible_bottom = (start + visible_count).min(total);
-    let footer_text = if total == 0 {
-        "↑/↓ navigate · Enter resume · Esc/q close".to_string()
-    } else {
-        format!(
-            "↑/↓ navigate · Enter resume · Esc/q close · {}-{} / {}",
-            start + 1,
-            visible_bottom,
-            total
-        )
-    };
-    let footer = Paragraph::new(Line::from(vec![Span::styled(
-        footer_text,
-        Style::default().fg(Color::Gray).bg(Color::Black),
-    )]));
-    frame.render_widget(footer, footer_area);
-}
-
-fn format_relative_time(secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let delta = now.saturating_sub(secs);
-    if delta < 60 {
-        "just now".to_string()
-    } else if delta < 3600 {
-        format!("{}m ago", delta / 60)
-    } else if delta < 86400 {
-        format!("{}h ago", delta / 3600)
-    } else if delta < 604800 {
-        format!("{}d ago", delta / 86400)
-    } else {
-        format!("{}w ago", delta / 604800)
     }
 }
 
@@ -2815,88 +2357,5 @@ fn separator_style(focus: Focus) -> Style {
     match focus {
         Focus::Main => Style::default().fg(Color::DarkGray),
         Focus::Sidebar => Style::default().fg(Color::Yellow),
-    }
-}
-
-#[cfg(test)]
-mod agent_sessions_ui_tests {
-    use super::*;
-
-    #[test]
-    fn format_relative_time_buckets() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        assert_eq!(format_relative_time(now), "just now");
-        assert_eq!(format_relative_time(now - 120), "2m ago");
-        assert_eq!(format_relative_time(now - 7200), "2h ago");
-        assert_eq!(format_relative_time(now - 172800), "2d ago");
-        assert_eq!(format_relative_time(now - 1209600), "2w ago");
-    }
-
-    #[test]
-    fn apply_response_populates_entries() {
-        let mut state = AgentSessionsState {
-            target_id: "local#17474:1".to_string(),
-            agent: "kimi".to_string(),
-            is_remote: false,
-            selected_index: 0,
-            entries: Vec::new(),
-            error: None,
-            loading: true,
-        };
-        let entries = vec![AgentSessionEntry {
-            id: "session-1".to_string(),
-            title: Some("Test Session".to_string()),
-            last_prompt: Some("last prompt".to_string()),
-            cwd: Some("/tmp".to_string()),
-            updated_at_seconds: Some(1_000_000),
-            updated_at_nanos: None,
-        }];
-        let response = ControlResponse::ok_data(serde_json::to_value(&entries).unwrap());
-        apply_list_agent_sessions_response(&response, &mut state);
-        assert!(!state.loading);
-        assert!(state.error.is_none());
-        assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.entries[0].id, "session-1");
-    }
-
-    #[test]
-    fn apply_error_response_sets_error() {
-        let mut state = AgentSessionsState {
-            target_id: "local#17474:1".to_string(),
-            agent: "kimi".to_string(),
-            is_remote: false,
-            selected_index: 0,
-            entries: Vec::new(),
-            error: None,
-            loading: true,
-        };
-        let response = ControlResponse::err("agent data directory not found");
-        apply_list_agent_sessions_response(&response, &mut state);
-        assert!(!state.loading);
-        assert_eq!(
-            state.error,
-            Some("agent data directory not found".to_string())
-        );
-        assert!(state.entries.is_empty());
-    }
-
-    #[test]
-    fn apply_ok_without_data_leaves_loading() {
-        let mut state = AgentSessionsState {
-            target_id: "local#17474:1".to_string(),
-            agent: "kimi".to_string(),
-            is_remote: false,
-            selected_index: 0,
-            entries: Vec::new(),
-            error: None,
-            loading: true,
-        };
-        let response = ControlResponse::ok();
-        apply_list_agent_sessions_response(&response, &mut state);
-        assert!(state.loading);
-        assert!(state.error.is_none());
     }
 }
