@@ -1,6 +1,7 @@
 // Legacy tmux-era session-sync backends kept during the ratatui migration; most items are currently unused.
 
 use crate::cli::RemoteNetworkConfig;
+use crate::domain::agent_detector::accepts_at_reference;
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
@@ -12,6 +13,7 @@ use crate::infra::remote_transport_codec::{
     AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::ratatui_node::clipboard_platform::format_file_reference;
 use crate::ratatui_node::SharedState;
 use crate::remote::authority::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
@@ -772,6 +774,7 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             running: running.clone(),
             io_tx,
             output_rx,
+            shared: self.shared.clone(),
         });
 
         Ok(SessionSyncAuthorityHost {
@@ -954,6 +957,7 @@ struct SpawnRatatuiAuthorityTargetHostArgs {
     running: Arc<AtomicBool>,
     io_tx: crate::ratatui_node::authority_host_io_loop::AuthorityHostIoHandle,
     output_rx: mpsc::Receiver<Vec<u8>>,
+    shared: Arc<SharedState>,
 }
 
 fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs) {
@@ -966,6 +970,7 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
         running,
         io_tx,
         output_rx,
+        shared,
     } = args;
     thread::spawn(move || {
         let session_id = session.session_id.clone();
@@ -1102,8 +1107,24 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                                     &full_bytes,
                                 ) {
                                     Ok(path) => {
+                                        let agent_command_name = {
+                                            let guard = shared
+                                                .sessions
+                                                .sessions
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            guard
+                                                .get(&target_id)
+                                                .and_then(|r| r.agent_command_name.clone())
+                                        };
+                                        let supports_at = agent_command_name
+                                            .as_deref()
+                                            .map(accepts_at_reference)
+                                            .unwrap_or(false);
                                         let path_string = path.to_string_lossy().into_owned();
-                                        session.feed_input(&io_tx, path_string.into_bytes());
+                                        let path_ref =
+                                            format_file_reference(&path_string, supports_at);
+                                        session.feed_input(&io_tx, path_ref.into_bytes());
                                     }
                                     Err(error) => {
                                         ERROR_LOG.log(format!(

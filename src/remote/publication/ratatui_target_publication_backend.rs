@@ -190,7 +190,7 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
             .shared
             .state_sender()
             .send(StateEvent::RemoteSessionCatalogUpdated {
-                record: session.clone(),
+                record: Box::new(session.clone()),
             });
         Ok(())
     }

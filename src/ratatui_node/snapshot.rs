@@ -122,6 +122,7 @@ pub struct SessionView {
     pub id: String,
     pub transport: String,
     pub command_name: String,
+    pub agent_command_name: Option<String>,
     pub authority_node_id: String,
     pub display_authority_id: String,
     pub session_id: String,
@@ -148,6 +149,7 @@ impl SessionView {
                 SessionTransport::RemotePeer => "remote".to_string(),
             },
             command_name,
+            agent_command_name: record.agent_command_name.clone(),
             authority_node_id,
             display_authority_id,
             session_id: record.address.session_id().to_string(),
@@ -315,6 +317,7 @@ mod snapshot_tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: Some("demo".to_string()),
+            agent_command_name: None,
             current_path: Some(std::path::PathBuf::from("/tmp")),
             task_state: ManagedSessionTaskState::Input,
         })
@@ -359,5 +362,28 @@ mod snapshot_tests {
         let json = serde_json::to_string(&view).expect("serialize session view");
         let decoded: SessionView = serde_json::from_str(&json).expect("deserialize session view");
         assert_eq!(view, decoded);
+    }
+
+    #[test]
+    fn session_view_preserves_agent_command_name() {
+        let record = ManagedSessionRecord {
+            address: ManagedSessionAddress::local("local#17474", "1"),
+            selector: None,
+            availability: SessionAvailability::Online,
+            workspace_dir: None,
+            workspace_key: None,
+            session_role: None,
+            opened_by: Vec::new(),
+            attached_clients: 0,
+            window_count: 1,
+            command_name: Some("bash".to_string()),
+            display_command_name: None,
+            agent_command_name: Some("kimi".to_string()),
+            current_path: None,
+            task_state: ManagedSessionTaskState::Input,
+        };
+        let view = SessionView::from_record(&record);
+        assert_eq!(view.command_name, "bash");
+        assert_eq!(view.agent_command_name.as_deref(), Some("kimi"));
     }
 }

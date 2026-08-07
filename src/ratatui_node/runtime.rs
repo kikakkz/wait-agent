@@ -422,12 +422,23 @@ impl SharedState {
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(record) = guard.get_mut(target_id) {
                 record.display_command_name = Some(command_name);
+                if record.agent_command_name.is_none() {
+                    if let Some(ref name) = record.display_command_name {
+                        if crate::domain::agent_detector::accepts_at_reference(name) {
+                            record.agent_command_name = Some(name.clone());
+                        }
+                    }
+                }
             }
         }
         self.notify_local_catalog_changed(LocalCatalogChangeReason::LocalRuntimeChanged);
     }
 
     /// Clear the displayed command name and notify catalog sync.
+    ///
+    /// The persistent `agent_command_name` is intentionally kept so that paste
+    /// formatting continues to work when the user is back at the shell prompt
+    /// inside an agent session.
     pub(super) fn clear_session_command_name(&self, target_id: &str) {
         {
             let mut guard = self
@@ -476,6 +487,7 @@ impl SharedState {
             existing.availability = record.availability;
             existing.command_name = record.command_name;
             existing.display_command_name = record.display_command_name;
+            existing.agent_command_name = record.agent_command_name;
             existing.attached_clients = record.attached_clients;
             existing.window_count = record.window_count;
         } else {
@@ -568,6 +580,7 @@ impl SharedState {
                 window_count: 1,
                 command_name: Some(command_name),
                 display_command_name: None,
+                agent_command_name: None,
                 current_path: None,
                 task_state: ManagedSessionTaskState::Input,
             };
@@ -642,6 +655,7 @@ impl SharedState {
                 window_count: 1,
                 command_name: Some(command_name),
                 display_command_name: None,
+                agent_command_name: None,
                 current_path: None,
                 task_state: ManagedSessionTaskState::Running,
             };
@@ -1166,6 +1180,7 @@ mod runtime_tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Input,
         }

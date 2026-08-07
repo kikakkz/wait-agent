@@ -124,6 +124,7 @@ impl Default for OwnerStateRecord {
                 window_count: 0,
                 command_name: None,
                 display_command_name: None,
+                agent_command_name: None,
                 current_path: None,
                 task_state: ManagedSessionTaskState::Unknown,
             },
@@ -1717,6 +1718,7 @@ fn parse_session_record<'a>(
         window_count,
         command_name,
         display_command_name,
+        agent_command_name: None,
         current_path,
         task_state,
     })
@@ -1850,6 +1852,7 @@ mod tests {
             window_count: 2,
             command_name: Some("codex".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }

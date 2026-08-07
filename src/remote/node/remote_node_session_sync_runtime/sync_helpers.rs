@@ -419,6 +419,7 @@ fn exited_source_publication_state(
         window_count: 0,
         command_name: None,
         display_command_name: None,
+        agent_command_name: None,
         current_path: None,
         task_state: ManagedSessionTaskState::Unknown,
     }

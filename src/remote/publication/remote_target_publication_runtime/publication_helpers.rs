@@ -920,6 +920,7 @@ pub(crate) fn published_remote_target_from_local(
         window_count: local_target.window_count,
         command_name: local_target.command_name.clone(),
         display_command_name: local_target.display_command_name.clone(),
+        agent_command_name: None,
         current_path: local_target.current_path.clone(),
         task_state: local_target.task_state,
     }
@@ -1116,6 +1117,7 @@ pub(crate) fn published_remote_target_record_from_payload(
         window_count: payload.window_count,
         command_name: payload.command_name.clone(),
         display_command_name: payload.display_command_name.clone(),
+        agent_command_name: None,
         current_path: payload.current_path.as_ref().map(PathBuf::from),
         task_state: ManagedSessionTaskState::parse(payload.task_state).ok_or_else(|| {
             LifecycleError::Protocol(format!(

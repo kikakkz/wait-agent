@@ -3,7 +3,7 @@ use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRun
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
-use crate::ratatui_node::clipboard_platform::PlatformContext;
+use crate::ratatui_node::clipboard_platform::{format_file_reference, PlatformContext};
 use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardContent};
 use crate::ratatui_node::logical_key::LogicalKey;
 use crate::ratatui_node::node_runtime::{
@@ -202,27 +202,6 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
 ///
 /// Local sessions receive path strings directly. Remote sessions have file
 /// bytes forwarded so the remote peer node can cache the file locally.
-/// Detected agent sessions that understand Kimi/Claude-style `@path` file references.
-fn session_accepts_at_reference(command_name: &str) -> bool {
-    matches!(command_name, "kimi" | "claude")
-}
-
-/// Format a local file path for injection into the active session.
-///
-/// Agent sessions that understand `@` references get `@/path/to/file`;
-/// plain shells and other agents receive the raw path. Paths containing
-/// whitespace are quoted so the reference does not break on spaces.
-fn format_file_reference(path: &str, supports_at: bool) -> String {
-    if !supports_at {
-        return path.to_string();
-    }
-    if path.contains(char::is_whitespace) {
-        format!("\"@{}\"", path)
-    } else {
-        format!("@{}", path)
-    }
-}
-
 fn handle_clipboard_content(
     ctx: &PlatformContext,
     stream: &mut UnixStream,
@@ -236,7 +215,8 @@ fn handle_clipboard_content(
     let session = snapshot.sessions.iter().find(|s| s.id == target_id);
     let is_local = session.map(|s| s.transport == "local").unwrap_or(false);
     let supports_at = session
-        .map(|s| session_accepts_at_reference(&s.command_name))
+        .map(|s| s.agent_command_name.as_deref().unwrap_or(&s.command_name))
+        .map(crate::domain::agent_detector::accepts_at_reference)
         .unwrap_or(false);
 
     match content {

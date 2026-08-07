@@ -9,6 +9,14 @@ use std::fmt;
 /// Shared list of shell program names used across agent detection and overlay logic.
 pub const SHELL_NAMES: &[&str] = &["bash", "zsh", "fish", "sh"];
 
+/// Agent command names whose prompts understand Kimi/Claude-style `@path` file references.
+pub const AT_REFERENCE_AGENTS: &[&str] = &["kimi", "claude"];
+
+/// Return true if `command_name` identifies a session/agent that accepts `@path` references.
+pub fn accepts_at_reference(command_name: &str) -> bool {
+    AT_REFERENCE_AGENTS.contains(&command_name)
+}
+
 /// Returns the first whitespace-delimited token of an argv[0] string, after
 /// stripping any leading directory path.
 ///
@@ -483,5 +491,13 @@ mod tests {
             registry.display_command_name(&candidates, Some("google-chrome-replier")),
             "google-chrome"
         );
+    }
+
+    #[test]
+    fn accepts_at_reference_for_agent_commands() {
+        assert!(accepts_at_reference("kimi"));
+        assert!(accepts_at_reference("claude"));
+        assert!(!accepts_at_reference("bash"));
+        assert!(!accepts_at_reference("python"));
     }
 }

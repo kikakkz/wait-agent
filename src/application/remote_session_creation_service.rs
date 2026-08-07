@@ -315,6 +315,7 @@ fn accepted_target_record(
         window_count: 1,
         command_name: Some("bash".to_string()),
         display_command_name: None,
+        agent_command_name: None,
         current_path: request.cwd_hint.clone(),
         task_state: ManagedSessionTaskState::Input,
     }
@@ -507,6 +508,7 @@ mod tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }

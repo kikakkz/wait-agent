@@ -581,6 +581,7 @@ mod tests {
             window_count: 1,
             command_name: Some(command.to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         }
@@ -599,6 +600,7 @@ mod tests {
             window_count: 1,
             command_name: Some(command.to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         }

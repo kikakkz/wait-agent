@@ -134,6 +134,22 @@ impl PlatformContext {
     }
 }
 
+/// Format a local file path for injection into the active session.
+///
+/// Agent sessions that understand `@` references get `@/path/to/file`;
+/// plain shells and other agents receive the raw path. Paths containing
+/// whitespace are quoted so the reference does not break on spaces.
+pub fn format_file_reference(path: &str, supports_at: bool) -> String {
+    if !supports_at {
+        return path.to_string();
+    }
+    if path.contains(char::is_whitespace) {
+        format!("\"@{}\"", path)
+    } else {
+        format!("@{}", path)
+    }
+}
+
 /// Detect whether the current Linux process is running inside WSL.
 pub(crate) fn is_wsl() -> bool {
     if std::env::var("WSL_DISTRO_NAME").is_ok()
@@ -432,6 +448,30 @@ mod tests {
             vec![PathBuf::from(
                 "/mnt/d/workspace/板卡维修/AutoRework_PitchDeck_v4.pptx"
             )]
+        );
+    }
+
+    #[test]
+    fn format_file_reference_adds_at_for_agent() {
+        assert_eq!(
+            format_file_reference("/tmp/waitagent/file.png", true),
+            "@/tmp/waitagent/file.png"
+        );
+    }
+
+    #[test]
+    fn format_file_reference_quotes_paths_with_spaces() {
+        assert_eq!(
+            format_file_reference("/tmp/my file.png", true),
+            "\"@/tmp/my file.png\""
+        );
+    }
+
+    #[test]
+    fn format_file_reference_returns_raw_path_for_non_agent() {
+        assert_eq!(
+            format_file_reference("/tmp/waitagent/file.png", false),
+            "/tmp/waitagent/file.png"
         );
     }
 }

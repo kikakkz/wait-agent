@@ -825,6 +825,7 @@ mod remote_session_tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Input,
         }

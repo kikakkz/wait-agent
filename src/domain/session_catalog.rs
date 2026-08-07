@@ -208,6 +208,7 @@ pub struct ManagedSessionRecord {
     pub window_count: usize,
     pub command_name: Option<String>,
     pub display_command_name: Option<String>,
+    pub agent_command_name: Option<String>,
     pub current_path: Option<PathBuf>,
     pub task_state: ManagedSessionTaskState,
 }
@@ -342,6 +343,7 @@ mod tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Input,
         };
@@ -370,6 +372,7 @@ mod tests {
             window_count: 3,
             command_name: Some("codex".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: Some(PathBuf::from("/tmp/demo")),
             task_state: ManagedSessionTaskState::Running,
         };
@@ -392,6 +395,7 @@ mod tests {
             window_count: 1,
             command_name: Some("codex".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -413,6 +417,7 @@ mod tests {
             window_count: 1,
             command_name: Some("codex".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -436,6 +441,7 @@ mod tests {
             window_count: 1,
             command_name: Some("codex".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Running,
         };
@@ -457,6 +463,7 @@ mod tests {
             window_count: 1,
             command_name: None,
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Unknown,
         };
@@ -472,6 +479,7 @@ mod tests {
             window_count: 1,
             command_name: None,
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Unknown,
         };

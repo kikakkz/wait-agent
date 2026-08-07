@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::DetectorRegistry;
+use crate::domain::agent_detector::{accepts_at_reference, DetectorRegistry};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::{
     ManagedSessionTaskState, SessionAvailability, SessionTransport,
@@ -16,6 +16,7 @@ use super::authority_host_io_loop::{
     AuthorityHostIoHandle, AuthorityHostIoLoop, AuthorityHostIoRequest,
 };
 use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
+use super::clipboard_platform::format_file_reference;
 use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
 use super::reconnect_worker::ReconnectWorker;
@@ -233,7 +234,7 @@ fn run_state_event_loop(
             }
 
             StateEvent::RemoteSessionCatalogUpdated { record } => {
-                shared.update_remote_session_record(record);
+                shared.update_remote_session_record(*record);
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
@@ -942,6 +943,16 @@ fn create_authority_host_session(
     })
 }
 
+/// Wrap `bytes` in XTerm bracketed-paste markers so the receiving shell treats
+/// the whole block as a single paste instead of executing embedded newlines.
+fn wrap_bracketed_paste(bytes: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(bytes.len().saturating_add(12));
+    wrapped.extend_from_slice(b"\x1b[200~");
+    wrapped.extend_from_slice(bytes);
+    wrapped.extend_from_slice(b"\x1b[201~");
+    wrapped
+}
+
 fn route_paste_text(
     shared: &SharedState,
     authority_host_io_tx: &AuthorityHostIoHandle,
@@ -971,7 +982,16 @@ fn route_paste_text(
                 guard.get(target_id).cloned()
             };
             if let Some(session) = local_session {
-                session.feed_input(bytes);
+                let wrap_bracketed = {
+                    let term = session.term.lock();
+                    term.mode()
+                        .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+                };
+                if wrap_bracketed {
+                    session.feed_input(wrap_bracketed_paste(&bytes));
+                } else {
+                    session.feed_input(bytes);
+                }
                 return;
             }
             if let Some(session_id) = target_id.rsplit_once(':').map(|(_, id)| id.to_string()) {
@@ -1014,6 +1034,12 @@ fn handle_paste_file(
         return CommandOutcome::Error("unknown target".to_string());
     };
 
+    let supports_at = record
+        .agent_command_name
+        .as_deref()
+        .map(accepts_at_reference)
+        .unwrap_or(false);
+
     match record.address.transport() {
         SessionTransport::Local => {
             let cached_path =
@@ -1026,6 +1052,8 @@ fn handle_paste_file(
                     }
                 };
 
+            let path_ref = format_file_reference(&cached_path.to_string_lossy(), supports_at);
+
             let local_session = {
                 let guard = shared
                     .sessions
@@ -1035,8 +1063,7 @@ fn handle_paste_file(
                 guard.get(target_id).cloned()
             };
             if let Some(session) = local_session {
-                let path_string = cached_path.to_string_lossy().into_owned();
-                session.feed_input(path_string.into_bytes());
+                session.feed_input(path_ref.into_bytes());
                 return CommandOutcome::Ok;
             }
 
@@ -1050,10 +1077,9 @@ fn handle_paste_file(
                     guard.contains_key(&session_id)
                 };
                 if is_host {
-                    let path_string = cached_path.to_string_lossy().into_owned();
                     let _ = _authority_host_io_tx.send(AuthorityHostIoRequest::WriteInput {
                         session_id,
-                        bytes: path_string.into_bytes(),
+                        bytes: path_ref.into_bytes(),
                     });
                     return CommandOutcome::Ok;
                 }
@@ -1578,11 +1604,14 @@ mod state_loop_tests {
             window_count: 1,
             command_name: Some("bash".to_string()),
             display_command_name: None,
+            agent_command_name: None,
             current_path: None,
             task_state: ManagedSessionTaskState::Input,
         };
         let target_id = record.address.qualified_target();
-        let _ = tx.send(StateEvent::RemoteSessionCatalogUpdated { record });
+        let _ = tx.send(StateEvent::RemoteSessionCatalogUpdated {
+            record: Box::new(record),
+        });
 
         // Give the loop a moment to apply the event.
         std::thread::sleep(Duration::from_millis(50));
@@ -1695,5 +1724,14 @@ mod state_loop_tests {
         drop(tx);
         drop(client_writer);
         handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn wrap_bracketed_paste_adds_markers() {
+        let wrapped = wrap_bracketed_paste(b"line1\nline2");
+        assert_eq!(
+            wrapped, b"\x1b[200~line1\nline2\x1b[201~",
+            "expected bracketed-paste start/end markers"
+        );
     }
 }

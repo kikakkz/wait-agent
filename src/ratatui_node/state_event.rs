@@ -69,7 +69,7 @@ pub(crate) enum StateEvent {
     /// session (e.g., cwd or task-state changed). The local catalog record should
     /// be updated to match.
     RemoteSessionCatalogUpdated {
-        record: crate::domain::session_catalog::ManagedSessionRecord,
+        record: Box<crate::domain::session_catalog::ManagedSessionRecord>,
     },
     /// A session has exited and should be removed from the local catalog.
     ///
