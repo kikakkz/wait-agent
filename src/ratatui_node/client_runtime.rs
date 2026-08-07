@@ -29,7 +29,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -1802,16 +1802,24 @@ fn render_history_footer_line(
     ])
 }
 
-fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
-    let popup = centered_rect(90, 85, area);
-
-    // Dim the area behind the popup by drawing a solid black overlay over the
-    // entire area. This fully obscures underlying borders (e.g. the sidebar
-    // separator) instead of merely dimming them.
+/// Render a unified popup background: dim the full area behind the popup,
+/// clear the popup rectangle so underlying cells do not leak through, and fill
+/// the popup interior with a solid black background.
+fn render_popup_background(frame: &mut Frame, area: Rect, popup: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
     );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        popup,
+    );
+}
+
+fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
+    let popup = centered_rect(90, 85, area);
+    render_popup_background(frame, area, popup);
 
     let block = Block::default()
         .style(Style::default().bg(Color::Black))
@@ -1884,12 +1892,10 @@ fn render_settings_popup(
     area: Rect,
 ) {
     let popup = centered_rect(70, 70, area);
-
-    // Dim the area behind the popup.
-    let dim = Paragraph::new("").style(Style::default().bg(Color::Black));
-    frame.render_widget(dim, area);
+    render_popup_background(frame, area, popup);
 
     let block = Block::default()
+        .style(Style::default().bg(Color::Black))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Settings (Ctrl-P to close) ");
@@ -2095,12 +2101,7 @@ fn render_settings_buttons(frame: &mut Frame, focus: SettingsFocus, area: Rect) 
 
 fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, area: Rect) {
     let popup = centered_rect(80, 70, area);
-
-    // Dim the area behind the popup by drawing a solid black overlay.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        area,
-    );
+    render_popup_background(frame, area, popup);
 
     let remote_tag = if state.is_remote { " [remote]" } else { "" };
     let title = format!("{} sessions{}", state.agent, remote_tag);
@@ -2118,20 +2119,12 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // Fill the popup interior with a solid black background. The list/footer
-    // widgets are rendered on top of this, but the background block guarantees
-    // that any blank padding or empty lines do not leak the underlying session.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        inner,
-    );
-
     if inner.width < 10 || inner.height < 4 {
         return;
     }
 
     let width = inner.width as usize;
-    // Reserve the bottom row for the hint footer.
+    // Reserve the bottom row for the hint footer; the rest is content.
     let content_height = inner.height.saturating_sub(1) as usize;
 
     if state.loading {
@@ -2166,8 +2159,12 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         return;
     }
 
-    let start = if state.selected_index + 1 > content_height {
-        state.selected_index + 1 - content_height
+    // Each session is rendered as a two-line card: title on the first line and
+    // indented cwd + relative time on the second line.
+    const ROW_HEIGHT: usize = 2;
+    let visible_rows = content_height / ROW_HEIGHT;
+    let start = if state.selected_index + 1 > visible_rows {
+        state.selected_index + 1 - visible_rows
     } else {
         0
     };
@@ -2178,42 +2175,56 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
         .iter()
         .enumerate()
         .skip(start)
-        .take(content_height)
+        .take(visible_rows)
     {
         let is_selected = idx == state.selected_index;
-        let style = if is_selected {
+        let base_style = if is_selected {
             Style::default().bg(Color::Blue).fg(Color::White)
         } else {
             Style::default().bg(Color::Black).fg(Color::White)
         };
+        let meta_style = if is_selected {
+            base_style
+        } else {
+            Style::default().fg(Color::Gray).patch(base_style)
+        };
+
         let title_text = entry
             .title
             .as_deref()
             .filter(|t| !t.is_empty())
             .unwrap_or(&entry.id);
-        let time_text = entry
-            .updated_at_seconds
-            .map(format_relative_time)
-            .unwrap_or_default();
-        let cwd_text = entry.cwd.as_deref().unwrap_or("");
-        let meta = format!("{} {}", cwd_text, time_text);
-        let meta_width = display_width(&meta).min(20);
-        let title_width = width.saturating_sub(meta_width + 1);
-        let title = truncate_display_width(title_text, title_width);
-        let title_display_width = display_width(&title);
-        let padded_title = format!("{}{}", title, " ".repeat(title_width - title_display_width));
-        let meta_truncated = right_align(&meta, meta_width);
-        lines.push(Line::from(vec![
-            Span::styled(padded_title, style),
-            Span::styled(
-                meta_truncated,
-                if is_selected {
-                    style
-                } else {
-                    Style::default().fg(Color::Gray).patch(style)
-                },
-            ),
-        ]));
+        let prefix = if is_selected { "▸ " } else { "  " };
+        let title_body_width = width.saturating_sub(display_width(prefix));
+        let title_body = truncate_display_width(title_text, title_body_width);
+        let title_display_width = display_width(prefix) + display_width(&title_body);
+        let title_padded = format!(
+            "{}{}{}",
+            prefix,
+            title_body,
+            " ".repeat(width.saturating_sub(title_display_width))
+        );
+        lines.push(Line::from(vec![Span::styled(title_padded, base_style)]));
+
+        let mut meta_parts = Vec::new();
+        if let Some(cwd) = entry.cwd.as_deref().filter(|c| !c.is_empty()) {
+            meta_parts.push(cwd.to_string());
+        }
+        if let Some(secs) = entry.updated_at_seconds {
+            let time_text = format_relative_time(secs);
+            if !time_text.is_empty() {
+                meta_parts.push(time_text);
+            }
+        }
+        let meta_text = if meta_parts.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", meta_parts.join(" · "))
+        };
+        let meta = truncate_display_width(&meta_text, width);
+        let meta_display_width = display_width(&meta);
+        let meta_padded = format!("{}{}", meta, " ".repeat(width - meta_display_width));
+        lines.push(Line::from(vec![Span::styled(meta_padded, meta_style)]));
     }
 
     render_agent_sessions_content(frame, lines, inner);
