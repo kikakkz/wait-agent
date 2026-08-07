@@ -2118,17 +2118,13 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // Fill the popup interior with a solid black background so empty lines
-    // and padding do not leak the underlying session content through.
-    // Paragraph/Block styles are not reliable for blank areas, so explicitly
-    // reset every cell inside the popup to a space with a black background.
-    for y in inner.y..inner.y + inner.height {
-        for x in inner.x..inner.x + inner.width {
-            let cell = frame.buffer_mut().get_mut(x, y);
-            cell.set_symbol(" ");
-            cell.set_style(Style::default().bg(Color::Black));
-        }
-    }
+    // Fill the popup interior with a solid black background. The list/footer
+    // widgets are rendered on top of this, but the background block guarantees
+    // that any blank padding or empty lines do not leak the underlying session.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        inner,
+    );
 
     if inner.width < 10 || inner.height < 4 {
         return;
