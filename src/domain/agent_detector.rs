@@ -9,8 +9,8 @@ use std::fmt;
 /// Shared list of shell program names used across agent detection and overlay logic.
 pub const SHELL_NAMES: &[&str] = &["bash", "zsh", "fish", "sh"];
 
-/// Agent command names whose prompts understand Kimi/Claude-style `@path` file references.
-pub const AT_REFERENCE_AGENTS: &[&str] = &["kimi", "claude"];
+/// Agent command names whose prompts understand `@path` file references.
+pub const AT_REFERENCE_AGENTS: &[&str] = &["kimi", "claude", "codex"];
 
 /// Return true if `command_name` identifies a session/agent that accepts `@path` references.
 pub fn accepts_at_reference(command_name: &str) -> bool {
@@ -497,6 +497,7 @@ mod tests {
     fn accepts_at_reference_for_agent_commands() {
         assert!(accepts_at_reference("kimi"));
         assert!(accepts_at_reference("claude"));
+        assert!(accepts_at_reference("codex"));
         assert!(!accepts_at_reference("bash"));
         assert!(!accepts_at_reference("python"));
     }
