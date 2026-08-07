@@ -1,8 +1,8 @@
 # WaitAgent Ratatui Agent Sessions 热键设计
 
 Version: `v1.0`  
-Status: `Draft`  
-Date: `2026-08-06`
+Status: `Accepted`  
+Date: `2026-08-07`
 
 ## 1. 目的
 
@@ -473,12 +473,15 @@ pub struct HistoryEntry {
 
 - 在 `tests/cli_smoke.rs` 或 ratatui 测试框架中验证热键触发弹窗。
 - 验证非 agent session 下热键给出正确提示。
+- 验证 `apply_list_agent_sessions_response` 对成功/失败/空数据的处理。
 
 ## 11. 限制与后续可能
 
 - Codex Desktop 新版使用云同步，本地 `history.jsonl` 可能不完整；如需完整列表，需官方 API。
 - Claude 没有官方 list CLI，但社区已提供 v2.0.76 / v2.1.1 的 JSON Schema；未来版本若变更字段，需要同步更新解析逻辑。
 - Kimi Windows Desktop 路径很深且可能变化，v1 先聚焦 CLI / Linux / macOS。
+- Remote peer 成功接收 `ListAgentSessionsRequest` 后长期无响应时，客户端弹窗会保持 `Loading...` 直到用户按 `Esc` 关闭；未来可增加请求超时。
+- 如果 remote peer 运行的 WaitAgent 版本不支持 `ListAgentSessionsRequest`，该消息会被忽略，客户端同样会保持 `Loading...`；升级两端版本或增加协议协商可解决。
 - 未来可考虑把 session 列表常驻在 sidebar 的一个 panel 中，而非弹窗。
 
 ## 12. 任务拆分建议

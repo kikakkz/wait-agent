@@ -472,14 +472,18 @@ impl RatatuiRemoteSession {
     }
 
     /// Send a ListAgentSessionsRequest to the remote peer for this session.
-    pub fn send_list_agent_sessions(&self, request_id: &str, agent: &str) {
+    ///
+    /// Returns `true` if the request was successfully written to the transport.
+    /// A `false` return lets the caller fail immediately instead of leaving the
+    /// client waiting for a response that will never arrive.
+    pub fn send_list_agent_sessions(&self, request_id: &str, agent: &str) -> bool {
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let Some(writer) = guard.as_mut() else {
             ERROR_LOG.log(format!(
                 "[ratatui-remote-session] send_list_agent_sessions dropped for {}: writer not ready",
                 self.target_id
             ));
-            return;
+            return false;
         };
         let payload = ListAgentSessionsRequestPayload {
             request_id: request_id.to_string(),
@@ -508,9 +512,10 @@ impl RatatuiRemoteSession {
                 "[ratatui-remote-session] send_list_agent_sessions target={} encode_failed: {error}",
                 self.target_id
             ));
-            return;
+            return false;
         }
         let _ = writer.flush();
+        true
     }
 
     /// Snapshot the rendered screen as plain/styled text lines and the cursor position.

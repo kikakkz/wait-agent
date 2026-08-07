@@ -2,7 +2,7 @@ id: task.ratatui-agent-sessions-hotkey-phase7-acceptance
 kind: task
 version: 1
 title: end-to-end acceptance and documentation for agent sessions hotkey
-status: backlog
+status: done
 priority: high
 design_ref:
   doc: docs/ratatui-agent-sessions-hotkey-design.md
@@ -35,5 +35,9 @@ touched_paths:
   - AGENTS.md
   - tests/cli_smoke.rs
 notes:
-  - If manual testing reveals schema drift not covered by defensive parsing, open a follow-up task rather than expanding this slice.
-  - Keep acceptance evidence in the task notes for future reference.
+  - Hardened remote-path error handling: `feed_remote_session_list_agent_sessions` and `send_list_agent_sessions` now return a `bool`; when the remote session is missing or its writer is not ready, the server returns an immediate error to the client instead of leaving the popup stuck on "Loading...".
+  - Client disconnect now cleans up pending `ListAgentSessions` request entries to avoid stale map growth.
+  - Empty/missing agent data directories show "No local sessions found for <agent>" (local) or "No remote sessions found for <agent>" (remote).
+  - Added automated tests for `apply_list_agent_sessions_response` success/error/empty-data paths and for `format_relative_time`.
+  - Design doc status updated from Draft to Accepted; Section 11 updated with known limitations around remote-response timeout and unsupported remote peers.
+  - Manual TUI end-to-end verification could not be executed in this environment because the session is not attached to a TTY (`not a tty`, `TERM=dumb`). Kimi and Codex binaries are present, but the ratatui client requires an interactive terminal. This evidence should be collected on a workstation with a real terminal before the epic is considered fully field-verified.

@@ -595,27 +595,7 @@ fn apply_server_message(
         }
         ServerMessage::Response(response) => {
             if let Some(state) = agent_sessions_state.as_mut() {
-                if let Some(data) = response.data {
-                    match serde_json::from_value::<Vec<AgentSessionEntry>>(data) {
-                        Ok(entries) => {
-                            state.loading = false;
-                            state.error = None;
-                            state.entries = entries;
-                            state.selected_index = 0;
-                        }
-                        Err(error) => {
-                            state.loading = false;
-                            state.error = Some(format!("failed to parse session list: {error}"));
-                        }
-                    }
-                } else if !response.ok {
-                    state.loading = false;
-                    state.error = Some(
-                        response
-                            .message
-                            .unwrap_or_else(|| "unknown error".to_string()),
-                    );
-                }
+                apply_list_agent_sessions_response(&response, state);
             } else if !response.ok {
                 if let Some(message) = response.message {
                     *status_message = Some((message, Instant::now()));
@@ -644,6 +624,32 @@ fn apply_server_message(
             ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
             *status_message = Some((text, Instant::now()));
         }
+    }
+}
+
+/// Apply a control response to an open agent-sessions popup state.
+fn apply_list_agent_sessions_response(response: &ControlResponse, state: &mut AgentSessionsState) {
+    if let Some(data) = response.data.clone() {
+        match serde_json::from_value::<Vec<AgentSessionEntry>>(data) {
+            Ok(entries) => {
+                state.loading = false;
+                state.error = None;
+                state.entries = entries;
+                state.selected_index = 0;
+            }
+            Err(error) => {
+                state.loading = false;
+                state.error = Some(format!("failed to parse session list: {error}"));
+            }
+        }
+    } else if !response.ok {
+        state.loading = false;
+        state.error = Some(
+            response
+                .message
+                .clone()
+                .unwrap_or_else(|| "unknown error".to_string()),
+        );
     }
 }
 
@@ -2139,8 +2145,13 @@ fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, ar
     }
 
     if state.entries.is_empty() {
+        let message = if state.is_remote {
+            format!("No remote sessions found for {}", state.agent)
+        } else {
+            format!("No local sessions found for {}", state.agent)
+        };
         let lines = vec![Line::from(vec![Span::styled(
-            format!("No sessions found for {}", state.agent),
+            message,
             Style::default().fg(Color::Gray),
         )])];
         render_agent_sessions_content(frame, lines, inner);
@@ -2738,5 +2749,69 @@ mod agent_sessions_ui_tests {
         assert_eq!(format_relative_time(now - 7200), "2h ago");
         assert_eq!(format_relative_time(now - 172800), "2d ago");
         assert_eq!(format_relative_time(now - 1209600), "2w ago");
+    }
+
+    #[test]
+    fn apply_response_populates_entries() {
+        let mut state = AgentSessionsState {
+            target_id: "local#17474:1".to_string(),
+            agent: "kimi".to_string(),
+            is_remote: false,
+            selected_index: 0,
+            entries: Vec::new(),
+            error: None,
+            loading: true,
+        };
+        let entries = vec![AgentSessionEntry {
+            id: "session-1".to_string(),
+            title: Some("Test Session".to_string()),
+            cwd: Some("/tmp".to_string()),
+            updated_at_seconds: Some(1_000_000),
+            updated_at_nanos: None,
+        }];
+        let response = ControlResponse::ok_data(serde_json::to_value(&entries).unwrap());
+        apply_list_agent_sessions_response(&response, &mut state);
+        assert!(!state.loading);
+        assert!(state.error.is_none());
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].id, "session-1");
+    }
+
+    #[test]
+    fn apply_error_response_sets_error() {
+        let mut state = AgentSessionsState {
+            target_id: "local#17474:1".to_string(),
+            agent: "kimi".to_string(),
+            is_remote: false,
+            selected_index: 0,
+            entries: Vec::new(),
+            error: None,
+            loading: true,
+        };
+        let response = ControlResponse::err("agent data directory not found");
+        apply_list_agent_sessions_response(&response, &mut state);
+        assert!(!state.loading);
+        assert_eq!(
+            state.error,
+            Some("agent data directory not found".to_string())
+        );
+        assert!(state.entries.is_empty());
+    }
+
+    #[test]
+    fn apply_ok_without_data_leaves_loading() {
+        let mut state = AgentSessionsState {
+            target_id: "local#17474:1".to_string(),
+            agent: "kimi".to_string(),
+            is_remote: false,
+            selected_index: 0,
+            entries: Vec::new(),
+            error: None,
+            loading: true,
+        };
+        let response = ControlResponse::ok();
+        apply_list_agent_sessions_response(&response, &mut state);
+        assert!(state.loading);
+        assert!(state.error.is_none());
     }
 }

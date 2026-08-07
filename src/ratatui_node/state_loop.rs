@@ -157,6 +157,7 @@ fn run_state_event_loop(
                     &authority_host_io_tx,
                     &client_writer,
                     &mut connected_clients,
+                    &mut pending_agent_session_requests,
                     client_id,
                 );
             }
@@ -359,11 +360,15 @@ fn handle_client_disconnected(
     authority_host_io_tx: &AuthorityHostIoHandle,
     client_writer: &ClientWriterHandle,
     connected_clients: &mut HashSet<u64>,
+    pending_agent_session_requests: &mut HashMap<String, u64>,
     client_id: u64,
 ) {
     connected_clients.remove(&client_id);
     shared.clients.client_count.fetch_sub(1, Ordering::SeqCst);
     client_writer.send(ClientWriterRequest::Unregister { client_id });
+    // Drop any pending agent-session requests owned by this client so the map
+    // does not accumulate stale entries when a response eventually arrives.
+    pending_agent_session_requests.retain(|_, owner_id| *owner_id != client_id);
     // If a local TUI was viewing an authority-host session, unregister
     // its "local" console so a remote viewer can take over the PTY size.
     if let Some(target_id) = shared
@@ -1126,8 +1131,13 @@ fn handle_list_agent_sessions(
                 now_millis_state_loop(),
                 agent
             );
-            shared.feed_remote_session_list_agent_sessions(target_id, &request_id, agent);
-            ListAgentSessionsOutcome::Pending { request_id }
+            if shared.feed_remote_session_list_agent_sessions(target_id, &request_id, agent) {
+                ListAgentSessionsOutcome::Pending { request_id }
+            } else {
+                ListAgentSessionsOutcome::Immediate(CommandOutcome::Error(
+                    "remote session is not available".to_string(),
+                ))
+            }
         }
     }
 }

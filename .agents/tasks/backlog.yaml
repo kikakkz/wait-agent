@@ -594,7 +594,7 @@ next:
       authorizes: Section 8 gRPC protocol extension and Section 4 remote session file semantics.
   - id: task.ratatui-agent-sessions-hotkey
     title: '[epic] add a hotkey to list all sessions of the current agent tool (codex, claude, kimi) on the host'
-    status: backlog
+    status: done
     design_ref:
       document: docs/ratatui-agent-sessions-hotkey-design.md
       status: accepted
@@ -636,7 +636,7 @@ next:
       authorizes: Section 8 (UI behavior, hotkey, popup, local/remote path selection, command injection).
   - id: task.ratatui-agent-sessions-hotkey-phase7-acceptance
     title: Phase 7 - end-to-end acceptance and documentation for agent sessions hotkey
-    status: backlog
+    status: done
     design_ref:
       document: docs/ratatui-agent-sessions-hotkey-design.md
       authorizes: Section 9 (error handling), Section 10 (testing), and Section 11 (limitations).
