@@ -1229,7 +1229,9 @@ fn run_event_loop(
                         agent_sessions_state: agent_sessions_state.as_ref(),
                         active_target: snapshot.active_target.as_deref(),
                         status_message: status_message.as_ref().map(|(text, _)| text.as_str()),
-                        dim_background: false,
+                        dim_background: error_log_state.is_some()
+                            || settings_state.is_some()
+                            || agent_sessions_state.is_some(),
                     },
                 )
             })
@@ -1802,14 +1804,11 @@ fn render_history_footer_line(
     ])
 }
 
-/// Render a unified popup background: dim the full area behind the popup,
-/// clear the popup rectangle so underlying cells do not leak through, and fill
-/// the popup interior with a solid black background.
-fn render_popup_background(frame: &mut Frame, area: Rect, popup: Rect) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        area,
-    );
+/// Render a unified popup background: clear the popup rectangle so underlying
+/// cells do not leak through, then fill the popup interior with a solid black
+/// background. The area behind the popup is dimmed by the caller via the
+/// `dim_background` flag passed to `render`.
+fn render_popup_background(frame: &mut Frame, popup: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
@@ -1819,7 +1818,7 @@ fn render_popup_background(frame: &mut Frame, area: Rect, popup: Rect) {
 
 fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
     let popup = centered_rect(90, 85, area);
-    render_popup_background(frame, area, popup);
+    render_popup_background(frame, popup);
 
     let block = Block::default()
         .style(Style::default().bg(Color::Black))
@@ -1892,7 +1891,7 @@ fn render_settings_popup(
     area: Rect,
 ) {
     let popup = centered_rect(70, 70, area);
-    render_popup_background(frame, area, popup);
+    render_popup_background(frame, popup);
 
     let block = Block::default()
         .style(Style::default().bg(Color::Black))
@@ -2101,7 +2100,7 @@ fn render_settings_buttons(frame: &mut Frame, focus: SettingsFocus, area: Rect) 
 
 fn render_agent_sessions_popup(frame: &mut Frame, state: &AgentSessionsState, area: Rect) {
     let popup = centered_rect(80, 70, area);
-    render_popup_background(frame, area, popup);
+    render_popup_background(frame, popup);
 
     let remote_tag = if state.is_remote { " [remote]" } else { "" };
     let title = format!("{} sessions{}", state.agent, remote_tag);
