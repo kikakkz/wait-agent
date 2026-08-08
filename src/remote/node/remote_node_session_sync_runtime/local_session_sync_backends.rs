@@ -2,7 +2,9 @@
 
 use crate::cli::RemoteNetworkConfig;
 use crate::domain::agent_detector::accepts_at_reference;
-use crate::domain::session_catalog::{ManagedSessionRecord, SessionTransport};
+use crate::domain::session_catalog::{
+    ManagedSessionAddress, ManagedSessionRecord, SessionTransport,
+};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::RemoteNodeSessionHandle;
 use crate::infra::remote_protocol::{
@@ -960,6 +962,28 @@ struct SpawnRatatuiAuthorityTargetHostArgs {
     shared: Arc<SharedState>,
 }
 
+/// Return whether the authority-host session identified by `session_id` should
+/// receive `@`-prefixed file references.
+///
+/// The catalog record that process detection updates is keyed under the local
+/// authority id (`local:{authority_id}:{session_id}`), while the viewer-facing
+/// command uses `remote-peer:{node_id}:{session_id}`. This helper looks up the
+/// local record so agent detection is honored.
+fn authority_host_supports_at(shared: &SharedState, session_id: &str) -> bool {
+    let local_target_id =
+        ManagedSessionAddress::local(shared.local_authority_id(), session_id).qualified_target();
+    let guard = shared
+        .sessions
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard
+        .get(&local_target_id)
+        .and_then(|r| r.agent_command_name.as_deref())
+        .map(accepts_at_reference)
+        .unwrap_or(false)
+}
+
 fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs) {
     let SpawnRatatuiAuthorityTargetHostArgs {
         mut listener_stream,
@@ -1107,20 +1131,10 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                                     &full_bytes,
                                 ) {
                                     Ok(path) => {
-                                        let agent_command_name = {
-                                            let guard = shared
-                                                .sessions
-                                                .sessions
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
-                                            guard
-                                                .get(&target_id)
-                                                .and_then(|r| r.agent_command_name.clone())
-                                        };
-                                        let supports_at = agent_command_name
-                                            .as_deref()
-                                            .map(accepts_at_reference)
-                                            .unwrap_or(false);
+                                        let supports_at = authority_host_supports_at(
+                                            &shared,
+                                            &session.session_id,
+                                        );
                                         let path_string = path.to_string_lossy().into_owned();
                                         let path_ref =
                                             format_file_reference(&path_string, supports_at);
@@ -1227,4 +1241,86 @@ fn forward_ratatui_host_output(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::RemoteNetworkConfig;
+    use crate::domain::session_catalog::{
+        ManagedSessionAddress, ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability,
+    };
+    use crate::ratatui_node::runtime::SharedState;
+
+    #[test]
+    fn authority_host_paste_uses_local_record_for_agent_command_name() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network).expect("SharedState::new should succeed");
+        let session_id = "42";
+        let local_target_id = ManagedSessionAddress::local(shared.local_authority_id(), session_id)
+            .qualified_target();
+        let remote_target_id = format!("remote-peer:other-node:{session_id}");
+
+        {
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(
+                local_target_id.clone(),
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::local(shared.local_authority_id(), session_id),
+                    selector: None,
+                    availability: SessionAvailability::Online,
+                    workspace_dir: None,
+                    workspace_key: None,
+                    session_role: None,
+                    opened_by: Vec::new(),
+                    attached_clients: 0,
+                    window_count: 1,
+                    command_name: Some("bash".to_string()),
+                    display_command_name: None,
+                    agent_command_name: Some("kimi".to_string()),
+                    current_path: None,
+                    task_state: ManagedSessionTaskState::Input,
+                },
+            );
+        }
+
+        // When the local record has agent_command_name=kimi, the authority host
+        // should report that it supports @-references.
+        assert!(authority_host_supports_at(&shared, session_id));
+
+        // If only the viewer-facing remote-peer record exists, the authority host
+        // must not use it; the local record is the source of truth.
+        {
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.remove(&local_target_id);
+            guard.insert(
+                remote_target_id,
+                ManagedSessionRecord {
+                    address: ManagedSessionAddress::remote_peer("other-node", session_id),
+                    selector: None,
+                    availability: SessionAvailability::Online,
+                    workspace_dir: None,
+                    workspace_key: None,
+                    session_role: None,
+                    opened_by: Vec::new(),
+                    attached_clients: 0,
+                    window_count: 1,
+                    command_name: Some("kimi".to_string()),
+                    display_command_name: None,
+                    agent_command_name: Some("kimi".to_string()),
+                    current_path: None,
+                    task_state: ManagedSessionTaskState::Input,
+                },
+            );
+        }
+        assert!(!authority_host_supports_at(&shared, session_id));
+    }
 }
