@@ -56,26 +56,6 @@ fn kimi_hook_command(sender_path: &Path, event: &str) -> String {
 }
 
 #[cfg(test)]
-fn toml_string(value: &str) -> String {
-    generic::toml_string(value)
-}
-
-#[cfg(test)]
-fn shell_single_quote(value: &str) -> String {
-    generic::shell_single_quote(value)
-}
-
-#[cfg(test)]
-fn config_text_has_unclosed_multiline_string(content: &str) -> bool {
-    generic::config_text_has_unclosed_multiline_string(content)
-}
-
-#[cfg(test)]
-fn is_waitagent_hook_block(block: &str) -> bool {
-    generic::kimi_waitagent_hook_predicate(block)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

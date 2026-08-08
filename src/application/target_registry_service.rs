@@ -90,14 +90,6 @@ impl<G> TargetRegistryService<G>
 where
     G: TargetCatalogGateway,
 {
-    pub fn list_workspace_chrome_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
-        Ok(self
-            .list_targets()?
-            .into_iter()
-            .filter(ManagedSessionRecord::is_workspace_chrome)
-            .collect())
-    }
-
     pub fn list_activation_targets(&self) -> Result<Vec<ManagedSessionRecord>, G::Error> {
         let mut targets = self
             .list_targets()?

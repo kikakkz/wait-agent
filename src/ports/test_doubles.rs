@@ -14,15 +14,6 @@ pub mod mocks {
         pub reply: Arc<Mutex<Option<Result<ManagedSessionRecord, RemoteSessionCreationError>>>>,
     }
 
-    impl MockSessionCreation {
-        pub fn with_reply(reply: Result<ManagedSessionRecord, RemoteSessionCreationError>) -> Self {
-            Self {
-                requests: Arc::new(Mutex::new(Vec::new())),
-                reply: Arc::new(Mutex::new(Some(reply))),
-            }
-        }
-    }
-
     impl SessionCreationPort for MockSessionCreation {
         fn create_session(
             &self,
@@ -41,15 +32,6 @@ pub mod mocks {
     pub struct MockTargetRegistry {
         pub targets: Arc<Mutex<Vec<ManagedSessionRecord>>>,
         pub calls: Arc<Mutex<usize>>,
-    }
-
-    impl MockTargetRegistry {
-        pub fn with_targets(targets: Vec<ManagedSessionRecord>) -> Self {
-            Self {
-                targets: Arc::new(Mutex::new(targets)),
-                calls: Arc::new(Mutex::new(0)),
-            }
-        }
     }
 
     impl TargetRegistryPort for MockTargetRegistry {

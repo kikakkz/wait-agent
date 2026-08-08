@@ -784,41 +784,6 @@ fn handle_publication_ack_outcome(
     }
 }
 
-#[cfg(test)]
-pub(super) fn sync_local_sessions_after_catalog_transport_event<G, O>(
-    gateway: &G,
-    node_id: &str,
-    session_handle: Option<&RemoteNodeSessionHandle>,
-    local_target_exit_observer: &O,
-    context: &mut SessionSyncPublicationContext<'_>,
-    reason: &str,
-) -> bool
-where
-    G: LocalSessionCatalog,
-    O: LocalTargetExitObserver,
-{
-    let Some(session_handle) = session_handle else {
-        return false;
-    };
-    if sync_local_sessions(
-        gateway,
-        node_id,
-        session_handle,
-        local_target_exit_observer,
-        context,
-        SessionSyncMode::Delta,
-    )
-    .is_err()
-    {
-        ERROR_LOG.log(format!(
-            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
-        ));
-        context.publication_tracker.on_disconnected();
-        return true;
-    }
-    false
-}
-
 fn recv_session_sync_event(
     session_event_rx: &mpsc::Receiver<SessionSyncEvent>,
     retry_delay: Option<Duration>,
@@ -1136,42 +1101,6 @@ where
         return true;
     }
     false
-}
-
-#[cfg(test)]
-pub(super) fn sync_local_sessions<G, O>(
-    gateway: &G,
-    node_id: &str,
-    session_handle: &RemoteNodeSessionHandle,
-    local_target_exit_observer: &O,
-    context: &mut SessionSyncPublicationContext<'_>,
-    mode: SessionSyncMode,
-) -> Result<(), io::Error>
-where
-    G: LocalSessionCatalog,
-    O: LocalTargetExitObserver,
-{
-    let t_sync = Instant::now();
-    ERROR_LOG.log(format!(
-        "[diag-newhost] sync_local_sessions start node={}",
-        node_id
-    ));
-    let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
-        return Ok(());
-    };
-    let mut inner_context = SessionSyncPublicationContext {
-        published: context.published,
-        observed: &current_sessions,
-        next_message_id: context.next_message_id,
-        publication_tracker: context.publication_tracker,
-    };
-    publish_current_local_sessions(
-        node_id,
-        session_handle,
-        local_target_exit_observer,
-        &mut inner_context,
-        mode,
-    )
 }
 
 fn publish_current_local_sessions<O>(

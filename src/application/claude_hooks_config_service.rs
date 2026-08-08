@@ -61,11 +61,6 @@ fn claude_hook_command(sender_path: &Path, event: &str) -> String {
 }
 
 #[cfg(test)]
-fn shell_single_quote(value: &str) -> String {
-    generic::shell_single_quote(value)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

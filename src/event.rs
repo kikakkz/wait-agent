@@ -9,8 +9,6 @@ pub enum EventGroup {
     Console,
     Session,
     Pty,
-    Scheduler,
-    Transport,
 }
 
 pub trait EventBusMessage {
