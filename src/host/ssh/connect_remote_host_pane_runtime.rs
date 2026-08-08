@@ -151,7 +151,9 @@ impl ConnectRemoteHostPaneRuntime {
                     };
                     let action = match event {
                         Event::Key(key) => state.apply_key(key),
-                        Event::Mouse(mouse) => state.apply_mouse(mouse),
+                        Event::Mouse(mouse) => {
+                            state.apply_mouse(mouse, crossterm::terminal::size().unwrap_or((96, 24)))
+                        }
                         Event::Resize(_, _) => PaneAction::Redraw,
                         _ => PaneAction::None,
                     };
@@ -553,10 +555,12 @@ impl ConnectRemoteHostState {
         }
     }
 
-    fn apply_delete_confirm_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> PaneAction {
-        let layout = DeleteConfirmGeometry::from_terminal_size(
-            crossterm::terminal::size().unwrap_or((96, 24)),
-        );
+    fn apply_delete_confirm_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        size: (u16, u16),
+    ) -> PaneAction {
+        let layout = DeleteConfirmGeometry::from_terminal_size(size);
         if point_in_rect(mouse.column, mouse.row, layout.cancel_button) {
             self.delete_confirm = DeleteConfirmState::Idle;
             return PaneAction::None;
@@ -676,28 +680,23 @@ impl ConnectRemoteHostState {
         PaneAction::None
     }
 
-    fn apply_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> PaneAction {
+    fn apply_mouse(&mut self, mouse: crossterm::event::MouseEvent, size: (u16, u16)) -> PaneAction {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return PaneAction::None;
         }
         if !matches!(self.delete_confirm, DeleteConfirmState::Idle) {
-            return self.apply_delete_confirm_mouse(mouse);
+            return self.apply_delete_confirm_mouse(mouse, size);
         }
         let x = mouse.column;
         let y = mouse.row;
         if matches!(self.status, Status::Error(_)) {
-            let layout = ConnectErrorGeometry::from_terminal_size(
-                crossterm::terminal::size().unwrap_or((96, 24)),
-            );
+            let layout = ConnectErrorGeometry::from_terminal_size(size);
             if point_in_rect(x, y, layout.ok_button) {
                 self.dismiss_error_popup();
             }
             return PaneAction::None;
         }
-        let layout = PopupGeometry::from_terminal_size(
-            crossterm::terminal::size().unwrap_or((96, 24)),
-            self,
-        );
+        let layout = PopupGeometry::from_terminal_size(size, self);
         if !point_in_rect(x, y, layout.dialog) {
             return PaneAction::None;
         }
@@ -4647,12 +4646,15 @@ mod tests {
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
 
         let details = DetailsGeometry::from_area(geometry.details, &state);
-        state.apply_mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + geometry.details.width - 10,
-            row: geometry.details.y + details.rows.password,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        });
+        state.apply_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: geometry.details.x + geometry.details.width - 10,
+                row: geometry.details.y + details.rows.password,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+            (80, 24),
+        );
 
         assert_eq!(state.focus, Focus::Password);
         assert_eq!(state.editing, Some(EditField::SshPassword));
@@ -5049,12 +5051,15 @@ mod tests {
         let geometry = PopupGeometry::from_terminal_size((80, 24), &state);
         let details = DetailsGeometry::from_area(geometry.details, &state);
 
-        state.apply_mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: geometry.details.x + geometry.details.width - 10,
-            row: geometry.details.y + details.rows.password,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        });
+        state.apply_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: geometry.details.x + geometry.details.width - 10,
+                row: geometry.details.y + details.rows.password,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+            (80, 24),
+        );
 
         assert!(!state.show_ssh_password);
         assert_eq!(password_display(&state), "******");
