@@ -66,9 +66,6 @@ pub enum ControlPlanePayload {
     CreateSessionRequest(CreateSessionRequestPayload),
     CreateSessionAccepted(CreateSessionAcceptedPayload),
     CreateSessionRejected(CreateSessionRejectedPayload),
-    ListAgentSessionsRequest(ListAgentSessionsRequestPayload),
-    ListAgentSessionsResponse(ListAgentSessionsResponsePayload),
-    ListAgentSessionsRejected(ListAgentSessionsRejectedPayload),
     TargetPublished(TargetPublishedPayload),
     TargetExited(TargetExitedPayload),
     TargetPublicationAck(TargetPublicationAckPayload),
@@ -99,9 +96,6 @@ impl ControlPlanePayload {
             Self::CreateSessionRequest(_) => "create_session_request",
             Self::CreateSessionAccepted(_) => "create_session_accepted",
             Self::CreateSessionRejected(_) => "create_session_rejected",
-            Self::ListAgentSessionsRequest(_) => "list_agent_sessions_request",
-            Self::ListAgentSessionsResponse(_) => "list_agent_sessions_response",
-            Self::ListAgentSessionsRejected(_) => "list_agent_sessions_rejected",
             Self::TargetPublished(_) => "target_published",
             Self::TargetExited(_) => "target_exited",
             Self::TargetPublicationAck(_) => "target_publication_ack",
@@ -303,35 +297,6 @@ pub struct CreateSessionRejectedPayload {
     pub request_id: String,
     pub code: &'static str,
     pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListAgentSessionsRequestPayload {
-    pub request_id: String,
-    pub target_id: String,
-    pub agent: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentSessionEntryPayload {
-    pub id: String,
-    pub title: Option<String>,
-    pub last_prompt: Option<String>,
-    pub cwd: Option<String>,
-    pub updated_at_seconds: Option<i64>,
-    pub updated_at_nanos: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListAgentSessionsResponsePayload {
-    pub request_id: String,
-    pub sessions: Vec<AgentSessionEntryPayload>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListAgentSessionsRejectedPayload {
-    pub request_id: String,
-    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

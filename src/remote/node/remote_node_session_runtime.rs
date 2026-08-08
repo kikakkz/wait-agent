@@ -5,9 +5,8 @@ use crate::domain::workspace::WorkspaceSessionRole;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body as GrpcBody;
 use crate::infra::remote_grpc_proto::v1::{
-    AgentSessionEntry as GrpcAgentSessionEntry, ApplyPtyResize, CloseMirrorRequest,
-    CreateSessionAccepted, CreateSessionRejected, CreateSessionRequest, ListAgentSessionsRejected,
-    ListAgentSessionsResponse, MirrorBootstrapChunk, MirrorBootstrapComplete,
+    ApplyPtyResize, CloseMirrorRequest, CreateSessionAccepted, CreateSessionRejected,
+    CreateSessionRequest, MirrorBootstrapChunk, MirrorBootstrapComplete,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorAccepted, OpenMirrorRejected,
     OpenMirrorRequest, PasteFileRequest as GrpcPasteFileRequest, PtyResizeApplied, RawPtyInput,
     RawPtyOutput, RouteContext, TargetExited as GrpcTargetExited, TargetGeometryChanged,
@@ -22,12 +21,10 @@ use crate::infra::remote_grpc_transport::{
 use crate::infra::remote_protocol::{
     ApplyResizePayload, BootstrapMode, CloseMirrorRequestPayload, ControlPlanePayload,
     CreateSessionAcceptedPayload, CreateSessionRejectedPayload, CreateSessionRequestPayload,
-    ListAgentSessionsRejectedPayload, ListAgentSessionsRequestPayload,
-    ListAgentSessionsResponsePayload, NodeSessionChannel, NodeSessionEnvelope,
-    OpenMirrorRejectedPayload, OpenMirrorRequestPayload, PasteFileRequestPayload, ProtocolEnvelope,
-    RawPtyInputPayload, RawPtyOutputPayload, ResizeAppliedPayload, TargetExitedPayload,
-    TargetOutputPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    NodeSessionChannel, NodeSessionEnvelope, OpenMirrorRejectedPayload, OpenMirrorRequestPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
+    ResizeAppliedPayload, TargetExitedPayload, TargetOutputPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_control_plane_envelope, read_node_session_envelope, write_control_plane_envelope,
@@ -103,12 +100,6 @@ pub(crate) enum GrpcAuthorityEvent {
     },
     CreateSessionAccepted(CreateSessionAcceptedPayload),
     CreateSessionRejected(CreateSessionRejectedPayload),
-    ListAgentSessionsRequest {
-        payload: ListAgentSessionsRequestPayload,
-        correlation_id: Option<String>,
-    },
-    ListAgentSessionsResponse(ListAgentSessionsResponsePayload),
-    ListAgentSessionsRejected(ListAgentSessionsRejectedPayload),
     MirrorAccepted,
     MirrorRejected(OpenMirrorRejectedPayload),
     TargetPublicationAck(crate::infra::remote_protocol::TargetPublicationAckPayload),
@@ -127,12 +118,6 @@ pub(crate) enum RemoteNodeAuthorityEvent {
     },
     CreateSessionAccepted(CreateSessionAcceptedPayload),
     CreateSessionRejected(CreateSessionRejectedPayload),
-    ListAgentSessionsRequest {
-        payload: ListAgentSessionsRequestPayload,
-        correlation_id: Option<String>,
-    },
-    ListAgentSessionsResponse(ListAgentSessionsResponsePayload),
-    ListAgentSessionsRejected(ListAgentSessionsRejectedPayload),
 }
 
 pub struct RemoteNodeSessionListenerGuard {
@@ -612,19 +597,6 @@ fn grpc_authority_event_to_node_event(
         GrpcAuthorityEvent::CreateSessionRejected(payload) => {
             Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(payload))
         }
-        GrpcAuthorityEvent::ListAgentSessionsRequest {
-            payload,
-            correlation_id,
-        } => Ok(RemoteNodeAuthorityEvent::ListAgentSessionsRequest {
-            payload,
-            correlation_id,
-        }),
-        GrpcAuthorityEvent::ListAgentSessionsResponse(payload) => {
-            Ok(RemoteNodeAuthorityEvent::ListAgentSessionsResponse(payload))
-        }
-        GrpcAuthorityEvent::ListAgentSessionsRejected(payload) => {
-            Ok(RemoteNodeAuthorityEvent::ListAgentSessionsRejected(payload))
-        }
         GrpcAuthorityEvent::TargetPublicationAck(_) => Err(RemoteNodeSessionError::new(
             "unexpected target publication ack while waiting for authority event",
         )),
@@ -763,18 +735,6 @@ fn map_local_authority_event(
         ControlPlanePayload::CreateSessionRejected(payload) => {
             Ok(RemoteNodeAuthorityEvent::CreateSessionRejected(payload))
         }
-        ControlPlanePayload::ListAgentSessionsRequest(payload) => {
-            Ok(RemoteNodeAuthorityEvent::ListAgentSessionsRequest {
-                payload,
-                correlation_id: session_envelope.envelope.correlation_id,
-            })
-        }
-        ControlPlanePayload::ListAgentSessionsResponse(payload) => {
-            Ok(RemoteNodeAuthorityEvent::ListAgentSessionsResponse(payload))
-        }
-        ControlPlanePayload::ListAgentSessionsRejected(payload) => {
-            Ok(RemoteNodeAuthorityEvent::ListAgentSessionsRejected(payload))
-        }
         other => Err(RemoteNodeSessionError::new(format!(
             "unexpected authority command `{}`",
             other.message_type()
@@ -868,16 +828,6 @@ pub(crate) fn map_inbound_grpc_authority_event(
                     cwd_hint: payload.cwd_hint,
                     cols: payload.cols as usize,
                     rows: payload.rows as usize,
-                },
-                correlation_id: envelope.correlation_id,
-            })
-        }
-        Some(GrpcBody::ListAgentSessionsRequest(payload)) => {
-            Some(GrpcAuthorityEvent::ListAgentSessionsRequest {
-                payload: ListAgentSessionsRequestPayload {
-                    request_id: payload.request_id,
-                    target_id: payload.target_id,
-                    agent: payload.agent,
                 },
                 correlation_id: envelope.correlation_id,
             })
@@ -1059,40 +1009,6 @@ pub(crate) fn map_outbound_grpc_envelope(
                 status: None,
             }))
         }
-        (
-            NodeSessionChannel::Authority,
-            ControlPlanePayload::ListAgentSessionsResponse(payload),
-        ) => Some(GrpcBody::ListAgentSessionsResponse(
-            ListAgentSessionsResponse {
-                request_id: payload.request_id.clone(),
-                sessions: payload
-                    .sessions
-                    .iter()
-                    .map(|entry| GrpcAgentSessionEntry {
-                        id: entry.id.clone(),
-                        title: entry.title.clone(),
-                        last_prompt: entry.last_prompt.clone(),
-                        cwd: entry.cwd.clone(),
-                        updated_at: match (entry.updated_at_seconds, entry.updated_at_nanos) {
-                            (Some(secs), Some(nanos)) => Some(prost_types::Timestamp {
-                                seconds: secs,
-                                nanos,
-                            }),
-                            _ => None,
-                        },
-                    })
-                    .collect(),
-            },
-        )),
-        (
-            NodeSessionChannel::Authority,
-            ControlPlanePayload::ListAgentSessionsRejected(payload),
-        ) => Some(GrpcBody::ListAgentSessionsRejected(
-            ListAgentSessionsRejected {
-                request_id: payload.request_id.clone(),
-                reason: payload.reason.clone(),
-            },
-        )),
         (NodeSessionChannel::Authority, ControlPlanePayload::OpenMirrorAccepted(payload)) => {
             Some(GrpcBody::OpenMirrorAccepted(OpenMirrorAccepted {
                 target_id: payload.target_id.clone(),

@@ -87,28 +87,6 @@ pub(crate) enum StateEvent {
     /// Any remote-peer sessions that were views into that node are stale and
     /// should be removed from the local catalog.
     RemoteNodeOffline { node_id: String },
-    /// Response to a ListAgentSessions request sent to a remote peer.
-    RemoteAgentSessionsReceived {
-        target_id: String,
-        request_id: String,
-        result: Result<Vec<AgentSessionEntry>, String>,
-    },
-}
-
-/// A single agent session entry reported to TUI clients.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AgentSessionEntry {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at_seconds: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at_nanos: Option<i32>,
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.
@@ -142,8 +120,6 @@ pub(crate) enum ClientCommand {
         filename_hint: String,
         bytes: Vec<u8>,
     },
-    /// List resumable agent sessions for a target session.
-    ListAgentSessions { target_id: String, agent: String },
     /// Request the full scrollback history for a session.
     GetHistory { target_id: String },
     /// Create a new remote session on the authority of the selected target.

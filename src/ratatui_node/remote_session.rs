@@ -2,16 +2,15 @@ use crate::cli::RemoteNetworkConfig;
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
-    AgentSessionEntryPayload, ApplyResizePayload, BootstrapMode, ControlPlanePayload,
-    ListAgentSessionsRequestPayload, OpenMirrorRequestPayload, PasteFileRequestPayload,
-    ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
+    ApplyResizePayload, BootstrapMode, ControlPlanePayload, OpenMirrorRequestPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, RawPtyInputPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_authority_transport_frame, write_authority_transport_frame, AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
 use crate::ratatui_node::runtime::SharedState;
-use crate::ratatui_node::state_event::{AgentSessionEntry, StateEvent};
+use crate::ratatui_node::state_event::StateEvent;
 use crate::remote::authority::remote_authority_transport_runtime::authority_transport_socket_path;
 use crate::remote::node::remote_node_ingress_server_runtime::notify_authority_socket_ready;
 use crate::remote::node::remote_node_transport_runtime::{read_client_hello, write_server_hello};
@@ -471,53 +470,6 @@ impl RatatuiRemoteSession {
         }
     }
 
-    /// Send a ListAgentSessionsRequest to the remote peer for this session.
-    ///
-    /// Returns `true` if the request was successfully written to the transport.
-    /// A `false` return lets the caller fail immediately instead of leaving the
-    /// client waiting for a response that will never arrive.
-    pub fn send_list_agent_sessions(&self, request_id: &str, agent: &str) -> bool {
-        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(writer) = guard.as_mut() else {
-            ERROR_LOG.log(format!(
-                "[ratatui-remote-session] send_list_agent_sessions dropped for {}: writer not ready",
-                self.target_id
-            ));
-            return false;
-        };
-        let payload = ListAgentSessionsRequestPayload {
-            request_id: request_id.to_string(),
-            target_id: self.target_id.clone(),
-            agent: agent.to_string(),
-        };
-        let now = now_millis();
-        let envelope = ProtocolEnvelope {
-            protocol_version: REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!("ratatui-list-agent-sessions-{now}"),
-            message_type: "list_agent_sessions_request",
-            timestamp: format!("{now}Z"),
-            sender_id: self.authority_node_id.clone(),
-            correlation_id: Some(request_id.to_string()),
-            session_id: Some(self.session_id.clone()),
-            target_id: Some(self.target_id.clone()),
-            attachment_id: None,
-            console_id: None,
-            payload: ControlPlanePayload::ListAgentSessionsRequest(payload),
-        };
-        if let Err(error) = write_authority_transport_frame(
-            writer,
-            &AuthorityTransportFrame::ControlPlane(Box::new(envelope)),
-        ) {
-            ERROR_LOG.log(format!(
-                "[ratatui-remote-session] send_list_agent_sessions target={} encode_failed: {error}",
-                self.target_id
-            ));
-            return false;
-        }
-        let _ = writer.flush();
-        true
-    }
-
     /// Snapshot the rendered screen as plain/styled text lines and the cursor position.
     pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
@@ -600,17 +552,6 @@ fn spawn_authority_transport_acceptor(
             }
         }
     });
-}
-
-fn map_agent_session_payload(payload: AgentSessionEntryPayload) -> AgentSessionEntry {
-    AgentSessionEntry {
-        id: payload.id,
-        title: payload.title,
-        last_prompt: payload.last_prompt,
-        cwd: payload.cwd,
-        updated_at_seconds: payload.updated_at_seconds,
-        updated_at_nanos: payload.updated_at_nanos,
-    }
 }
 
 fn signal_connected(session: &RatatuiRemoteSession, result: Result<(), LifecycleError>) {
@@ -710,30 +651,6 @@ fn handle_authority_transport_stream(
                         "[ratatui-remote-session] mirror rejected for {target_id}: {}",
                         payload.message
                     ));
-                }
-                ControlPlanePayload::ListAgentSessionsResponse(payload) => {
-                    let entries = payload
-                        .sessions
-                        .clone()
-                        .into_iter()
-                        .map(map_agent_session_payload)
-                        .collect();
-                    let _ = session.shared.state_sender().send(
-                        StateEvent::RemoteAgentSessionsReceived {
-                            target_id: target_id.to_string(),
-                            request_id: payload.request_id.clone(),
-                            result: Ok(entries),
-                        },
-                    );
-                }
-                ControlPlanePayload::ListAgentSessionsRejected(payload) => {
-                    let _ = session.shared.state_sender().send(
-                        StateEvent::RemoteAgentSessionsReceived {
-                            target_id: target_id.to_string(),
-                            request_id: payload.request_id.clone(),
-                            result: Err(payload.reason.clone()),
-                        },
-                    );
                 }
                 ControlPlanePayload::RawPtyOutput(payload) => {
                     output_seq = output_seq.max(payload.output_seq);

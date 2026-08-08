@@ -184,11 +184,6 @@ fn parse_command(line: &str) -> Option<ClientCommand> {
                 Some(ClientCommand::CreateRemoteSession {
                     authority_node_id: args.to_string(),
                 })
-            } else if let Some(args) = trimmed.strip_prefix("LIST_AGENT_SESSIONS ") {
-                let mut parts = args.splitn(2, ' ');
-                let target_id = parts.next().unwrap_or("").to_string();
-                let agent = parts.next().unwrap_or("").to_string();
-                Some(ClientCommand::ListAgentSessions { target_id, agent })
             } else if let Some(args) = trimmed.strip_prefix("SET_PUBLIC ") {
                 let trimmed_args = args.trim();
                 let save = trimmed_args.ends_with(" SAVE");
@@ -356,21 +351,6 @@ mod tests {
                     endpoint: None,
                     save: false,
                 })
-            ),
-            "unexpected command: {command:?}"
-        );
-    }
-
-    #[test]
-    fn parse_list_agent_sessions_command() {
-        let command = parse_command("LIST_AGENT_SESSIONS local#17474:1 kimi");
-        assert!(
-            matches!(
-                command,
-                Some(ClientCommand::ListAgentSessions {
-                    ref target_id,
-                    ref agent,
-                }) if target_id == "local#17474:1" && agent == "kimi"
             ),
             "unexpected command: {command:?}"
         );

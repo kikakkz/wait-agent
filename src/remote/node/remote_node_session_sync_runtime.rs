@@ -1,16 +1,11 @@
 // Legacy tmux-era session-sync runtime kept during the ratatui migration; most items are currently unused.
 
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
-use crate::domain::agent_session::{AgentSession, AgentSessionRegistry};
 use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_transport::{
     GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
     RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportEvent,
-};
-use crate::infra::remote_protocol::{
-    AgentSessionEntryPayload, ControlPlanePayload, ListAgentSessionsRejectedPayload,
-    ListAgentSessionsRequestPayload, ListAgentSessionsResponsePayload, NodeSessionChannel,
 };
 use crate::lifecycle::LifecycleError;
 use crate::process::current_executable::current_waitagent_executable;
@@ -22,9 +17,7 @@ use crate::remote::authority::remote_authority_target_host_runtime::{
     wait_for_ready_socket, RemoteAuthorityPublicationGateway,
 };
 use crate::remote::authority::remote_authority_transport_runtime::RemoteAuthorityCommand;
-use crate::remote::node::remote_node_session_runtime::{
-    map_outbound_grpc_envelope, GrpcAuthorityEvent,
-};
+use crate::remote::node::remote_node_session_runtime::GrpcAuthorityEvent;
 use crate::remote::publication::remote_target_publication_runtime::RemoteTargetPublicationRuntime;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -534,25 +527,6 @@ where
     }
 }
 
-fn map_agent_session_to_payload(session: AgentSession) -> AgentSessionEntryPayload {
-    let (updated_at_seconds, updated_at_nanos) = session
-        .updated_at
-        .and_then(|time| {
-            time.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i32))
-        })
-        .unzip();
-    AgentSessionEntryPayload {
-        id: session.id,
-        title: session.title,
-        last_prompt: session.last_prompt,
-        cwd: session.cwd.map(|path| path.to_string_lossy().into_owned()),
-        updated_at_seconds,
-        updated_at_nanos,
-    }
-}
-
 fn create_session_reply_envelope(
     node_id: &str,
     correlation_id: Option<&str>,
@@ -642,17 +616,6 @@ where
         event: GrpcAuthorityEvent,
     ) -> bool {
         match event {
-            GrpcAuthorityEvent::Command(RemoteAuthorityCommand::ListAgentSessionsRequest(
-                payload,
-            )) => {
-                if let Err(error) = self.handle_list_agent_sessions_request(session_handle, payload)
-                {
-                    ERROR_LOG.log(format!(
-                        "[session-sync] failed to handle list-agent-sessions request: {error}"
-                    ));
-                }
-                false
-            }
             GrpcAuthorityEvent::Command(command) => {
                 if let Err(error) = self.ensure_and_send_command(session_handle, command) {
                     ERROR_LOG.log(format!(
@@ -679,9 +642,6 @@ where
             },
             GrpcAuthorityEvent::CreateSessionAccepted(_)
             | GrpcAuthorityEvent::CreateSessionRejected(_)
-            | GrpcAuthorityEvent::ListAgentSessionsRequest { .. }
-            | GrpcAuthorityEvent::ListAgentSessionsResponse(_)
-            | GrpcAuthorityEvent::ListAgentSessionsRejected(_)
             | GrpcAuthorityEvent::TargetPublicationAck(_)
             | GrpcAuthorityEvent::MirrorAccepted
             | GrpcAuthorityEvent::MirrorRejected(_)
@@ -745,64 +705,6 @@ where
                 .map_err(remote_session_sync_error)?)
                 .map_err(remote_session_sync_error),
         }
-    }
-
-    fn handle_list_agent_sessions_request(
-        &self,
-        session_handle: &RemoteNodeSessionHandle,
-        payload: ListAgentSessionsRequestPayload,
-    ) -> Result<(), LifecycleError> {
-        let registry = AgentSessionRegistry::default();
-        let result = registry.list_for(&payload.agent);
-        let control_payload = match result {
-            Ok(sessions) => {
-                ControlPlanePayload::ListAgentSessionsResponse(ListAgentSessionsResponsePayload {
-                    request_id: payload.request_id.clone(),
-                    sessions: sessions
-                        .into_iter()
-                        .map(map_agent_session_to_payload)
-                        .collect(),
-                })
-            }
-            Err(error) => {
-                ControlPlanePayload::ListAgentSessionsRejected(ListAgentSessionsRejectedPayload {
-                    request_id: payload.request_id.clone(),
-                    reason: error.to_string(),
-                })
-            }
-        };
-        let session_id = payload
-            .target_id
-            .rsplit_once(':')
-            .map(|(_, id)| id.to_string())
-            .unwrap_or_else(|| payload.target_id.clone());
-        let envelope = crate::infra::remote_protocol::ProtocolEnvelope {
-            protocol_version: crate::infra::remote_protocol::REMOTE_PROTOCOL_VERSION.to_string(),
-            message_id: format!(
-                "{}-list-agent-sessions-reply-{}",
-                session_handle.node_id(),
-                sync_now_millis()
-            ),
-            message_type: control_payload.message_type(),
-            timestamp: format!("{}Z", sync_now_millis()),
-            sender_id: session_handle.node_id().to_string(),
-            correlation_id: None,
-            session_id: Some(session_id),
-            target_id: Some(payload.target_id),
-            attachment_id: None,
-            console_id: None,
-            payload: control_payload,
-        };
-        session_handle
-            .send(
-                map_outbound_grpc_envelope(
-                    session_handle.node_id(),
-                    NodeSessionChannel::Authority,
-                    &envelope,
-                )
-                .map_err(remote_session_sync_error)?,
-            )
-            .map_err(remote_session_sync_error)
     }
 
     fn create_local_target_for_create_session(

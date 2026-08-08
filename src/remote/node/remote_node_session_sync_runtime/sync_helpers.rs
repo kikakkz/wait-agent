@@ -1539,7 +1539,6 @@ pub(super) fn authority_command_target_id(command: &RemoteAuthorityCommand) -> &
         RemoteAuthorityCommand::RawPtyInput(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::PasteFile(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::ApplyResize(payload) => payload.target_id.as_str(),
-        RemoteAuthorityCommand::ListAgentSessionsRequest(payload) => payload.target_id.as_str(),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => "",
     }
 }

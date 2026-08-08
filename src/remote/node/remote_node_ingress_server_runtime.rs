@@ -4,7 +4,7 @@ use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
-    ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest, ListAgentSessionsRequest,
+    ApplyPtyResize, CloseMirrorRequest, CreateSessionRequest,
     NodeSessionEnvelope as GrpcNodeSessionEnvelope, OpenMirrorRequest, PasteFileRequest,
     RawPtyInput, RouteContext, TargetExited as GrpcTargetExited,
     TargetPublicationAck as GrpcTargetPublicationAck,
@@ -17,11 +17,9 @@ use crate::infra::remote_grpc_transport::{
 };
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
-    AgentSessionEntryPayload, BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload,
-    CreateSessionRejectedPayload, ListAgentSessionsRejectedPayload,
-    ListAgentSessionsResponsePayload, PasteFileRequestPayload, ProtocolEnvelope,
-    TargetExitedPayload, TargetPublicationAckPayload, TargetPublicationAckStatus,
-    TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
+    BootstrapMode, ControlPlanePayload, CreateSessionAcceptedPayload, CreateSessionRejectedPayload,
+    PasteFileRequestPayload, ProtocolEnvelope, TargetExitedPayload, TargetPublicationAckPayload,
+    TargetPublicationAckStatus, TargetPublishedPayload, REMOTE_PROTOCOL_VERSION,
 };
 use crate::infra::remote_transport_codec::{
     read_node_session_envelope, write_node_session_envelope,
@@ -1771,7 +1769,6 @@ fn handle_transport_event<
                     | Some(Body::ApplyPtyResize(_))
                     | Some(Body::RawPtyInput(_))
                     | Some(Body::PasteFileRequest(_))
-                    | Some(Body::ListAgentSessionsRequest(_))
             );
             if is_command {
                 if let Some(active) = sessions.get(&session_instance_id) {
@@ -2336,12 +2333,6 @@ fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
         }
         Some(Body::PasteFileRequest(payload)) => {
             handle_paste_file_request(node_id, &envelope, payload, session)
-        }
-        Some(Body::ListAgentSessionsResponse(payload)) => {
-            handle_list_agent_sessions_response(node_id, &envelope, payload, session)
-        }
-        Some(Body::ListAgentSessionsRejected(payload)) => {
-            handle_list_agent_sessions_rejected(node_id, &envelope, payload, session)
         }
         Some(Body::Heartbeat(_)) | Some(Body::ClientHello(_)) | Some(Body::ServerHello(_)) => {
             Ok(())
@@ -2909,75 +2900,6 @@ fn handle_paste_file_request(
     )
 }
 
-fn handle_list_agent_sessions_response(
-    node_id: &str,
-    envelope: &GrpcNodeSessionEnvelope,
-    payload: &crate::infra::remote_grpc_proto::v1::ListAgentSessionsResponse,
-    session: Option<&mut ActiveNodeIngressSession>,
-) -> Result<(), LifecycleError> {
-    let Some(session) = session else {
-        return Ok(());
-    };
-    let session_id = route_session_id(envelope).unwrap_or_default();
-    let target_id = route_target_id(envelope).unwrap_or_default();
-    bridge_output_to_authority_transports(
-        node_id,
-        session,
-        session_id,
-        target_id,
-        |transport, session_id, target_id| {
-            transport.send_payload(
-                session_id,
-                target_id,
-                ControlPlanePayload::ListAgentSessionsResponse(ListAgentSessionsResponsePayload {
-                    request_id: payload.request_id.clone(),
-                    sessions: payload
-                        .sessions
-                        .iter()
-                        .map(|entry| AgentSessionEntryPayload {
-                            id: entry.id.clone(),
-                            title: entry.title.clone(),
-                            last_prompt: entry.last_prompt.clone(),
-                            cwd: entry.cwd.clone(),
-                            updated_at_seconds: entry.updated_at.as_ref().map(|ts| ts.seconds),
-                            updated_at_nanos: entry.updated_at.as_ref().map(|ts| ts.nanos),
-                        })
-                        .collect(),
-                }),
-            )
-        },
-    )
-}
-
-fn handle_list_agent_sessions_rejected(
-    node_id: &str,
-    envelope: &GrpcNodeSessionEnvelope,
-    payload: &crate::infra::remote_grpc_proto::v1::ListAgentSessionsRejected,
-    session: Option<&mut ActiveNodeIngressSession>,
-) -> Result<(), LifecycleError> {
-    let Some(session) = session else {
-        return Ok(());
-    };
-    let session_id = route_session_id(envelope).unwrap_or_default();
-    let target_id = route_target_id(envelope).unwrap_or_default();
-    bridge_output_to_authority_transports(
-        node_id,
-        session,
-        session_id,
-        target_id,
-        |transport, session_id, target_id| {
-            transport.send_payload(
-                session_id,
-                target_id,
-                ControlPlanePayload::ListAgentSessionsRejected(ListAgentSessionsRejectedPayload {
-                    request_id: payload.request_id.clone(),
-                    reason: payload.reason.clone(),
-                }),
-            )
-        },
-    )
-}
-
 fn bridge_output_to_authority_transports<F>(
     node_id: &str,
     session: &mut ActiveNodeIngressSession,
@@ -3386,21 +3308,6 @@ fn map_authority_command_to_grpc(
             Some(Body::CloseMirrorRequest(CloseMirrorRequest {
                 target_id: payload.target_id,
                 session_id: payload.session_id,
-            })),
-        ),
-        RemoteAuthorityCommand::ListAgentSessionsRequest(payload) => (
-            Some(RouteContext {
-                authority_node_id: Some(session.node_id().to_string()),
-                target_id: Some(payload.target_id.clone()),
-                attachment_id: None,
-                console_id: None,
-                console_host_id: None,
-                session_id: None,
-            }),
-            Some(Body::ListAgentSessionsRequest(ListAgentSessionsRequest {
-                request_id: payload.request_id,
-                target_id: payload.target_id,
-                agent: payload.agent,
             })),
         ),
         RemoteAuthorityCommand::SyncRequest { .. } | RemoteAuthorityCommand::HeartbeatPing => {
