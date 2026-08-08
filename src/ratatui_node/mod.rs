@@ -5,6 +5,8 @@ pub mod authority_host_session;
 pub mod client;
 pub mod client_writer;
 pub mod clipboard_cache;
+pub mod clipboard_classifier;
+pub mod clipboard_paste;
 pub mod clipboard_platform;
 pub mod clipboard_reader;
 pub mod key_translation;

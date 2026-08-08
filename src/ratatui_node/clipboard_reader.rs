@@ -1,8 +1,11 @@
 //! Cross-platform clipboard reader with fallbacks for native, WSL, X11 and Wayland.
+//!
+//! This module is only responsible for reading raw content from the system
+//! clipboard. Classification (text vs URI list) is performed by
+//! [`crate::ratatui_node::clipboard_classifier`].
 
 use crate::infra::error_log::ERROR_LOG;
-use crate::ratatui_node::clipboard_platform::{is_wsl, windows_path_to_wsl};
-use serde::Deserialize;
+use crate::ratatui_node::clipboard_platform::is_wsl;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,47 +14,53 @@ type TextBackend = Box<dyn Fn() -> Result<String, String>>;
 /// Clipboard backend that returns PNG image bytes and a filename hint.
 type ImageBackend = Box<dyn Fn() -> Result<(Vec<u8>, String), String>>;
 
-/// Content read from the system clipboard.
+/// Raw content read from the system clipboard.
 #[derive(Debug)]
-pub enum ClipboardContent {
-    PlainText(String),
-    /// Raw `file://` URI strings as returned by the clipboard.
-    ///
-    /// Platform-specific path resolution is performed by the caller using
-    /// [`crate::ratatui_node::clipboard_platform::PlatformContext`].
-    FileUris(Vec<String>),
-    BinaryFile {
+pub enum ClipboardReadResult {
+    /// Plain text or a newline-separated list of `file://` URIs.
+    Text(String),
+    /// Binary image data read from the clipboard.
+    Image {
         filename_hint: String,
         bytes: Vec<u8>,
     },
+    /// The clipboard is empty or contains no readable text/image.
+    Empty,
 }
 
 const WSL_CLIPBOARD_JSON_COMMAND: &str = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
      @{ text = Get-Clipboard; files = @((Get-Clipboard -Format FileDropList) | ForEach-Object { $_.FullName }) } | \
      ConvertTo-Json -Compress";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct WslClipboardJson {
     text: Option<String>,
     files: Vec<String>,
 }
 
-/// Read the clipboard and classify its contents.
-pub fn read_clipboard() -> Result<ClipboardContent, String> {
+/// Read the system clipboard and return its raw content.
+///
+/// Text/URI-list is tried first. If the text backends report an empty
+/// clipboard, image backends are attempted so that copied screenshots can
+/// still be pasted via explicit keyboard shortcuts.
+pub fn read_clipboard() -> Result<ClipboardReadResult, String> {
+    let start = std::time::Instant::now();
+
     // In WSL use a single PowerShell invocation that fetches both text and the
     // Windows file-drop list. Starting powershell.exe from WSL is slow; doing
-    // it twice (text then files) caused noticeable lag on Shift+P.
+    // it twice (text then files) caused noticeable lag.
     if is_wsl() {
         match read_clipboard_wsl() {
-            Ok(Some(content)) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] wsl combined read returned {:?}",
-                    std::mem::discriminant(&content)
-                ));
-                return Ok(content);
-            }
-            Ok(None) => {
+            Ok(ClipboardReadResult::Empty) => {
                 ERROR_LOG.log("[clipboard-reader] wsl combined read returned empty".to_string());
+            }
+            Ok(result) => {
+                ERROR_LOG.log(format!(
+                    "[clipboard-reader] wsl combined read returned {:?} in {:?}",
+                    std::mem::discriminant(&result),
+                    start.elapsed()
+                ));
+                return Ok(result);
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -64,13 +73,12 @@ pub fn read_clipboard() -> Result<ClipboardContent, String> {
     // Try text/URI-list first (fast, works in most environments including WSL).
     match read_text() {
         Ok(text) if !text.trim().is_empty() => {
-            let content = classify_text(&text);
             ERROR_LOG.log(format!(
-                "[clipboard-reader] classified text len={} as {:?}",
+                "[clipboard-reader] text backend ok len={} in {:?}",
                 text.len(),
-                std::mem::discriminant(&content)
+                start.elapsed()
             ));
-            return Ok(content);
+            return Ok(ClipboardReadResult::Text(text));
         }
         Ok(_) => {
             ERROR_LOG.log("[clipboard-reader] text backends returned empty".to_string());
@@ -81,12 +89,27 @@ pub fn read_clipboard() -> Result<ClipboardContent, String> {
     }
 
     // Text backends could not access the clipboard at all (e.g. no X11 on
-    // WSL). Fall back to image as a last resort; the caller decides whether
-    // to keep or ignore binary content.
-    read_image().map(|(bytes, hint)| ClipboardContent::BinaryFile {
-        filename_hint: hint,
-        bytes,
-    })
+    // WSL) or the clipboard is empty. Try image as a last resort.
+    match read_image() {
+        Ok((bytes, hint)) => {
+            ERROR_LOG.log(format!(
+                "[clipboard-reader] image backend ok bytes={} in {:?}",
+                bytes.len(),
+                start.elapsed()
+            ));
+            Ok(ClipboardReadResult::Image {
+                filename_hint: hint,
+                bytes,
+            })
+        }
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[clipboard-reader] all backends failed in {:?}: {error}",
+                start.elapsed()
+            ));
+            Err(error)
+        }
+    }
 }
 
 /// Strip a single trailing line ending from text fetched from the clipboard.
@@ -96,7 +119,7 @@ pub fn read_clipboard() -> Result<ClipboardContent, String> {
 /// would execute the command or add an unwanted blank line. Removing one
 /// trailing newline normalizes the clipboard content without destroying
 /// intentional multi-line text.
-fn normalize_clipboard_text(text: &str) -> &str {
+pub fn normalize_clipboard_text(text: &str) -> &str {
     text.strip_suffix("\r\n")
         .or_else(|| text.strip_suffix('\n'))
         .or_else(|| text.strip_suffix('\r'))
@@ -104,7 +127,8 @@ fn normalize_clipboard_text(text: &str) -> &str {
 }
 
 /// WSL-only combined clipboard read: text + file-drop list in one powershell.exe call.
-fn read_clipboard_wsl() -> Result<Option<ClipboardContent>, String> {
+fn read_clipboard_wsl() -> Result<ClipboardReadResult, String> {
+    let start = std::time::Instant::now();
     let bytes = run_command_bytes(
         "powershell.exe",
         &["-NoProfile", "-Command", WSL_CLIPBOARD_JSON_COMMAND],
@@ -116,7 +140,7 @@ fn read_clipboard_wsl() -> Result<Option<ClipboardContent>, String> {
     if let Some(text) = parsed.text {
         let text = normalize_clipboard_text(&text);
         if !text.trim().is_empty() {
-            return Ok(Some(classify_text(text)));
+            return Ok(ClipboardReadResult::Text(text.to_string()));
         }
     }
 
@@ -126,42 +150,50 @@ fn read_clipboard_wsl() -> Result<Option<ClipboardContent>, String> {
             .iter()
             .map(|path| windows_path_to_file_uri(path))
             .collect();
-        return Ok(Some(ClipboardContent::FileUris(uris)));
+        return Ok(ClipboardReadResult::Text(uris.join("\n")));
     }
 
-    Ok(None)
+    ERROR_LOG.log(format!(
+        "[clipboard-reader] wsl combined read empty in {:?}",
+        start.elapsed()
+    ));
+    Ok(ClipboardReadResult::Empty)
 }
 
 /// Read plain text or URI list from the clipboard using the first working backend.
 fn read_text() -> Result<String, String> {
-    // In WSL the Linux clipboard backends (arboard/xclip/wl-paste) have no
-    // display to talk to and may hang while probing. Use the Windows bridge
-    // first, then fall back to the native Linux backends.
+    // Select backends based on the runtime platform. Avoid cross-platform
+    // probes (e.g. PowerShell on native Linux) that can only fail.
     let backends: Vec<(&str, TextBackend)> = if is_wsl() {
         vec![
             ("powershell (wsl)", Box::new(read_text_powershell)),
+            ("arboard", Box::new(read_text_arboard)),
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
             ("arboard", Box::new(read_text_arboard)),
             ("wl-paste", Box::new(read_text_wlpaste)),
             ("xclip", Box::new(read_text_xclip)),
         ]
     } else {
-        vec![
-            ("arboard", Box::new(read_text_arboard)),
-            ("wl-paste", Box::new(read_text_wlpaste)),
-            ("xclip", Box::new(read_text_xclip)),
-        ]
+        vec![("arboard", Box::new(read_text_arboard))]
     };
 
     let mut errors = Vec::new();
     for (name, backend) in backends {
+        let start = std::time::Instant::now();
         match backend() {
             Ok(text) => {
-                ERROR_LOG.log(format!("[clipboard-reader] text backend {name} ok"));
+                ERROR_LOG.log(format!(
+                    "[clipboard-reader] text backend {name} ok in {:?}",
+                    start.elapsed()
+                ));
                 return Ok(normalize_clipboard_text(&text).to_string());
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
-                    "[clipboard-reader] text backend {name} failed: {error}"
+                    "[clipboard-reader] text backend {name} failed in {:?}: {error}",
+                    start.elapsed()
                 ));
                 errors.push(format!("{name}: {error}"));
             }
@@ -173,43 +205,6 @@ fn read_text() -> Result<String, String> {
     ))
 }
 
-/// Read a list of file paths from the Windows clipboard file-drop format.
-///
-/// Only useful in WSL: the Windows side of the clipboard exposes copied files
-/// as `FileDropList`, which yields raw Windows paths like `C:\foo.txt`.
-#[allow(dead_code)]
-fn read_file_drop_list() -> Result<Vec<String>, String> {
-    let text = read_file_drop_list_powershell()?;
-    let paths: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(windows_path_to_file_uri)
-        .collect();
-    if paths.is_empty() {
-        return Err("file drop list is empty".to_string());
-    }
-    Ok(paths)
-}
-
-#[allow(dead_code)]
-fn read_file_drop_list_powershell() -> Result<String, String> {
-    let bytes = run_command_bytes(
-        "powershell.exe",
-        &[
-            "-NoProfile",
-            "-Command",
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Get-Clipboard -Format FileDropList) -join \"`n\"",
-        ],
-    )?;
-    decode_powershell_output(&bytes)
-}
-
-fn windows_path_to_file_uri(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    format!("file:///{normalized}")
-}
-
 /// Read image bytes from the clipboard using the first working backend.
 fn read_image() -> Result<(Vec<u8>, String), String> {
     // In WSL prefer the Windows bridge to avoid hanging on X11/Wayland probes.
@@ -217,27 +212,32 @@ fn read_image() -> Result<(Vec<u8>, String), String> {
         vec![
             ("powershell image (wsl)", Box::new(read_image_powershell)),
             ("arboard", Box::new(read_image_arboard)),
-            ("wl-paste image/png", Box::new(read_image_wlpaste)),
-            ("xclip image/png", Box::new(read_image_xclip)),
         ]
-    } else {
+    } else if cfg!(target_os = "linux") {
         vec![
             ("arboard", Box::new(read_image_arboard)),
             ("wl-paste image/png", Box::new(read_image_wlpaste)),
             ("xclip image/png", Box::new(read_image_xclip)),
         ]
+    } else {
+        vec![("arboard", Box::new(read_image_arboard))]
     };
 
     let mut errors = Vec::new();
     for (name, backend) in backends {
+        let start = std::time::Instant::now();
         match backend() {
             Ok(result) => {
-                ERROR_LOG.log(format!("[clipboard-reader] image backend {name} ok"));
+                ERROR_LOG.log(format!(
+                    "[clipboard-reader] image backend {name} ok in {:?}",
+                    start.elapsed()
+                ));
                 return Ok(result);
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
-                    "[clipboard-reader] image backend {name} failed: {error}"
+                    "[clipboard-reader] image backend {name} failed in {:?}: {error}",
+                    start.elapsed()
                 ));
                 errors.push(format!("{name}: {error}"));
             }
@@ -343,7 +343,7 @@ fn read_image_powershell() -> Result<(Vec<u8>, String), String> {
         .map(|d| d.as_millis().to_string())
         .unwrap_or_else(|_| "0".to_string());
     let windows_file = format!("{}\\waitagent-paste-{}.png", windows_temp, timestamp);
-    let wsl_path = windows_path_to_wsl(&windows_file);
+    let wsl_path = crate::ratatui_node::clipboard_platform::windows_path_to_wsl(&windows_file);
 
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms; \
@@ -361,6 +361,7 @@ fn read_image_powershell() -> Result<(Vec<u8>, String), String> {
 }
 
 fn run_command(cmd: &str, args: &[&str]) -> Result<String, String> {
+    let start = std::time::Instant::now();
     let output = Command::new(cmd)
         .args(args)
         .output()
@@ -369,6 +370,10 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("{cmd} exited {:?}: {stderr}", output.status));
     }
+    ERROR_LOG.log(format!(
+        "[clipboard-reader] ran {cmd} in {:?}",
+        start.elapsed()
+    ));
     String::from_utf8(output.stdout).map_err(|e| format!("{cmd} output is not utf-8: {e}"))
 }
 
@@ -382,37 +387,6 @@ fn run_command_bytes(cmd: &str, args: &[&str]) -> Result<Vec<u8>, String> {
         return Err(format!("{cmd} exited {:?}: {stderr}", output.status));
     }
     Ok(output.stdout)
-}
-
-/// Classify clipboard text as plain text or a list of `file://` URIs.
-///
-/// URIs are returned as raw strings; platform-specific path resolution is the
-/// caller's responsibility.
-fn classify_text(text: &str) -> ClipboardContent {
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    if lines.is_empty() {
-        return ClipboardContent::PlainText(text.to_string());
-    }
-
-    let mut uris = Vec::with_capacity(lines.len());
-    for line in &lines {
-        if is_file_uri(line) {
-            uris.push(line.to_string());
-        } else {
-            return ClipboardContent::PlainText(text.to_string());
-        }
-    }
-
-    ClipboardContent::FileUris(uris)
-}
-
-/// Return true if `line` looks like a `file://` URI.
-fn is_file_uri(line: &str) -> bool {
-    line.starts_with("file://")
 }
 
 fn encode_image_to_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
@@ -449,83 +423,7 @@ fn encode_image_to_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
     Ok(buffer.into_inner())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_plain_text() {
-        match classify_text("hello") {
-            ClipboardContent::PlainText(t) => assert_eq!(t, "hello"),
-            other => panic!("expected text, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_file_uri() {
-        match classify_text("file:///home/user/my file.txt") {
-            ClipboardContent::FileUris(uris) => {
-                assert_eq!(uris.len(), 1);
-                assert_eq!(uris[0], "file:///home/user/my file.txt");
-            }
-            other => panic!("expected URIs, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_uri_list() {
-        let input = "file:///home/user/a.txt\r\nfile:///home/user/b.txt\r\n";
-        match classify_text(input) {
-            ClipboardContent::FileUris(uris) => {
-                assert_eq!(uris.len(), 2);
-                assert_eq!(uris[0], "file:///home/user/a.txt");
-                assert_eq!(uris[1], "file:///home/user/b.txt");
-            }
-            other => panic!("expected URIs, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_mixed_lines_falls_back_to_text() {
-        // If one line is not a file URI, treat the whole clipboard as text.
-        match classify_text("file:///home/user/a.txt\nnot a uri") {
-            ClipboardContent::PlainText(text) => {
-                assert_eq!(text, "file:///home/user/a.txt\nnot a uri");
-            }
-            other => panic!("expected plain text fallback, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn normalize_clipboard_text_strips_one_trailing_newline() {
-        assert_eq!(normalize_clipboard_text("hello\r\n"), "hello");
-        assert_eq!(normalize_clipboard_text("hello\n"), "hello");
-        assert_eq!(normalize_clipboard_text("hello\r"), "hello");
-    }
-
-    #[test]
-    fn normalize_clipboard_text_preserves_internal_newlines() {
-        assert_eq!(normalize_clipboard_text("line1\nline2\n"), "line1\nline2");
-    }
-
-    #[test]
-    fn normalize_clipboard_text_leaves_clean_text_unchanged() {
-        assert_eq!(normalize_clipboard_text("hello"), "hello");
-        assert_eq!(normalize_clipboard_text("line1\nline2"), "line1\nline2");
-    }
-
-    #[test]
-    fn decode_utf16le_handles_bom() {
-        // "test" encoded as UTF-16-LE with BOM.
-        let bytes: Vec<u8> = vec![0x74, 0x00, 0x65, 0x00, 0x73, 0x00, 0x74, 0x00];
-        assert_eq!(decode_utf16le(&bytes).unwrap(), "test");
-    }
-
-    #[test]
-    fn decode_utf16le_handles_chinese() {
-        // "板卡" encoded as UTF-16-LE.
-        // 板 U+677F -> 0x7F 0x67; 卡 U+5361 -> 0x61 0x53
-        let bytes: Vec<u8> = vec![0x7f, 0x67, 0x61, 0x53];
-        assert_eq!(decode_utf16le(&bytes).unwrap(), "板卡");
-    }
+fn windows_path_to_file_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    format!("file:///{normalized}")
 }

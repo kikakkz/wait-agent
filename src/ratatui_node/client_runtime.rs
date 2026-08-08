@@ -3,8 +3,12 @@ use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRun
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
-use crate::ratatui_node::clipboard_platform::{format_file_reference, PlatformContext};
-use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardContent};
+use crate::ratatui_node::clipboard_classifier::{classify_text, ClipboardContent};
+use crate::ratatui_node::clipboard_paste::{
+    dispatch_paste, run_paste_job, PasteAction, PasteContext, PasteJob, PasteJobResult,
+};
+use crate::ratatui_node::clipboard_platform::PlatformContext;
+use crate::ratatui_node::clipboard_reader::{read_clipboard, ClipboardReadResult};
 use crate::ratatui_node::logical_key::KeyCode as LogicalKeyCode;
 use crate::ratatui_node::logical_key::KeyModifiers as LogicalKeyModifiers;
 use crate::ratatui_node::logical_key::LogicalKey;
@@ -142,7 +146,27 @@ impl RatatuiClientRuntime {
         });
 
         // Channel for asynchronous clipboard reads initiated by Ctrl+V / Shift+Insert.
-        let (clipboard_tx, clipboard_rx) = unbounded::<Result<ClipboardContent, String>>();
+        let (clipboard_tx, clipboard_rx) = unbounded::<Result<ClipboardReadResult, String>>();
+
+        // Channel for paste jobs that need blocking file I/O or base64 encoding.
+        let (paste_job_tx, paste_job_rx) = unbounded::<PasteJob>();
+        let (paste_result_tx, paste_result_rx) = unbounded::<PasteJobResult>();
+
+        // Spawn a single clipboard worker thread that handles all blocking paste
+        // operations (file reads, temp-file writes, base64 encoding).
+        let worker_platform = PlatformContext::detect();
+        let worker_result_tx = paste_result_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(job) = paste_job_rx.recv() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_paste_job(&worker_platform, job)
+                }))
+                .unwrap_or_else(|_| PasteJobResult::Error("clipboard worker panicked".to_string()));
+                if worker_result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
 
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -161,6 +185,8 @@ impl RatatuiClientRuntime {
             crossterm_rx,
             clipboard_rx,
             clipboard_tx,
+            paste_job_tx,
+            paste_result_rx,
             self.port,
             &self.network,
             &self.settings_store,
@@ -200,193 +226,6 @@ fn main_pane_size(cols: u16, rows: u16, sidebar_hidden: bool) -> (u16, u16) {
     }
 }
 
-/// Handle classified clipboard content for the active session.
-///
-/// Local sessions receive path strings directly. Remote sessions have file
-/// bytes forwarded so the remote peer node can cache the file locally.
-fn handle_clipboard_content(
-    ctx: &PlatformContext,
-    stream: &mut UnixStream,
-    snapshot: &RatatuiSnapshot,
-    status_message: &mut Option<(String, Instant)>,
-    content: ClipboardContent,
-) {
-    let Some(target_id) = snapshot.active_target.as_deref() else {
-        return;
-    };
-    let session = snapshot.sessions.iter().find(|s| s.id == target_id);
-    let is_local = session.map(|s| s.transport == "local").unwrap_or(false);
-    let supports_at = session
-        .map(|s| s.agent_command_name.as_deref().unwrap_or(&s.command_name))
-        .map(crate::domain::agent_detector::accepts_at_reference)
-        .unwrap_or(false);
-
-    match content {
-        ClipboardContent::PlainText(text) => {
-            ERROR_LOG.log(format!(
-                "[clipboard] plain text {} bytes, attempting path parse",
-                text.len()
-            ));
-            if let Some(paths) = ctx.parse_file_paths_from_text(&text) {
-                ERROR_LOG.log(format!(
-                    "[clipboard] parsed as {} path(s): {:?}",
-                    paths.len(),
-                    paths
-                ));
-                handle_file_paths(
-                    ctx,
-                    stream,
-                    target_id,
-                    is_local,
-                    supports_at,
-                    status_message,
-                    &paths,
-                );
-            } else {
-                ERROR_LOG.log("[clipboard] not paths, sending as text".to_string());
-                send_paste_text(stream, target_id, &text);
-            }
-        }
-        ClipboardContent::FileUris(uris) => {
-            handle_file_uris(
-                ctx,
-                stream,
-                target_id,
-                is_local,
-                supports_at,
-                status_message,
-                &uris,
-            );
-        }
-        ClipboardContent::BinaryFile {
-            filename_hint,
-            bytes,
-        } => {
-            handle_binary_file(
-                ctx,
-                stream,
-                target_id,
-                is_local,
-                supports_at,
-                status_message,
-                &filename_hint,
-                &bytes,
-            );
-        }
-    }
-}
-
-fn handle_file_uris(
-    ctx: &PlatformContext,
-    stream: &mut UnixStream,
-    target_id: &str,
-    is_local: bool,
-    supports_at: bool,
-    status_message: &mut Option<(String, Instant)>,
-    uris: &[String],
-) {
-    let mut paths = Vec::with_capacity(uris.len());
-    for uri in uris {
-        match ctx.resolve_file_uri(uri) {
-            Some(path) => paths.push(path),
-            None => {
-                *status_message = Some((format!("invalid file URI: {uri}"), Instant::now()));
-                return;
-            }
-        }
-    }
-    handle_file_paths(
-        ctx,
-        stream,
-        target_id,
-        is_local,
-        supports_at,
-        status_message,
-        &paths,
-    );
-}
-
-fn handle_file_paths(
-    ctx: &PlatformContext,
-    stream: &mut UnixStream,
-    target_id: &str,
-    is_local: bool,
-    supports_at: bool,
-    status_message: &mut Option<(String, Instant)>,
-    paths: &[std::path::PathBuf],
-) {
-    if is_local {
-        let path_string = paths
-            .iter()
-            .map(|p| format_file_reference(&ctx.path_for_input(p), supports_at))
-            .collect::<Vec<_>>()
-            .join(" ");
-        send_paste_text(stream, target_id, &path_string);
-        return;
-    }
-
-    if paths.len() > 1 {
-        *status_message = Some((
-            "pasting multiple remote files at once is not yet supported".to_string(),
-            Instant::now(),
-        ));
-        return;
-    }
-
-    let Some(path) = paths.first() else {
-        return;
-    };
-    match ctx.read_file(path) {
-        Ok(bytes) => {
-            let hint = path.file_name().and_then(|n| n.to_str()).unwrap_or("paste");
-            send_paste_file(stream, target_id, hint, &bytes);
-        }
-        Err(error) => {
-            *status_message = Some((
-                format!("failed to read file {}: {error}", path.display()),
-                Instant::now(),
-            ));
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_binary_file(
-    ctx: &PlatformContext,
-    stream: &mut UnixStream,
-    target_id: &str,
-    is_local: bool,
-    supports_at: bool,
-    status_message: &mut Option<(String, Instant)>,
-    filename_hint: &str,
-    bytes: &[u8],
-) {
-    if is_local {
-        match ctx.write_temp_file(filename_hint, bytes) {
-            Ok(path) => {
-                let path_ref = format_file_reference(&ctx.path_for_input(&path), supports_at);
-                send_paste_text(stream, target_id, &path_ref);
-            }
-            Err(error) => {
-                *status_message = Some((
-                    format!("failed to cache pasted file: {error}"),
-                    Instant::now(),
-                ));
-            }
-        }
-        return;
-    }
-
-    send_paste_file(stream, target_id, filename_hint, bytes);
-}
-
-/// Send a PASTE_FILE command with the given bytes to the server.
-fn send_paste_file(stream: &mut UnixStream, target_id: &str, filename_hint: &str, bytes: &[u8]) {
-    let encoded = general_purpose::STANDARD.encode(bytes);
-    let _ = writeln!(stream, "PASTE_FILE {target_id} {filename_hint} {encoded}");
-    let _ = stream.flush();
-}
-
 /// Send a PASTE_TEXT command with the given text to the server.
 fn send_paste_text(stream: &mut UnixStream, target_id: &str, text: &str) {
     let encoded = general_purpose::STANDARD.encode(text.as_bytes());
@@ -394,9 +233,62 @@ fn send_paste_text(stream: &mut UnixStream, target_id: &str, text: &str) {
     let _ = stream.flush();
 }
 
-/// Spawn a background thread that reads and classifies the system clipboard
-/// content, then sends the result back on the supplied channel.
-fn spawn_clipboard_read(tx: crossbeam_channel::Sender<Result<ClipboardContent, String>>) {
+/// Apply a paste action produced by the dispatcher.
+///
+/// Immediate text pastes are sent directly to the server; file jobs are
+/// enqueued on the clipboard worker thread.
+fn apply_paste_action(
+    action: PasteAction,
+    stream: &mut UnixStream,
+    paste_job_tx: &crossbeam_channel::Sender<PasteJob>,
+    status_message: &mut Option<(String, Instant)>,
+) {
+    match action {
+        PasteAction::SendText { target_id, text } => {
+            send_paste_text(stream, &target_id, &text);
+        }
+        PasteAction::RunJob(job) => {
+            ERROR_LOG.log(format!("[clipboard] enqueuing paste job: {job:?}"));
+            if paste_job_tx.send(job).is_err() {
+                *status_message =
+                    Some(("clipboard worker disconnected".to_string(), Instant::now()));
+            }
+        }
+        PasteAction::Error(message) => {
+            *status_message = Some((message, Instant::now()));
+        }
+        PasteAction::Nothing => {}
+    }
+}
+
+/// Apply the result of a background paste job.
+fn apply_paste_job_result(
+    result: PasteJobResult,
+    stream: &mut UnixStream,
+    status_message: &mut Option<(String, Instant)>,
+) {
+    ERROR_LOG.log(format!("[clipboard] applying paste job result: {result:?}"));
+    match result {
+        PasteJobResult::PasteText { target_id, text } => {
+            send_paste_text(stream, &target_id, &text);
+        }
+        PasteJobResult::PasteFile {
+            target_id,
+            filename_hint,
+            base64,
+        } => {
+            let _ = writeln!(stream, "PASTE_FILE {target_id} {filename_hint} {base64}");
+            let _ = stream.flush();
+        }
+        PasteJobResult::Error(message) => {
+            *status_message = Some((message, Instant::now()));
+        }
+    }
+}
+
+/// Spawn a background thread that reads the system clipboard, then sends the
+/// raw result back on the supplied channel.
+fn spawn_clipboard_read(tx: crossbeam_channel::Sender<Result<ClipboardReadResult, String>>) {
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(read_clipboard)
             .unwrap_or_else(|_| Err("clipboard read panicked".to_string()));
@@ -671,7 +563,8 @@ struct HandleCrosstermEventArgs<'a> {
     network: &'a RemoteNetworkConfig,
     settings_store: &'a SettingsStore,
     crossterm_rx: &'a Receiver<Event>,
-    clipboard_tx: &'a crossbeam_channel::Sender<Result<ClipboardContent, String>>,
+    clipboard_tx: &'a crossbeam_channel::Sender<Result<ClipboardReadResult, String>>,
+    paste_job_tx: &'a crossbeam_channel::Sender<PasteJob>,
 }
 
 /// `false` to break (e.g. user detached).
@@ -696,18 +589,36 @@ fn handle_crossterm_event(
         settings_store,
         crossterm_rx,
         clipboard_tx,
+        paste_job_tx,
     } = args;
     match event {
-        Event::Paste(_text) => {
-            // Treat terminal paste events (Ctrl+V / Shift+Insert in bracketed-paste
-            // mode) the same as our own clipboard shortcut: read the system
-            // clipboard so we can handle files and URI lists, not just plain text.
+        Event::Paste(text) => {
             if *focus == Focus::Main
                 && error_log_state.is_none()
                 && settings_state.is_none()
                 && history_state.is_none()
             {
-                spawn_clipboard_read(clipboard_tx.clone());
+                if text.trim().is_empty() {
+                    // The terminal sent an empty bracketed-paste event. This
+                    // can happen when the clipboard contains binary content
+                    // (e.g. a screenshot) that cannot be represented as text.
+                    // Fall back to reading the system clipboard so we can
+                    // still handle files and images.
+                    spawn_clipboard_read(clipboard_tx.clone());
+                } else {
+                    // Fast path: the terminal already gave us the pasted text
+                    // via bracketed-paste mode. Classify it locally and
+                    // dispatch without touching the system clipboard API.
+                    let platform = PlatformContext::detect();
+                    let ctx = PasteContext { platform, snapshot };
+                    let content = classify_text(&text);
+                    apply_paste_action(
+                        dispatch_paste(content, &ctx),
+                        stream,
+                        paste_job_tx,
+                        status_message,
+                    );
+                }
             }
         }
         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -940,8 +851,10 @@ fn run_event_loop(
     mut snapshot: RatatuiSnapshot,
     server_rx: Receiver<ServerMessage>,
     crossterm_rx: Receiver<Event>,
-    clipboard_rx: Receiver<Result<ClipboardContent, String>>,
-    clipboard_tx: crossbeam_channel::Sender<Result<ClipboardContent, String>>,
+    clipboard_rx: Receiver<Result<ClipboardReadResult, String>>,
+    clipboard_tx: crossbeam_channel::Sender<Result<ClipboardReadResult, String>>,
+    paste_job_tx: crossbeam_channel::Sender<PasteJob>,
+    paste_result_rx: Receiver<PasteJobResult>,
     port: u16,
     network: &RemoteNetworkConfig,
     settings_store: &SettingsStore,
@@ -1005,28 +918,51 @@ fn run_event_loop(
                         settings_store,
                         crossterm_rx: &crossterm_rx,
                         clipboard_tx: &clipboard_tx,
+                        paste_job_tx: &paste_job_tx,
                     },
                 )? {
                     break;
                 }
             }
             recv(clipboard_rx) -> result => {
-                let ctx = PlatformContext::detect();
-                ERROR_LOG.log(format!("[clipboard] detected context={ctx:?}"));
+                let platform = PlatformContext::detect();
+                let ctx = PasteContext {
+                    platform,
+                    snapshot: &snapshot,
+                };
                 match result {
-                    Ok(Ok(content)) => {
-                        handle_clipboard_content(
-                            &ctx,
-                            stream,
-                            &snapshot,
-                            &mut status_message,
-                            content,
-                        );
+                    Ok(Ok(read_result)) => {
+                        let content = match read_result {
+                            ClipboardReadResult::Text(text) => Some(classify_text(&text)),
+                            ClipboardReadResult::Image { filename_hint, bytes } => {
+                                Some(ClipboardContent::BinaryFile { filename_hint, bytes })
+                            }
+                            ClipboardReadResult::Empty => {
+                                status_message = Some((
+                                    "clipboard is empty".to_string(),
+                                    Instant::now(),
+                                ));
+                                None
+                            }
+                        };
+                        if let Some(content) = content {
+                            apply_paste_action(
+                                dispatch_paste(content, &ctx),
+                                stream,
+                                &paste_job_tx,
+                                &mut status_message,
+                            );
+                        }
                     }
                     Ok(Err(error)) => {
                         status_message = Some((format!("clipboard error: {error}"), Instant::now()));
                     }
                     Err(_) => {}
+                }
+            }
+            recv(paste_result_rx) -> result => {
+                if let Ok(job_result) = result {
+                    apply_paste_job_result(job_result, stream, &mut status_message);
                 }
             }
         }
@@ -1071,6 +1007,7 @@ fn run_event_loop(
                             settings_store,
                             crossterm_rx: &crossterm_rx,
                             clipboard_tx: &clipboard_tx,
+                            paste_job_tx: &paste_job_tx,
                         },
                     )? {
                         return Ok(());
