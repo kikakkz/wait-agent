@@ -26,10 +26,10 @@ impl LogLevel {
 
     pub fn short(self) -> &'static str {
         match self {
-            LogLevel::Debug => "DBG",
-            LogLevel::Info => "INF",
-            LogLevel::Warn => "WRN",
-            LogLevel::Error => "ERR",
+            LogLevel::Debug => "D",
+            LogLevel::Info => "I",
+            LogLevel::Warn => "W",
+            LogLevel::Error => "E",
         }
     }
 

@@ -1555,9 +1555,9 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
     // operate on the visible position rather than stale values like usize::MAX.
     state.scroll_offset = offset;
 
-    // Fixed-width columns: time (HH:MM:SS.mmm) + level (3 chars) + content.
+    // Fixed-width columns: time (HH:MM:SS.mmm) + level (1 char) + content.
     const TIME_WIDTH: usize = 12;
-    const LEVEL_WIDTH: usize = 3;
+    const LEVEL_WIDTH: usize = 1;
     const GUTTER: usize = 2;
     let content_width = width.saturating_sub(TIME_WIDTH + LEVEL_WIDTH + GUTTER);
 
@@ -1617,11 +1617,11 @@ fn format_log_line(
     let seconds = (total_seconds % 60) as u32;
     let time = format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
 
-    let (level_text, level_color) = match level {
-        LogLevel::Debug => (LogLevel::Debug.short(), Color::Gray),
-        LogLevel::Info => (LogLevel::Info.short(), Color::White),
-        LogLevel::Warn => (LogLevel::Warn.short(), Color::Yellow),
-        LogLevel::Error => (LogLevel::Error.short(), Color::Red),
+    let (level_text, level_fg, level_bg) = match level {
+        LogLevel::Debug => (LogLevel::Debug.short(), Color::Black, Color::Gray),
+        LogLevel::Info => (LogLevel::Info.short(), Color::White, Color::Blue),
+        LogLevel::Warn => (LogLevel::Warn.short(), Color::Black, Color::Yellow),
+        LogLevel::Error => (LogLevel::Error.short(), Color::White, Color::Red),
     };
 
     let content = truncate_display_width(message, content_width);
@@ -1629,8 +1629,8 @@ fn format_log_line(
         Span::styled(time, Style::default().fg(Color::DarkGray).bg(POPUP_BG)),
         Span::raw("  "),
         Span::styled(
-            format!("{:>3}", level_text),
-            Style::default().fg(level_color).bg(POPUP_BG),
+            level_text.to_string(),
+            Style::default().fg(level_fg).bg(level_bg),
         ),
         Span::raw("  "),
         Span::styled(content, Style::default().fg(Color::White).bg(POPUP_BG)),
