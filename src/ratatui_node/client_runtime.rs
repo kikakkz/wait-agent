@@ -1555,15 +1555,29 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
     // operate on the visible position rather than stale values like usize::MAX.
     state.scroll_offset = offset;
 
-    // Fixed-width columns: time (HH:MM:SS.mmm) + level (1 char) + content.
+    // Fixed-width columns: time (HH:MM:SS.mmm) + level (1 char) + module tag + content.
     const TIME_WIDTH: usize = 12;
     const LEVEL_WIDTH: usize = 1;
     const GUTTER: usize = 2;
-    let content_width = width.saturating_sub(TIME_WIDTH + LEVEL_WIDTH + GUTTER);
+    const MAX_MODULE_WIDTH: usize = 20;
+    let module_width = state
+        .entries
+        .iter()
+        .filter_map(|(_, _, msg)| parse_module_tag(msg).0.map(display_width))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_MODULE_WIDTH);
+    let content_width = width.saturating_sub(TIME_WIDTH + LEVEL_WIDTH + module_width + GUTTER * 3);
 
     let mut lines = Vec::new();
     for (ts, level, message) in state.entries.iter().skip(offset).take(content_height) {
-        lines.push(format_log_line(*ts, *level, message, content_width));
+        lines.push(format_log_line(
+            *ts,
+            *level,
+            message,
+            module_width,
+            content_width,
+        ));
     }
     while lines.len() < content_height {
         lines.push(Line::from(""));
@@ -1608,6 +1622,7 @@ fn format_log_line(
     ts: u128,
     level: LogLevel,
     message: &str,
+    module_width: usize,
     content_width: usize,
 ) -> Line<'static> {
     let total_seconds = ts / 1000;
@@ -1624,17 +1639,56 @@ fn format_log_line(
         LogLevel::Error => (LogLevel::Error.short(), Color::White, Color::Red),
     };
 
-    let content = truncate_display_width(message, content_width);
-    Line::from(vec![
+    let (module, body) = parse_module_tag(message);
+    let module_span = module.map(|tag| {
+        let padded = pad_right(&truncate_display_width(tag, module_width), module_width);
+        Span::styled(padded, Style::default().fg(Color::DarkGray).bg(POPUP_BG))
+    });
+    let content = truncate_display_width(body, content_width);
+
+    let mut spans = vec![
         Span::styled(time, Style::default().fg(Color::DarkGray).bg(POPUP_BG)),
         Span::raw("  "),
         Span::styled(
             level_text.to_string(),
             Style::default().fg(level_fg).bg(level_bg),
         ),
-        Span::raw("  "),
-        Span::styled(content, Style::default().fg(Color::White).bg(POPUP_BG)),
-    ])
+    ];
+    if module_width > 0 {
+        spans.push(Span::raw("  "));
+        if let Some(module_span) = module_span {
+            spans.push(module_span);
+        } else {
+            spans.push(Span::styled(
+                " ".repeat(module_width),
+                Style::default().bg(POPUP_BG),
+            ));
+        }
+    }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        content,
+        Style::default().fg(Color::White).bg(POPUP_BG),
+    ));
+    Line::from(spans)
+}
+
+/// Extract a leading `[module]` tag from a log message.
+/// Returns `(Some(tag), rest)` if the message starts with a non-empty,
+/// space-free bracketed prefix; otherwise `(None, message)`.
+fn parse_module_tag(message: &str) -> (Option<&str>, &str) {
+    let Some(rest) = message.strip_prefix('[') else {
+        return (None, message);
+    };
+    let Some(close) = rest.find(']') else {
+        return (None, message);
+    };
+    let tag = &rest[..close];
+    let after = rest[close + 1..].trim_start();
+    if tag.is_empty() || tag.contains(' ') {
+        return (None, message);
+    }
+    (Some(tag), after)
 }
 
 fn render_settings_popup(
