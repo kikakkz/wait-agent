@@ -541,7 +541,7 @@ fn spawn_task_state_monitor(
 
 /// Read /proc for the process group leader of `pgid` and return its argv[0]
 /// and full argv vector.
-fn foreground_process_info(pgid: i32) -> (Option<String>, Option<Vec<String>>) {
+pub(crate) fn foreground_process_info(pgid: i32) -> (Option<String>, Option<Vec<String>>) {
     // The foreground process group leader is typically the running command.
     // SAFETY: `getpgid` is async-signal-safe and only reads the kernel process
     // table; the supplied pgid comes from the PTY foreground process group.

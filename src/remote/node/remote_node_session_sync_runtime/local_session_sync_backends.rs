@@ -1,7 +1,7 @@
 // Legacy tmux-era session-sync backends kept during the ratatui migration; most items are currently unused.
 
 use crate::cli::RemoteNetworkConfig;
-use crate::domain::agent_detector::accepts_at_reference;
+use crate::domain::agent_detector::{accepts_at_reference, DetectorRegistry};
 use crate::domain::session_catalog::{
     ManagedSessionAddress, ManagedSessionRecord, SessionTransport,
 };
@@ -15,7 +15,9 @@ use crate::infra::remote_transport_codec::{
     AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession;
 use crate::ratatui_node::clipboard_platform::format_file_reference;
+use crate::ratatui_node::local_session::foreground_process_info;
 use crate::ratatui_node::SharedState;
 use crate::remote::authority::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
@@ -30,6 +32,7 @@ use crate::remote::node::remote_node_session_sync_runtime::{
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -962,14 +965,42 @@ struct SpawnRatatuiAuthorityTargetHostArgs {
     shared: Arc<SharedState>,
 }
 
-/// Return whether the authority-host session identified by `session_id` should
-/// receive `@`-prefixed file references.
+/// Return whether the authority-host session should receive `@`-prefixed file
+/// references.
 ///
 /// The catalog record that process detection updates is keyed under the local
 /// authority id (`local:{authority_id}:{session_id}`), while the viewer-facing
-/// command uses `remote-peer:{node_id}:{session_id}`. This helper looks up the
-/// local record so agent detection is honored.
-fn authority_host_supports_at(shared: &SharedState, session_id: &str) -> bool {
+/// command uses `remote-peer:{node_id}:{session_id}`. This helper first looks up
+/// the local record so agent detection is honored. If the record has not been
+/// updated yet (authority-host sessions do not have a background /proc monitor
+/// like local sessions do), it falls back to scanning `/proc` for the current
+/// PTY foreground process.
+fn authority_host_supports_at(shared: &SharedState, session: &RatatuiAuthorityHostSession) -> bool {
+    if let Some(supports_at) = authority_host_supports_at_from_record(shared, &session.session_id) {
+        return supports_at;
+    }
+
+    // Authority-host sessions lack a background /proc monitor, so agent hooks
+    // may be the only source of agent_command_name. If hooks have not fired yet
+    // (e.g. the user pastes before submitting a prompt), detect the agent from
+    // the PTY foreground process at paste time.
+    let fg_pgid = unsafe { libc::tcgetpgrp(session.pty_master.as_raw_fd()) };
+    if fg_pgid <= 0 {
+        return false;
+    }
+    let (argv0, argv) = foreground_process_info(fg_pgid);
+    let command_name = argv0
+        .as_deref()
+        .map(|cmd| DetectorRegistry::default().detect_command_name(cmd, argv.as_deref(), ""));
+    command_name
+        .as_deref()
+        .map(accepts_at_reference)
+        .unwrap_or(false)
+}
+
+/// Look up `agent_command_name` from the local catalog record. Returns `None`
+/// when there is no record or the record has no agent command name yet.
+fn authority_host_supports_at_from_record(shared: &SharedState, session_id: &str) -> Option<bool> {
     let local_target_id =
         ManagedSessionAddress::local(shared.local_authority_id(), session_id).qualified_target();
     let guard = shared
@@ -981,7 +1012,6 @@ fn authority_host_supports_at(shared: &SharedState, session_id: &str) -> bool {
         .get(&local_target_id)
         .and_then(|r| r.agent_command_name.as_deref())
         .map(accepts_at_reference)
-        .unwrap_or(false)
 }
 
 fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs) {
@@ -1131,10 +1161,8 @@ fn spawn_ratatui_authority_target_host(args: SpawnRatatuiAuthorityTargetHostArgs
                                     &full_bytes,
                                 ) {
                                     Ok(path) => {
-                                        let supports_at = authority_host_supports_at(
-                                            &shared,
-                                            &session.session_id,
-                                        );
+                                        let supports_at =
+                                            authority_host_supports_at(&shared, &session);
                                         let path_string = path.to_string_lossy().into_owned();
                                         let path_ref =
                                             format_file_reference(&path_string, supports_at);
@@ -1290,7 +1318,7 @@ mod tests {
 
         // When the local record has agent_command_name=kimi, the authority host
         // should report that it supports @-references.
-        assert!(authority_host_supports_at(&shared, session_id));
+        assert!(authority_host_supports_at_from_record(&shared, session_id).unwrap_or(false));
 
         // If only the viewer-facing remote-peer record exists, the authority host
         // must not use it; the local record is the source of truth.
@@ -1321,6 +1349,6 @@ mod tests {
                 },
             );
         }
-        assert!(!authority_host_supports_at(&shared, session_id));
+        assert!(!authority_host_supports_at_from_record(&shared, session_id).unwrap_or(false));
     }
 }
