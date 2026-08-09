@@ -742,17 +742,7 @@ fn handle_publication_ack_outcome(
     let Some(ack) = ack else {
         return;
     };
-    match tracker.on_ack(ack) {
-        SourcePublicationAckOutcome::Cleared => ERROR_LOG.log(format!(
-            "[diag-publication] source publication ack cleared target={} revision={}",
-            ack.target_id, ack.revision
-        )),
-        SourcePublicationAckOutcome::Retained => ERROR_LOG.log(format!(
-            "[diag-publication] source publication ack failed target={} revision={}",
-            ack.target_id, ack.revision
-        )),
-        SourcePublicationAckOutcome::Ignored => {}
-    }
+    let _ = tracker.on_ack(ack);
 }
 
 fn recv_session_sync_event(
@@ -958,8 +948,6 @@ where
     let local_sessions = match gateway.list_local_sessions() {
         Ok(sessions) => sessions,
         Err(_) => {
-            ERROR_LOG
-                .log("[diag-timing] sync_local_sessions: list_local_sessions FAILED".to_string());
             ERROR_LOG.log_error(format!(
                 "sync_local_sessions list_local_sessions FAILED node={} elapsed={:?}",
                 node_id,

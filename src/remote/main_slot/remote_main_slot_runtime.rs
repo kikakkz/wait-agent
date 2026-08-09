@@ -290,15 +290,11 @@ impl RemoteMainSlotRuntime {
             .route_target_output(target, output_seq, stream, output_bytes)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         let result = self.send_messages(&[message]);
-        match &result {
-            Ok(()) => ERROR_LOG.log(format!(
-                "[diag-timing] send_target_output: seq={} ({} bytes) delivered OK",
+        if let Err(error) = &result {
+            ERROR_LOG.log_error(format!(
+                "send_target_output seq={} bytes={} failed: {error}",
                 output_seq, byte_count
-            )),
-            Err(e) => ERROR_LOG.log(format!(
-                "[diag-timing] send_target_output: seq={} ({} bytes) FAILED: {e}",
-                output_seq, byte_count
-            )),
+            ));
         }
         result
     }
