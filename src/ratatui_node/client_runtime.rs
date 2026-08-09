@@ -1532,15 +1532,16 @@ fn render_history_footer_line(
 }
 
 /// Render a unified popup background: clear the popup rectangle so underlying
-/// cells do not leak through, then fill the popup interior with a solid black
-/// background. The area behind the popup is dimmed by the caller via the
+/// Background color used for modal popups; kept in sync with the Ctrl+W
+/// "Connect Remote Host" popup so all modals look consistent.
+const POPUP_BG: Color = Color::Rgb(22, 24, 30);
+
+/// cells do not leak through, then fill the popup interior with the shared
+/// popup background. The area behind the popup is dimmed by the caller via the
 /// `dim_background` flag passed to `render`.
 fn render_popup_background(frame: &mut Frame, popup: Rect) {
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
-        popup,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(POPUP_BG)), popup);
 }
 
 fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
@@ -1548,16 +1549,11 @@ fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) 
     render_popup_background(frame, popup);
 
     let block = Block::default()
-        .style(Style::default().bg(Color::Black))
+        .title("Error Log")
+        .title_alignment(ratatui::layout::Alignment::Center)
+        .title_style(Style::default().add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(
-            Line::from(vec![
-                Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
-                Span::styled("Error Log", Style::default().add_modifier(Modifier::BOLD)),
-            ])
-            .alignment(ratatui::layout::Alignment::Center),
-        );
+        .style(Style::default().fg(Color::White).bg(POPUP_BG));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1588,7 +1584,7 @@ fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) 
     );
     let footer = Paragraph::new(Line::from(vec![Span::styled(
         footer_text,
-        Style::default().fg(Color::Gray).bg(Color::Black),
+        Style::default().fg(Color::Gray).bg(POPUP_BG),
     )]));
 
     let content_area = Rect {
@@ -1605,7 +1601,7 @@ fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) 
     };
 
     let content = Paragraph::new(lines)
-        .style(Style::default().bg(Color::Black))
+        .style(Style::default().bg(POPUP_BG))
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(content, content_area);
     frame.render_widget(footer, footer_area);
@@ -1621,7 +1617,7 @@ fn render_settings_popup(
     render_popup_background(frame, popup);
 
     let block = Block::default()
-        .style(Style::default().bg(Color::Black))
+        .style(Style::default().bg(POPUP_BG))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Settings (Ctrl-P to close) ");
