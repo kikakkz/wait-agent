@@ -82,7 +82,7 @@ pub(crate) fn handle_client(
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                ERROR_LOG.log(format!("[ratatui-node] client {client_id} disconnected"));
+                ERROR_LOG.log_warn(format!("[ratatui-node] client {client_id} disconnected"));
                 break;
             }
             Ok(_) => {

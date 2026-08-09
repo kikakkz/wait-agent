@@ -1135,7 +1135,7 @@ impl RatatuiNodeRuntime {
                     });
                 }
                 Err(error) => {
-                    ERROR_LOG.log(format!("[ratatui-node] accept error: {error:?}"));
+                    ERROR_LOG.log_error(format!("[ratatui-node] accept error: {error:?}"));
                 }
             }
         }

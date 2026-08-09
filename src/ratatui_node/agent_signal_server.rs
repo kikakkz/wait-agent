@@ -80,7 +80,7 @@ fn run_signal_listener(
                 handle_signal_bytes(bytes, &state_tx, &token);
             }
             Err(error) => {
-                ERROR_LOG.log(format!("[agent-signal] recv error: {error}"));
+                ERROR_LOG.log_error(format!("[agent-signal] recv error: {error}"));
                 break;
             }
         }

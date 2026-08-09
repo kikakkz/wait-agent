@@ -1,6 +1,6 @@
 use crate::cli::{ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::host::ssh::connect_remote_host_pane_runtime::ConnectRemoteHostPaneRuntime;
-use crate::infra::error_log::ERROR_LOG;
+use crate::infra::error_log::{LogLevel, ERROR_LOG};
 use crate::infra::settings_store::SettingsStore;
 use crate::lifecycle::LifecycleError;
 use crate::ratatui_node::clipboard_classifier::{classify_text, ClipboardContent};
@@ -248,7 +248,7 @@ fn apply_paste_action(
             send_paste_text(stream, &target_id, &text);
         }
         PasteAction::RunJob(job) => {
-            ERROR_LOG.log(format!("[clipboard] enqueuing paste job: {job:?}"));
+            ERROR_LOG.log_debug(format!("[clipboard] enqueuing paste job: {job:?}"));
             if paste_job_tx.send(job).is_err() {
                 *status_message =
                     Some(("clipboard worker disconnected".to_string(), Instant::now()));
@@ -267,7 +267,7 @@ fn apply_paste_job_result(
     stream: &mut UnixStream,
     status_message: &mut Option<(String, Instant)>,
 ) {
-    ERROR_LOG.log(format!("[clipboard] applying paste job result: {result:?}"));
+    ERROR_LOG.log_debug(format!("[clipboard] applying paste job result: {result:?}"));
     match result {
         PasteJobResult::PasteText { target_id, text } => {
             send_paste_text(stream, &target_id, &text);
@@ -303,9 +303,6 @@ fn send_main_pane_resize(stream: &mut UnixStream, sidebar_hidden: bool) {
         Ok((cols, rows)) => main_pane_size(cols, rows, sidebar_hidden),
         Err(_) => (80, 24),
     };
-    ERROR_LOG.log(format!(
-        "[ratatui-client] send resize sidebar_hidden={sidebar_hidden} raw={raw_size:?} main_cols={cols} main_rows={rows}"
-    ));
     let _ = writeln!(stream, "RESIZE {cols} {rows}");
     let _ = stream.flush();
 }
@@ -356,7 +353,7 @@ struct HistoryState {
 
 #[derive(Debug, Clone)]
 struct ErrorLogState {
-    entries: Vec<(u128, String)>,
+    entries: Vec<(u128, LogLevel, String)>,
     scroll_offset: usize,
 }
 
@@ -463,13 +460,6 @@ fn apply_server_message(
                     }
                 }
             }
-            ERROR_LOG.log(format!(
-                "[timing] client snapshot active={} sessions={} main_lines={} main_len={}",
-                snapshot.active_target.as_deref().unwrap_or("none"),
-                snapshot.sessions.len(),
-                snapshot.main_lines.len(),
-                snapshot.main.len()
-            ));
         }
         ServerMessage::Response(response) => {
             if !response.ok {
@@ -1105,7 +1095,7 @@ fn handle_error_log_key(
         {
             *error_log_state = None;
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
             *error_log_state = None;
         }
         KeyCode::Up => {
@@ -1331,10 +1321,6 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
             ])
             .split(outer[0])
     };
-    ERROR_LOG.log(format!(
-        "[ratatui-client] render frame={}x{} main_pane={}x{} sidebar_hidden={sidebar_hidden}",
-        area.width, area.height, inner[0].width, inner[0].height
-    ));
 
     let history_viewport =
         history_state.map(|history| compute_history_viewport(history, inner[0].height as usize));
@@ -1569,9 +1555,15 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
     // operate on the visible position rather than stale values like usize::MAX.
     state.scroll_offset = offset;
 
+    // Fixed-width columns: time (HH:MM:SS.mmm) + level (3 chars) + content.
+    const TIME_WIDTH: usize = 12;
+    const LEVEL_WIDTH: usize = 3;
+    const GUTTER: usize = 2;
+    let content_width = width.saturating_sub(TIME_WIDTH + LEVEL_WIDTH + GUTTER);
+
     let mut lines = Vec::new();
-    for (_, message) in state.entries.iter().skip(offset).take(content_height) {
-        lines.push(Line::from(truncate_display_width(message, width)));
+    for (ts, level, message) in state.entries.iter().skip(offset).take(content_height) {
+        lines.push(format_log_line(*ts, *level, message, content_width));
     }
     while lines.len() < content_height {
         lines.push(Line::from(""));
@@ -1584,7 +1576,7 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
         format!("[{}-{} / {}]", offset + 1, visible_bottom, total_lines)
     };
     let footer_text = format!(
-        "{}  ·  Ctrl-E/Esc/q close · Home/g top · End/G bottom · ↑↓/PgUp/PgDn scroll",
+        "{}  ·  Enter/Esc/q close · Home/g top · End/G bottom · ↑↓/PgUp/PgDn scroll",
         position_text
     );
     let footer = Paragraph::new(Line::from(vec![Span::styled(
@@ -1610,6 +1602,39 @@ fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Re
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(content, content_area);
     frame.render_widget(footer, footer_area);
+}
+
+fn format_log_line(
+    ts: u128,
+    level: LogLevel,
+    message: &str,
+    content_width: usize,
+) -> Line<'static> {
+    let total_seconds = ts / 1000;
+    let millis = (ts % 1000) as u32;
+    let hours = ((total_seconds / 3600) % 24) as u32;
+    let minutes = ((total_seconds / 60) % 60) as u32;
+    let seconds = (total_seconds % 60) as u32;
+    let time = format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
+
+    let (level_text, level_color) = match level {
+        LogLevel::Debug => (LogLevel::Debug.short(), Color::Gray),
+        LogLevel::Info => (LogLevel::Info.short(), Color::White),
+        LogLevel::Warn => (LogLevel::Warn.short(), Color::Yellow),
+        LogLevel::Error => (LogLevel::Error.short(), Color::Red),
+    };
+
+    let content = truncate_display_width(message, content_width);
+    Line::from(vec![
+        Span::styled(time, Style::default().fg(Color::DarkGray).bg(POPUP_BG)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:>3}", level_text),
+            Style::default().fg(level_color).bg(POPUP_BG),
+        ),
+        Span::raw("  "),
+        Span::styled(content, Style::default().fg(Color::White).bg(POPUP_BG)),
+    ])
 }
 
 fn render_settings_popup(

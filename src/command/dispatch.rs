@@ -88,10 +88,10 @@ impl CommandDispatcher {
                 if entries.is_empty() {
                     println!("(no error log entries)");
                 } else {
-                    for (ts, msg) in &entries {
+                    for (ts, level, msg) in &entries {
                         let secs = ts / 1000;
                         let millis = ts % 1000;
-                        println!("[{}.{:03}] {}", secs, millis, msg);
+                        println!("[{}.{:03}] [{:>5}] {}", secs, millis, level.as_str(), msg);
                     }
                 }
                 Ok(())

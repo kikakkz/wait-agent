@@ -84,7 +84,7 @@ pub fn read_clipboard() -> Result<ClipboardReadResult, String> {
             ERROR_LOG.log("[clipboard-reader] text backends returned empty".to_string());
         }
         Err(error) => {
-            ERROR_LOG.log(format!("[clipboard-reader] text backends failed: {error}"));
+            ERROR_LOG.log_error(format!("[clipboard-reader] text backends failed: {error}"));
         }
     }
 
