@@ -5,6 +5,7 @@ use crate::domain::session_catalog::ManagedSessionTaskState;
 use serde_json::Value;
 
 const KIMI_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
     "UserPromptSubmit",
     "PermissionRequest",
     "PermissionResult",
@@ -130,6 +131,7 @@ impl AgentDetector for KimiDetector {
 
     fn signal_state_effect(&self, event: &str, payload: &Value) -> Option<AgentStateEffect> {
         let state = match event {
+            "SessionStart" => ManagedSessionTaskState::Input,
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
                 ManagedSessionTaskState::Running
             }

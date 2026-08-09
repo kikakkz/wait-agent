@@ -86,6 +86,7 @@ command = "/tmp/agent-signal-send Stop"
         assert!(next.contains("command = \"echo user\""));
         assert!(!next.contains("/tmp/agent-signal-send Stop"));
         assert!(next.contains("WAITAGENT_AGENT_NAME=kimi"));
+        assert!(next.contains("event = \"SessionStart\""));
         assert!(next.contains("event = \"UserPromptSubmit\""));
         assert!(next.contains("event = \"PermissionResult\""));
         assert!(next.contains("event = \"SessionEnd\""));

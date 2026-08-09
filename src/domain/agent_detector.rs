@@ -368,6 +368,10 @@ mod tests {
         let registry = DetectorRegistry::default();
 
         assert_eq!(
+            registry.signal_state_effect("kimi", "SessionStart", &Value::Null),
+            Some(AgentStateEffect::Set(ManagedSessionTaskState::Input))
+        );
+        assert_eq!(
             registry.signal_state_effect(
                 "kimi",
                 "PermissionResult",
