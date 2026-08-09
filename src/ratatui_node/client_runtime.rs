@@ -1026,6 +1026,7 @@ fn run_event_loop(
             }
         }
 
+        let dim_background = error_log_state.is_some() || settings_state.is_some();
         terminal
             .draw(|frame| {
                 render(
@@ -1036,11 +1037,11 @@ fn run_event_loop(
                         selected_index,
                         sidebar_hidden,
                         history_state: history_state.as_ref(),
-                        error_log_state: error_log_state.as_ref(),
+                        error_log_state: error_log_state.as_mut(),
                         settings_state: settings_state.as_ref(),
                         active_target: snapshot.active_target.as_deref(),
                         status_message: status_message.as_ref().map(|(text, _)| text.as_str()),
-                        dim_background: error_log_state.is_some() || settings_state.is_some(),
+                        dim_background,
                     },
                 )
             })
@@ -1285,7 +1286,7 @@ struct RenderArgs<'a> {
     selected_index: usize,
     sidebar_hidden: bool,
     history_state: Option<&'a HistoryState>,
-    error_log_state: Option<&'a ErrorLogState>,
+    error_log_state: Option<&'a mut ErrorLogState>,
     settings_state: Option<&'a SettingsState>,
     active_target: Option<&'a str>,
     status_message: Option<&'a str>,
@@ -1544,7 +1545,7 @@ fn render_popup_background(frame: &mut Frame, popup: Rect) {
     frame.render_widget(Block::default().style(Style::default().bg(POPUP_BG)), popup);
 }
 
-fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) {
+fn render_error_log_popup(frame: &mut Frame, state: &mut ErrorLogState, area: Rect) {
     let popup = centered_rect(90, 85, area);
     render_popup_background(frame, popup);
 
@@ -1558,11 +1559,15 @@ fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) 
     frame.render_widget(block, popup);
 
     let width = inner.width as usize;
-    // Reserve the bottom row for the position/hint footer; the rest is content.
-    let content_height = inner.height.saturating_sub(1) as usize;
+    // Reserve the bottom row for the position/hint footer and one blank row
+    // so the footer does not visually collide with the last log line.
+    let content_height = inner.height.saturating_sub(2) as usize;
     let total_lines = state.entries.len();
     let max_offset = total_lines.saturating_sub(content_height);
     let offset = state.scroll_offset.min(max_offset);
+    // Keep the stored offset clamped to the current viewport so Up/Down/PageUp
+    // operate on the visible position rather than stale values like usize::MAX.
+    state.scroll_offset = offset;
 
     let mut lines = Vec::new();
     for (_, message) in state.entries.iter().skip(offset).take(content_height) {
@@ -1595,7 +1600,7 @@ fn render_error_log_popup(frame: &mut Frame, state: &ErrorLogState, area: Rect) 
     };
     let footer_area = Rect {
         x: inner.x,
-        y: inner.y + content_height as u16,
+        y: inner.y + content_height as u16 + 1,
         width: inner.width,
         height: 1,
     };
