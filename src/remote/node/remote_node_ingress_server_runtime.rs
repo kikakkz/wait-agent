@@ -918,7 +918,7 @@ fn handle_owner_stream(
         };
         let authority_node_id = payload.authority_node_id.clone();
         let request_id = payload.request_id.clone();
-        ERROR_LOG.log(format!("[diag-create] owner received local create-session request id={request_id} authority={authority_node_id}"));
+
         let grpc = local_create_session_request_grpc_envelope(authority_node_id, payload);
         let (reply_tx, reply_rx) = mpsc::channel();
         if owner_tx
@@ -938,16 +938,15 @@ fn handle_owner_stream(
         let wait_started = std::time::Instant::now();
         match reply_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(reply) => {
-                ERROR_LOG.log(format!(
-                    "[diag-create] owner got create-session reply after {:?}",
-                    wait_started.elapsed()
-                ));
                 if let Some(envelope) = map_local_reply_from_grpc(reply) {
                     let _ = write_node_session_envelope(&mut stream, &envelope);
                 }
             }
             Err(_) => {
-                ERROR_LOG.log(format!("[diag-create] owner timed out waiting create-session reply id={request_id} after {:?}", wait_started.elapsed()));
+                ERROR_LOG.log_error(format!(
+                    "owner timed out waiting create-session reply id={request_id} after {:?}",
+                    wait_started.elapsed()
+                ));
                 let _ = owner_tx.send(InternalEvent::LocalCreateSessionTimedOut {
                     request_id: request_id.clone(),
                 });
@@ -1751,9 +1750,6 @@ fn handle_transport_event<
         } => {
             let envelope = *boxed_envelope;
             if closed_session_instances.contains(&session_instance_id) {
-                ERROR_LOG.log(format!(
-                    "[diag-ingress] dropping event for closed session_instance_id={session_instance_id} node={node_id}"
-                ));
                 return;
             }
             if let Some(request_id) = grpc_create_session_reply_request_id(&envelope) {
@@ -1773,15 +1769,8 @@ fn handle_transport_event<
             if is_command {
                 if let Some(active) = sessions.get(&session_instance_id) {
                     if let Some(event) = map_inbound_grpc_authority_event(envelope) {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] ingress server: routing command via authority_manager node={node_id}"
-                        ));
                         authority_manager.handle_event(&active.session, event);
                     }
-                } else {
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] ingress server: no session for command node={node_id}, dropping"
-                    ));
                 }
                 return;
             }
@@ -1864,13 +1853,13 @@ fn mark_discovered_node_offline_if_last_ingress_session<B: RemoteTargetPublicati
         return;
     }
     if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(node_id) {
-        ERROR_LOG.log(format!(
-            "[diag] ingress server: failed to mark discovered node offline {node_id}: {error}"
+        ERROR_LOG.log_error(format!(
+            "ingress server: failed to mark discovered node offline {node_id}: {error}"
         ));
     }
     if let Err(error) = publication_runtime.signal_remote_node_offline(node_id) {
-        ERROR_LOG.log(format!(
-            "[diag] ingress server: failed to signal remote node offline {node_id}: {error}"
+        ERROR_LOG.log_error(format!(
+            "ingress server: failed to signal remote node offline {node_id}: {error}"
         ));
     }
 }
@@ -1904,12 +1893,12 @@ fn handle_local_create_session_request(
         return;
     };
     let request_id = grpc_create_session_request_id(&envelope).unwrap_or_default();
-    ERROR_LOG.log(format!("[diag-create] routing create-session request id={request_id} authority={authority_node_id}"));
+
     pending_create_sessions.insert(request_id.clone(), reply_tx);
     let send_started = std::time::Instant::now();
     if active.session.send(envelope).is_err() {
-        ERROR_LOG.log(format!(
-            "[diag-create] failed sending create-session request id={request_id} after {:?}",
+        ERROR_LOG.log_error(format!(
+            "failed sending create-session request id={request_id} after {:?}",
             send_started.elapsed()
         ));
         if let Some(reply_tx) = pending_create_sessions.remove(&request_id) {
@@ -2137,11 +2126,7 @@ fn handle_internal_event(
                     return;
                 }
             };
-            ERROR_LOG.log(format!(
-                "[diag-timing] ingress authority output: forwarding envelope type={} to session_instance_id={}",
-                envelope.payload.message_type(),
-                session_instance_id
-            ));
+
             if let Err(error) = active.session.send(grpc) {
                 ERROR_LOG.log(format!(
                     "[remote-node-ingress] failed to send authority output for node={node_id} session_instance_id={session_instance_id} type={}: {error}",
@@ -2246,8 +2231,8 @@ fn send_publication_ack(
         })),
     };
     if let Err(error) = session.session.send(envelope) {
-        ERROR_LOG.log(format!(
-            "[diag-publication] failed to send publication ack node={node_id} target={target_id} revision={revision}: {error}"
+        ERROR_LOG.log_error(format!(
+            "failed to send publication ack node={node_id} target={target_id} revision={revision}: {error}"
         ));
     }
 }
@@ -2469,13 +2454,13 @@ fn handle_target_exited<B: RemoteTargetPublicationBackend>(
         }
         PublicationRevisionDecision::Legacy | PublicationRevisionDecision::Apply => {}
     }
-    let t_exit = std::time::Instant::now();
-    ERROR_LOG.log_exit_latency(format!(
-        "[diag-bug] ingress_server route_transport_envelope: received TargetExited node={node_id} session={}",
+    let _t_exit = std::time::Instant::now();
+    ERROR_LOG.log_error(format!(
+        "ingress_server route_transport_envelope: received TargetExited node={node_id} session={}",
         payload.transport_session_id
     ));
     let mapped = map_target_exited_envelope(node_id, envelope, payload);
-    let t_apply = std::time::Instant::now();
+    let _t_apply = std::time::Instant::now();
     match publication_runtime.apply_discovered_remote_session_envelope_for_sockets(
         node_id,
         mapped,
@@ -2514,15 +2499,9 @@ fn handle_target_exited<B: RemoteTargetPublicationBackend>(
             return Err(error);
         }
     }
-    ERROR_LOG.log_exit_latency(format!(
-        "[diag-exit] ingress_target_exited_apply node={} session={} elapsed={:?} total={:?} stage=ingress_server",
-        node_id,
-        payload.transport_session_id,
-        t_apply.elapsed(),
-        t_exit.elapsed()
-    ));
-    ERROR_LOG.log_exit_latency(format!(
-        "[diag-bug] ingress_server: applied TargetExited to live workspaces node={node_id} session={}",
+
+    ERROR_LOG.log_error(format!(
+        "ingress_server: applied TargetExited to live workspaces node={node_id} session={}",
         payload.transport_session_id
     ));
     let Some(session) = session else {
@@ -2591,10 +2570,7 @@ fn handle_raw_pty_output(
     let Some(session) = session else {
         return Ok(());
     };
-    ERROR_LOG.log(format!(
-        "[diag-timing] ingress route RawPtyOutput node={node_id} session={} target={} seq={} bytes={}",
-        payload.session_id, payload.target_id, payload.output_seq, payload.output_bytes.len()
-    ));
+
     let session_id = route_session_id(envelope)
         .or_else(|| payload_session_id(&payload.session_id, &payload.target_id))
         .unwrap_or_else(|| payload.target_id.clone());

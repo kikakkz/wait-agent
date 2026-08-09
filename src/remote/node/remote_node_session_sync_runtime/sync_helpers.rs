@@ -618,7 +618,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                     }
                     if session_opened {
                         publication_tracker.on_connected();
-                        let had_pending_publication = publication_dirty;
+                        let _had_pending_publication = publication_dirty;
                         if observe_local_session_catalog(
                             &gateway,
                             &node_id,
@@ -640,13 +640,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                             SessionSyncMode::FullBaseline,
                             "SessionOpened",
                         );
-                        if !should_reconnect && had_pending_publication {
-                            ERROR_LOG.log(
-                                "[diag-sync] replaying pending local catalog change after SessionOpened"
-                                    .to_string(),
-                            );
-                            publication_dirty = false;
-                        } else if !should_reconnect {
+                        if !should_reconnect {
                             publication_dirty = false;
                         }
                     }
@@ -654,19 +648,13 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                 SessionSyncEvent::RetryDue => {
                     if let Some(session_handle) = active_session.as_ref() {
                         let due = publication_tracker.due_retry_publications(Instant::now());
-                        if !due.is_empty() {
-                            ERROR_LOG.log(format!(
-                                "[diag-publication] retrying pending source publications count={}",
-                                due.len()
-                            ));
-                        }
                         if let Err(error) = send_pending_source_publications(
                             session_handle,
                             &mut publication_tracker,
                             due,
                         ) {
-                            ERROR_LOG.log(format!(
-                                "[diag-publication] source publication retry failed, will reconnect: {error}"
+                            ERROR_LOG.log_error(format!(
+                                "source publication retry failed, will reconnect: {error}"
                             ));
                             publication_tracker.on_disconnected();
                             should_reconnect = true;
@@ -675,28 +663,18 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                 }
                 SessionSyncEvent::AuthorityHostOutput(envelope) => {
                     let Some(session_handle) = active_session.as_ref() else {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] authority host output deferred without active session type={}",
-                            envelope.payload.message_type()
-                        ));
                         continue;
                     };
-                    if let Err(error) =
+                    if let Err(_error) =
                         send_authority_host_output_to_session(session_handle, &envelope)
                     {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] authority host output send failed, will reconnect: {error}"
-                        ));
                         publication_tracker.on_disconnected();
                         should_reconnect = true;
                     }
                 }
                 SessionSyncEvent::LocalCatalogChanged(request) => {
-                    let reason = request.reason.clone();
-                    ERROR_LOG.log_exit_latency(format!(
-                        "[diag-exit] sync_event_received reason={} stage=session_sync",
-                        reason.as_str()
-                    ));
+                    let _reason = request.reason.clone();
+
                     let ack = if observe_local_session_catalog(
                         &gateway,
                         &node_id,
@@ -728,14 +706,7 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
                             ack = LocalCatalogChangeAck::Published;
                         }
                     }
-                    ERROR_LOG.log(format!(
-                        "[diag-sync] local catalog change processed reason={} ack={} active_session={} dirty={} should_reconnect={}",
-                        reason.as_str(),
-                        ack.as_str(),
-                        active_session.is_some(),
-                        publication_dirty,
-                        should_reconnect
-                    ));
+
                     acknowledge_local_catalog_change(request, Ok(ack));
                 }
                 SessionSyncEvent::Stop => return,
@@ -818,10 +789,6 @@ pub(super) fn wait_for_reconnect_delay_or_stop(
         match session_event_rx.recv_timeout(remaining) {
             Ok(SessionSyncEvent::Stop) => return ReconnectWaitOutcome::Stop,
             Ok(SessionSyncEvent::LocalCatalogChanged(request)) => {
-                ERROR_LOG.log_exit_latency(format!(
-                    "[diag-exit] sync_event_queued_for_reconnect reason={} stage=session_sync",
-                    request.reason.as_str()
-                ));
                 return ReconnectWaitOutcome::LocalCatalogChanged(request);
             }
             Ok(_) => continue,
@@ -885,9 +852,7 @@ where
             ..
         } => {
             let node_id = event_node_id.as_str();
-            ERROR_LOG.log(format!(
-                "[diag-sync] SessionClosed for node {node_id}, will reconnect"
-            ));
+
             if let Some(publication_runtime) = publication_runtime {
                 mark_discovered_remote_node_offline_best_effort(publication_runtime, node_id);
             }
@@ -904,8 +869,8 @@ where
             ..
         } => {
             let node_id = event_node_id.as_deref().unwrap_or(node_id);
-            ERROR_LOG.log(format!(
-                "[diag-sync] TransportFailed node={node_id} msg={message}, will reconnect"
+            ERROR_LOG.log_error(format!(
+                "TransportFailed node={node_id} msg={message}, will reconnect"
             ));
             if let Some(publication_runtime) = publication_runtime {
                 mark_discovered_remote_node_offline_best_effort(publication_runtime, node_id);
@@ -930,13 +895,13 @@ fn mark_discovered_remote_node_offline_best_effort<P>(
     let node_id = node_id.to_string();
     thread::spawn(move || {
         if let Err(error) = publication_runtime.mark_discovered_remote_node_offline(&node_id) {
-            ERROR_LOG.log(format!(
-                "[diag-sync] failed to mark discovered remote node offline {node_id}: {error}"
+            ERROR_LOG.log_error(format!(
+                "failed to mark discovered remote node offline {node_id}: {error}"
             ));
         }
         if let Err(error) = publication_runtime.signal_remote_node_offline(&node_id) {
-            ERROR_LOG.log(format!(
-                "[diag-sync] failed to signal remote node offline {node_id}: {error}"
+            ERROR_LOG.log_error(format!(
+                "failed to signal remote node offline {node_id}: {error}"
             ));
         }
     });
@@ -967,10 +932,7 @@ fn send_authority_host_output_to_session(
     .map_err(|error| {
         crate::infra::remote_grpc_transport::RemoteNodeTransportError::new(error.to_string())
     })?;
-    ERROR_LOG.log(format!(
-        "[diag-timing] authority host output: forwarding envelope type={} to current gRPC session",
-        envelope.payload.message_type()
-    ));
+
     session_handle.send(grpc)
 }
 
@@ -994,24 +956,12 @@ where
     G: LocalSessionCatalog,
 {
     let local_sessions = match gateway.list_local_sessions() {
-        Ok(sessions) => {
-            ERROR_LOG.log(format!(
-                "[diag-timing] sync_local_sessions: found {} local sessions",
-                sessions.len()
-            ));
-            ERROR_LOG.log(format!(
-                "[diag-newhost] sync_local_sessions list_local_sessions node={} sessions={} elapsed={:?}",
-                node_id,
-                sessions.len(),
-                t_sync.elapsed()
-            ));
-            sessions
-        }
+        Ok(sessions) => sessions,
         Err(_) => {
             ERROR_LOG
                 .log("[diag-timing] sync_local_sessions: list_local_sessions FAILED".to_string());
-            ERROR_LOG.log(format!(
-                "[diag-newhost] sync_local_sessions list_local_sessions FAILED node={} elapsed={:?}",
+            ERROR_LOG.log_error(format!(
+                "sync_local_sessions list_local_sessions FAILED node={} elapsed={:?}",
                 node_id,
                 t_sync.elapsed()
             ));
@@ -1022,16 +972,7 @@ where
         .into_iter()
         .filter(|s| *s.address.transport() == SessionTransport::Local)
         .collect();
-    ERROR_LOG.log(format!(
-        "[diag-timing] sync_local_sessions: after filter {} local sessions",
-        local_sessions.len()
-    ));
-    ERROR_LOG.log(format!(
-        "[diag-newhost] sync_local_sessions filter node={} local_sessions={} elapsed={:?}",
-        node_id,
-        local_sessions.len(),
-        t_sync.elapsed()
-    ));
+
     Some(local_sessions_by_local_id(local_sessions))
 }
 
@@ -1045,22 +986,14 @@ where
     G: LocalSessionCatalog,
 {
     let t_sync = Instant::now();
-    ERROR_LOG.log(format!(
-        "[diag-newhost] observe_local_sessions start node={}",
-        node_id
-    ));
+
     let Some(current_sessions) = observe_current_local_sessions(gateway, node_id, t_sync) else {
         return false;
     };
     let changed = !*observed_initialized || *observed_sessions != current_sessions;
     *observed_sessions = current_sessions;
     *observed_initialized = true;
-    ERROR_LOG.log(format!(
-        "[diag-newhost] observe_local_sessions done node={} changed={} elapsed={:?}",
-        node_id,
-        changed,
-        t_sync.elapsed()
-    ));
+
     changed
 }
 
@@ -1094,8 +1027,8 @@ where
     )
     .is_err()
     {
-        ERROR_LOG.log(format!(
-            "[diag-sync] sync_local_sessions after {reason} failed, will reconnect"
+        ERROR_LOG.log_error(format!(
+            "sync_local_sessions after {reason} failed, will reconnect"
         ));
         context.publication_tracker.on_disconnected();
         return true;
@@ -1115,25 +1048,8 @@ where
 {
     let t_sync = Instant::now();
     let delta = compute_session_sync_delta(context.published, context.observed, mode);
-    ERROR_LOG.log(format!(
-        "[diag-newhost] sync_local_sessions delta node={} publish={} exit={} elapsed={:?}",
-        node_id,
-        delta.publish.len(),
-        delta.exit.len(),
-        t_sync.elapsed()
-    ));
-    for session in &delta.publish {
-        ERROR_LOG.log(format!(
-            "[diag-sync] publishing target node={} target={}",
-            node_id,
-            session.address.qualified_target()
-        ));
-    }
-    ERROR_LOG.log(format!(
-        "[diag-timing] sync_local_sessions: delta publish={} exit={}",
-        delta.publish.len(),
-        delta.exit.len()
-    ));
+
+    for _session in &delta.publish {}
 
     for session in &delta.publish {
         let t_send = Instant::now();
@@ -1159,9 +1075,9 @@ where
         if let Err(error) =
             send_source_publication(session_handle, context.publication_tracker, &publication)
         {
-            ERROR_LOG.log(format!("[diag-sync] session_handle.send failed: {error}"));
-            ERROR_LOG.log(format!(
-                "[diag-newhost] sync_local_sessions publish_send FAILED node={} target={} elapsed={:?} total={:?}",
+            ERROR_LOG.log_error(format!("session_handle.send failed: {error}"));
+            ERROR_LOG.log_error(format!(
+                "sync_local_sessions publish_send FAILED node={} target={} elapsed={:?} total={:?}",
                 node_id,
                 session.address.qualified_target(),
                 t_send.elapsed(),
@@ -1169,44 +1085,25 @@ where
             ));
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()));
         }
-        ERROR_LOG.log(format!(
-            "[diag-newhost] sync_local_sessions publish_send node={} target={} elapsed={:?} total={:?}",
-            node_id,
-            session.address.qualified_target(),
-            t_send.elapsed(),
-            t_sync.elapsed()
-        ));
     }
 
     for previous in &delta.exit {
-        let t_exit = Instant::now();
-        ERROR_LOG.log_exit_latency(format!(
-            "[diag-exit] sync_exit_start node={} target={} total={:?} stage=session_sync",
-            node_id,
-            previous.address.qualified_target(),
-            t_sync.elapsed()
-        ));
+        let _t_exit = Instant::now();
+
         if previous.is_target_host() {
-            let t_observe = Instant::now();
+            let _t_observe = Instant::now();
             if let Err(error) = local_target_exit_observer.observe_local_target_exit(
                 previous.address.server_id(),
                 previous.address.session_id(),
             ) {
-                ERROR_LOG.log(format!(
-                    "[diag-sync] failed to observe local target exit socket={} target={}: {error}",
+                ERROR_LOG.log_error(format!(
+                    "failed to observe local target exit socket={} target={}: {error}",
                     previous.address.server_id(),
                     previous.address.session_id()
                 ));
             }
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] sync_exit_observe_local node={} target={} elapsed={:?} total={:?} stage=session_sync",
-                node_id,
-                previous.address.qualified_target(),
-                t_observe.elapsed(),
-                t_sync.elapsed()
-            ));
         }
-        let t_send = Instant::now();
+        let _t_send = Instant::now();
         let publication = context.publication_tracker.on_target_exited(
             node_id,
             session_handle.session_instance_id(),
@@ -1215,22 +1112,10 @@ where
         );
         send_source_publication(session_handle, context.publication_tracker, &publication)
             .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))?;
-        ERROR_LOG.log_exit_latency(format!(
-            "[diag-exit] sync_exit_send node={} target={} elapsed={:?} total={:?} exit_total={:?} stage=session_sync",
-            node_id,
-            previous.address.qualified_target(),
-            t_send.elapsed(),
-            t_sync.elapsed(),
-            t_exit.elapsed()
-        ));
     }
 
     *context.published = context.observed.clone();
-    ERROR_LOG.log(format!(
-        "[diag-newhost] sync_local_sessions done node={} elapsed={:?}",
-        node_id,
-        t_sync.elapsed()
-    ));
+
     Ok(())
 }
 
@@ -1677,19 +1562,13 @@ fn request_local_catalog_change(
     local_catalog_tx: &mpsc::Sender<LocalCatalogChangeRequest>,
     reason: LocalCatalogChangeReason,
 ) -> Result<LocalCatalogChangeAck, String> {
-    let reason_label = reason.as_str();
+    let _reason_label = reason.as_str();
     let (ack_tx, ack_rx) = mpsc::channel();
     local_catalog_tx
         .send(LocalCatalogChangeRequest::with_ack(reason, ack_tx))
         .map_err(|_| "local-catalog-channel-closed".to_string())?;
     match ack_rx.recv_timeout(OWNER_COMMAND_ACK_TIMEOUT) {
-        Ok(Ok(ack)) => {
-            ERROR_LOG.log(format!(
-                "[diag-sync] owner local catalog command ack reason={reason_label} ack={}",
-                ack.as_str()
-            ));
-            Ok(ack)
-        }
+        Ok(Ok(ack)) => Ok(ack),
         Ok(Err(message)) => Err(message),
         Err(mpsc::RecvTimeoutError::Timeout) => Err("local-catalog-ack-timeout".to_string()),
         Err(mpsc::RecvTimeoutError::Disconnected) => {

@@ -227,7 +227,7 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         envelope: ProtocolEnvelope<ControlPlanePayload>,
         live_workspace_sockets: &[String],
     ) -> Result<(), LifecycleError> {
-        let t_total = std::time::Instant::now();
+        let _t_total = std::time::Instant::now();
         let remote_session = discovered_remote_session_from_envelope(node_id, &envelope)?;
         if let Some(session) = remote_session.published_session {
             if is_publishable_discovered_remote_session(&session) {
@@ -235,50 +235,18 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
             }
         }
         if let Some((authority_id, transport_session_id)) = remote_session.exited_session {
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_apply_exit_start node={} authority={} session={} stage=publication_apply",
-                node_id, authority_id, transport_session_id
-            ));
-            let t_remove = std::time::Instant::now();
+            let _t_remove = std::time::Instant::now();
             self.signal_remote_runtime_owner_remove(node_id, &authority_id, &transport_session_id)?;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_apply_remove node={} authority={} session={} elapsed={:?} total={:?} stage=publication_apply",
-                node_id,
-                authority_id,
-                transport_session_id,
-                t_remove.elapsed(),
-                t_total.elapsed()
-            ));
-            let t_workspace = std::time::Instant::now();
+
+            let _t_workspace = std::time::Instant::now();
             let target = format!("{authority_id}:{transport_session_id}");
-            let signalled = self
+            let _signalled = self
                 .signal_remote_target_exited_to_live_workspaces(live_workspace_sockets, &target)?;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_apply_workspace_signal node={} target={} signalled={} elapsed={:?} total={:?} stage=publication_apply",
-                node_id,
-                target,
-                signalled,
-                t_workspace.elapsed(),
-                t_total.elapsed()
-            ));
         }
-        ERROR_LOG.log_exit_latency(format!(
-            "[diag-exit] publication_apply_live_sockets node={} count={} elapsed={:?} total={:?} stage=publication_apply",
-            node_id,
-            live_workspace_sockets.len(),
-            std::time::Duration::ZERO,
-            t_total.elapsed()
-        ));
+
         if !live_workspace_sockets.is_empty() {
-            let t_refresh = std::time::Instant::now();
+            let _t_refresh = std::time::Instant::now();
             self.refresh_live_workspaces(live_workspace_sockets)?;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_apply_refresh node={} sockets={:?} elapsed={:?} total={:?} stage=publication_apply",
-                node_id,
-                live_workspace_sockets,
-                t_refresh.elapsed(),
-                t_total.elapsed()
-            ));
         }
         Ok(())
     }
@@ -324,24 +292,14 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         node_id: &str,
         session: &ManagedSessionRecord,
     ) -> Result<(), LifecycleError> {
-        let t_upsert = std::time::Instant::now();
-        ERROR_LOG.log(format!(
-            "[diag-sync] upsert discovered remote session node={} target={}",
-            node_id,
-            session.address.qualified_target()
-        ));
+        let _t_upsert = std::time::Instant::now();
+
         let result = self.remote_runtime_owner.upsert_session(node_id, session);
-        ERROR_LOG.log(format!(
-            "[diag-newhost] remote_runtime_owner_upsert node={} target={} ok={} elapsed={:?}",
-            node_id,
-            session.address.qualified_target(),
-            result.is_ok(),
-            t_upsert.elapsed()
-        ));
+
         if result.is_ok() {
             if let Err(error) = self.backend.on_remote_session_upserted(node_id, session) {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] on_remote_session_upserted node={} target={} error={}",
+                ERROR_LOG.log_error(format!(
+                    "on_remote_session_upserted node={} target={} error={}",
                     node_id,
                     session.address.qualified_target(),
                     error
@@ -357,26 +315,19 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         authority_id: &str,
         transport_session_id: &str,
     ) -> Result<(), LifecycleError> {
-        let t_remove = std::time::Instant::now();
+        let _t_remove = std::time::Instant::now();
         let result =
             self.remote_runtime_owner
                 .remove_session(node_id, authority_id, transport_session_id);
-        ERROR_LOG.log_exit_latency(format!(
-            "[diag-exit] remote_runtime_owner_remove node={} authority={} session={} ok={} elapsed={:?} stage=publication_apply",
-            node_id,
-            authority_id,
-            transport_session_id,
-            result.is_ok(),
-            t_remove.elapsed()
-        ));
+
         if result.is_ok() {
             let target = format!("{authority_id}:{transport_session_id}");
             if let Err(error) = self.signal_remote_target_exited_to_live_workspaces(
                 &self.live_workspace_socket_names()?,
                 &target,
             ) {
-                ERROR_LOG.log(format!(
-                    "[diag-exit] failed to signal workspace exit for {target}: {error}"
+                ERROR_LOG.log_error(format!(
+                    "failed to signal workspace exit for {target}: {error}"
                 ));
             }
         }
@@ -404,34 +355,22 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
     ) -> Result<usize, LifecycleError> {
         let mut signalled = 0;
         for socket_name in socket_names {
-            let t_workspace = std::time::Instant::now();
+            let _t_workspace = std::time::Instant::now();
             let count = self.backend.signal_remote_target_exited_to_workspace(
                 socket_name,
                 target,
                 &self.current_executable,
             )?;
             signalled += count;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_workspace_exit_spawn socket={} target={} signalled={} elapsed={:?} stage=publication_apply",
-                socket_name,
-                target,
-                count,
-                t_workspace.elapsed()
-            ));
         }
         Ok(signalled)
     }
 
     fn refresh_live_workspaces(&self, socket_names: &[String]) -> Result<(), LifecycleError> {
         for socket_name in socket_names {
-            let t_spawn = std::time::Instant::now();
+            let _t_spawn = std::time::Instant::now();
             self.backend
                 .refresh_workspace_socket(socket_name, &self.current_executable)?;
-            ERROR_LOG.log_exit_latency(format!(
-                "[diag-exit] publication_refresh_spawn socket={} elapsed={:?} stage=publication_apply",
-                socket_name,
-                t_spawn.elapsed()
-            ));
         }
         Ok(())
     }

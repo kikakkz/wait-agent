@@ -7,12 +7,8 @@ use crate::remote::network_state::command_network_config;
 // workspace command runtime. Event-r4 keeps that path explicit so new local
 // behavior does not drift back into ad hoc or historical entrypoints.
 pub fn run() -> Result<(), AppError> {
-    let args: Vec<String> = std::env::args().collect();
-    ERROR_LOG.log(format!(
-        "[diag] bootstrap: pid={} args={:?}",
-        std::process::id(),
-        args
-    ));
+    let _args: Vec<String> = std::env::args().collect();
+
     let cli = Cli::parse(std::env::args_os())?;
     let network = command_network_config(cli.network.clone(), cli.network_explicit, &cli.command);
     let dispatcher =
@@ -24,8 +20,8 @@ pub fn run() -> Result<(), AppError> {
     let command = cli.command.clone();
     let result = dispatcher.dispatch(cli.command);
     if let Err(error) = &result {
-        ERROR_LOG.log(format!(
-            "[diag-error] dispatch failed: command={command:?} error={error:?}"
+        ERROR_LOG.log_error(format!(
+            "dispatch failed: command={command:?} error={error:?}"
         ));
     }
     result

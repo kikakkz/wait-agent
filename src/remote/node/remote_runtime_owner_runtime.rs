@@ -201,8 +201,8 @@ impl RemoteRuntimeOwnerRuntime {
                 if let Err(error) =
                     notify_remote_runtime_owner_ready(command.ready_socket.as_deref(), Ok(()))
                 {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_runtime_owner ready notification failed: {error}"
+                    ERROR_LOG.log_error(format!(
+                        "remote_runtime_owner ready notification failed: {error}"
                     ));
                 }
                 listener
@@ -240,30 +240,20 @@ async fn run_remote_runtime_owner_event_loop(
             result = listener.accept() => {
                 let (mut stream, _) = result.map_err(remote_runtime_owner_error)?;
                 let t_client = Instant::now();
-                ERROR_LOG.log("[diag-newhost] remote_owner server accepted".to_string());
+
                 match handle_remote_runtime_owner_client_async(&state, &mut stream).await {
                     Ok(Some(payload)) => {
-                        let t_write = Instant::now();
-                        let write_ok = stream.write_all(payload.as_bytes()).await.is_ok();
-                        let flush_ok = stream.flush().await.is_ok();
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner server write_response bytes={} write_ok={} flush_ok={} elapsed={:?} total={:?}",
-                            payload.len(),
-                            write_ok,
-                            flush_ok,
-                            t_write.elapsed(),
-                            t_client.elapsed()
-                        ));
+                        let _t_write = Instant::now();
+                        let _write_ok = stream.write_all(payload.as_bytes()).await.is_ok();
+                        let _flush_ok = stream.flush().await.is_ok();
+
                     }
                     Ok(None) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner server no_response total={:?}",
-                            t_client.elapsed()
-                        ));
+
                     }
                     Err(error) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner server handle_error error={} total={:?}",
+                        ERROR_LOG.log_error(format!(
+                            "remote_owner server handle_error error={} total={:?}",
                             error,
                             t_client.elapsed()
                         ));
@@ -275,8 +265,8 @@ async fn run_remote_runtime_owner_event_loop(
                 let pruned = prune_expired_offline_nodes(&state, Instant::now());
                 if !pruned.is_empty() {
                     if let Err(error) = emit_remote_target_exited_cleanup(&state, &pruned) {
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner cleanup error: {error}"
+                        ERROR_LOG.log_error(format!(
+                            "remote_owner cleanup error: {error}"
                         ));
                     }
                 }
@@ -291,24 +281,13 @@ async fn handle_remote_runtime_owner_client_async(
     state: &RemoteRuntimeOwnerSharedState,
     stream: &mut TokioUnixStream,
 ) -> Result<Option<String>, LifecycleError> {
-    let t_total = Instant::now();
+    let _t_total = Instant::now();
     let command = read_remote_runtime_owner_command_async(stream).await?;
-    let command_label = remote_runtime_owner_command_label(&command);
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner server read_command command={} elapsed={:?}",
-        command_label,
-        t_total.elapsed()
-    ));
-    let t_handle = Instant::now();
-    let response = handle_remote_runtime_owner_command(state, command);
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
-        command_label,
-        response.is_ok(),
-        t_handle.elapsed(),
-        t_total.elapsed()
-    ));
-    response
+    let _command_label = remote_runtime_owner_command_label(&command);
+
+    let _t_handle = Instant::now();
+
+    handle_remote_runtime_owner_command(state, command)
 }
 
 async fn read_remote_runtime_owner_command_async(
@@ -526,8 +505,8 @@ impl RemoteRuntimeOwnerRuntime {
                     Ok(Vec::new())
                 }),
             Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] remote_owner list_targets_by_source_binding read_failed listener={} error={}",
+                ERROR_LOG.log_error(format!(
+                    "remote_owner list_targets_by_source_binding read_failed listener={} error={}",
                     self.network.listener_addr(),
                     error
                 ));
@@ -590,17 +569,9 @@ impl RemoteRuntimeOwnerRuntime {
                 sessions: Vec::new(),
             });
         }
-        let t_connect = Instant::now();
+        let _t_connect = Instant::now();
         let mut stream = match UnixStream::connect(&socket_path) {
-            Ok(stream) => {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] remote_owner try_snapshot connect listener={} elapsed={:?} total={:?}",
-                    self.network.listener_addr(),
-                    t_connect.elapsed(),
-                    t_total.elapsed()
-                ));
-                stream
-            }
+            Ok(stream) => stream,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 return Ok(RemoteRuntimeOwnerSnapshot {
                     sessions: Vec::new(),
@@ -631,50 +602,26 @@ impl RemoteRuntimeOwnerRuntime {
         // Gracefully degrade: if the owner is unresponsive, return an empty
         // snapshot so local session switching can continue without remote
         // sessions visible.
-        let t_write = Instant::now();
-        let write_ok = stream
+        let _t_write = Instant::now();
+        let _write_ok = stream
             .write_all(
                 render_remote_runtime_owner_command(&RemoteRuntimeOwnerCommandEnvelope::Snapshot)
                     .as_bytes(),
             )
             .is_ok();
-        let flush_ok = stream.flush().is_ok();
-        let shutdown_ok = stream.shutdown(Shutdown::Write).is_ok();
-        ERROR_LOG.log(format!(
-            "[diag-newhost] remote_owner try_snapshot write listener={} write_ok={} flush_ok={} shutdown_ok={} elapsed={:?} total={:?}",
-            self.network.listener_addr(),
-            write_ok,
-            flush_ok,
-            shutdown_ok,
-            t_write.elapsed(),
-            t_total.elapsed()
-        ));
+        let _flush_ok = stream.flush().is_ok();
+        let _shutdown_ok = stream.shutdown(Shutdown::Write).is_ok();
+
         let mut response = String::new();
         let t_read = Instant::now();
         match stream.read_to_string(&mut response) {
             Ok(_) => {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] remote_owner try_snapshot read listener={} bytes={} elapsed={:?} total={:?}",
-                    self.network.listener_addr(),
-                    response.len(),
-                    t_read.elapsed(),
-                    t_total.elapsed()
-                ));
                 let t_parse = Instant::now();
                 match parse_remote_runtime_owner_snapshot(&response) {
-                    Ok(snapshot) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner try_snapshot parse listener={} sessions={} elapsed={:?} total={:?}",
-                            self.network.listener_addr(),
-                            snapshot.sessions.len(),
-                            t_parse.elapsed(),
-                            t_total.elapsed()
-                        ));
-                        Ok(snapshot)
-                    }
+                    Ok(snapshot) => Ok(snapshot),
                     Err(_) => {
-                        ERROR_LOG.log(format!(
-                            "[diag-newhost] remote_owner try_snapshot parse_failed listener={} elapsed={:?} total={:?}",
+                        ERROR_LOG.log_error(format!(
+                            "remote_owner try_snapshot parse_failed listener={} elapsed={:?} total={:?}",
                             self.network.listener_addr(),
                             t_parse.elapsed(),
                             t_total.elapsed()
@@ -687,8 +634,8 @@ impl RemoteRuntimeOwnerRuntime {
                 }
             }
             Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] remote_owner try_snapshot read_failed listener={} error={} elapsed={:?} total={:?}",
+                ERROR_LOG.log_error(format!(
+                    "remote_owner try_snapshot read_failed listener={} error={} elapsed={:?} total={:?}",
                     self.network.listener_addr(),
                     error,
                     t_read.elapsed(),
@@ -735,24 +682,12 @@ fn handle_remote_runtime_owner_client(
     state: &RemoteRuntimeOwnerSharedState,
     stream: &mut UnixStream,
 ) -> Result<Option<String>, LifecycleError> {
-    let t_total = Instant::now();
+    let _t_total = Instant::now();
     let command = read_remote_runtime_owner_command(stream)?;
-    let command_label = remote_runtime_owner_command_label(&command);
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner server read_command command={} elapsed={:?}",
-        command_label,
-        t_total.elapsed()
-    ));
-    let t_handle = Instant::now();
-    let response = handle_remote_runtime_owner_command(state, command);
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner server handled command={} ok={} elapsed={:?} total={:?}",
-        command_label,
-        response.is_ok(),
-        t_handle.elapsed(),
-        t_total.elapsed()
-    ));
-    response
+    let _command_label = remote_runtime_owner_command_label(&command);
+
+    let _t_handle = Instant::now();
+    handle_remote_runtime_owner_command(state, command)
 }
 
 fn handle_remote_runtime_owner_command(
@@ -915,9 +850,7 @@ fn handle_remote_runtime_owner_command(
             let pruned = prune_expired_offline_nodes(state, Instant::now());
             if !pruned.is_empty() {
                 if let Err(error) = emit_remote_target_exited_cleanup(state, &pruned) {
-                    ERROR_LOG.log(format!(
-                        "[diag-newhost] remote_owner snapshot cleanup error: {error}"
-                    ));
+                    ERROR_LOG.log_error(format!("remote_owner snapshot cleanup error: {error}"));
                 }
             }
             let snapshot = render_remote_runtime_owner_snapshot(
@@ -1209,19 +1142,13 @@ fn try_signal_remote_runtime_owner_command(
     network: &RemoteNetworkConfig,
     command: &RemoteRuntimeOwnerCommandEnvelope,
 ) -> Result<(), LifecycleError> {
-    let t_total = Instant::now();
-    let command_label = remote_runtime_owner_command_label(command);
-    let t_connect = Instant::now();
+    let _t_total = Instant::now();
+    let _command_label = remote_runtime_owner_command_label(command);
+    let _t_connect = Instant::now();
     let mut stream = UnixStream::connect(remote_runtime_owner_socket_path(network))
         .map_err(remote_runtime_owner_io_error)?;
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner signal connect listener={} command={} elapsed={:?} total={:?}",
-        network.listener_addr(),
-        command_label,
-        t_connect.elapsed(),
-        t_total.elapsed()
-    ));
-    let t_write = Instant::now();
+
+    let _t_write = Instant::now();
     stream
         .write_all(render_remote_runtime_owner_command(command).as_bytes())
         .map_err(remote_runtime_owner_io_error)?;
@@ -1229,27 +1156,13 @@ fn try_signal_remote_runtime_owner_command(
     stream
         .shutdown(Shutdown::Write)
         .map_err(remote_runtime_owner_io_error)?;
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner signal write listener={} command={} elapsed={:?} total={:?}",
-        network.listener_addr(),
-        command_label,
-        t_write.elapsed(),
-        t_total.elapsed()
-    ));
 
     let mut response = String::new();
-    let t_read = Instant::now();
+    let _t_read = Instant::now();
     stream
         .read_to_string(&mut response)
         .map_err(remote_runtime_owner_io_error)?;
-    ERROR_LOG.log(format!(
-        "[diag-newhost] remote_owner signal read listener={} command={} bytes={} elapsed={:?} total={:?}",
-        network.listener_addr(),
-        command_label,
-        response.len(),
-        t_read.elapsed(),
-        t_total.elapsed()
-    ));
+
     if response.trim() == "ok" {
         Ok(())
     } else {

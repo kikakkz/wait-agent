@@ -261,14 +261,9 @@ impl RemoteNodeSessionSyncRuntime {
         socket_name: &str,
         network: &RemoteNetworkConfig,
     ) -> Result<(), LifecycleError> {
-        let t_owner = std::time::Instant::now();
+        let _t_owner = std::time::Instant::now();
         let socket_path = remote_session_sync_owner_socket_path(socket_name);
         if remote_session_sync_owner_available(&socket_path) {
-            ERROR_LOG.log(format!(
-                "[diag-newhost] ensure_session_sync_owner socket={} already_available elapsed={:?}",
-                socket_name,
-                t_owner.elapsed()
-            ));
             return Ok(());
         }
         let lock_path = owner_startup_lock_path(&socket_path);
@@ -278,11 +273,6 @@ impl RemoteNodeSessionSyncRuntime {
             let _startup_lock =
                 StartupLock::acquire(&lock_path).map_err(remote_session_sync_error)?;
             if remote_session_sync_owner_available(&socket_path) {
-                ERROR_LOG.log(format!(
-                    "[diag-newhost] ensure_session_sync_owner socket={} ready_by_peer elapsed={:?}",
-                    socket_name,
-                    t_owner.elapsed()
-                ));
                 return Ok(());
             }
             return Err(LifecycleError::Protocol(format!(
@@ -308,19 +298,11 @@ impl RemoteNodeSessionSyncRuntime {
             remote_session_sync_owner_args(socket_name, network, Some(&ready_socket)),
         )
         .map_err(remote_session_sync_error)?;
-        ERROR_LOG.log(format!(
-            "[diag-newhost] ensure_session_sync_owner socket={} sidecar_spawned elapsed={:?}",
-            socket_name,
-            t_owner.elapsed()
-        ));
+
         let ready = wait_for_remote_session_sync_owner_ready(ready_listener, &ready_socket, child);
         crate::infra::best_effort::remove_file(&ready_socket);
         ready?;
-        ERROR_LOG.log(format!(
-            "[diag-newhost] ensure_session_sync_owner socket={} ready elapsed={:?}",
-            socket_name,
-            t_owner.elapsed()
-        ));
+
         Ok(())
     }
 
@@ -336,8 +318,8 @@ impl RemoteNodeSessionSyncRuntime {
         match notify_remote_session_sync_owner(&socket_path, reason.clone()) {
             Ok(()) => Ok(()),
             Err(first_error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-exit] session_sync_notify retry socket={} reason={} first_error={}",
+                ERROR_LOG.log_error(format!(
+                    "session_sync_notify retry socket={} reason={} first_error={}",
                     socket_name,
                     reason.as_str(),
                     first_error
@@ -360,8 +342,8 @@ impl RemoteNodeSessionSyncRuntime {
         match signal_remote_session_sync_owner(&socket_path, reason.clone()) {
             Ok(()) => Ok(()),
             Err(first_error) => {
-                ERROR_LOG.log(format!(
-                    "[diag-exit] session_sync_signal retry socket={} reason={} first_error={}",
+                ERROR_LOG.log_error(format!(
+                    "session_sync_signal retry socket={} reason={} first_error={}",
                     socket_name,
                     reason.as_str(),
                     first_error
@@ -650,17 +632,10 @@ where
         payload: crate::infra::remote_protocol::CreateSessionRequestPayload,
         correlation_id: Option<&str>,
     ) -> Result<(), LifecycleError> {
-        let started = std::time::Instant::now();
-        ERROR_LOG.log(format!(
-            "[diag-create] sync owner received create-session request id={} authority={}",
-            payload.request_id, payload.authority_node_id
-        ));
+        let _started = std::time::Instant::now();
+
         let result = self.create_local_target_for_create_session(session_handle, &payload);
-        ERROR_LOG.log(format!(
-            "[diag-create] sync owner create-session target result id={} elapsed={:?}",
-            payload.request_id,
-            started.elapsed()
-        ));
+
         match result {
             Ok(created) => session_handle
                 .send(crate::remote::node::remote_node_session_runtime::map_outbound_grpc_envelope(

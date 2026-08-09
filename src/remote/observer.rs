@@ -76,8 +76,8 @@ impl RemoteObserverRuntime {
             // aborting here previously left processed_envelopes behind, so the
             // offending envelope was retried forever and blocked the stream.
             if let Err(error) = self.apply_envelope(envelope) {
-                ERROR_LOG.log(format!(
-                    "[diag] observer sync: skipping envelope after error: {error}"
+                ERROR_LOG.log_error(format!(
+                    "observer sync: skipping envelope after error: {error}"
                 ));
             }
         }

@@ -336,7 +336,7 @@ fn bridge_live_authority_stream(
         *writer_guard = Some(host_stream.try_clone().map_err(remote_session_sync_error)?);
     }
     writer_ready.notify_all();
-    ERROR_LOG.log("[diag-timing] bridge_live_authority_stream: writer set, ready signalled, starting forward_host_output_to_owner".to_string());
+
     let result = forward_host_output(
         host_reader,
         writer.clone(),
@@ -345,7 +345,7 @@ fn bridge_live_authority_stream(
         output_route,
         running.clone(),
     );
-    ERROR_LOG.log(format!("[diag-timing] bridge_live_authority_stream: forward_host_output_to_owner exited, result={:?}", result));
+
     let _ = host_stream.shutdown(Shutdown::Both);
     let _ = match writer.lock() {
         Ok(mut guard) => guard.take(),
@@ -446,9 +446,6 @@ fn forward_host_output(
                 forward_host_envelope(&output_route, &node_id, &session_instance_id, envelope)?;
             }
             Ok(other) => {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output_to_session: unexpected authority frame {other:?}, exiting"
-                ));
                 return Err(remote_session_sync_error(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("unexpected authority frame {other:?}"),
@@ -457,13 +454,11 @@ fn forward_host_output(
             Err(ref e) if e.is_read_timeout() => {
                 if let Some(sent_at) = keepalive_sent_at {
                     if sent_at.elapsed() >= ping_timeout {
-                        let session_instance_id = bridge_session_id
+                        let _session_instance_id = bridge_session_id
                             .read()
                             .map(|g| g.clone())
                             .unwrap_or_default();
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] forward_host_output: keepalive timed out for node={node_id} session={session_instance_id}, declaring host dead"
-                        ));
+
                         return Err(remote_session_sync_error(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "authority host keepalive timed out",
@@ -472,19 +467,11 @@ fn forward_host_output(
                     continue;
                 }
                 if last_received.elapsed() >= ping_interval {
-                    if let Err(error) = send_authority_ping(&writer) {
-                        ERROR_LOG.log(format!(
-                            "[diag-timing] forward_host_output: failed to send keepalive ping for node={node_id}: {error}"
-                        ));
-                        return Err(error);
-                    }
+                    send_authority_ping(&writer)?;
                     keepalive_sent_at = Some(Instant::now());
                 }
             }
             Err(e) => {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output_to_session: read_authority_transport_frame failed: {e}, exiting"
-                ));
                 return Err(remote_session_sync_error(e));
             }
         }
@@ -500,18 +487,13 @@ fn forward_host_envelope(
 ) -> Result<(), LifecycleError> {
     match output_route {
         SessionSyncAuthorityOutputRoute::OwnerEvent(session_event_tx) => {
-            ERROR_LOG.log(format!(
-                "[diag-timing] forward_host_output: forwarding envelope type={} to session-sync owner",
-                envelope.payload.message_type()
-            ));
+
             if let Err(e) = session_event_tx.send(
                 crate::remote::node::remote_node_session_sync_runtime::SessionSyncEvent::AuthorityHostOutput(
                     Box::new(envelope),
                 ),
             ) {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output: owner event send failed: {e}, exiting"
-                ));
+
                 return Err(remote_session_sync_error(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     e.to_string(),
@@ -519,10 +501,7 @@ fn forward_host_envelope(
             }
         }
         SessionSyncAuthorityOutputRoute::IngressEvent(ingress_event_tx) => {
-            ERROR_LOG.log(format!(
-                "[diag-timing] forward_host_output: forwarding envelope type={} to ingress owner",
-                envelope.payload.message_type()
-            ));
+
             if let Err(e) = ingress_event_tx.send(
                 crate::remote::node::remote_node_ingress_server_runtime::InternalEvent::AuthorityHostOutput {
                     node_id: node_id.to_string(),
@@ -530,9 +509,7 @@ fn forward_host_envelope(
                     envelope,
                 },
             ) {
-                ERROR_LOG.log(format!(
-                    "[diag-timing] forward_host_output: ingress event send failed: {e}, exiting"
-                ));
+
                 return Err(remote_session_sync_error(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     e.to_string(),
@@ -857,12 +834,10 @@ impl LocalAuthorityHostBackend for RatatuiLocalAuthorityHostBackend {
             return Ok(AuthorityHostSignal::Closed);
         };
         let envelope = authority_command_envelope(command);
-        if let Err(error) = write_control_plane_envelope(writer, &envelope) {
+        if let Err(_error) = write_control_plane_envelope(writer, &envelope) {
             let _ = writer.shutdown(Shutdown::Both);
             *guard = None;
-            ERROR_LOG.log(format!(
-                "[diag-timing] send_command_to_host: write failed for target={target_id}: {error}"
-            ));
+
             return Ok(AuthorityHostSignal::Closed);
         }
         Ok(AuthorityHostSignal::Ready)

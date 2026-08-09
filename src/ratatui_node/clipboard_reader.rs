@@ -44,26 +44,14 @@ struct WslClipboardJson {
 /// clipboard, image backends are attempted so that copied screenshots can
 /// still be pasted via explicit keyboard shortcuts.
 pub fn read_clipboard() -> Result<ClipboardReadResult, String> {
-    let start = std::time::Instant::now();
-
     // In WSL use a single PowerShell invocation that fetches both text and the
     // Windows file-drop list. Starting powershell.exe from WSL is slow; doing
     // it twice (text then files) caused noticeable lag.
     if is_wsl() {
         match read_clipboard_wsl() {
-            Ok(ClipboardReadResult::Empty) => {
-                ERROR_LOG.log("[clipboard-reader] wsl combined read returned empty".to_string());
-            }
-            Ok(result) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] wsl combined read returned {:?} in {:?}",
-                    std::mem::discriminant(&result),
-                    start.elapsed()
-                ));
-                return Ok(result);
-            }
+            Ok(result) => return Ok(result),
             Err(error) => {
-                ERROR_LOG.log(format!(
+                ERROR_LOG.log_error(format!(
                     "[clipboard-reader] wsl combined read failed, falling back: {error}"
                 ));
             }
@@ -73,16 +61,9 @@ pub fn read_clipboard() -> Result<ClipboardReadResult, String> {
     // Try text/URI-list first (fast, works in most environments including WSL).
     match read_text() {
         Ok(text) if !text.trim().is_empty() => {
-            ERROR_LOG.log(format!(
-                "[clipboard-reader] text backend ok len={} in {:?}",
-                text.len(),
-                start.elapsed()
-            ));
             return Ok(ClipboardReadResult::Text(text));
         }
-        Ok(_) => {
-            ERROR_LOG.log("[clipboard-reader] text backends returned empty".to_string());
-        }
+        Ok(_) => {}
         Err(error) => {
             ERROR_LOG.log_error(format!("[clipboard-reader] text backends failed: {error}"));
         }
@@ -91,22 +72,12 @@ pub fn read_clipboard() -> Result<ClipboardReadResult, String> {
     // Text backends could not access the clipboard at all (e.g. no X11 on
     // WSL) or the clipboard is empty. Try image as a last resort.
     match read_image() {
-        Ok((bytes, hint)) => {
-            ERROR_LOG.log(format!(
-                "[clipboard-reader] image backend ok bytes={} in {:?}",
-                bytes.len(),
-                start.elapsed()
-            ));
-            Ok(ClipboardReadResult::Image {
-                filename_hint: hint,
-                bytes,
-            })
-        }
+        Ok((bytes, hint)) => Ok(ClipboardReadResult::Image {
+            filename_hint: hint,
+            bytes,
+        }),
         Err(error) => {
-            ERROR_LOG.log(format!(
-                "[clipboard-reader] all backends failed in {:?}: {error}",
-                start.elapsed()
-            ));
+            ERROR_LOG.log_error(format!("[clipboard-reader] all backends failed: {error}"));
             Err(error)
         }
     }
@@ -128,7 +99,6 @@ pub fn normalize_clipboard_text(text: &str) -> &str {
 
 /// WSL-only combined clipboard read: text + file-drop list in one powershell.exe call.
 fn read_clipboard_wsl() -> Result<ClipboardReadResult, String> {
-    let start = std::time::Instant::now();
     let bytes = run_command_bytes(
         "powershell.exe",
         &["-NoProfile", "-Command", WSL_CLIPBOARD_JSON_COMMAND],
@@ -153,10 +123,6 @@ fn read_clipboard_wsl() -> Result<ClipboardReadResult, String> {
         return Ok(ClipboardReadResult::Text(uris.join("\n")));
     }
 
-    ERROR_LOG.log(format!(
-        "[clipboard-reader] wsl combined read empty in {:?}",
-        start.elapsed()
-    ));
     Ok(ClipboardReadResult::Empty)
 }
 
@@ -181,20 +147,11 @@ fn read_text() -> Result<String, String> {
 
     let mut errors = Vec::new();
     for (name, backend) in backends {
-        let start = std::time::Instant::now();
         match backend() {
             Ok(text) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] text backend {name} ok in {:?}",
-                    start.elapsed()
-                ));
                 return Ok(normalize_clipboard_text(&text).to_string());
             }
             Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] text backend {name} failed in {:?}: {error}",
-                    start.elapsed()
-                ));
                 errors.push(format!("{name}: {error}"));
             }
         }
@@ -225,20 +182,11 @@ fn read_image() -> Result<(Vec<u8>, String), String> {
 
     let mut errors = Vec::new();
     for (name, backend) in backends {
-        let start = std::time::Instant::now();
         match backend() {
             Ok(result) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] image backend {name} ok in {:?}",
-                    start.elapsed()
-                ));
                 return Ok(result);
             }
             Err(error) => {
-                ERROR_LOG.log(format!(
-                    "[clipboard-reader] image backend {name} failed in {:?}: {error}",
-                    start.elapsed()
-                ));
                 errors.push(format!("{name}: {error}"));
             }
         }
@@ -361,7 +309,6 @@ fn read_image_powershell() -> Result<(Vec<u8>, String), String> {
 }
 
 fn run_command(cmd: &str, args: &[&str]) -> Result<String, String> {
-    let start = std::time::Instant::now();
     let output = Command::new(cmd)
         .args(args)
         .output()
@@ -370,10 +317,6 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("{cmd} exited {:?}: {stderr}", output.status));
     }
-    ERROR_LOG.log(format!(
-        "[clipboard-reader] ran {cmd} in {:?}",
-        start.elapsed()
-    ));
     String::from_utf8(output.stdout).map_err(|e| format!("{cmd} output is not utf-8: {e}"))
 }
 

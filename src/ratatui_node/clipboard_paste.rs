@@ -5,7 +5,6 @@
 //! paste action or a background job for file I/O.
 
 use crate::domain::agent_detector::accepts_at_reference;
-use crate::infra::error_log::ERROR_LOG;
 use crate::ratatui_node::clipboard_classifier::ClipboardContent;
 use crate::ratatui_node::clipboard_platform::{format_file_reference, PlatformContext};
 use crate::ratatui_node::snapshot::{RatatuiSnapshot, SessionView};
@@ -94,14 +93,7 @@ impl PasteContext<'_> {
 
 /// Dispatch classified clipboard content to the appropriate paste handler.
 pub fn dispatch_paste(content: ClipboardContent, ctx: &PasteContext<'_>) -> PasteAction {
-    let start = std::time::Instant::now();
-    let action = dispatch_paste_inner(content, ctx);
-    ERROR_LOG.log(format!(
-        "[clipboard-paste] dispatched in {:?}: {:?}",
-        start.elapsed(),
-        std::mem::discriminant(&action)
-    ));
-    action
+    dispatch_paste_inner(content, ctx)
 }
 
 fn dispatch_paste_inner(content: ClipboardContent, ctx: &PasteContext<'_>) -> PasteAction {
@@ -140,10 +132,6 @@ fn dispatch_paste_inner(content: ClipboardContent, ctx: &PasteContext<'_>) -> Pa
             filename_hint,
             bytes,
         } => {
-            ERROR_LOG.log(format!(
-                "[clipboard-paste] binary paste target={target_id} is_local={is_local} supports_at={supports_at} hint={filename_hint} bytes={}",
-                bytes.len()
-            ));
             if is_local {
                 PasteAction::RunJob(PasteJob::CacheLocalBinary {
                     target_id,
@@ -209,14 +197,7 @@ fn dispatch_file_paths(
 /// It performs blocking file I/O and CPU-heavy base64 encoding, then returns
 /// a result that the main event loop can send to the server.
 pub fn run_paste_job(ctx: &PlatformContext, job: PasteJob) -> PasteJobResult {
-    let start = std::time::Instant::now();
-    let result = run_paste_job_inner(ctx, job);
-    ERROR_LOG.log(format!(
-        "[clipboard-paste] background job completed in {:?}: {:?}",
-        start.elapsed(),
-        std::mem::discriminant(&result)
-    ));
-    result
+    run_paste_job_inner(ctx, job)
 }
 
 fn run_paste_job_inner(ctx: &PlatformContext, job: PasteJob) -> PasteJobResult {
@@ -243,9 +224,6 @@ fn run_paste_job_inner(ctx: &PlatformContext, job: PasteJob) -> PasteJobResult {
         } => match ctx.write_temp_file(&filename_hint, &bytes) {
             Ok(path) => {
                 let path_ref = format_file_reference(&ctx.path_for_input(&path), supports_at);
-                ERROR_LOG.log(format!(
-                    "[clipboard-paste] cached local binary target={target_id} path={path_ref}"
-                ));
                 PasteJobResult::PasteText {
                     target_id,
                     text: path_ref,

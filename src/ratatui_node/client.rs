@@ -87,9 +87,6 @@ pub(crate) fn handle_client(
             }
             Ok(_) => {
                 let trimmed = line.trim();
-                ERROR_LOG.log(format!(
-                    "[ratatui-node] client {client_id} received: {trimmed}"
-                ));
                 if trimmed == "DETACH" {
                     break;
                 }

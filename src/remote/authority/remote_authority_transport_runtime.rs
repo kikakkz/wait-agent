@@ -1,6 +1,5 @@
 // Legacy tmux-era authority transport runtime kept during the ratatui migration; most items are currently unused.
 
-use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ApplyResizePayload, CloseMirrorRequestPayload, ControlPlanePayload,
     MirrorBootstrapChunkPayload, MirrorBootstrapCompletePayload, OpenMirrorAcceptedPayload,
@@ -401,9 +400,6 @@ impl RemoteAuthorityTransportRuntime {
         resize_epoch: u64,
         resize_authority_console_id: String,
     ) -> Result<(), RemoteAuthorityTransportError> {
-        ERROR_LOG.log(format!(
-            "[diag-timing] target host: send_resize_applied target={target_id} cols={cols} rows={rows} epoch={resize_epoch}"
-        ));
         self.send_payload(
             session_id,
             target_id,
@@ -425,9 +421,6 @@ impl RemoteAuthorityTransportRuntime {
         cols: usize,
         rows: usize,
     ) -> Result<(), RemoteAuthorityTransportError> {
-        ERROR_LOG.log(format!(
-            "[diag-timing] target host: send_target_geometry_changed target={target_id} cols={cols} rows={rows}"
-        ));
         self.send_payload(
             session_id,
             target_id,

@@ -248,7 +248,6 @@ fn apply_paste_action(
             send_paste_text(stream, &target_id, &text);
         }
         PasteAction::RunJob(job) => {
-            ERROR_LOG.log_debug(format!("[clipboard] enqueuing paste job: {job:?}"));
             if paste_job_tx.send(job).is_err() {
                 *status_message =
                     Some(("clipboard worker disconnected".to_string(), Instant::now()));
@@ -267,7 +266,6 @@ fn apply_paste_job_result(
     stream: &mut UnixStream,
     status_message: &mut Option<(String, Instant)>,
 ) {
-    ERROR_LOG.log_debug(format!("[clipboard] applying paste job result: {result:?}"));
     match result {
         PasteJobResult::PasteText { target_id, text } => {
             send_paste_text(stream, &target_id, &text);
@@ -487,7 +485,6 @@ fn apply_server_message(
             });
         }
         ServerMessage::Log(text) => {
-            ERROR_LOG.log(format!("[ratatui-client] server: {text}"));
             *status_message = Some((text, Instant::now()));
         }
     }

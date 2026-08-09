@@ -304,8 +304,8 @@ impl RemoteNodeSessionRuntime {
         transport_session_id: &str,
         authority_host_session_name: Option<&str>,
     ) -> Result<(), RemoteNodeSessionError> {
-        ERROR_LOG.log(format!(
-            "[diag-bug] send_target_exited: sending TargetExited via Publication channel, transport_session_id={}, authority_host_session_name={:?}, node_id={}",
+        ERROR_LOG.log_error(format!(
+            "send_target_exited: sending TargetExited via Publication channel, transport_session_id={}, authority_host_session_name={:?}, node_id={}",
             transport_session_id, authority_host_session_name, self.node_id
         ));
         let target_id = format!("remote-peer:{}:{transport_session_id}", self.node_id);
@@ -884,8 +884,8 @@ pub(crate) fn map_inbound_grpc_authority_event(
         }
         Some(GrpcBody::ServerHello(_)) | Some(GrpcBody::Heartbeat(_)) => None,
         Some(other) => {
-            ERROR_LOG.log(format!(
-                "[diag-bug] map_inbound_grpc_authority_event: UNHANDLED body type -> Failed, body={other:?}"
+            ERROR_LOG.log_error(format!(
+                "map_inbound_grpc_authority_event: UNHANDLED body type -> Failed, body={other:?}"
             ));
             Some(GrpcAuthorityEvent::Failed(format!(
                 "unexpected grpc authority envelope `{other:?}`",

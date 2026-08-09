@@ -1,6 +1,5 @@
 // Legacy tmux-era authority connection runtime kept during the ratatui migration; most items are currently unused.
 
-use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_protocol::{
     ControlPlanePayload, ProtocolEnvelope, RawPtyInputPayload, RawPtyOutputPayload,
 };
@@ -253,7 +252,7 @@ pub(super) fn register_authority_stream_with_timeouts(
     let ping_timeout = read_timeout
         .saturating_sub(ping_interval)
         .max(socket_timeout);
-    let t_register = std::time::Instant::now();
+    let _t_register = std::time::Instant::now();
     let node_id = read_registration_frame(&mut stream)?;
     if node_id != authority_id {
         return Err(RemoteAuthorityConnectionError::new(format!(
@@ -273,11 +272,7 @@ pub(super) fn register_authority_stream_with_timeouts(
             connected: connected.clone(),
         }),
     );
-    ERROR_LOG.log(format!(
-        "[diag-timing] register_authority_stream: registered node={}, sending Connected ({:?})",
-        node_id,
-        t_register.elapsed()
-    ));
+
     let _ = tx.send(AuthorityTransportEvent::Connected {
         authority_id: authority_id.clone(),
         generation,
@@ -441,10 +436,6 @@ pub(super) fn register_authority_stream_with_timeouts(
                         let wall_since_sent =
                             now_wall.duration_since(sent_at_wall).unwrap_or_default();
                         if mono_since_sent >= ping_timeout || wall_since_sent >= ping_timeout {
-                            ERROR_LOG.log(
-                                "[diag-timing] reader thread: keepalive timed out, exiting"
-                                    .to_string(),
-                            );
                             break;
                         }
                         continue;
@@ -459,38 +450,27 @@ pub(super) fn register_authority_stream_with_timeouts(
                         || wall_jump >= ping_interval
                     {
                         let mut buf = Vec::new();
-                        if let Err(error) = write_authority_transport_frame(
+                        if let Err(_error) = write_authority_transport_frame(
                             &mut buf,
                             &AuthorityTransportFrame::Ping,
                         ) {
-                            ERROR_LOG.log(format!(
-                                "[diag-timing] reader thread: encode Ping failed, exiting: {error}"
-                            ));
                             break;
                         }
-                        if let Err(error) = pong_writer.write_all(&buf) {
-                            ERROR_LOG.log(format!(
-                                "[diag-timing] reader thread: Ping write failed, exiting: {error}"
-                            ));
+                        if let Err(_error) = pong_writer.write_all(&buf) {
                             break;
                         }
                         keepalive_sent_at = Some(now_instant);
                         keepalive_sent_at_wall = Some(now_wall);
                     }
                 }
-                Err(ref e) => {
-                    ERROR_LOG.log(format!(
-                        "[diag-timing] reader thread: read error, exiting: {e}"
-                    ));
+                Err(ref _e) => {
                     break;
                 }
             }
         }
         connected.store(false, Ordering::Relaxed);
         registry.unregister_connection_generation(&node_id, generation);
-        ERROR_LOG.log(format!(
-            "[diag-timing] reader thread: loop exited, sending Disconnected for node={node_id}"
-        ));
+
         let _ = reader_tx.send(AuthorityTransportEvent::Disconnected {
             authority_id: node_id,
             generation,

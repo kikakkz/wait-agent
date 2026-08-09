@@ -307,17 +307,6 @@ impl RatatuiRemoteSession {
             ));
             return;
         };
-        ERROR_LOG.log(format!(
-            "[ratatui-remote-session] feed_input target={} seq={} bytes={} hex={}",
-            self.target_id,
-            seq,
-            bytes.len(),
-            bytes
-                .iter()
-                .map(|b| format!("\\x{b:02x}"))
-                .collect::<Vec<_>>()
-                .join("")
-        ));
         let payload = RawPtyInputPayload {
             session_id: self.session_id.clone(),
             target_id: self.target_id.clone(),
@@ -330,11 +319,7 @@ impl RatatuiRemoteSession {
         let frame = AuthorityTransportFrame::RawPtyInput(payload);
         match write_authority_transport_frame(writer, &frame) {
             Ok(_) => {
-                let flush_result = writer.flush();
-                ERROR_LOG.log(format!(
-                    "[ratatui-remote-session] feed_input target={} seq={} write_ok flush={flush_result:?}",
-                    self.target_id, seq
-                ));
+                let _ = writer.flush();
             }
             Err(error) => {
                 ERROR_LOG.log(format!(
@@ -623,11 +608,6 @@ fn handle_authority_transport_stream(
                         payload.output_bytes.len()
                     ));
                 }
-                ERROR_LOG.log(format!(
-                    "[ratatui-remote-session] received raw pty output for {target_id} seq={} bytes={}",
-                    payload.output_seq,
-                    payload.output_bytes.len()
-                ));
                 {
                     let mut observer = session.observer.lock().unwrap_or_else(|e| e.into_inner());
                     observer.feed_raw_output(payload.output_seq, &payload.output_bytes);
@@ -662,11 +642,6 @@ fn handle_authority_transport_stream(
                             payload.output_bytes.len()
                         ));
                     }
-                    ERROR_LOG.log(format!(
-                        "[ratatui-remote-session] received control raw pty output for {target_id} seq={} bytes={}",
-                        payload.output_seq,
-                        payload.output_bytes.len()
-                    ));
                     {
                         let mut observer =
                             session.observer.lock().unwrap_or_else(|e| e.into_inner());

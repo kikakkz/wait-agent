@@ -55,22 +55,12 @@ impl ErrorLog {
         self.write(LogLevel::Info, message);
     }
 
-    pub fn log_debug(&self, message: String) {
-        self.write(LogLevel::Debug, message);
-    }
-
     pub fn log_warn(&self, message: String) {
         self.write(LogLevel::Warn, message);
     }
 
     pub fn log_error(&self, message: String) {
         self.write(LogLevel::Error, message);
-    }
-
-    pub fn log_exit_latency(&self, message: String) {
-        if std::env::var_os("WAITAGENT_EXIT_LATENCY_DIAG").is_some() {
-            self.write(LogLevel::Info, message);
-        }
     }
 
     fn write(&self, level: LogLevel, message: String) {
