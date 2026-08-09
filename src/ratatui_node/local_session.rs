@@ -104,12 +104,14 @@ impl RatatuiLocalSession {
             event_loop_sender: sender_slot,
         });
 
-        spawn_task_state_monitor(
+        let session_for_pane_text = session.clone();
+        let _monitor_handle = spawn_task_state_monitor(
             session_id.clone(),
             master_fd,
             child_pid,
-            session.clone(),
+            Box::new(move || session_for_pane_text.last_visible_text(8)),
             shared.clone(),
+            Arc::new(AtomicBool::new(true)),
         );
 
         ERROR_LOG.log(format!(
@@ -441,21 +443,28 @@ fn detector_registry() -> &'static DetectorRegistry {
 
 /// Spawn a background thread that watches the PTY foreground process group
 /// to infer whether the shell is at a prompt (Input) or a command is running
-/// (Running/Confirm).  The result is sent to `StateEventLoop` as task-state
-/// and command-name changes.
-fn spawn_task_state_monitor(
+/// Spawn a background thread that watches the PTY foreground process group
+/// (and shell child processes) to infer the session's running command and task
+/// state (Input/Running/Confirm).  The result is sent to `StateEventLoop` as
+/// task-state and command-name changes.
+///
+/// `pane_text` supplies the last visible screen lines for agent-specific state
+/// inference.  `shutdown` is an external kill switch; callers should set it to
+/// `false` before closing `master_fd` to avoid racing with fd reuse.
+pub(crate) fn spawn_task_state_monitor(
     target_id: String,
     master_fd: std::os::unix::io::RawFd,
     child_pid: i32,
-    session: Arc<RatatuiLocalSession>,
+    pane_text: Box<dyn Fn() -> String + Send + Sync>,
     shared: Arc<SharedState>,
-) {
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let running = Arc::new(AtomicBool::new(true));
         let mut last_state = None;
         let mut last_command_name = None;
 
-        while running.load(Ordering::Relaxed) {
+        while running.load(Ordering::Relaxed) && shutdown.load(Ordering::Relaxed) {
             // SAFETY: `tcgetpgrp` and `getpgid` are async-signal-safe POSIX
             // calls operating on the PTY master fd owned by the alacritty
             // event loop.  The fd remains valid until the child exits.
@@ -483,7 +492,7 @@ fn spawn_task_state_monitor(
                 foreground_process_info(fg_pgid)
             };
 
-            let pane_text = session.last_visible_text(8);
+            let pane_text = pane_text();
             let registry = detector_registry();
 
             let command_name = detected_command
@@ -558,7 +567,7 @@ fn spawn_task_state_monitor(
         ERROR_LOG.log(format!(
             "[ratatui-local-session] task-state monitor exiting for {target_id}"
         ));
-    });
+    })
 }
 
 /// Read /proc for the process group leader of `pgid` and return its argv[0]
@@ -816,5 +825,22 @@ mod local_session_tests {
     fn select_primary_child_returns_none_for_shell_only() {
         let root = node("/bin/bash", vec![node("/bin/bash", Vec::new())]);
         assert!(select_primary_child(&root).is_none());
+    }
+
+    #[test]
+    fn task_state_monitor_respects_shutdown_flag() {
+        let network = RemoteNetworkConfig::default();
+        let shared = SharedState::new(network).expect("SharedState::new should succeed");
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let handle = spawn_task_state_monitor(
+            "local#test:1".to_string(),
+            0,
+            std::process::id() as i32,
+            Box::new(String::new),
+            shared,
+            shutdown.clone(),
+        );
+        shutdown.store(false, Ordering::Relaxed);
+        handle.join().expect("monitor should exit after shutdown");
     }
 }

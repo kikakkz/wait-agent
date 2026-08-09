@@ -11,10 +11,11 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use super::local_session::render_grid_line;
+use super::local_session::{render_grid_line, spawn_task_state_monitor};
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
@@ -125,6 +126,7 @@ impl Dimensions for TermSize {
 struct SessionState {
     pty_master: File,
     child: Child,
+    monitor_shutdown: Arc<AtomicBool>,
     token: usize,
     output_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Buffered PTY output produced before an output sender was installed.
@@ -303,6 +305,7 @@ fn run_io_loop(
         // responsive even when PTY traffic is steady.
         drain_requests(
             &rx,
+            &shared,
             &mut poller,
             &mut sessions,
             &mut token_to_session,
@@ -370,6 +373,7 @@ fn run_io_loop(
 
 fn drain_requests(
     rx: &mpsc::Receiver<AuthorityHostIoRequest>,
+    shared: &Arc<SharedState>,
     poller: &mut polling::Poller,
     sessions: &mut HashMap<String, SessionState>,
     token_to_session: &mut HashMap<usize, String>,
@@ -429,6 +433,22 @@ fn drain_requests(
                         })?;
                 }
                 token_to_session.insert(token, session_id.clone());
+
+                // Start a task-state monitor so remote viewers see the actual
+                // command running inside the shell (e.g. chrome, vi) instead of
+                // always falling back to "bash".
+                let monitor_shutdown = Arc::new(AtomicBool::new(true));
+                let master_fd = pty_master.as_raw_fd();
+                let child_pid = child.id() as i32;
+                let _monitor_handle = spawn_task_state_monitor(
+                    session_id.clone(),
+                    master_fd,
+                    child_pid,
+                    Box::new(String::new),
+                    shared.clone(),
+                    monitor_shutdown.clone(),
+                );
+
                 let term = Term::new(
                     Config::default(),
                     &TermSize {
@@ -442,6 +462,7 @@ fn drain_requests(
                     SessionState {
                         pty_master,
                         child,
+                        monitor_shutdown,
                         token,
                         output_tx,
                         output_buffer: VecDeque::new(),
@@ -456,6 +477,7 @@ fn drain_requests(
             }
             AuthorityHostIoRequest::UnregisterSession { session_id } => {
                 if let Some(state) = sessions.remove(&session_id) {
+                    state.monitor_shutdown.store(false, Ordering::Relaxed);
                     let _ = poller.delete(&state.pty_master);
                     token_to_session.remove(&state.token);
                 }
@@ -609,6 +631,7 @@ fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<
     for (session_id, state) in sessions.iter_mut() {
         match state.child.try_wait() {
             Ok(Some(status)) => {
+                state.monitor_shutdown.store(false, Ordering::Relaxed);
                 let exit_code = status.code().unwrap_or(-1);
                 let _ = shared
                     .state_sender()
