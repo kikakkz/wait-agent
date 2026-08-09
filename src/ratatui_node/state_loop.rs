@@ -139,6 +139,11 @@ fn run_state_event_loop(
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
 
+            StateEvent::SessionCommandNameCleared { target_id } => {
+                shared.clear_session_command_name(&target_id);
+                broadcast_snapshot(&shared, &client_writer, &connected_clients);
+            }
+
             StateEvent::LocalSessionOutput { .. } => {
                 broadcast_snapshot(&shared, &client_writer, &connected_clients);
             }
@@ -1723,6 +1728,63 @@ mod state_loop_tests {
         std::thread::sleep(Duration::from_millis(100));
         drop(tx);
         drop(client_writer);
+        handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn state_loop_clears_display_command_name() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let (shared, tx, _client_writer, handle) = start_test_loop();
+
+        let target_id = "local#0:1".to_string();
+        {
+            let record = ManagedSessionRecord {
+                address: ManagedSessionAddress::local("local#0", "1"),
+                selector: None,
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                display_command_name: None,
+                agent_command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Input,
+            };
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(target_id.clone(), record);
+        }
+
+        let _ = tx.send(StateEvent::SessionCommandNameChanged {
+            target_id: target_id.clone(),
+            command_name: "chrome".to_string(),
+        });
+        let _ = tx.send(StateEvent::SessionCommandNameCleared {
+            target_id: target_id.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let record = guard.get(&target_id).expect("session should exist");
+        assert_eq!(
+            record.display_command_name.as_deref(),
+            None,
+            "display_command_name should be cleared"
+        );
+
+        drop(tx);
         handle.join().expect("state loop should exit cleanly");
     }
 

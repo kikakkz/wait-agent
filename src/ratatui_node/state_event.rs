@@ -26,6 +26,9 @@ pub(crate) enum StateEvent {
         target_id: String,
         command_name: String,
     },
+    /// The detected foreground command name was cleared (e.g. the foreground
+    /// process exited and the shell is back at an empty prompt).
+    SessionCommandNameCleared { target_id: String },
     /// A local `alacritty_terminal` session produced output and the TUI
     /// clients should be refreshed.  This is deliberately sent to the single
     /// writer loop so that snapshots are broadcast without holding the

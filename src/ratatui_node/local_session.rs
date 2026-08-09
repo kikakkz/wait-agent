@@ -1,4 +1,4 @@
-use crate::domain::agent_detector::DetectorRegistry;
+use crate::domain::agent_detector::{DetectorRegistry, SHELL_NAMES};
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -474,8 +474,11 @@ fn spawn_task_state_monitor(
 
             // Resolve the foreground command name and argv from /proc so the
             // agent detector can recognize known agents (claude, codex, kimi).
+            // When the shell is back at its prompt, also scan its child
+            // processes: detached programs like Chrome are no longer in the
+            // foreground process group but still belong to the session.
             let (detected_command, argv) = if at_shell_prompt {
-                (None, None)
+                shell_child_process_info(child_pid)
             } else {
                 foreground_process_info(fg_pgid)
             };
@@ -488,7 +491,14 @@ fn spawn_task_state_monitor(
                 .map(|cmd| registry.detect_command_name(cmd, argv.as_deref(), &pane_text));
 
             let task_state = if at_shell_prompt {
-                crate::domain::session_catalog::ManagedSessionTaskState::Input
+                if detected_command.is_some() {
+                    // Shell is at a prompt but a non-shell child process is still
+                    // running in the session (e.g. a background job or a detached
+                    // GUI program like Chrome).
+                    crate::domain::session_catalog::ManagedSessionTaskState::Running
+                } else {
+                    crate::domain::session_catalog::ManagedSessionTaskState::Input
+                }
             } else if let Some(name) = command_name.as_deref() {
                 let detected = registry.infer_task_state(Some(name), &pane_text);
                 if detected == crate::domain::session_catalog::ManagedSessionTaskState::Unknown {
@@ -519,15 +529,27 @@ fn spawn_task_state_monitor(
             }
 
             if last_command_name != command_name {
-                last_command_name = command_name.clone();
-                if let Some(command_name) = command_name {
-                    let _ = shared
-                        .state_sender()
-                        .send(StateEvent::SessionCommandNameChanged {
-                            target_id: target_id.clone(),
-                            command_name,
-                        });
+                match (&last_command_name, &command_name) {
+                    (Some(_), None) => {
+                        let _ = shared
+                            .state_sender()
+                            .send(StateEvent::SessionCommandNameCleared {
+                                target_id: target_id.clone(),
+                            });
+                    }
+                    _ => {
+                        if let Some(command_name) = command_name.clone() {
+                            let _ =
+                                shared
+                                    .state_sender()
+                                    .send(StateEvent::SessionCommandNameChanged {
+                                        target_id: target_id.clone(),
+                                        command_name,
+                                    });
+                        }
+                    }
                 }
+                last_command_name = command_name;
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -549,7 +571,12 @@ pub(crate) fn foreground_process_info(pgid: i32) -> (Option<String>, Option<Vec<
     if leader_pid <= 0 {
         return (None, None);
     }
-    let cmdline_path = format!("/proc/{leader_pid}/cmdline");
+    read_proc_cmdline(leader_pid)
+}
+
+/// Read /proc/<pid>/cmdline and return (argv0, full_argv).
+fn read_proc_cmdline(pid: i32) -> (Option<String>, Option<Vec<String>>) {
+    let cmdline_path = format!("/proc/{pid}/cmdline");
     let contents = std::fs::read_to_string(&cmdline_path).unwrap_or_default();
     let parts: Vec<String> = contents
         .split('\0')
@@ -562,6 +589,123 @@ pub(crate) fn foreground_process_info(pgid: i32) -> (Option<String>, Option<Vec<
     } else {
         (argv0, Some(parts))
     }
+}
+
+/// Read the direct children of `pid` from `/proc/<pid>/task/<pid>/children`.
+fn read_proc_children(pid: i32) -> Vec<i32> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    contents
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+/// Return true if `name` is a known shell program.
+fn is_shell_name(name: &str) -> bool {
+    SHELL_NAMES.contains(&name)
+}
+
+/// A lightweight in-memory view of a process node used for child-scanning
+/// heuristics and tests.
+#[derive(Debug, Clone)]
+struct ProcessNode {
+    argv0: String,
+    argv: Vec<String>,
+    children: Vec<ProcessNode>,
+}
+
+impl ProcessNode {
+    fn command_name(&self) -> String {
+        crate::domain::agent_detector::first_argv_token(&self.argv0).to_string()
+    }
+}
+
+/// Find the most significant non-shell descendant of a shell process.
+///
+/// The heuristic prefers:
+/// 1. A direct child of the shell that is not a shell.
+/// 2. Among direct children, one that has its own children (e.g. main Chrome
+///    process) over leaf processes (e.g. a renderer).
+/// 3. If no direct non-shell child exists, a non-shell grandchild.
+///
+/// This handles both foreground commands like `vi` (when the foreground process
+/// group has already returned to the shell because the program detached) and
+/// background jobs like `google-chrome &`.
+fn shell_child_process_info(shell_pid: i32) -> (Option<String>, Option<Vec<String>>) {
+    let Some(root) = read_process_node(shell_pid, 0) else {
+        return (None, None);
+    };
+    select_primary_child(&root).map_or((None, None), |(cmd, argv)| (Some(cmd), Some(argv)))
+}
+
+/// Recursively read `/proc` starting at `pid` up to a small depth.
+fn read_process_node(pid: i32, depth: usize) -> Option<ProcessNode> {
+    if depth > 2 {
+        return None;
+    }
+    let (argv0, argv) = read_proc_cmdline(pid);
+    let argv0 = argv0?;
+    let argv = argv.unwrap_or_default();
+    let children_pids = read_proc_children(pid);
+    let children = children_pids
+        .into_iter()
+        .filter_map(|child_pid| read_process_node(child_pid, depth + 1))
+        .collect();
+    Some(ProcessNode {
+        argv0,
+        argv,
+        children,
+    })
+}
+
+/// Pure-function selection logic over an in-memory process tree.
+///
+/// Returns the argv0 basename and full argv of the primary non-shell process,
+/// or `None` if only shells are present.
+fn select_primary_child(root: &ProcessNode) -> Option<(String, Vec<String>)> {
+    #[derive(Debug, Clone)]
+    struct Candidate {
+        score: usize,
+        node: ProcessNode,
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+
+    for direct in &root.children {
+        let name = direct.command_name();
+        if name.is_empty() || is_shell_name(&name) {
+            // A direct shell child (e.g. `bash -c "..."`) might still hide a
+            // useful grandchild; collect grandchildren below.
+            for grandchild in &direct.children {
+                let grandchild_name = grandchild.command_name();
+                if grandchild_name.is_empty() || is_shell_name(&grandchild_name) {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    score: grandchild.children.len(),
+                    node: grandchild.clone(),
+                });
+            }
+            continue;
+        }
+        // Direct non-shell children are strongly preferred.
+        let score = 100 + direct.children.len();
+        candidates.push(Candidate {
+            score,
+            node: direct.clone(),
+        });
+    }
+
+    // Keep the first candidate with the highest score so the kernel's
+    // children-file ordering (roughly oldest process first) is preserved.
+    let mut best: Option<Candidate> = None;
+    for candidate in candidates {
+        if best.as_ref().is_none_or(|b| candidate.score > b.score) {
+            best = Some(candidate);
+        }
+    }
+    best.map(|c| (c.node.command_name(), c.node.argv))
 }
 
 #[cfg(test)]
@@ -617,5 +761,60 @@ mod local_session_tests {
             }
         }
         assert!(found_output, "LocalSessionOutput event should be emitted");
+    }
+
+    fn node(argv0: &str, children: Vec<ProcessNode>) -> ProcessNode {
+        let argv0 = argv0.to_string();
+        ProcessNode {
+            argv0: argv0.clone(),
+            argv: vec![argv0],
+            children,
+        }
+    }
+
+    fn leaf(argv0: &str) -> ProcessNode {
+        node(argv0, Vec::new())
+    }
+
+    #[test]
+    fn select_primary_child_prefers_direct_non_shell_child() {
+        let root = node(
+            "/bin/bash",
+            vec![
+                leaf("/usr/bin/google-chrome-stable"),
+                leaf("/usr/bin/sleep"),
+            ],
+        );
+        let (name, _) = select_primary_child(&root).expect("should pick a child");
+        assert_eq!(name, "google-chrome-stable");
+    }
+
+    #[test]
+    fn select_primary_child_prefers_child_with_descendants() {
+        let chrome = node(
+            "/usr/bin/google-chrome-stable",
+            vec![
+                leaf("/usr/bin/chrome-renderer"),
+                leaf("/usr/bin/chrome-gpu"),
+            ],
+        );
+        let sleep = leaf("/usr/bin/sleep");
+        let root = node("/bin/bash", vec![chrome, sleep]);
+        let (name, _) = select_primary_child(&root).expect("should pick a child");
+        assert_eq!(name, "google-chrome-stable");
+    }
+
+    #[test]
+    fn select_primary_child_ignores_shell_children_and_uses_grandchild() {
+        let wrapped = node("/bin/bash", vec![leaf("/usr/bin/sleep")]);
+        let root = node("/bin/bash", vec![wrapped]);
+        let (name, _) = select_primary_child(&root).expect("should pick grandchild");
+        assert_eq!(name, "sleep");
+    }
+
+    #[test]
+    fn select_primary_child_returns_none_for_shell_only() {
+        let root = node("/bin/bash", vec![node("/bin/bash", Vec::new())]);
+        assert!(select_primary_child(&root).is_none());
     }
 }
