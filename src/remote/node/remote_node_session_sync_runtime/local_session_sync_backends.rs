@@ -15,9 +15,9 @@ use crate::infra::remote_transport_codec::{
     AuthorityTransportFrame,
 };
 use crate::lifecycle::LifecycleError;
+use crate::process_monitor::read_foreground_process_cmdline;
 use crate::ratatui_node::authority_host_session::RatatuiAuthorityHostSession;
 use crate::ratatui_node::clipboard_platform::format_file_reference;
-use crate::ratatui_node::local_session::foreground_process_info;
 use crate::ratatui_node::SharedState;
 use crate::remote::authority::remote_authority_transport_runtime::{
     RemoteAuthorityCommand, AUTHORITY_TRANSPORT_PING_INTERVAL, AUTHORITY_TRANSPORT_READ_TIMEOUT,
@@ -959,11 +959,7 @@ fn authority_host_supports_at(shared: &SharedState, session: &RatatuiAuthorityHo
     // may be the only source of agent_command_name. If hooks have not fired yet
     // (e.g. the user pastes before submitting a prompt), detect the agent from
     // the PTY foreground process at paste time.
-    let fg_pgid = unsafe { libc::tcgetpgrp(session.pty_master.as_raw_fd()) };
-    if fg_pgid <= 0 {
-        return false;
-    }
-    let (argv0, argv) = foreground_process_info(fg_pgid);
+    let (argv0, argv) = read_foreground_process_cmdline(session.pty_master.as_raw_fd());
     let command_name = argv0
         .as_deref()
         .map(|cmd| DetectorRegistry::default().detect_command_name(cmd, argv.as_deref(), ""));

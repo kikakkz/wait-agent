@@ -81,6 +81,7 @@ pub(crate) struct SharedState {
     pub(crate) io: IoHandles,
     pub(crate) session_creation_port: Option<Arc<dyn SessionCreationPort>>,
     pub(crate) target_registry_port: Option<Arc<dyn TargetRegistryPort>>,
+    pub(crate) process_monitor: Mutex<Option<crate::process_monitor::ProcessMonitor>>,
 }
 
 /// Runtime configuration for agent lifecycle signals.
@@ -162,6 +163,7 @@ impl SharedState {
             },
             session_creation_port: None,
             target_registry_port: None,
+            process_monitor: Mutex::new(None),
         }))
     }
 }
@@ -270,6 +272,19 @@ impl SharedState {
         self.io.notify_local_catalog_changed(reason);
     }
 
+    pub(crate) fn set_process_monitor(&self, monitor: crate::process_monitor::ProcessMonitor) {
+        if let Ok(mut guard) = self.process_monitor.lock() {
+            *guard = Some(monitor);
+        }
+    }
+
+    pub(crate) fn process_monitor(&self) -> Option<crate::process_monitor::ProcessMonitor> {
+        self.process_monitor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub(super) fn detach_all_clients(&self) {
         self.clients.detach_all_clients();
     }
@@ -277,6 +292,10 @@ impl SharedState {
     /// Mark a session as exited, remove its runtime, switch to the next
     /// available session, and shut down the server when the last session exits.
     pub(super) fn handle_session_exit(&self, target_id: &str) {
+        if let Some(monitor) = self.process_monitor() {
+            monitor.unregister_session(target_id);
+        }
+
         let record = {
             let mut guard = self
                 .sessions
@@ -904,6 +923,11 @@ impl RatatuiNodeRuntime {
             state.session_creation_port = Some(session_creation_port);
             state.target_registry_port = Some(target_registry_port);
         }
+
+        // Start the event-driven process monitor before any local session is
+        // created so every session can be registered as soon as it spawns.
+        let process_monitor = crate::process_monitor::ProcessMonitor::start(shared.clone())?;
+        shared.set_process_monitor(process_monitor);
 
         // Create the default local session with a reasonable initial size.
         // The client will send a RESIZE once it knows the terminal dimensions.

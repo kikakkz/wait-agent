@@ -11,11 +11,10 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use super::local_session::{render_grid_line, spawn_task_state_monitor};
+use super::local_session::render_grid_line;
 use super::runtime::SharedState;
 use super::state_event::StateEvent;
 
@@ -126,7 +125,6 @@ impl Dimensions for TermSize {
 struct SessionState {
     pty_master: File,
     child: Child,
-    monitor_shutdown: Arc<AtomicBool>,
     token: usize,
     output_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Buffered PTY output produced before an output sender was installed.
@@ -352,6 +350,11 @@ fn run_io_loop(
                 dead = read_pty(&session_id, &mut sessions);
                 if dead {
                     if let Some(state) = sessions.remove(&session_id) {
+                        let qualified_target_id =
+                            format!("{}:{session_id}", shared.local_authority_id());
+                        if let Some(monitor) = shared.process_monitor() {
+                            monitor.unregister_session(&qualified_target_id);
+                        }
                         let _ = poller.delete(&state.pty_master);
                         token_to_session.remove(&state.token);
                     }
@@ -434,20 +437,19 @@ fn drain_requests(
                 }
                 token_to_session.insert(token, session_id.clone());
 
-                // Start a task-state monitor so remote viewers see the actual
-                // command running inside the shell (e.g. chrome, vi) instead of
-                // always falling back to "bash".
-                let monitor_shutdown = Arc::new(AtomicBool::new(true));
-                let master_fd = pty_master.as_raw_fd();
-                let child_pid = child.id() as i32;
-                let _monitor_handle = spawn_task_state_monitor(
-                    session_id.clone(),
-                    master_fd,
-                    child_pid,
-                    Box::new(String::new),
-                    shared.clone(),
-                    monitor_shutdown.clone(),
-                );
+                // Register the session with the event-driven process monitor so
+                // remote viewers see the actual command running inside the shell
+                // (e.g. chrome, vi) instead of always falling back to "bash".
+                if let Some(monitor) = shared.process_monitor() {
+                    let qualified_target_id =
+                        format!("{}:{session_id}", shared.local_authority_id());
+                    monitor.register_session(
+                        qualified_target_id,
+                        child.id(),
+                        pty_master.as_raw_fd(),
+                        Box::new(String::new),
+                    );
+                }
 
                 let term = Term::new(
                     Config::default(),
@@ -462,7 +464,6 @@ fn drain_requests(
                     SessionState {
                         pty_master,
                         child,
-                        monitor_shutdown,
                         token,
                         output_tx,
                         output_buffer: VecDeque::new(),
@@ -477,7 +478,11 @@ fn drain_requests(
             }
             AuthorityHostIoRequest::UnregisterSession { session_id } => {
                 if let Some(state) = sessions.remove(&session_id) {
-                    state.monitor_shutdown.store(false, Ordering::Relaxed);
+                    let qualified_target_id =
+                        format!("{}:{session_id}", shared.local_authority_id());
+                    if let Some(monitor) = shared.process_monitor() {
+                        monitor.unregister_session(&qualified_target_id);
+                    }
                     let _ = poller.delete(&state.pty_master);
                     token_to_session.remove(&state.token);
                 }
@@ -631,7 +636,6 @@ fn check_child_exits(sessions: &mut HashMap<String, SessionState>, shared: &Arc<
     for (session_id, state) in sessions.iter_mut() {
         match state.child.try_wait() {
             Ok(Some(status)) => {
-                state.monitor_shutdown.store(false, Ordering::Relaxed);
                 let exit_code = status.code().unwrap_or(-1);
                 let _ = shared
                     .state_sender()

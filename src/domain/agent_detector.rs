@@ -74,6 +74,7 @@ pub trait AgentDetector: Send + Sync {
 
     /// Agent-specific hook compatibility. Most agents only match their own
     /// command name; wrappers can opt into aliases here.
+    #[allow(dead_code)]
     fn matches_agent_signal(&self, agent: &str, command_name: &str) -> bool {
         agent == self.name() && command_name == self.name()
     }
@@ -240,6 +241,7 @@ impl DetectorRegistry {
         ManagedSessionTaskState::Running
     }
 
+    #[allow(dead_code)]
     pub fn agent_signal_matches_command(&self, agent: &str, command_name: &str) -> bool {
         if agent == command_name {
             return true;
@@ -247,6 +249,15 @@ impl DetectorRegistry {
         self.detectors
             .iter()
             .any(|detector| detector.matches_agent_signal(agent, command_name))
+    }
+
+    /// Return true if `command_name` is a registered agent (e.g. "kimi", "claude",
+    /// "codex"). Used to decide whether task-state inference should use agent-
+    /// specific pane-text heuristics or simply treat the command as running.
+    pub fn is_registered_agent(&self, command_name: &str) -> bool {
+        self.detectors
+            .iter()
+            .any(|detector| detector.name() == command_name)
     }
 
     pub fn hook_events_for_agent(&self, agent: &str) -> Option<&'static [&'static str]> {

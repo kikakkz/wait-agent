@@ -10,6 +10,7 @@ mod infra;
 mod lifecycle;
 mod ports;
 mod process;
+mod process_monitor;
 mod ratatui_node;
 mod remote;
 mod terminal;
