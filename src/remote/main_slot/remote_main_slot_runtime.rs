@@ -392,27 +392,31 @@ pub(super) fn log_diagnostic(msg: impl fmt::Display) {
     use std::io::{BufWriter, Write};
     use std::sync::{Mutex, OnceLock};
 
-    static LOG: OnceLock<Mutex<BufWriter<std::fs::File>>> = OnceLock::new();
+    static LOG: OnceLock<Mutex<Option<BufWriter<std::fs::File>>>> = OnceLock::new();
     let writer = LOG.get_or_init(|| {
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("waitagent-diag-main-slot-{pid}.log"));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|error| {
-                // Diagnostic logging is best-effort; fall back to /dev/null so the
-                // process can continue even if the temp directory is not writable.
+        let file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                // Diagnostic logging is best-effort; if the temp directory is not
+                // writable, try /dev/null so the process can continue.
                 ERROR_LOG.log(format!(
                     "failed to open main-slot diagnostic log file {}: {error}; using /dev/null",
                     path.display()
                 ));
-                OpenOptions::new()
-                    .write(true)
-                    .open("/dev/null")
-                    .expect("/dev/null should be writable on Unix")
-            });
-        Mutex::new(BufWriter::with_capacity(4096, file))
+                match OpenOptions::new().write(true).open("/dev/null") {
+                    Ok(file) => file,
+                    Err(error) => {
+                        ERROR_LOG.log(format!(
+                            "failed to open /dev/null fallback for diagnostic logging: {error}"
+                        ));
+                        return Mutex::new(None);
+                    }
+                }
+            }
+        };
+        Mutex::new(Some(BufWriter::with_capacity(4096, file)))
     });
 
     fn now_millis() -> u64 {
@@ -423,9 +427,12 @@ pub(super) fn log_diagnostic(msg: impl fmt::Display) {
     }
 
     let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = writeln!(guard, "[{}] {}", now_millis(), msg);
+    let Some(writer) = guard.as_mut() else {
+        return;
+    };
+    let _ = writeln!(writer, "[{}] {}", now_millis(), msg);
     // Flush on every write so logs survive a crash.
-    let _ = guard.flush();
+    let _ = writer.flush();
 }
 
 #[cfg(test)]
