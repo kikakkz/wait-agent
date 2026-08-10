@@ -65,6 +65,19 @@ fn create_netlink_socket() -> Result<OwnedFd, LifecycleError> {
     // SAFETY: fd was just returned by a successful socket() call.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
 
+    // Increase the receive buffer to reduce the chance of the kernel dropping
+    // proc events under burst load. If the call fails we still proceed.
+    let rcvbuf_size: libc::c_int = 1024 * 1024;
+    unsafe {
+        libc::setsockopt(
+            owned.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &rcvbuf_size as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&rcvbuf_size) as libc::socklen_t,
+        );
+    }
+
     // SAFETY: `sockaddr_nl` is a C struct with no meaningful invariants for
     // unused padding fields; zeroing is the standard initialization pattern.
     let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
@@ -171,7 +184,38 @@ fn subscribe_to_proc_events(fd: &OwnedFd) -> Result<(), LifecycleError> {
         ));
     }
 
+    log_netlink_capability();
     Ok(())
+}
+
+/// Linux capability number for `CAP_NET_ADMIN`.
+const CAP_NET_ADMIN: usize = 12;
+
+/// Read effective capabilities from `/proc/self/status` and log whether
+/// `CAP_NET_ADMIN` is set. Without this capability the netlink proc connector
+/// may silently fail to deliver fork/exec/exit events.
+fn log_netlink_capability() {
+    let has_cap = read_proc_self_status_cap_eff()
+        .map(|cap_eff| (cap_eff & (1u64 << CAP_NET_ADMIN)) != 0)
+        .unwrap_or(false);
+
+    if has_cap {
+        ERROR_LOG.log("[process-monitor-linux] CAP_NET_ADMIN present; netlink proc events should be delivered".to_string());
+    } else {
+        ERROR_LOG.log_error(
+            "[process-monitor-linux] CAP_NET_ADMIN missing; run: sudo setcap cap_net_admin+ep /path/to/waitagent".to_string(),
+        );
+    }
+}
+
+fn read_proc_self_status_cap_eff() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("CapEff:") {
+            return u64::from_str_radix(value.trim(), 16).ok();
+        }
+    }
+    None
 }
 
 #[repr(C)]
