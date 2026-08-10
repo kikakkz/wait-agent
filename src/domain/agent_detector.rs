@@ -251,15 +251,6 @@ impl DetectorRegistry {
             .any(|detector| detector.matches_agent_signal(agent, command_name))
     }
 
-    /// Return true if `command_name` is a registered agent (e.g. "kimi", "claude",
-    /// "codex"). Used to decide whether task-state inference should use agent-
-    /// specific pane-text heuristics or simply treat the command as running.
-    pub fn is_registered_agent(&self, command_name: &str) -> bool {
-        self.detectors
-            .iter()
-            .any(|detector| detector.name() == command_name)
-    }
-
     pub fn hook_events_for_agent(&self, agent: &str) -> Option<&'static [&'static str]> {
         self.detectors
             .iter()

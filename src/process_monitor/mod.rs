@@ -8,7 +8,7 @@ use crate::domain::session_catalog::ManagedSessionTaskState;
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::process_monitor::event::ProcessEvent;
-use crate::process_monitor::state_machine::derive_session_state;
+use crate::process_monitor::state_machine::{derive_session_state, foreground_pgid};
 use crate::process_monitor::tree::SessionProcessTree;
 use crate::ratatui_node::runtime::SharedState;
 use crate::ratatui_node::state_event::StateEvent;
@@ -271,8 +271,8 @@ fn dispatcher_loop(
 
 fn recompute_and_emit(target_id: &str, state: &mut SessionState, shared: &Arc<SharedState>) {
     let pane_text = (state.pane_text)();
-    let (command_name, task_state) =
-        derive_session_state(&state.tree, state.pty_master_fd, &pane_text);
+    let fg_pgid = foreground_pgid(state.pty_master_fd);
+    let (command_name, task_state) = derive_session_state(&state.tree, fg_pgid, &pane_text);
 
     if state.last_task_state != task_state {
         ERROR_LOG.log(format!(
@@ -288,27 +288,38 @@ fn recompute_and_emit(target_id: &str, state: &mut SessionState, shared: &Arc<Sh
     }
 
     if state.last_command_name != command_name {
-        state.last_command_name = command_name.clone();
-        ERROR_LOG.log(format!(
-            "[process-monitor] command_name target_id={target_id} command_name={command_name:?}"
-        ));
         match command_name {
-            Some(command_name) => {
+            Some(ref command_name) if !command_name.is_empty() => {
+                ERROR_LOG.log(format!(
+                    "[process-monitor] command_name target_id={target_id} command_name={command_name}"
+                ));
+                state.last_command_name = Some(command_name.clone());
                 // For agents that accept @-references, set agent_command_name
                 // proactively so paste formatting works even before hooks fire.
                 let _ = shared
                     .state_sender()
                     .send(StateEvent::SessionCommandNameChanged {
                         target_id: target_id.to_string(),
-                        command_name,
+                        command_name: command_name.clone(),
                     });
             }
-            None => {
-                let _ = shared
-                    .state_sender()
-                    .send(StateEvent::SessionCommandNameCleared {
-                        target_id: target_id.to_string(),
-                    });
+            _ => {
+                // Only clear the displayed command name when we are back at the
+                // shell prompt. While a command is still running (even if we do
+                // not know its name yet), keep the last known name to avoid
+                // sidebar flicker.
+                if task_state == ManagedSessionTaskState::Input && state.last_command_name.is_some()
+                {
+                    ERROR_LOG.log(format!(
+                        "[process-monitor] command_name target_id={target_id} cleared"
+                    ));
+                    state.last_command_name = None;
+                    let _ = shared
+                        .state_sender()
+                        .send(StateEvent::SessionCommandNameCleared {
+                            target_id: target_id.to_string(),
+                        });
+                }
             }
         }
     }
