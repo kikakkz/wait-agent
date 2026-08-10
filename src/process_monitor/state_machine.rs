@@ -25,61 +25,37 @@ pub(crate) fn foreground_pgid(_pty_master_fd: RawFd) -> Option<u32> {
 }
 
 /// Derive the display command name and task state for a session from its
-/// process tree, PTY foreground group, and pane text.
+/// process tree and PTY foreground group.
 pub(crate) fn derive_session_state(
     tree: &SessionProcessTree,
-    fg_pgid: Option<u32>,
+    pty_master_fd: RawFd,
     pane_text: &str,
 ) -> (Option<String>, ManagedSessionTaskState) {
+    let fg_pgid = foreground_pgid(pty_master_fd);
+    let Some(primary) = tree.primary_process(fg_pgid) else {
+        return (None, ManagedSessionTaskState::Input);
+    };
+
     let registry = DetectorRegistry::default();
+    let command_name =
+        registry.detect_command_name(&primary.command_name, Some(&primary.argv), pane_text);
 
-    // 1. The foreground process group leader is authoritative. If it points to
-    //    a known non-shell process, the session is Running regardless of pane
-    //    text.  An empty command name is treated as an unknown running process
-    //    so that transient /proc races do not flicker to Input.
-    if let Some(pgid) = fg_pgid {
-        if let Some(node) = tree.get(pgid) {
-            if !node.is_shell() {
-                let command_name =
-                    registry.detect_command_name(&node.command_name, Some(&node.argv), pane_text);
-                if command_name.is_empty() {
-                    return (None, ManagedSessionTaskState::Running);
-                }
-                return (Some(command_name), ManagedSessionTaskState::Running);
-            }
-        }
-    }
-
-    // 2. The foreground is the shell itself (or we cannot read it). Use the
-    //    pane text to decide whether the shell is at a prompt or executing
-    //    commands. This handles sourced scripts, shell functions, and any case
-    //    where the foreground process group points back to the shell.
-    let shell_state = registry.infer_task_state(None, pane_text);
-    if shell_state == ManagedSessionTaskState::Input
-        || shell_state == ManagedSessionTaskState::Confirm
-    {
-        return (None, shell_state);
-    }
-
-    // 3. Not at a prompt: fall back to the most significant non-shell descendant.
-    if let Some(primary) = tree.primary_process(None) {
-        let command_name =
-            registry.detect_command_name(&primary.command_name, Some(&primary.argv), pane_text);
-        if command_name.is_empty() {
-            return (None, ManagedSessionTaskState::Running);
-        }
-        return (Some(command_name), ManagedSessionTaskState::Running);
-    }
-
-    // 4. No evidence of a running command.
-    (
-        None,
-        if shell_state == ManagedSessionTaskState::Unknown {
+    let task_state = if registry.is_registered_agent(&command_name) {
+        // Known agent: use agent-specific inference from pane text; fall back
+        // to Input when inconclusive, because hook signals will switch to
+        // Running once the agent actually starts working.
+        let detected = registry.infer_task_state(Some(&command_name), pane_text);
+        if detected == ManagedSessionTaskState::Unknown {
             ManagedSessionTaskState::Input
         } else {
-            shell_state
-        },
-    )
+            detected
+        }
+    } else {
+        // Non-agent foreground/child command is always Running.
+        ManagedSessionTaskState::Running
+    };
+
+    (Some(command_name), task_state)
 }
 
 #[cfg(test)]
@@ -90,7 +66,7 @@ mod tests {
     fn empty_tree_yields_input() {
         let tree =
             SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        let (name, state) = derive_session_state(&tree, None, "");
+        let (name, state) = derive_session_state(&tree, -1, "");
         assert!(name.is_none());
         assert_eq!(state, ManagedSessionTaskState::Input);
     }
@@ -105,67 +81,8 @@ mod tests {
             "/usr/bin/vi".to_string(),
             vec!["/usr/bin/vi".to_string()],
         );
-        let (name, state) = derive_session_state(&tree, None, "");
+        let (name, state) = derive_session_state(&tree, -1, "");
         assert_eq!(name.as_deref(), Some("vi"));
         assert_eq!(state, ManagedSessionTaskState::Running);
-    }
-
-    #[test]
-    fn foreground_script_yields_running() {
-        let mut tree =
-            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        tree.add_child(
-            1,
-            10,
-            "/home/user/deploy.sh".to_string(),
-            vec!["/home/user/deploy.sh".to_string()],
-        );
-        let (name, state) = derive_session_state(&tree, Some(10), "");
-        assert_eq!(name.as_deref(), Some("deploy.sh"));
-        assert_eq!(state, ManagedSessionTaskState::Running);
-    }
-
-    #[test]
-    fn foreground_unknown_process_yields_running_without_clearing_name() {
-        let mut tree =
-            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        tree.add_child(1, 10, "".to_string(), vec![]);
-        let (name, state) = derive_session_state(&tree, Some(10), "");
-        assert!(name.is_none());
-        assert_eq!(state, ManagedSessionTaskState::Running);
-    }
-
-    #[test]
-    fn shell_prompt_yields_input() {
-        let tree =
-            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        let (name, state) = derive_session_state(&tree, None, "user@host:~$ ");
-        assert!(name.is_none());
-        assert_eq!(state, ManagedSessionTaskState::Input);
-    }
-
-    #[test]
-    fn shell_output_without_prompt_yields_running() {
-        let tree =
-            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        let (name, state) = derive_session_state(&tree, None, "Building...\nCompiling foo");
-        assert!(name.is_none());
-        assert_eq!(state, ManagedSessionTaskState::Running);
-    }
-
-    #[test]
-    fn script_exit_returns_to_input() {
-        let mut tree =
-            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
-        tree.add_child(
-            1,
-            10,
-            "/usr/bin/vi".to_string(),
-            vec!["/usr/bin/vi".to_string()],
-        );
-        tree.remove(10);
-        let (name, state) = derive_session_state(&tree, None, "user@host:~$ ");
-        assert!(name.is_none());
-        assert_eq!(state, ManagedSessionTaskState::Input);
     }
 }
