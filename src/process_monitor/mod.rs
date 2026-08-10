@@ -50,13 +50,18 @@ struct SessionState {
 pub(crate) struct ProcessMonitor {
     sessions: Arc<Mutex<HashMap<String, SessionState>>>,
     pid_to_session: Arc<Mutex<HashMap<u32, String>>>,
+    // Keep the event source alive for the lifetime of the monitor. Dropping it
+    // would shut down the platform event thread (e.g. the netlink reader on
+    // Linux) and close the kernel socket.
+    #[allow(dead_code)]
+    source: Arc<PlatformSource>,
 }
 
 impl ProcessMonitor {
     /// Start the platform-specific process event source and the dispatcher loop.
     pub fn start(shared: Arc<SharedState>) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<ProcessEvent>();
-        let _source = PlatformSource::start(tx)?;
+        let source = Arc::new(PlatformSource::start(tx)?);
 
         let sessions = Arc::new(Mutex::new(HashMap::<String, SessionState>::new()));
         let pid_to_session = Arc::new(Mutex::new(HashMap::<u32, String>::new()));
@@ -64,6 +69,7 @@ impl ProcessMonitor {
         let monitor = Self {
             sessions: sessions.clone(),
             pid_to_session: pid_to_session.clone(),
+            source: source.clone(),
         };
 
         ERROR_LOG.log("[process-monitor] dispatcher starting".to_string());
