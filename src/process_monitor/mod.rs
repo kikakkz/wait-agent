@@ -5,6 +5,7 @@
 //! implemented later (Windows: ETW, macOS: kqueue + libproc).
 
 use crate::domain::session_catalog::ManagedSessionTaskState;
+use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::process_monitor::event::ProcessEvent;
 use crate::process_monitor::state_machine::derive_session_state;
@@ -65,6 +66,8 @@ impl ProcessMonitor {
             pid_to_session: pid_to_session.clone(),
         };
 
+        ERROR_LOG.log("[process-monitor] dispatcher starting".to_string());
+
         std::thread::spawn(move || {
             dispatcher_loop(rx, sessions, pid_to_session, shared);
         });
@@ -81,11 +84,11 @@ impl ProcessMonitor {
         pane_text: Box<dyn Fn() -> String + Send>,
     ) {
         let (argv0, argv) = read_proc_cmdline(shell_pid);
-        let tree = SessionProcessTree::new(
-            shell_pid,
-            argv0.unwrap_or_else(|| "bash".to_string()),
-            argv.unwrap_or_default(),
-        );
+        let argv0 = argv0.unwrap_or_else(|| "bash".to_string());
+        ERROR_LOG.log(format!(
+            "[process-monitor] register target_id={target_id} shell_pid={shell_pid} argv0={argv0}"
+        ));
+        let tree = SessionProcessTree::new(shell_pid, argv0, argv.unwrap_or_default());
 
         {
             let mut pid_map = self
@@ -114,6 +117,10 @@ impl ProcessMonitor {
         let Some(state) = sessions.remove(target_id) else {
             return;
         };
+        ERROR_LOG.log(format!(
+            "[process-monitor] unregister target_id={target_id} shell_pid={}",
+            state.tree.shell_pid()
+        ));
         drop(sessions);
 
         let mut pid_map = self
@@ -268,6 +275,9 @@ fn recompute_and_emit(target_id: &str, state: &mut SessionState, shared: &Arc<Sh
         derive_session_state(&state.tree, state.pty_master_fd, &pane_text);
 
     if state.last_task_state != task_state {
+        ERROR_LOG.log(format!(
+            "[process-monitor] task_state target_id={target_id} task_state={task_state:?}"
+        ));
         state.last_task_state = task_state;
         let _ = shared
             .state_sender()
@@ -279,6 +289,9 @@ fn recompute_and_emit(target_id: &str, state: &mut SessionState, shared: &Arc<Sh
 
     if state.last_command_name != command_name {
         state.last_command_name = command_name.clone();
+        ERROR_LOG.log(format!(
+            "[process-monitor] command_name target_id={target_id} command_name={command_name:?}"
+        ));
         match command_name {
             Some(command_name) => {
                 // For agents that accept @-references, set agent_command_name

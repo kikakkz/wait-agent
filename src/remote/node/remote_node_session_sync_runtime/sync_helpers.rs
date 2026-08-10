@@ -1037,7 +1037,15 @@ where
     let t_sync = Instant::now();
     let delta = compute_session_sync_delta(context.published, context.observed, mode);
 
-    for _session in &delta.publish {}
+    for session in &delta.publish {
+        ERROR_LOG.log(format!(
+            "[session-sync-publish] node={node_id} target={} command={:?} display={:?} task_state={:?}",
+            session.address.qualified_target(),
+            session.command_name,
+            session.display_command_name,
+            session.task_state
+        ));
+    }
 
     for session in &delta.publish {
         let t_send = Instant::now();
