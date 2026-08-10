@@ -137,6 +137,21 @@ main() {
     install_binary_atomically "$binary" "${INSTALL_DIR}/waitagent"
   fi
 
+  # Grant CAP_NET_ADMIN so the process monitor can receive netlink proc
+  # connector events while still running as the login user.
+  if [[ "$platform" == linux-* ]] && command -v setcap >/dev/null 2>&1; then
+    local cap_target="${INSTALL_DIR}/waitagent"
+    if [[ -n "${PREFIX:-}" ]]; then
+      cap_target="${PREFIX}${INSTALL_DIR}/waitagent"
+    fi
+    if [[ "$INSTALL_DIR" == /usr/local/bin && "$(id -u)" -ne 0 ]]; then
+      echo ">>> (sudo required for capability setup)"
+      sudo setcap cap_net_admin+ep "$cap_target" || true
+    else
+      setcap cap_net_admin+ep "$cap_target" || true
+    fi
+  fi
+
   echo ""
   echo "✔  waitagent ${version} installed to ${INSTALL_DIR}/waitagent"
   echo ""

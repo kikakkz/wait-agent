@@ -38,5 +38,14 @@ Description: Ratatui-based terminal workspace for multi-agent workflows
 Homepage: https://github.com/kikakkz/wait-agent
 EOF
 
+cat > "$PKG_ROOT/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v setcap >/dev/null 2>&1; then
+    setcap cap_net_admin+ep /usr/bin/waitagent || true
+fi
+EOF
+chmod 755 "$PKG_ROOT/DEBIAN/postinst"
+
 dpkg-deb --root-owner-group --build "$PKG_ROOT" "$OUTPUT_DEB"
 echo "created $OUTPUT_DEB"

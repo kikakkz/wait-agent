@@ -50,6 +50,9 @@ rm -rf %{buildroot}
 
 %post
 /sbin/ldconfig 2>/dev/null || true
+if command -v setcap >/dev/null 2>&1; then
+    setcap cap_net_admin+ep /usr/bin/waitagent || true
+fi
 EOF
 
 rpmbuild --define "_topdir $RPMBUILD_DIR" -bb "$RPMBUILD_DIR/SPECS/waitagent.spec"
