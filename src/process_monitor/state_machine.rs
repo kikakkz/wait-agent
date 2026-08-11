@@ -85,4 +85,47 @@ mod tests {
         assert_eq!(name.as_deref(), Some("vi"));
         assert_eq!(state, ManagedSessionTaskState::Running);
     }
+
+    #[test]
+    fn shell_script_yields_script_name() {
+        let mut tree =
+            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
+        tree.add_child(
+            1,
+            10,
+            "/bin/bash".to_string(),
+            vec![
+                "/bin/bash".to_string(),
+                "./scripts/run_local.sh".to_string(),
+            ],
+        );
+        let (name, state) = derive_session_state(&tree, -1, "");
+        assert_eq!(name.as_deref(), Some("run_local.sh"));
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
+
+    #[test]
+    fn bash_c_wrapper_yields_grandchild_name() {
+        let mut tree =
+            SessionProcessTree::new(1, "/bin/bash".to_string(), vec!["/bin/bash".to_string()]);
+        tree.add_child(
+            1,
+            10,
+            "/bin/bash".to_string(),
+            vec![
+                "/bin/bash".to_string(),
+                "-c".to_string(),
+                "sleep 100".to_string(),
+            ],
+        );
+        tree.add_child(
+            10,
+            11,
+            "/usr/bin/sleep".to_string(),
+            vec!["/usr/bin/sleep".to_string(), "100".to_string()],
+        );
+        let (name, state) = derive_session_state(&tree, -1, "");
+        assert_eq!(name.as_deref(), Some("sleep"));
+        assert_eq!(state, ManagedSessionTaskState::Running);
+    }
 }

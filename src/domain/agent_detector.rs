@@ -28,6 +28,26 @@ pub(crate) fn first_argv_token(argv0: &str) -> &str {
     base.split_whitespace().next().unwrap_or(base)
 }
 
+/// Returns the script argument from a shell argv, if one exists.
+///
+/// Skips boolean shell flags and the `-c` command-string argument (and its
+/// value). This distinguishes `bash ./scripts/run_local.sh` from
+/// `bash -c "sleep 100"`.
+pub fn shell_script_arg(argv: &[String]) -> Option<&str> {
+    let mut iter = argv.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "-c" {
+            iter.next(); // skip the command string argument
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return Some(arg.as_str());
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputStabilityPolicy {
     Immediate,

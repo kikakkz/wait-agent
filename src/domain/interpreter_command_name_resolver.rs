@@ -38,7 +38,22 @@ impl InterpreterCommandNameResolver {
             return Some(argv0_base.to_string());
         }
 
-        // Case 2: interpreter running a script or module directly.
+        // Case 2: shell executing a script file.
+        // e.g. `bash ./scripts/run_local.sh` -> `run_local.sh`
+        // Skips boolean flags and the `-c` command-string argument.
+        if crate::domain::agent_detector::SHELL_NAMES.contains(&current_command) {
+            if let Some(script) = crate::domain::agent_detector::shell_script_arg(argv) {
+                let name = std::path::Path::new(script)
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or(script);
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+
+        // Case 3: interpreter running a script or module directly.
         match current_command {
             "python" | "python3" | "python2" => self.resolve_python(argv),
             "node" | "nodejs" => self.resolve_node(argv),
@@ -137,9 +152,47 @@ mod tests {
     }
 
     #[test]
-    fn leaves_shell_unchanged() {
+    fn leaves_bare_shell_unchanged() {
         let resolver = InterpreterCommandNameResolver::new();
-        let argv = vec!["/bin/bash".to_string(), "script.sh".to_string()];
+        let argv = vec!["/bin/bash".to_string()];
+        assert_eq!(resolver.resolve("bash", Some(&argv)), None);
+    }
+
+    #[test]
+    fn resolves_shell_script() {
+        let resolver = InterpreterCommandNameResolver::new();
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "./scripts/run_local.sh".to_string(),
+        ];
+        assert_eq!(
+            resolver.resolve("bash", Some(&argv)),
+            Some("run_local.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_shell_script_with_flags() {
+        let resolver = InterpreterCommandNameResolver::new();
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "-x".to_string(),
+            "./scripts/run_local.sh".to_string(),
+        ];
+        assert_eq!(
+            resolver.resolve("bash", Some(&argv)),
+            Some("run_local.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_bash_c_wrapper() {
+        let resolver = InterpreterCommandNameResolver::new();
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "-c".to_string(),
+            "sleep 100".to_string(),
+        ];
         assert_eq!(resolver.resolve("bash", Some(&argv)), None);
     }
 
