@@ -1378,14 +1378,14 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
             if let Some((col, row)) = snapshot.main_cursor {
                 let cursor_x = inner[0].x + col;
                 let cursor_y = inner[0].y + row;
-                if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
-                    if snapshot.main_cursor_visible {
-                        frame
-                            .buffer_mut()
-                            .get_mut(cursor_x, cursor_y)
-                            .set_style(Style::default().add_modifier(Modifier::REVERSED));
-                        frame.set_cursor(cursor_x, cursor_y);
-                    }
+                if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y))
+                    && snapshot.main_cursor_visible
+                {
+                    frame
+                        .buffer_mut()
+                        .get_mut(cursor_x, cursor_y)
+                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                    frame.set_cursor(cursor_x, cursor_y);
                 }
             }
         }
