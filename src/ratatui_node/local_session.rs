@@ -169,7 +169,9 @@ impl RatatuiLocalSession {
     }
 
     /// Snapshot the visible screen as plain/styled text lines and the cursor position.
-    pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
+    pub fn snapshot(&self) -> crate::ratatui_node::session_snapshot::SessionSnapshot {
+        use crate::ratatui_node::session_snapshot::SessionSnapshot;
+
         let term = self.term.lock();
         let grid = term.grid();
         let screen_lines = grid.screen_lines();
@@ -185,10 +187,10 @@ impl RatatuiLocalSession {
             styled_lines.push(styled);
         }
 
-        let cursor = if term
+        let cursor_visible = term
             .mode()
-            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
-        {
+            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
+        let cursor = {
             let point = grid.cursor.point;
             let col = point.column.0 as u16;
             let row = (point.line.0 + display_offset) as u16;
@@ -197,11 +199,14 @@ impl RatatuiLocalSession {
             } else {
                 None
             }
-        } else {
-            None
         };
 
-        (lines, styled_lines, cursor)
+        SessionSnapshot {
+            lines,
+            styled_lines,
+            cursor,
+            cursor_visible,
+        }
     }
 
     /// Return the full scrollback history plus the visible screen as plain/styled lines.

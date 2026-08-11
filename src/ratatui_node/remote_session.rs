@@ -444,7 +444,9 @@ impl RatatuiRemoteSession {
     }
 
     /// Snapshot the rendered screen as plain/styled text lines and the cursor position.
-    pub fn snapshot(&self) -> (Vec<String>, Vec<String>, Option<(u16, u16)>) {
+    pub fn snapshot(&self) -> crate::ratatui_node::session_snapshot::SessionSnapshot {
+        use crate::ratatui_node::session_snapshot::SessionSnapshot;
+
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = observer.sync();
         let snap = observer.snapshot();
@@ -455,7 +457,12 @@ impl RatatuiRemoteSession {
         } else {
             None
         };
-        (screen.lines.clone(), screen.styled_lines.clone(), cursor)
+        SessionSnapshot {
+            lines: screen.lines.clone(),
+            styled_lines: screen.styled_lines.clone(),
+            cursor,
+            cursor_visible: screen.cursor_visible,
+        }
     }
 
     /// Return the full scrollback history plus the visible screen as plain/styled lines.
@@ -775,7 +782,7 @@ mod remote_session_tests {
             observer.feed_raw_output(1, b"HELLO WORLD\n");
         }
 
-        let (lines, _styled, _cursor) = session.snapshot();
+        let lines = session.snapshot().lines;
         assert!(
             lines.iter().any(|line| line.contains("HELLO WORLD")),
             "observer screen should contain bootstrap content, got: {lines:?}"

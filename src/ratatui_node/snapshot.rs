@@ -110,6 +110,8 @@ pub struct RatatuiSnapshot {
     pub main_lines: Vec<String>,
     pub main_styled_lines: Vec<String>,
     pub main_cursor: Option<(u16, u16)>,
+    #[serde(default)]
+    pub main_cursor_visible: bool,
     pub sidebar: String,
     pub footer: FooterState,
     pub sessions: Vec<SessionView>,
@@ -246,7 +248,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         .unwrap_or_else(|| super::runtime::DEFAULT_SESSION_ID.to_string());
     drop(guard);
 
-    let (main_lines, main_styled_lines, main_cursor) = active_target
+    let session_snap = active_target
         .as_deref()
         .map(|target| {
             if is_remote_target(target, shared) {
@@ -258,7 +260,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 remote_guard
                     .get(target)
                     .map(|s| s.snapshot())
-                    .unwrap_or_else(|| (Vec::new(), Vec::new(), None))
+                    .unwrap_or_default()
             } else {
                 let local_guard = shared
                     .sessions
@@ -268,10 +270,14 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
                 local_guard
                     .get(target)
                     .map(|s| s.snapshot())
-                    .unwrap_or_else(|| (Vec::new(), Vec::new(), None))
+                    .unwrap_or_default()
             }
         })
-        .unwrap_or_else(|| (Vec::new(), Vec::new(), None));
+        .unwrap_or_default();
+    let main_lines = session_snap.lines;
+    let main_styled_lines = session_snap.styled_lines;
+    let main_cursor = session_snap.cursor;
+    let main_cursor_visible = session_snap.cursor_visible;
 
     RatatuiSnapshot {
         session_name: active_session_id.clone(),
@@ -280,6 +286,7 @@ pub(crate) fn build_snapshot(client_count: usize, shared: &SharedState) -> Ratat
         main_lines,
         main_styled_lines,
         main_cursor,
+        main_cursor_visible,
         sidebar: "Sessions".to_string(),
         footer: FooterState {
             active_session: active_session_id,
@@ -331,6 +338,7 @@ mod snapshot_tests {
             main_lines: vec!["hello".to_string()],
             main_styled_lines: vec!["hello".to_string()],
             main_cursor: Some((0, 0)),
+            main_cursor_visible: true,
             sidebar: "Sessions".to_string(),
             footer: FooterState {
                 active_session: "1".to_string(),

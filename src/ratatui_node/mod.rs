@@ -15,6 +15,7 @@ pub mod logical_key;
 pub mod reconnect_worker;
 pub mod remote_session;
 pub mod runtime;
+pub mod session_snapshot;
 pub mod snapshot;
 pub mod socket;
 pub mod state_event;

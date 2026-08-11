@@ -18,6 +18,7 @@ use crate::ratatui_node::node_runtime::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver};
+use crossterm::cursor::{Hide, MoveTo};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -773,6 +774,7 @@ fn handle_crossterm_event(
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let render_background = |frame: &mut Frame| {
+                            let mut cursor_state = None;
                             render(
                                 frame,
                                 RenderArgs {
@@ -788,6 +790,7 @@ fn handle_crossterm_event(
                                         .as_ref()
                                         .map(|(text, _)| text.as_str()),
                                     dim_background: true,
+                                    cursor_state: &mut cursor_state,
                                 },
                             )
                         };
@@ -1014,6 +1017,7 @@ fn run_event_loop(
         }
 
         let dim_background = error_log_state.is_some() || settings_state.is_some();
+        let mut cursor_state = None;
         terminal
             .draw(|frame| {
                 render(
@@ -1029,12 +1033,32 @@ fn run_event_loop(
                         active_target: snapshot.active_target.as_deref(),
                         status_message: status_message.as_ref().map(|(text, _)| text.as_str()),
                         dim_background,
+                        cursor_state: &mut cursor_state,
                     },
                 )
             })
             .map_err(|error| {
                 LifecycleError::Io("failed to draw ratatui frame".to_string(), error)
             })?;
+
+        // When the PTY hides its cursor, ratatui will hide the hardware cursor
+        // and may leave it at an arbitrary cell. The IME candidate window still
+        // needs the correct anchor, so move the hidden cursor to the active
+        // input position without showing it.
+        if focus == Focus::Main {
+            if let Some(ImeCursorState {
+                area,
+                cursor: Some((col, row)),
+                cursor_visible: false,
+            }) = cursor_state
+            {
+                let cursor_x = area.x + col;
+                let cursor_y = area.y + row;
+                if area.contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
+                    let _ = execute!(terminal.backend_mut(), MoveTo(cursor_x, cursor_y), Hide,);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1267,6 +1291,13 @@ fn key_event_to_logical_key(key: &KeyEvent) -> Option<LogicalKey> {
     Some(LogicalKey::from(key))
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ImeCursorState {
+    area: Rect,
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+}
+
 struct RenderArgs<'a> {
     snapshot: &'a RatatuiSnapshot,
     focus: Focus,
@@ -1278,6 +1309,7 @@ struct RenderArgs<'a> {
     active_target: Option<&'a str>,
     status_message: Option<&'a str>,
     dim_background: bool,
+    cursor_state: &'a mut Option<ImeCursorState>,
 }
 
 fn render(frame: &mut Frame, args: RenderArgs<'_>) {
@@ -1292,6 +1324,7 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
         active_target,
         status_message,
         dim_background,
+        cursor_state,
     } = args;
     let area = frame.size();
 
@@ -1322,8 +1355,14 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
     let history_viewport =
         history_state.map(|history| compute_history_viewport(history, inner[0].height as usize));
 
+    *cursor_state = Some(ImeCursorState {
+        area: inner[0],
+        cursor: snapshot.main_cursor,
+        cursor_visible: snapshot.main_cursor_visible,
+    });
+
     if let Some(history) = history_state {
-        render_history_view(frame, history, inner[0]);
+        render_history_view(frame, history, inner[0], cursor_state);
     } else {
         let main_block = Block::default()
             .borders(Borders::NONE)
@@ -1333,16 +1372,20 @@ fn render(frame: &mut Frame, args: RenderArgs<'_>) {
         frame.render_widget(main, inner[0]);
 
         // Draw cursor if the active session provided a cursor position.
+        // When the PTY hides its cursor we still track the position for the IME
+        // post-render adjustment, but we do not draw a visible cursor here.
         if focus == Focus::Main {
             if let Some((col, row)) = snapshot.main_cursor {
                 let cursor_x = inner[0].x + col;
                 let cursor_y = inner[0].y + row;
                 if inner[0].contains(ratatui::layout::Position::new(cursor_x, cursor_y)) {
-                    frame
-                        .buffer_mut()
-                        .get_mut(cursor_x, cursor_y)
-                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
-                    frame.set_cursor(cursor_x, cursor_y);
+                    if snapshot.main_cursor_visible {
+                        frame
+                            .buffer_mut()
+                            .get_mut(cursor_x, cursor_y)
+                            .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                        frame.set_cursor(cursor_x, cursor_y);
+                    }
                 }
             }
         }
@@ -1441,7 +1484,12 @@ fn compute_history_viewport(history: &HistoryState, height: usize) -> HistoryVie
     }
 }
 
-fn render_history_view(frame: &mut Frame, history: &HistoryState, area: Rect) {
+fn render_history_view(
+    frame: &mut Frame,
+    history: &HistoryState,
+    area: Rect,
+    cursor_state: &mut Option<ImeCursorState>,
+) {
     if area.height == 0 {
         return;
     }
@@ -1482,6 +1530,11 @@ fn render_history_view(frame: &mut Frame, history: &HistoryState, area: Rect) {
                     .get_mut(cursor_x, cursor_y)
                     .set_style(Style::default().add_modifier(Modifier::REVERSED));
                 frame.set_cursor(cursor_x, cursor_y);
+                *cursor_state = Some(ImeCursorState {
+                    area,
+                    cursor: Some((cursor_col, cursor_screen_row as u16)),
+                    cursor_visible: true,
+                });
             }
         }
     }
