@@ -676,7 +676,11 @@ impl SharedState {
                 display_command_name: None,
                 agent_command_name: None,
                 current_path: None,
-                task_state: ManagedSessionTaskState::Running,
+                // Authority-host sessions are shell-only until a command is
+                // launched, just like local sessions. Start at Input so remote
+                // viewers do not see a transient Running state before the first
+                // process-monitor refresh arrives.
+                task_state: ManagedSessionTaskState::Input,
             };
             guard.insert(target_id.clone(), record);
         }
