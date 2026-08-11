@@ -1,6 +1,6 @@
 use crate::lifecycle::LifecycleError;
 use crate::process_monitor::event::ProcessEvent;
-use std::sync::mpsc;
+use std::os::windows::io::{AsRawHandle, RawHandle};
 
 /// Stub Windows process event source.
 ///
@@ -9,7 +9,17 @@ use std::sync::mpsc;
 pub(crate) struct WindowsProcessEventSource;
 
 impl WindowsProcessEventSource {
-    pub fn start(_tx: mpsc::Sender<ProcessEvent>) -> Result<Self, LifecycleError> {
+    pub fn new() -> Result<Self, LifecycleError> {
         Ok(Self)
+    }
+
+    pub fn read_events(&self, _out: &mut Vec<ProcessEvent>) -> Result<usize, LifecycleError> {
+        Ok(0)
+    }
+}
+
+impl AsRawHandle for WindowsProcessEventSource {
+    fn as_raw_handle(&self) -> RawHandle {
+        std::ptr::null_mut()
     }
 }

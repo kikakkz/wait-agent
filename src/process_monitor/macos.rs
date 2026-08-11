@@ -1,6 +1,6 @@
 use crate::lifecycle::LifecycleError;
 use crate::process_monitor::event::ProcessEvent;
-use std::sync::mpsc;
+use std::os::fd::{AsRawFd, RawFd};
 
 /// Stub macOS process event source.
 ///
@@ -9,7 +9,17 @@ use std::sync::mpsc;
 pub(crate) struct MacOsProcessEventSource;
 
 impl MacOsProcessEventSource {
-    pub fn start(_tx: mpsc::Sender<ProcessEvent>) -> Result<Self, LifecycleError> {
+    pub fn new() -> Result<Self, LifecycleError> {
         Ok(Self)
+    }
+
+    pub fn read_events(&self, _out: &mut Vec<ProcessEvent>) -> Result<usize, LifecycleError> {
+        Ok(0)
+    }
+}
+
+impl AsRawFd for MacOsProcessEventSource {
+    fn as_raw_fd(&self) -> RawFd {
+        -1
     }
 }

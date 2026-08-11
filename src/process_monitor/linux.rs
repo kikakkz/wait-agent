@@ -1,11 +1,7 @@
 use crate::infra::error_log::ERROR_LOG;
 use crate::lifecycle::LifecycleError;
 use crate::process_monitor::event::ProcessEvent;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::thread;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 // Netlink connector constants.
 const NETLINK_CONNECTOR: libc::c_int = 11;
@@ -22,28 +18,66 @@ const PROC_EVENT_SID: u32 = 0x0000_0080;
 const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
 /// Linux netlink connector process event source.
+///
+/// This type no longer spawns its own thread. The caller is expected to poll
+/// [`Self::fd`] in a unified event loop and call [`Self::read_events`] when the
+/// socket becomes readable.
 pub(crate) struct LinuxProcessEventSource {
-    shutdown: Arc<AtomicBool>,
+    socket_fd: OwnedFd,
 }
 
 impl LinuxProcessEventSource {
-    pub fn start(tx: mpsc::Sender<ProcessEvent>) -> Result<Self, LifecycleError> {
+    /// Create and subscribe the netlink proc connector socket.
+    pub fn new() -> Result<Self, LifecycleError> {
         let socket_fd = create_netlink_socket()?;
         subscribe_to_proc_events(&socket_fd)?;
+        Ok(Self { socket_fd })
+    }
 
-        let shutdown = Arc::new(AtomicBool::new(true));
-        let thread_shutdown = shutdown.clone();
-        thread::spawn(move || {
-            event_reader_loop(socket_fd, tx, thread_shutdown);
-        });
+    /// Read all currently available proc events from the socket into `out`.
+    ///
+    /// Returns the number of events appended to `out`. A return value of zero
+    /// means the socket was readable but no complete events were available.
+    pub fn read_events(&self, out: &mut Vec<ProcessEvent>) -> Result<usize, LifecycleError> {
+        let mut buf = vec![0u8; 4096];
+        let mut total = 0usize;
 
-        Ok(Self { shutdown })
+        loop {
+            // SAFETY: `recv` on a valid netlink socket into a valid buffer.
+            let n = unsafe {
+                libc::recv(
+                    self.socket_fd.as_raw_fd(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::Interrupted
+                {
+                    break;
+                }
+                return Err(LifecycleError::Io("netlink recv failed".to_string(), err));
+            }
+            if n == 0 {
+                break;
+            }
+
+            let before = out.len();
+            parse_netlink_buffer(&buf[..n as usize], out);
+            total += out.len() - before;
+        }
+
+        Ok(total)
     }
 }
 
-impl Drop for LinuxProcessEventSource {
-    fn drop(&mut self) {
-        self.shutdown.store(false, Ordering::Relaxed);
+impl AsRawFd for LinuxProcessEventSource {
+    fn as_raw_fd(&self) -> RawFd {
+        self.socket_fd.as_raw_fd()
     }
 }
 
@@ -248,39 +282,7 @@ struct ExitEvent {
     signal: u32,
 }
 
-fn event_reader_loop(fd: OwnedFd, tx: mpsc::Sender<ProcessEvent>, shutdown: Arc<AtomicBool>) {
-    let mut buf = vec![0u8; 4096];
-
-    while shutdown.load(Ordering::Relaxed) {
-        // SAFETY: `recv` on a valid netlink socket into a valid buffer.
-        let n = unsafe {
-            libc::recv(
-                fd.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-            )
-        };
-
-        if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            ERROR_LOG.log(format!(
-                "[process-monitor-linux] netlink recv failed: {err}"
-            ));
-            break;
-        }
-        if n == 0 {
-            break;
-        }
-
-        parse_netlink_buffer(&buf[..n as usize], &tx);
-    }
-}
-
-fn parse_netlink_buffer(buf: &[u8], tx: &mpsc::Sender<ProcessEvent>) {
+fn parse_netlink_buffer(buf: &[u8], out: &mut Vec<ProcessEvent>) {
     let mut offset = 0;
     while offset + std::mem::size_of::<libc::nlmsghdr>() <= buf.len() {
         // SAFETY: We checked that the buffer is large enough for an nlmsghdr.
@@ -310,7 +312,7 @@ fn parse_netlink_buffer(buf: &[u8], tx: &mpsc::Sender<ProcessEvent>) {
                         let proc_event =
                             unsafe { &*(buf.as_ptr().add(data_offset) as *const ProcEvent) };
                         if let Some(event) = translate_proc_event(proc_event) {
-                            let _ = tx.send(event);
+                            out.push(event);
                         }
                     }
                 }
