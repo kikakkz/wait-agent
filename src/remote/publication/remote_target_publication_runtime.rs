@@ -267,6 +267,10 @@ impl<B: RemoteTargetPublicationBackend> RemoteTargetPublicationRuntime<B> {
         self.backend.signal_remote_node_offline(node_id)
     }
 
+    pub fn signal_remote_node_online(&self, node_id: &str) -> Result<(), LifecycleError> {
+        self.backend.signal_remote_node_online(node_id)
+    }
+
     pub fn mark_source_target_offline(
         &self,
         socket_name: &str,

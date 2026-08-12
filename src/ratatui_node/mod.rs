@@ -12,6 +12,7 @@ pub mod clipboard_reader;
 pub mod key_translation;
 pub mod local_session;
 pub mod logical_key;
+pub mod outbound_dial_retry_worker;
 pub mod reconnect_worker;
 pub mod remote_session;
 pub mod runtime;

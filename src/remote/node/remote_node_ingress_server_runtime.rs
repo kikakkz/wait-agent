@@ -1773,12 +1773,14 @@ fn handle_transport_event<
             let session_instance_id = session.session_instance_id().to_string();
             closed_session_instances.remove(&session_instance_id);
 
+            let node_id = session.node_id().to_string();
+            let was_offline = !has_active_ingress_session_for_node(sessions, &node_id);
+
             let mut active = ActiveNodeIngressSession {
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
             };
-            let node_id = active.session.node_id().to_string();
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
                 schedule_socket_discovery_retry(
@@ -1788,6 +1790,14 @@ fn handle_transport_event<
                 );
             }
             sessions.insert(session_instance_id, active);
+
+            if was_offline {
+                if let Err(error) = publication_runtime.signal_remote_node_online(&node_id) {
+                    ERROR_LOG.log_error(format!(
+                        "ingress server: failed to signal remote node online {node_id}: {error}"
+                    ));
+                }
+            }
         }
         RemoteNodeTransportEvent::EnvelopeReceived {
             node_id,

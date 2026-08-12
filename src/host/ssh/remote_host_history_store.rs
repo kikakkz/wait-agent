@@ -5,6 +5,52 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteHostKind {
+    /// A cloud host that is reachable directly and must use key authentication
+    /// for both SSH and the control-plane operator challenge.
+    Cloud,
+    /// A LAN host that is reached via outbound dial but may use password or key
+    /// authentication for SSH.
+    #[default]
+    Lan,
+}
+
+impl RemoteHostKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloud => "cloud",
+            Self::Lan => "lan",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cloud => "Cloud",
+            Self::Lan => "LAN",
+        }
+    }
+
+    pub fn shift(self, step: i32) -> Self {
+        let values = [Self::Lan, Self::Cloud];
+        let index = values.iter().position(|value| *value == self).unwrap_or(0) as i32;
+        let len = values.len() as i32;
+        values[((index + step).rem_euclid(len)) as usize]
+    }
+}
+
+impl std::str::FromStr for RemoteHostKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cloud" => Ok(Self::Cloud),
+            "lan" => Ok(Self::Lan),
+            other => Err(format!("unknown remote host kind `{other}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteHostProfile {
     pub name: String,
@@ -18,6 +64,7 @@ pub struct RemoteHostProfile {
     pub last_connected_at: Option<String>,
     pub use_install_proxy: bool,
     pub tls_pin_sha256: Option<String>,
+    pub host_kind: RemoteHostKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +236,7 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
             push_string(&mut out, "tls_pin_sha256", tls_pin);
         }
         out.push_str(&format!("use_install_proxy = {}\n", host.use_install_proxy));
+        out.push_str(&format!("host_kind = \"{}\"\n", host.host_kind.as_str()));
         out.push('\n');
     }
     out
@@ -259,6 +307,7 @@ struct RawProfile {
     last_connected_at: Option<String>,
     tls_pin_sha256: Option<String>,
     use_install_proxy: Option<String>,
+    host_kind: Option<String>,
 }
 
 impl RawProfile {
@@ -277,6 +326,7 @@ impl RawProfile {
             "last_connected_at" => self.last_connected_at = Some(value),
             "tls_pin_sha256" => self.tls_pin_sha256 = Some(value),
             "use_install_proxy" => self.use_install_proxy = Some(value),
+            "host_kind" => self.host_kind = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
                     "unknown remote host history field `{other}`"
@@ -316,6 +366,7 @@ impl RawProfile {
             tls_pin_sha256: self.tls_pin_sha256.filter(|value| !value.is_empty()),
             use_install_proxy: optional_bool(self.use_install_proxy, "use_install_proxy")?
                 .unwrap_or(true),
+            host_kind: parse_host_kind(self.host_kind)?,
         })
     }
 }
@@ -391,6 +442,19 @@ fn optional_bool(
         "false" => Ok(Some(false)),
         _ => Err(RemoteHostHistoryStoreError::new(format!(
             "remote host profile `{field}` must be true or false"
+        ))),
+    }
+}
+
+fn parse_host_kind(value: Option<String>) -> Result<RemoteHostKind, RemoteHostHistoryStoreError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(RemoteHostKind::Lan);
+    };
+    match value.as_str() {
+        "cloud" => Ok(RemoteHostKind::Cloud),
+        "lan" => Ok(RemoteHostKind::Lan),
+        other => Err(RemoteHostHistoryStoreError::new(format!(
+            "unknown remote host kind `{other}`"
         ))),
     }
 }
@@ -471,6 +535,7 @@ mod tests {
                 last_connected_at: Some("2026-06-16T00:00:00Z".to_string()),
                 use_install_proxy: true,
                 tls_pin_sha256: Some("a1b2c3d4".to_string()),
+                ..RemoteHostProfile::default()
             })
             .unwrap();
 
@@ -553,7 +618,63 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         }
+    }
+
+    #[test]
+    fn remote_host_history_persists_and_loads_host_kind() {
+        let path = unique_path("remote-hosts-host-kind.toml");
+        let store = RemoteHostHistoryStore::new(&path);
+
+        store
+            .upsert_profile(RemoteHostProfile {
+                name: "cloud".to_string(),
+                host: "10.1.29.130".to_string(),
+                ssh_user: "kk".to_string(),
+                auth: RemoteHostAuthProfile::Key {
+                    key_path: PathBuf::from("/home/kk/.ssh/cloud"),
+                },
+                sudo_password_secret_id: None,
+                preferred_remote_port: RemotePortPreference::Auto,
+                last_remote_port: None,
+                last_endpoint: None,
+                last_connected_at: None,
+                use_install_proxy: true,
+                tls_pin_sha256: None,
+                host_kind: RemoteHostKind::Cloud,
+            })
+            .unwrap();
+        store
+            .upsert_profile(RemoteHostProfile {
+                name: "lan".to_string(),
+                host: "10.1.29.131".to_string(),
+                ssh_user: "kk".to_string(),
+                auth: RemoteHostAuthProfile::Password {
+                    password_secret_id: None,
+                },
+                sudo_password_secret_id: None,
+                preferred_remote_port: RemotePortPreference::Auto,
+                last_remote_port: None,
+                last_endpoint: None,
+                last_connected_at: None,
+                use_install_proxy: true,
+                tls_pin_sha256: None,
+                host_kind: RemoteHostKind::Lan,
+            })
+            .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("host_kind = \"cloud\""));
+        assert!(content.contains("host_kind = \"lan\""));
+
+        let loaded = store.load().unwrap();
+        let cloud = loaded.hosts.iter().find(|h| h.name == "cloud").unwrap();
+        let lan = loaded.hosts.iter().find(|h| h.name == "lan").unwrap();
+        assert_eq!(cloud.host_kind, RemoteHostKind::Cloud);
+        assert_eq!(lan.host_kind, RemoteHostKind::Lan);
+
+        crate::infra::best_effort::remove_file(path);
     }
 
     fn unique_path(name: &str) -> PathBuf {

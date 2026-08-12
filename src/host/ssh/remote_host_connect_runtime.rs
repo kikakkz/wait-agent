@@ -1,7 +1,7 @@
 use crate::cli::ConnectRemoteHostCommand;
 use crate::domain::session_catalog::{ManagedSessionRecord, SessionAvailability};
 use crate::host::ssh::remote_host_history_store::{
-    RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostProfile,
+    RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostKind, RemoteHostProfile,
     RemotePortPreference as HistoryRemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
@@ -16,6 +16,7 @@ use crate::host::ssh::remote_port_probe::{
 use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, RemoteHostBootstrapPlan, RemoteHostBootstrapper,
 };
+use crate::infra::error_log::ERROR_LOG;
 use crate::infra::operator_auth;
 use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
 use crate::lifecycle::LifecycleError;
@@ -28,7 +29,11 @@ const DEFAULT_ENDPOINT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // First-time installs can take a while to download the release asset and
 // start the remote daemon, so give the endpoint more time to publish.
 const DEFAULT_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+// When reusing a previously connected remote waitagent, only wait a few seconds
+// for it to publish a target before falling back to SSH bootstrapping.
+const REUSE_CONNECTION_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -112,7 +117,7 @@ where
     pub fn connect(
         &self,
         request: RemoteHostConnectRequest,
-        initiate_outbound_dial: impl FnOnce(OutboundNodeSessionRequest) -> Result<(), String>,
+        mut initiate_outbound_dial: impl FnMut(OutboundNodeSessionRequest) -> Result<(), String>,
     ) -> Result<RemoteHostConnectOutcome, LifecycleError> {
         let mut profile = self.resolve_profile(&request)?;
         let should_save_profile =
@@ -121,13 +126,30 @@ where
             profile.name = name.clone();
         }
 
+        if profile.host_kind == crate::host::ssh::remote_host_history_store::RemoteHostKind::Cloud
+            && matches!(&profile.auth, RemoteHostAuthProfile::Password { .. })
+        {
+            return Err(LifecycleError::Protocol(
+                "cloud hosts require key authentication".to_string(),
+            ));
+        }
+
+        // Fast path: if the remote waitagent is still running from a previous
+        // connection, dial it directly using the stored TLS pin and operator key
+        // without re-bootstrapping over SSH.
+        if let Some(outcome) =
+            self.try_reuse_existing_connection(&profile, &request, &mut initiate_outbound_dial)?
+        {
+            return Ok(outcome);
+        }
+
         let preference = port_preference(&profile.preferred_remote_port);
         let port_probe = self.port_probe_factory.create(&profile);
         let port = port_probe
             .choose_remote_port(&preference, &request.local_connect_endpoint)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         let authority_node_id = authority_id_for_profile_port(&profile, port.port);
-        let existing_endpoint = self.find_connected_endpoint(&profile)?;
+        let existing_endpoint = self.find_online_target_for_authority(&authority_node_id)?;
         let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             port.port,
@@ -238,9 +260,9 @@ where
             })
     }
 
-    fn find_connected_endpoint(
+    fn find_online_target_for_authority(
         &self,
-        profile: &RemoteHostProfile,
+        authority_node_id: &str,
     ) -> Result<Option<String>, LifecycleError> {
         let targets = self
             .target_registry
@@ -248,8 +270,70 @@ where
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         Ok(targets
             .into_iter()
-            .find(|target| is_online_remote_target_for_profile(target, profile))
+            .find(|target| {
+                target.availability == SessionAvailability::Online
+                    && target.address.authority_id() == authority_node_id
+            })
             .map(|target| target.address.authority_id().to_string()))
+    }
+
+    /// Try to reuse a remote waitagent that is still running from a previous
+    /// connection.  This avoids SSH bootstrap and credential regeneration when
+    /// the stored TLS pin, port, and operator key are still valid.
+    fn try_reuse_existing_connection(
+        &self,
+        profile: &RemoteHostProfile,
+        request: &RemoteHostConnectRequest,
+        initiate_outbound_dial: &mut impl FnMut(OutboundNodeSessionRequest) -> Result<(), String>,
+    ) -> Result<Option<RemoteHostConnectOutcome>, LifecycleError> {
+        let Some(port) = profile.last_remote_port else {
+            return Ok(None);
+        };
+        let Some(tls_pin_sha256) = profile.tls_pin_sha256.clone() else {
+            return Ok(None);
+        };
+        if tls_pin_sha256.is_empty() {
+            return Ok(None);
+        }
+
+        let authority_node_id = authority_id_for_profile_port(profile, port);
+        let outbound_request = OutboundNodeSessionRequest {
+            node_id: authority_node_id.clone(),
+            endpoint_uri: format!("tls://{}:{}", profile.host, port),
+            tls_pin_sha256: Some(tls_pin_sha256),
+            operator_key_path: operator_private_key_path_for_profile(profile),
+        };
+
+        if let Err(error) = initiate_outbound_dial(outbound_request) {
+            ERROR_LOG.log(format!(
+                "[remote-host-connect] failed to queue reuse dial for {}:{}: {error}; falling back",
+                profile.host, port
+            ));
+            return Ok(None);
+        }
+
+        match self.wait_for_first_online_target(
+            &authority_node_id,
+            DEFAULT_ENDPOINT_POLL_INTERVAL,
+            REUSE_CONNECTION_WAIT_TIMEOUT,
+        ) {
+            Ok(_target) => {
+                let created =
+                    self.create_remote_session(&authority_node_id, request.cwd_hint.clone())?;
+                Ok(Some(RemoteHostConnectOutcome {
+                    authority_node_id,
+                    created_target: created,
+                    reused_existing_endpoint: true,
+                }))
+            }
+            Err(error) => {
+                ERROR_LOG.log(format!(
+                    "[remote-host-connect] stored endpoint for {}:{} did not come online, falling back to SSH bootstrap: {error}",
+                    profile.host, port
+                ));
+                Ok(None)
+            }
+        }
     }
 
     fn wait_for_first_online_target(
@@ -406,6 +490,13 @@ fn profile_from_direct_args(
     } else {
         optional_secret_id(command.sudo_password_secret_id.clone())?
     };
+    let host_kind = command
+        .host_kind
+        .as_deref()
+        .map(RemoteHostKind::from_str)
+        .transpose()
+        .map_err(LifecycleError::Protocol)?;
+
     Ok(RemoteHostProfile {
         name: profile_name,
         host: host.to_string(),
@@ -418,6 +509,7 @@ fn profile_from_direct_args(
         last_connected_at: None,
         use_install_proxy: command.use_install_proxy.unwrap_or(true),
         tls_pin_sha256: None,
+        host_kind: host_kind.unwrap_or_default(),
     })
 }
 
@@ -529,7 +621,9 @@ fn operator_public_key_for_profile(
     }
 }
 
-fn operator_private_key_path_for_profile(profile: &RemoteHostProfile) -> Option<PathBuf> {
+pub(crate) fn operator_private_key_path_for_profile(
+    profile: &RemoteHostProfile,
+) -> Option<PathBuf> {
     match &profile.auth {
         RemoteHostAuthProfile::Key { key_path } => Some(key_path.clone()),
         RemoteHostAuthProfile::Password { .. } => None,
@@ -541,17 +635,6 @@ fn port_preference(value: &HistoryRemotePortPreference) -> RemotePortProbePrefer
         HistoryRemotePortPreference::Auto => RemotePortProbePreference::Auto,
         HistoryRemotePortPreference::Port(port) => RemotePortProbePreference::Port(*port),
     }
-}
-
-fn is_online_remote_target_for_profile(
-    target: &ManagedSessionRecord,
-    profile: &RemoteHostProfile,
-) -> bool {
-    target.availability == SessionAvailability::Online
-        && target
-            .address
-            .authority_id()
-            .starts_with(&format!("{}#", profile.host))
 }
 
 #[cfg(test)]
@@ -769,7 +852,7 @@ mod tests {
         let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
         let create_requests = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(FakeRegistry::new(vec![remote_target(
-            "10.1.29.130#7474",
+            "10.1.29.130#7476",
             "seed",
         )]));
         let runtime = RemoteHostConnectRuntime::new(
@@ -785,7 +868,7 @@ mod tests {
             registry.clone(),
             Arc::new(FakeSessionCreation::new(
                 create_requests.clone(),
-                Ok(remote_target("10.1.29.130#7474", "created-1")),
+                Ok(remote_target("10.1.29.130#7476", "created-1")),
             )),
         );
 
@@ -805,14 +888,72 @@ mod tests {
             .unwrap();
 
         assert!(outcome.reused_existing_endpoint);
-        assert_eq!(outcome.authority_node_id, "10.1.29.130#7474");
+        assert_eq!(outcome.authority_node_id, "10.1.29.130#7476");
         assert_eq!(*probe_calls.lock().unwrap(), 1);
         assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
         assert_eq!(
             create_requests.lock().unwrap()[0].authority_node_id,
-            "10.1.29.130#7474"
+            "10.1.29.130#7476"
         );
         assert_eq!(*registry.calls.lock().unwrap(), 1);
+        crate::infra::best_effort::remove_file(path);
+    }
+
+    #[test]
+    fn remote_host_connect_ignores_stale_endpoint_with_different_port() {
+        let path = unique_path("remote-host-connect-ignore-stale.toml");
+        let history = RemoteHostHistoryStore::new(&path);
+        history.upsert_profile(profile()).unwrap();
+        let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
+        let catalog_targets =
+            Arc::new(Mutex::new(vec![remote_target("10.1.29.130#7474", "stale")]));
+        let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
+        let outbound_dial_calls = Arc::new(Mutex::new(Vec::new()));
+        let dial_calls = outbound_dial_calls.clone();
+        let runtime = RemoteHostConnectRuntime::new(
+            history,
+            FakeProbe {
+                calls: Arc::new(Mutex::new(0)),
+                port: 7476,
+            },
+            FakeBootstrapper {
+                plans: bootstrap_plans.clone(),
+                catalog_targets: Some(catalog_targets.clone()),
+            },
+            registry,
+            Arc::new(FakeSessionCreation::new(
+                Arc::new(Mutex::new(Vec::new())),
+                Ok(remote_target("10.1.29.130#7476", "created-1")),
+            )),
+        );
+
+        let outcome = runtime
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                move |request| {
+                    dial_calls
+                        .lock()
+                        .unwrap()
+                        .push(request.endpoint_uri.clone());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!outcome.reused_existing_endpoint);
+        assert_eq!(outcome.authority_node_id, "10.1.29.130#7476");
+        assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
+        let dial_calls = outbound_dial_calls.lock().unwrap();
+        assert_eq!(dial_calls.len(), 1);
+        assert!(dial_calls[0].contains("7476"));
         crate::infra::best_effort::remove_file(path);
     }
 
@@ -1117,6 +1258,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         }
     }
 

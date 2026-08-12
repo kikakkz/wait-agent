@@ -70,6 +70,27 @@ pub struct RatatuiNodeRuntime {
 /// TUI client sockets are owned by `ClientWriter` and are not protected by any
 /// `SharedState` lock. `StateEventLoop` is the only thread that decides when to
 /// broadcast snapshots.
+/// Direction in which the gRPC node session for a remote peer was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum RemoteNodeConnectionMode {
+    /// The control host dials the remote peer's listening waitagent.
+    OutboundDial,
+    /// The remote peer dials the control host via `--connect`.
+    InboundConnect,
+}
+
+/// Metadata needed to reconnect to a remote peer without re-bootstrapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteNodeConnectionInfo {
+    pub mode: RemoteNodeConnectionMode,
+    pub host: String,
+    pub port: u16,
+    pub tls_pin_sha256: String,
+    pub operator_key_path: Option<PathBuf>,
+    pub profile_name: String,
+}
+
 pub(crate) struct SharedState {
     pub(crate) network: RemoteNetworkConfig,
     pub(crate) public_endpoint_override: Mutex<Option<String>>,
@@ -84,6 +105,9 @@ pub(crate) struct SharedState {
     pub(crate) target_registry_port: Option<Arc<dyn TargetRegistryPort>>,
     pub(crate) ingress_internal_tx: Mutex<Option<mpsc::Sender<InternalEvent>>>,
     pub(crate) process_monitor: Mutex<Option<crate::process_monitor::ProcessMonitor>>,
+    /// Connection metadata for remote peers, keyed by `authority_node_id`.
+    /// Accessed only from `StateEventLoop`.
+    pub(crate) remote_node_connections: Mutex<HashMap<String, RemoteNodeConnectionInfo>>,
 }
 
 /// Runtime configuration for agent lifecycle signals.
@@ -167,6 +191,7 @@ impl SharedState {
             target_registry_port: None,
             ingress_internal_tx: Mutex::new(None),
             process_monitor: Mutex::new(None),
+            remote_node_connections: Mutex::new(HashMap::new()),
         }))
     }
 }
@@ -286,6 +311,30 @@ impl SharedState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub(crate) fn record_remote_node_connection(
+        &self,
+        node_id: &str,
+        info: RemoteNodeConnectionInfo,
+    ) {
+        if let Ok(mut guard) = self.remote_node_connections.lock() {
+            guard.insert(node_id.to_string(), info);
+        }
+    }
+
+    pub(crate) fn remote_node_connection(&self, node_id: &str) -> Option<RemoteNodeConnectionInfo> {
+        self.remote_node_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(node_id)
+            .cloned()
+    }
+
+    pub(crate) fn remove_remote_node_connection(&self, node_id: &str) {
+        if let Ok(mut guard) = self.remote_node_connections.lock() {
+            guard.remove(node_id);
+        }
     }
 
     pub(super) fn detach_all_clients(&self) {

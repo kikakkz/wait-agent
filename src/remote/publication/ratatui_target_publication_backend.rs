@@ -181,6 +181,16 @@ impl RemoteTargetPublicationBackend for RatatuiRemoteTargetPublicationBackend {
         Ok(())
     }
 
+    fn signal_remote_node_online(&self, node_id: &str) -> Result<(), LifecycleError> {
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::RemoteNodeOnline {
+                node_id: node_id.to_string(),
+            });
+        Ok(())
+    }
+
     fn on_remote_session_upserted(
         &self,
         _node_id: &str,

@@ -225,6 +225,7 @@ pub struct ConnectRemoteHostCommand {
     pub profile: Option<String>,
     pub host: Option<String>,
     pub ssh_user: Option<String>,
+    pub host_kind: Option<String>,
     pub auth: Option<String>,
     pub key_path: Option<String>,
     pub ssh_password_secret_id: Option<String>,

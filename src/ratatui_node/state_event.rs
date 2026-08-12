@@ -1,4 +1,5 @@
 use super::logical_key::LogicalKey;
+use crate::ratatui_node::runtime::RemoteNodeConnectionInfo;
 use std::sync::Arc;
 
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.
@@ -90,6 +91,16 @@ pub(crate) enum StateEvent {
     /// Any remote-peer sessions that were views into that node are stale and
     /// should be removed from the local catalog.
     RemoteNodeOffline { node_id: String },
+    /// A remote peer that was offline has re-established its gRPC node session.
+    /// This cancels any outbound-dial retry worker for the node and lets
+    /// per-session reconnect workers proceed.
+    RemoteNodeOnline { node_id: String },
+    /// Record connection metadata for a remote peer so reconnect can reuse the
+    /// endpoint, TLS pin, and operator key without re-bootstrapping.
+    RecordRemoteNodeConnection {
+        node_id: String,
+        info: RemoteNodeConnectionInfo,
+    },
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.

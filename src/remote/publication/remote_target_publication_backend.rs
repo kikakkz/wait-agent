@@ -138,6 +138,9 @@ pub trait RemoteTargetPublicationBackend: Clone + Send + Sync + 'static {
     /// Signal that a remote node is offline.
     fn signal_remote_node_offline(&self, node_id: &str) -> Result<(), LifecycleError>;
 
+    /// Signal that a remote node that was offline has reconnected.
+    fn signal_remote_node_online(&self, node_id: &str) -> Result<(), LifecycleError>;
+
     /// Optional hook called after a discovered remote session has been upserted
     /// into the remote runtime owner. The ratatui backend uses this to keep the
     /// in-memory SharedState catalog in sync with published remote metadata such

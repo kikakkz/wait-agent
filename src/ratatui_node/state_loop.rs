@@ -19,15 +19,17 @@ use super::client_writer::{ClientWriterHandle, ClientWriterRequest};
 use super::clipboard_platform::format_file_reference;
 use super::key_translation::{translate_key, KeyTranslationMode};
 use super::logical_key::LogicalKey;
+use super::outbound_dial_retry_worker::OutboundDialRetryWorker;
 use super::reconnect_worker::ReconnectWorker;
-use super::runtime::SharedState;
+use super::runtime::{RemoteNodeConnectionInfo, RemoteNodeConnectionMode, SharedState};
 use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
     HistoryResponse, ServerStatus, SessionView,
 };
 use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
 use crate::host::ssh::remote_host_connect_runtime::{
-    RemoteHostConnectRequest, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
+    operator_private_key_path_for_profile, RemoteHostConnectRequest, RemoteHostConnectRuntime,
+    SshRemotePortProbeFactory,
 };
 use crate::host::ssh::remote_host_history_store::RemoteHostHistoryStore;
 use crate::host::ssh::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
@@ -94,6 +96,7 @@ fn run_state_event_loop(
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
     let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
+    let mut outbound_dial_retry_handles: HashMap<String, OutboundDialRetryWorker> = HashMap::new();
 
     while let Ok(event) = rx.recv() {
         match event {
@@ -208,6 +211,7 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &mut reconnect_handles,
+                    &mut outbound_dial_retry_handles,
                     target_id,
                 );
             }
@@ -251,6 +255,7 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &mut reconnect_handles,
+                    &mut outbound_dial_retry_handles,
                     target_id,
                 );
             }
@@ -261,8 +266,19 @@ fn run_state_event_loop(
                     &client_writer,
                     &connected_clients,
                     &mut reconnect_handles,
+                    &mut outbound_dial_retry_handles,
                     node_id,
                 );
+            }
+
+            StateEvent::RemoteNodeOnline { node_id } => {
+                if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
+                    let _ = worker.cancel_tx.send(());
+                }
+            }
+
+            StateEvent::RecordRemoteNodeConnection { node_id, info } => {
+                shared.record_remote_node_connection(&node_id, info);
             }
         }
     }
@@ -459,6 +475,7 @@ fn handle_remote_session_disconnected(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     target_id: String,
 ) {
     ERROR_LOG.log(format!(
@@ -472,6 +489,20 @@ fn handle_remote_session_disconnected(
             ));
         }
         std::collections::hash_map::Entry::Vacant(slot) => {
+            // Capture the record and node id before we mutate the catalog.
+            let record = {
+                let guard = shared
+                    .sessions
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.get(&target_id).cloned()
+            };
+            let node_id = record
+                .as_ref()
+                .filter(|r| *r.address.transport() == SessionTransport::RemotePeer)
+                .map(|r| r.address.authority_id().to_string());
+
             // Mark the catalog entry offline so the sidebar shows the
             // disconnected state immediately.
             {
@@ -510,15 +541,40 @@ fn handle_remote_session_disconnected(
                 guard.remove(&target_id);
             }
 
+            // For outbound-dial peers, start a node-level retry worker so the
+            // server re-dials the remote waitagent without re-bootstrapping.
+            if let Some(node_id) = node_id {
+                if let Some(info) = shared.remote_node_connection(&node_id) {
+                    if info.mode == RemoteNodeConnectionMode::OutboundDial
+                        && !outbound_dial_retry_handles.contains_key(&node_id)
+                    {
+                        let request = OutboundNodeSessionRequest {
+                            node_id: node_id.clone(),
+                            endpoint_uri: format!("tls://{}:{}", info.host, info.port),
+                            tls_pin_sha256: Some(info.tls_pin_sha256.clone())
+                                .filter(|s| !s.is_empty()),
+                            operator_key_path: info.operator_key_path.clone(),
+                        };
+                        let ingress_tx = {
+                            let guard = shared
+                                .ingress_internal_tx
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.clone()
+                        };
+                        if let Some(ingress_tx) = ingress_tx {
+                            let worker = OutboundDialRetryWorker::start(
+                                node_id.clone(),
+                                request,
+                                ingress_tx,
+                            );
+                            outbound_dial_retry_handles.insert(node_id, worker);
+                        }
+                    }
+                }
+            }
+
             // Start a background worker with the last known terminal size.
-            let record = {
-                let guard = shared
-                    .sessions
-                    .sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.get(&target_id).cloned()
-            };
             if let Some(record) = record {
                 let (cols, rows) = shared
                     .resize
@@ -616,12 +672,29 @@ fn handle_session_closed(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     target_id: String,
 ) {
     if let Some(tx) = reconnect_handles.remove(&target_id) {
         let _ = tx.send(());
     }
+    let node_id = {
+        let guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&target_id)
+            .filter(|r| *r.address.transport() == SessionTransport::RemotePeer)
+            .map(|r| r.address.authority_id().to_string())
+    };
     shared.handle_session_exit(&target_id);
+    if let Some(node_id) = node_id {
+        if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
+            let _ = worker.cancel_tx.send(());
+        }
+    }
     broadcast_snapshot(shared, client_writer, connected_clients);
 }
 
@@ -630,6 +703,7 @@ fn handle_remote_node_offline(
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
+    outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
     node_id: String,
 ) {
     ERROR_LOG.log(format!(
@@ -658,6 +732,10 @@ fn handle_remote_node_offline(
             let _ = tx.send(());
         }
     }
+    if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
+        let _ = worker.cancel_tx.send(());
+    }
+    shared.remove_remote_node_connection(&node_id);
     shared.remove_remote_sessions_for_node(&node_id);
     broadcast_snapshot(shared, client_writer, connected_clients);
 }
@@ -1354,6 +1432,16 @@ fn connect_remote_host_target(
 
     let history_store = RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path());
 
+    let profile = match history_store.load() {
+        Ok(store) => store
+            .hosts
+            .into_iter()
+            .find(|profile| profile.name == profile_name),
+        Err(error) => {
+            return CommandOutcome::Error(format!("failed to load remote host history: {error}"));
+        }
+    };
+
     let request = RemoteHostConnectRequest {
         profile_name: Some(profile_name.to_string()),
         direct_profile: None,
@@ -1386,6 +1474,24 @@ fn connect_remote_host_target(
         Ok(outcome) => outcome,
         Err(error) => return CommandOutcome::Error(error.to_string()),
     };
+
+    if let Some(profile) = profile {
+        shared.record_remote_node_connection(
+            &outcome.authority_node_id,
+            RemoteNodeConnectionInfo {
+                mode: RemoteNodeConnectionMode::OutboundDial,
+                host: profile.host.clone(),
+                port: outcome
+                    .authority_node_id
+                    .rsplit_once('#')
+                    .and_then(|(_, port)| port.parse().ok())
+                    .unwrap_or(0),
+                tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
+                operator_key_path: operator_private_key_path_for_profile(&profile),
+                profile_name: profile.name.clone(),
+            },
+        );
+    }
 
     let record = outcome.created_target;
     let target = record.address.qualified_target();

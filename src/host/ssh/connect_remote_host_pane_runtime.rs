@@ -2,7 +2,8 @@
 
 use crate::cli::{prepend_global_network_args, ConnectRemoteHostPaneCommand, RemoteNetworkConfig};
 use crate::host::ssh::remote_host_history_store::{
-    RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostProfile, RemotePortPreference,
+    RemoteHostAuthProfile, RemoteHostHistoryStore, RemoteHostKind, RemoteHostProfile,
+    RemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
     FileRemoteHostSecretStore, RemoteHostSecretStore,
@@ -256,6 +257,7 @@ struct ConnectRemoteHostState {
     ssh_user: String,
     remote_port_preference: String,
     last_remote_port: Option<u16>,
+    host_kind: RemoteHostKind,
     auth: AuthChoice,
     key_path: String,
     ssh_password: String,
@@ -294,6 +296,7 @@ impl ConnectRemoteHostState {
             ssh_user: std::env::var("USER").unwrap_or_default(),
             remote_port_preference: "auto".to_string(),
             last_remote_port: None,
+            host_kind: RemoteHostKind::Lan,
             auth: AuthChoice::Password,
             key_path: String::new(),
             ssh_password: String::new(),
@@ -331,6 +334,7 @@ impl ConnectRemoteHostState {
             self.ssh_user = std::env::var("USER").unwrap_or_default();
             self.remote_port_preference = "auto".to_string();
             self.last_remote_port = None;
+            self.host_kind = RemoteHostKind::Lan;
             self.auth = AuthChoice::Password;
             self.key_path.clear();
             self.ssh_password.clear();
@@ -352,6 +356,7 @@ impl ConnectRemoteHostState {
             RemotePortPreference::Port(port) => port.to_string(),
         };
         self.last_remote_port = profile.last_remote_port;
+        self.host_kind = profile.host_kind;
         let mut request = SecretLoadRequest {
             id: self.next_secret_request_id,
             selected: self.selected,
@@ -491,7 +496,7 @@ impl ConnectRemoteHostState {
                     Focus::ProxySave => self.set_focus(Focus::ProxyActive),
                     Focus::ProxyDelete => self.set_focus(Focus::ProxySave),
                     Focus::Auth if self.auth == AuthChoice::Password => {
-                        self.set_focus(Focus::Hosts);
+                        self.set_focus(Focus::HostKind);
                     }
                     _ if self.focus.uses_horizontal_choice() => self.adjust_choice(-1),
                     _ if self.focus != Focus::Hosts => self.set_focus(Focus::Hosts),
@@ -523,6 +528,8 @@ impl ConnectRemoteHostState {
                     self.use_install_proxy = !self.use_install_proxy;
                 } else if self.focus == Focus::Password || self.focus == Focus::Sudo {
                     self.toggle_password_visibility();
+                } else if self.focus == Focus::HostKind {
+                    self.adjust_choice(1);
                 }
                 PaneAction::None
             }
@@ -758,6 +765,9 @@ impl ConnectRemoteHostState {
             row if row == details.rows.user && point_in_rect(x, y, details.connection) => {
                 self.set_focus(Focus::User)
             }
+            row if row == details.rows.host_kind && point_in_rect(x, y, details.connection) => {
+                self.set_focus(Focus::HostKind)
+            }
             row if row == details.rows.auth && point_in_rect(x, y, details.authentication) => {
                 self.set_focus(Focus::Auth)
             }
@@ -914,6 +924,7 @@ impl ConnectRemoteHostState {
             Focus::Host
             | Focus::Port
             | Focus::User
+            | Focus::HostKind
             | Focus::ProxyName
             | Focus::AllProxy
             | Focus::HttpsProxy => PaneAction::None,
@@ -976,8 +987,22 @@ impl ConnectRemoteHostState {
             self.delete_confirm = DeleteConfirmState::Idle;
         }
         match self.focus {
+            Focus::HostKind => {
+                self.host_kind = self.host_kind.shift(step);
+                if self.host_kind == RemoteHostKind::Cloud && self.auth != AuthChoice::Key {
+                    self.auth = AuthChoice::Key;
+                    if self.sudo_mode == SudoMode::SameAsSsh {
+                        self.sudo_mode = SudoMode::None;
+                    }
+                }
+                self.set_focus(Focus::HostKind);
+            }
             Focus::Auth => {
-                self.auth = self.auth.shift(step);
+                if self.host_kind == RemoteHostKind::Cloud {
+                    self.auth = AuthChoice::Key;
+                } else {
+                    self.auth = self.auth.shift(step);
+                }
                 if self.auth == AuthChoice::Password && self.sudo_mode == SudoMode::None {
                     self.sudo_mode = SudoMode::SameAsSsh;
                 }
@@ -1264,6 +1289,7 @@ enum Focus {
     Host,
     Port,
     User,
+    HostKind,
     Auth,
     Password,
     Sudo,
@@ -1281,7 +1307,7 @@ enum Focus {
 
 impl Focus {
     fn uses_horizontal_choice(self) -> bool {
-        matches!(self, Self::Auth)
+        matches!(self, Self::HostKind | Self::Auth)
     }
 
     fn edit_field(self, auth: AuthChoice) -> Option<EditField> {
@@ -1315,6 +1341,7 @@ impl Focus {
             Self::Host,
             Self::Port,
             Self::User,
+            Self::HostKind,
             Self::Auth,
             Self::Password,
             Self::Sudo,
@@ -1505,6 +1532,7 @@ struct DetailsRows {
     host: u16,
     port: u16,
     user: u16,
+    host_kind: u16,
     auth: u16,
     password: u16,
     sudo: u16,
@@ -1732,10 +1760,10 @@ impl DetailsGeometry {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // framed header bar
-                Constraint::Length(6), // Connection card (Host/Port/Last Port/User)
+                Constraint::Length(7), // Connection card (Host/Port/Last Port/User/Host Kind)
                 Constraint::Length(5), // Authentication card
                 Constraint::Length(4), // Options card
-                Constraint::Length(4), // info box card
+                Constraint::Length(3), // info box card
                 Constraint::Length(1), // spacer above buttons
                 Constraint::Length(1), // buttons
                 Constraint::Length(1), // hint
@@ -1745,6 +1773,7 @@ impl DetailsGeometry {
             host: sections[1].y.saturating_add(1).saturating_sub(area.y),
             port: sections[1].y.saturating_add(2).saturating_sub(area.y),
             user: sections[1].y.saturating_add(3).saturating_sub(area.y),
+            host_kind: sections[1].y.saturating_add(4).saturating_sub(area.y),
             auth: sections[2].y.saturating_add(1).saturating_sub(area.y),
             password: sections[2].y.saturating_add(2).saturating_sub(area.y),
             sudo: sections[2].y.saturating_add(3).saturating_sub(area.y),
@@ -2341,6 +2370,13 @@ fn render_connection(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHos
         state,
         Focus::User,
     ));
+    rows.push(icon_choice_row(
+        "◎",
+        "Host Kind",
+        host_kind_tabs(state),
+        state,
+        Focus::HostKind,
+    ));
     render_detail_table(frame, table_area, rows);
 }
 
@@ -2361,7 +2397,7 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
         state,
         Focus::Auth,
     )];
-    if state.auth == AuthChoice::Key {
+    if state.auth == AuthChoice::Key || state.host_kind == RemoteHostKind::Cloud {
         rows.push(icon_detail_row(
             "■",
             "Key",
@@ -2377,7 +2413,9 @@ fn render_authentication(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemot
             state,
         ));
     }
-    rows.push(icon_password_row("▲", "Sudo", PasswordField::Sudo, state));
+    if state.host_kind == RemoteHostKind::Lan {
+        rows.push(icon_password_row("▲", "Sudo", PasswordField::Sudo, state));
+    }
     render_detail_table(frame, table_area, rows);
 }
 
@@ -2570,7 +2608,7 @@ fn render_hint(frame: &mut Frame<'_>, area: Rect, state: &ConnectRemoteHostState
 fn bottom_hint_text(state: &ConnectRemoteHostState) -> String {
     match state.focus {
         Focus::Password | Focus::Sudo => "Enter: edit · Space: show/hide · Tab: next".to_string(),
-        Focus::Auth => "←/→: switch auth · Tab: next".to_string(),
+        Focus::HostKind | Focus::Auth => "←/→: switch · Space: toggle · Tab: next".to_string(),
         Focus::Remember | Focus::InstallProxy => "Space: toggle · Tab: next".to_string(),
         Focus::Connect => "Enter: connect · Tab: next".to_string(),
         Focus::Delete => "Enter: delete · Tab: next".to_string(),
@@ -2756,6 +2794,19 @@ fn auth_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
         ChoiceSegment {
             label: "Key",
             selected: state.auth == AuthChoice::Key,
+        },
+    ]
+}
+
+fn host_kind_tabs(state: &ConnectRemoteHostState) -> Vec<ChoiceSegment> {
+    vec![
+        ChoiceSegment {
+            label: RemoteHostKind::Lan.label(),
+            selected: state.host_kind == RemoteHostKind::Lan,
+        },
+        ChoiceSegment {
+            label: RemoteHostKind::Cloud.label(),
+            selected: state.host_kind == RemoteHostKind::Cloud,
         },
     ]
 }
@@ -3380,6 +3431,8 @@ fn run_connect(
             state.host.clone(),
             "--ssh-user".to_string(),
             state.ssh_user.clone(),
+            "--host-kind".to_string(),
+            state.host_kind.as_str().to_string(),
             "--auth".to_string(),
             state.auth.as_arg().to_string(),
             "--remote-port".to_string(),
@@ -3521,6 +3574,7 @@ fn profile_matches_state(profile: &RemoteHostProfile, state: &ConnectRemoteHostS
     profile.host == state.host
         && profile.ssh_user == state.ssh_user
         && normalized_port_matches_profile(&state.remote_port_preference, profile)
+        && profile.host_kind == state.host_kind
         && auth_matches_state(&profile.auth, state)
         && profile.use_install_proxy == state.use_install_proxy
 }
@@ -3555,6 +3609,9 @@ fn validate(state: &ConnectRemoteHostState) -> Result<(), String> {
     }
     if state.ssh_user.trim().is_empty() {
         return Err("SSH user is required.".to_string());
+    }
+    if state.host_kind == RemoteHostKind::Cloud && state.auth != AuthChoice::Key {
+        return Err("Cloud hosts require key authentication.".to_string());
     }
     if state.auth == AuthChoice::Password
         && state.password_mode == PasswordMode::Enter
@@ -5296,5 +5353,91 @@ mod tests {
         state.apply_key(KeyEvent::from(KeyCode::Down));
         assert_eq!(state.selected, 1);
         assert_eq!(state.ssh_user, "b");
+    }
+
+    #[test]
+    fn cloud_host_kind_forces_key_auth_and_hides_password_sudo() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "cloud.example.com".to_string();
+        state.ssh_user = "k".to_string();
+        state.auth = AuthChoice::Password;
+        state.sudo_mode = SudoMode::SameAsSsh;
+        state.set_focus(Focus::HostKind);
+
+        assert_eq!(state.host_kind, RemoteHostKind::Lan);
+        state.adjust_choice(1);
+        assert_eq!(state.host_kind, RemoteHostKind::Cloud);
+        assert_eq!(state.auth, AuthChoice::Key);
+        assert_eq!(state.sudo_mode, SudoMode::None);
+
+        state.adjust_choice(1);
+        assert_eq!(state.host_kind, RemoteHostKind::Lan);
+    }
+
+    #[test]
+    fn validate_rejects_cloud_host_with_password_auth() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+        state.host = "cloud.example.com".to_string();
+        state.ssh_user = "k".to_string();
+        state.host_kind = RemoteHostKind::Cloud;
+        state.auth = AuthChoice::Password;
+        state.ssh_password = "secret".to_string();
+
+        assert!(validate(&state).is_err());
+
+        state.auth = AuthChoice::Key;
+        state.key_path = "/home/k/.ssh/id_rsa".to_string();
+        assert!(validate(&state).is_ok());
+    }
+
+    #[test]
+    fn profile_matches_state_includes_host_kind() {
+        let mut state = ConnectRemoteHostState::load();
+        let profile = RemoteHostProfile {
+            name: "k@127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ssh_user: "k".to_string(),
+            auth: RemoteHostAuthProfile::Key {
+                key_path: std::path::PathBuf::from("~/.ssh/id_rsa"),
+            },
+            sudo_password_secret_id: None,
+            preferred_remote_port: RemotePortPreference::Auto,
+            last_remote_port: Some(7575),
+            last_endpoint: None,
+            last_connected_at: None,
+            use_install_proxy: true,
+            host_kind: RemoteHostKind::Cloud,
+            ..RemoteHostProfile::default()
+        };
+        state.profiles = vec![profile.clone()];
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+
+        assert!(profile_matches_state(&profile, &state));
+
+        state.host_kind = RemoteHostKind::Lan;
+        assert!(!profile_matches_state(&profile, &state));
+    }
+
+    #[test]
+    fn host_kind_tabs_reflect_state() {
+        let mut state = ConnectRemoteHostState::load();
+        state.profiles.clear();
+        state.selected = 0;
+        let _ = state.sync_selected_profile();
+
+        state.host_kind = RemoteHostKind::Lan;
+        assert_eq!(segmented_for_test(&host_kind_tabs(&state)), "LAN  Cloud");
+
+        state.host_kind = RemoteHostKind::Cloud;
+        let tabs = host_kind_tabs(&state);
+        assert!(tabs[0].label == "LAN" && !tabs[0].selected);
+        assert!(tabs[1].label == "Cloud" && tabs[1].selected);
     }
 }

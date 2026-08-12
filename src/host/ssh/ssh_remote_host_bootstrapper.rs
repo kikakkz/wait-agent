@@ -911,6 +911,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -974,6 +975,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -1030,6 +1032,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1096,6 +1099,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
         let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1158,6 +1162,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
         let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1224,6 +1229,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1285,6 +1291,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1333,6 +1340,7 @@ mod tests {
             last_connected_at: None,
             use_install_proxy: true,
             tls_pin_sha256: None,
+            ..RemoteHostProfile::default()
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
