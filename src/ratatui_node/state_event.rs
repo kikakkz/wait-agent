@@ -101,6 +101,16 @@ pub(crate) enum StateEvent {
         node_id: String,
         info: RemoteNodeConnectionInfo,
     },
+    /// The control plane's upstream connectivity changed.
+    ///
+    /// Sent by `NetworkProbe` so the state loop can distinguish a transient
+    /// control-plane outage from a permanent remote host failure.
+    NetworkConnectivityChanged { online: bool },
+    /// Reconnect to all outbound-dial hosts recorded in the persistent snapshot.
+    ///
+    /// Sent once at startup and again after the control plane recovers from a
+    /// network outage.
+    ReconnectSnapshotHosts,
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.

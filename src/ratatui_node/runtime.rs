@@ -36,6 +36,7 @@ use super::authority_host_session::RatatuiAuthorityHostSession;
 use super::client::ClientHandle;
 use super::client_writer::ClientWriter;
 use super::local_session::RatatuiLocalSession;
+use super::network_probe::NetworkProbe;
 use super::remote_session::RatatuiRemoteSession;
 use super::state_event::StateEvent;
 use super::state_loop::StateEventLoop;
@@ -1049,6 +1050,16 @@ impl RatatuiNodeRuntime {
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
         self.shared.set_local_catalog_tx(catalog_tx);
+
+        // Monitor upstream connectivity so the state loop can distinguish a
+        // transient control-plane outage from a permanent remote host failure.
+        let _network_probe = NetworkProbe::start(state_event_loop.sender());
+
+        // Reconnect to outbound-dial hosts that were active when the control
+        // plane last shut down, or retry them once the network recovers.
+        let _ = state_event_loop
+            .sender()
+            .send(StateEvent::ReconnectSnapshotHosts);
 
         // Peer node servers host a default authority-host session for remote
         // viewers. Create it now that the IO loops are running; it will be

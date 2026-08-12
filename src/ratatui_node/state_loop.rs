@@ -27,6 +27,7 @@ use super::snapshot::{
     HistoryResponse, ServerStatus, SessionView,
 };
 use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
+use crate::host::ssh::outbound_connection_snapshot_store::OutboundConnectionSnapshotStore;
 use crate::host::ssh::remote_host_connect_runtime::{
     operator_private_key_path_for_profile, RemoteHostConnectRequest, RemoteHostConnectRuntime,
     SshRemotePortProbeFactory,
@@ -62,6 +63,8 @@ impl StateEventLoop {
     ) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<StateEvent>();
         let authority_host_io_tx = authority_host_io.sender();
+        let snapshot_store =
+            OutboundConnectionSnapshotStore::new(OutboundConnectionSnapshotStore::default_path());
         std::thread::spawn(move || {
             if let Err(error) = run_state_event_loop(
                 shared,
@@ -71,6 +74,7 @@ impl StateEventLoop {
                 client_writer,
                 remote_owner,
                 settings_store,
+                snapshot_store,
             ) {
                 ERROR_LOG.log(format!(
                     "[ratatui-state-loop] loop exited with error: {error}"
@@ -85,6 +89,7 @@ impl StateEventLoop {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_state_event_loop(
     shared: Arc<SharedState>,
     rx: mpsc::Receiver<StateEvent>,
@@ -93,10 +98,12 @@ fn run_state_event_loop(
     client_writer: ClientWriterHandle,
     remote_owner: RemoteRuntimeOwnerRuntime,
     settings_store: SettingsStore,
+    snapshot_store: OutboundConnectionSnapshotStore,
 ) -> Result<(), LifecycleError> {
     let mut connected_clients: HashSet<u64> = HashSet::new();
     let mut reconnect_handles: HashMap<String, mpsc::Sender<()>> = HashMap::new();
     let mut outbound_dial_retry_handles: HashMap<String, OutboundDialRetryWorker> = HashMap::new();
+    let mut network_online: bool = true;
 
     while let Ok(event) = rx.recv() {
         match event {
@@ -179,6 +186,7 @@ fn run_state_event_loop(
                     client_id,
                     command,
                     &settings_store,
+                    &snapshot_store,
                 );
             }
 
@@ -256,6 +264,8 @@ fn run_state_event_loop(
                     &connected_clients,
                     &mut reconnect_handles,
                     &mut outbound_dial_retry_handles,
+                    &snapshot_store,
+                    network_online,
                     target_id,
                 );
             }
@@ -267,6 +277,8 @@ fn run_state_event_loop(
                     &connected_clients,
                     &mut reconnect_handles,
                     &mut outbound_dial_retry_handles,
+                    &snapshot_store,
+                    network_online,
                     node_id,
                 );
             }
@@ -279,6 +291,20 @@ fn run_state_event_loop(
 
             StateEvent::RecordRemoteNodeConnection { node_id, info } => {
                 shared.record_remote_node_connection(&node_id, info);
+            }
+
+            StateEvent::NetworkConnectivityChanged { online } => {
+                let was_online = network_online;
+                network_online = online;
+                if online && !was_online {
+                    let _ = shared
+                        .state_sender()
+                        .send(StateEvent::ReconnectSnapshotHosts);
+                }
+            }
+
+            StateEvent::ReconnectSnapshotHosts => {
+                reconnect_snapshot_hosts(&shared, &remote_owner, &snapshot_store);
             }
         }
     }
@@ -405,6 +431,7 @@ fn handle_client_command_event(
     client_id: u64,
     command: ClientCommand,
     settings_store: &SettingsStore,
+    snapshot_store: &OutboundConnectionSnapshotStore,
 ) {
     if let ClientCommand::GetHistory { target_id } = &command {
         let response = build_history_response(shared, target_id);
@@ -430,6 +457,7 @@ fn handle_client_command_event(
             connected_clients,
             command,
             settings_store,
+            snapshot_store,
         )
     };
     let response: ControlResponse = outcome.into();
@@ -667,12 +695,15 @@ fn handle_agent_signal_received(
     broadcast_snapshot(shared, client_writer, connected_clients);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_session_closed(
     shared: &Arc<SharedState>,
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    network_online: bool,
     target_id: String,
 ) {
     if let Some(tx) = reconnect_handles.remove(&target_id) {
@@ -694,16 +725,26 @@ fn handle_session_closed(
         if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
             let _ = worker.cancel_tx.send(());
         }
+        if network_online {
+            if let Err(error) = snapshot_store.remove(&node_id) {
+                ERROR_LOG.log(format!(
+                    "[ratatui-state-loop] failed to remove snapshot for {node_id}: {error}"
+                ));
+            }
+        }
     }
     broadcast_snapshot(shared, client_writer, connected_clients);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_remote_node_offline(
     shared: &Arc<SharedState>,
     client_writer: &ClientWriterHandle,
     connected_clients: &HashSet<u64>,
     reconnect_handles: &mut HashMap<String, mpsc::Sender<()>>,
     outbound_dial_retry_handles: &mut HashMap<String, OutboundDialRetryWorker>,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    network_online: bool,
     node_id: String,
 ) {
     ERROR_LOG.log(format!(
@@ -734,6 +775,13 @@ fn handle_remote_node_offline(
     }
     if let Some(worker) = outbound_dial_retry_handles.remove(&node_id) {
         let _ = worker.cancel_tx.send(());
+    }
+    if network_online {
+        if let Err(error) = snapshot_store.remove(&node_id) {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] failed to remove snapshot for {node_id}: {error}"
+            ));
+        }
     }
     shared.remove_remote_node_connection(&node_id);
     shared.remove_remote_sessions_for_node(&node_id);
@@ -779,6 +827,7 @@ fn handle_client_command(
     connected_clients: &HashSet<u64>,
     command: ClientCommand,
     settings_store: &SettingsStore,
+    snapshot_store: &OutboundConnectionSnapshotStore,
 ) -> CommandOutcome {
     match command {
         ClientCommand::Attach => CommandOutcome::Ok,
@@ -851,7 +900,8 @@ fn handle_client_command(
         }
 
         ClientCommand::ConnectRemoteHost { profile_name } => {
-            let outcome = connect_remote_host_target(shared, remote_owner, &profile_name);
+            let outcome =
+                connect_remote_host_target(shared, remote_owner, &profile_name, snapshot_store);
             if matches!(outcome, CommandOutcome::Message(_)) {
                 broadcast_snapshot(shared, client_writer, connected_clients);
             }
@@ -1418,29 +1468,44 @@ fn activate_target(
     }
 }
 
+/// Result of a successful outbound-dial remote host connection.
+struct RemoteHostConnectedOutcome {
+    target_id: String,
+}
+
 fn connect_remote_host_target(
     shared: &Arc<SharedState>,
     remote_owner: &RemoteRuntimeOwnerRuntime,
     profile_name: &str,
+    snapshot_store: &OutboundConnectionSnapshotStore,
 ) -> CommandOutcome {
+    match connect_remote_host_by_profile_name(
+        shared,
+        remote_owner,
+        profile_name,
+        snapshot_store,
+        true,
+    ) {
+        Ok(outcome) => CommandOutcome::Message(format!("connected {}", outcome.target_id)),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn connect_remote_host_by_profile_name(
+    shared: &Arc<SharedState>,
+    remote_owner: &RemoteRuntimeOwnerRuntime,
+    profile_name: &str,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    activate: bool,
+) -> Result<RemoteHostConnectedOutcome, String> {
     let Some(target_registry) = shared.target_registry_port.clone() else {
-        return CommandOutcome::Error("target registry port not configured".to_string());
+        return Err("target registry port not configured".to_string());
     };
     let Some(session_creation) = shared.session_creation_port.clone() else {
-        return CommandOutcome::Error("session creation port not configured".to_string());
+        return Err("session creation port not configured".to_string());
     };
 
     let history_store = RemoteHostHistoryStore::new(RemoteHostHistoryStore::default_path());
-
-    let profile = match history_store.load() {
-        Ok(store) => store
-            .hosts
-            .into_iter()
-            .find(|profile| profile.name == profile_name),
-        Err(error) => {
-            return CommandOutcome::Error(format!("failed to load remote host history: {error}"));
-        }
-    };
 
     let request = RemoteHostConnectRequest {
         profile_name: Some(profile_name.to_string()),
@@ -1453,27 +1518,34 @@ fn connect_remote_host_target(
     };
 
     let runtime = RemoteHostConnectRuntime::new(
-        history_store,
+        history_store.clone(),
         SshRemotePortProbeFactory,
         SshRemoteHostBootstrapper::default(),
         target_registry,
         session_creation,
     );
 
-    let outcome = match runtime.connect(request, |request: OutboundNodeSessionRequest| {
-        let guard = shared
-            .ingress_internal_tx
-            .lock()
-            .map_err(|_| "remote node ingress lock is poisoned".to_string())?;
-        let tx = guard
-            .as_ref()
-            .ok_or_else(|| "remote node ingress is not ready".to_string())?;
-        tx.send(InternalEvent::InitiateOutboundConnection { request })
-            .map_err(|_| "remote node ingress is not ready".to_string())
-    }) {
-        Ok(outcome) => outcome,
-        Err(error) => return CommandOutcome::Error(error.to_string()),
-    };
+    let outcome = runtime
+        .connect(request, |request: OutboundNodeSessionRequest| {
+            let guard = shared
+                .ingress_internal_tx
+                .lock()
+                .map_err(|_| "remote node ingress lock is poisoned".to_string())?;
+            let tx = guard
+                .as_ref()
+                .ok_or_else(|| "remote node ingress is not ready".to_string())?;
+            tx.send(InternalEvent::InitiateOutboundConnection { request })
+                .map_err(|_| "remote node ingress is not ready".to_string())
+        })
+        .map_err(|error| error.to_string())?;
+
+    // Reload the profile so we capture the TLS pin / port that connect() saved.
+    let profile = history_store.load().ok().and_then(|store| {
+        store
+            .hosts
+            .into_iter()
+            .find(|profile| profile.name == profile_name)
+    });
 
     if let Some(profile) = profile {
         shared.record_remote_node_connection(
@@ -1496,9 +1568,9 @@ fn connect_remote_host_target(
     let record = outcome.created_target;
     let target = record.address.qualified_target();
 
-    if let Err(error) = remote_owner.upsert_session(&outcome.authority_node_id, &record) {
-        return CommandOutcome::Error(format!("failed to register remote session: {error}"));
-    }
+    remote_owner
+        .upsert_session(&outcome.authority_node_id, &record)
+        .map_err(|error| format!("failed to register remote session: {error}"))?;
 
     {
         let mut guard = shared
@@ -1510,24 +1582,90 @@ fn connect_remote_host_target(
         guard.insert(target.clone(), record.clone());
     }
 
-    if let Err(error) = shared.ensure_remote_session(&record) {
-        return CommandOutcome::Error(error.to_string());
+    shared
+        .ensure_remote_session(&record)
+        .map_err(|error| error.to_string())?;
+
+    if activate {
+        *shared
+            .sessions
+            .active_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        let (cols, rows) = shared
+            .resize
+            .last_client_resize
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or((80, 24));
+        shared.resize_active_remote_session(cols, rows);
     }
 
-    *shared
-        .sessions
-        .active_target
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
-    let (cols, rows) = shared
-        .resize
-        .last_client_resize
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .unwrap_or((80, 24));
-    shared.resize_active_remote_session(cols, rows);
+    if let Err(error) = snapshot_store.upsert(profile_name, &outcome.authority_node_id) {
+        ERROR_LOG.log(format!(
+            "[ratatui-state-loop] connected {target} but failed to write snapshot: {error}"
+        ));
+    }
 
-    CommandOutcome::Message(format!("connected {target}"))
+    Ok(RemoteHostConnectedOutcome { target_id: target })
+}
+
+fn reconnect_snapshot_hosts(
+    shared: &Arc<SharedState>,
+    remote_owner: &RemoteRuntimeOwnerRuntime,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+) {
+    let entries = match snapshot_store.load() {
+        Ok(entries) => entries,
+        Err(error) => {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] failed to load outbound connection snapshot: {error}"
+            ));
+            return;
+        }
+    };
+
+    for entry in entries {
+        let already_connected = {
+            let guard = shared
+                .remote_node_connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.contains_key(&entry.authority_node_id)
+        };
+        if already_connected {
+            continue;
+        }
+
+        let has_online_session = {
+            let guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.values().any(|record| {
+                *record.address.transport() == SessionTransport::RemotePeer
+                    && record.address.authority_id() == entry.authority_node_id
+                    && record.availability == SessionAvailability::Online
+            })
+        };
+        if has_online_session {
+            continue;
+        }
+
+        if let Err(error) = connect_remote_host_by_profile_name(
+            shared,
+            remote_owner,
+            &entry.profile_name,
+            snapshot_store,
+            false,
+        ) {
+            ERROR_LOG.log(format!(
+                "[ratatui-state-loop] snapshot reconnect failed for profile `{}`: {error}",
+                entry.profile_name
+            ));
+        }
+    }
 }
 
 fn create_remote_session_on_authority(
@@ -1617,6 +1755,20 @@ mod state_loop_tests {
         super::super::client_writer::ClientWriterHandle,
         std::thread::JoinHandle<()>,
     ) {
+        let snapshot_store = OutboundConnectionSnapshotStore::new(std::env::temp_dir().join(
+            format!("waitagent-test-outbound-snapshot-{}", std::process::id()),
+        ));
+        start_test_loop_with_snapshot_store(snapshot_store)
+    }
+
+    fn start_test_loop_with_snapshot_store(
+        snapshot_store: OutboundConnectionSnapshotStore,
+    ) -> (
+        Arc<SharedState>,
+        mpsc::Sender<StateEvent>,
+        super::super::client_writer::ClientWriterHandle,
+        std::thread::JoinHandle<()>,
+    ) {
         let network = RemoteNetworkConfig::default();
         let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
         let (tx, rx) = mpsc::channel::<StateEvent>();
@@ -1637,6 +1789,7 @@ mod state_loop_tests {
                 client_writer_for_loop,
                 remote_owner,
                 SettingsStore::new(std::env::temp_dir().join("waitagent-test-settings.toml")),
+                snapshot_store,
             );
         });
         (shared, tx, client_writer, handle)
@@ -1904,6 +2057,236 @@ mod state_loop_tests {
 
         drop(tx);
         handle.join().expect("state loop should exit cleanly");
+    }
+
+    #[test]
+    fn snapshot_removed_on_session_closed_when_online() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-close-online-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let target_id = "peer#99999:sess-1".to_string();
+        {
+            let record = ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer(
+                    "peer#99999".to_string(),
+                    "sess-1".to_string(),
+                ),
+                selector: None,
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                display_command_name: None,
+                agent_command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Input,
+            };
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(target_id.clone(), record);
+        }
+
+        let _ = tx.send(StateEvent::SessionClosed {
+            target_id: target_id.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        assert_eq!(
+            reloaded.load().expect("load should succeed").len(),
+            0,
+            "snapshot should be removed while network is online"
+        );
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_kept_on_session_closed_when_offline() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-close-offline-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        // Mark network offline before the session closes.
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
+
+        let target_id = "peer#99999:sess-1".to_string();
+        {
+            let record = ManagedSessionRecord {
+                address: ManagedSessionAddress::remote_peer(
+                    "peer#99999".to_string(),
+                    "sess-1".to_string(),
+                ),
+                selector: None,
+                availability: SessionAvailability::Online,
+                workspace_dir: None,
+                workspace_key: None,
+                session_role: None,
+                opened_by: Vec::new(),
+                attached_clients: 0,
+                window_count: 1,
+                command_name: Some("bash".to_string()),
+                display_command_name: None,
+                agent_command_name: None,
+                current_path: None,
+                task_state: ManagedSessionTaskState::Input,
+            };
+            let mut guard = shared
+                .sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(target_id.clone(), record);
+        }
+
+        let _ = tx.send(StateEvent::SessionClosed {
+            target_id: target_id.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "snapshot should be kept while network is offline"
+        );
+        assert_eq!(entries[0].authority_node_id, "peer#99999");
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_removed_on_remote_node_offline_when_online() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-node-online-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::RemoteNodeOffline {
+            node_id: "peer#99999".to_string(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        assert_eq!(
+            reloaded.load().expect("load should succeed").len(),
+            0,
+            "snapshot should be removed when remote node goes offline while network is online"
+        );
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_kept_on_remote_node_offline_when_offline() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "waitagent-snapshot-node-offline-{}",
+            std::process::id()
+        ));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("test-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
+        let _ = tx.send(StateEvent::RemoteNodeOffline {
+            node_id: "peer#99999".to_string(),
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "snapshot should be kept when remote node goes offline while control plane is offline"
+        );
+        assert_eq!(entries[0].authority_node_id, "peer#99999");
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
+    }
+
+    #[test]
+    fn network_recovery_triggers_snapshot_reconnect_event() {
+        let _guard = STATE_LOOP_TEST_LOCK.lock().unwrap();
+        let snapshot_path =
+            std::env::temp_dir().join(format!("waitagent-snapshot-recover-{}", std::process::id()));
+        let snapshot_store = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        snapshot_store
+            .upsert("missing-profile", "peer#99999")
+            .expect("upsert should succeed");
+
+        let (_shared, tx, _client_writer, handle) =
+            start_test_loop_with_snapshot_store(snapshot_store);
+
+        // Transition from offline to online. The loop should enqueue
+        // ReconnectSnapshotHosts and attempt to reconnect the saved profile.
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: false });
+        let _ = tx.send(StateEvent::NetworkConnectivityChanged { online: true });
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        // The reconnect attempt ran: the missing profile is still in the
+        // snapshot because the failure is logged and the entry is preserved.
+        let reloaded = OutboundConnectionSnapshotStore::new(&snapshot_path);
+        let entries = reloaded.load().expect("load should succeed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].profile_name, "missing-profile");
+
+        drop(tx);
+        handle.join().expect("state loop should exit cleanly");
+        crate::infra::best_effort::remove_file(&snapshot_path);
     }
 
     #[test]

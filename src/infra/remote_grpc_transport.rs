@@ -869,7 +869,11 @@ fn tls_endpoint_uri(endpoint_uri: &str, tls_pin_sha256: &Option<String>) -> Stri
         .or_else(|| endpoint_uri.strip_prefix("tls://"))
         .unwrap_or(endpoint_uri);
     match tls_pin_sha256 {
-        Some(_) => format!("https://{bare}"),
+        // When a TLS pin is configured we use a custom TLS connector that
+        // performs the handshake itself. Tonic's `connect_with_connector`
+        // requires a plain `http://` URI in that case; using `https://` makes
+        // it reject the connection with `HttpsUriWithoutTlsSupport`.
+        Some(_) => format!("http://{bare}"),
         None => {
             if endpoint_uri.starts_with("https://") || endpoint_uri.starts_with("tls://") {
                 format!("https://{bare}")
@@ -878,6 +882,16 @@ fn tls_endpoint_uri(endpoint_uri: &str, tls_pin_sha256: &Option<String>) -> Stri
             }
         }
     }
+}
+
+fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = format!("{error:#?}");
+    let mut source = error.source();
+    while let Some(err) = source {
+        message.push_str(&format!("\n  caused by: {err:#?}"));
+        source = err.source();
+    }
+    message
 }
 
 async fn connect_channel(
@@ -890,12 +904,21 @@ async fn connect_channel(
             endpoint
                 .connect_with_connector(connector)
                 .await
-                .map_err(|error| RemoteNodeTransportError::new(error.to_string()))
+                .map_err(|error| {
+                    ERROR_LOG.log_error(format!(
+                        "connect_channel (tls pin) failed; pin={pin}; error chain:\n{}",
+                        format_error_chain(&error)
+                    ));
+                    RemoteNodeTransportError::new(error.to_string())
+                })
         }
-        None => endpoint
-            .connect()
-            .await
-            .map_err(|error| RemoteNodeTransportError::new(error.to_string())),
+        None => endpoint.connect().await.map_err(|error| {
+            ERROR_LOG.log_error(format!(
+                "connect_channel (no pin) failed; error chain:\n{}",
+                format_error_chain(&error)
+            ));
+            RemoteNodeTransportError::new(error.to_string())
+        }),
     }
 }
 
@@ -908,10 +931,11 @@ struct TlsPinConnector {
 impl TlsPinConnector {
     fn new(pin: String) -> Result<Self, RemoteNodeTransportError> {
         let verifier = Arc::new(PinnedCertVerifier { pin });
-        let config = rustls::ClientConfig::builder()
+        let mut config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec()];
         let server_name = rustls::pki_types::ServerName::try_from("waitagent")
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
         Ok(Self {
