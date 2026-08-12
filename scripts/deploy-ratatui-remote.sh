@@ -2,24 +2,31 @@
 set -euo pipefail
 
 # Deploy the locally-built waitagent binary to a remote host and start it as a
-# ratatui node server that connects back to the local WaitAgent.
+# ratatui node server.
+#
+# In inbound mode the remote daemon connects back to the local WaitAgent. In
+# outbound-dial mode (omit --connect) the daemon listens for the control host to
+# dial in.
 #
 # This script is invoked by the SSH bootstrapper instead of downloading the
 # release installer from the network. It copies target/release/waitagent to the
-# remote host, kills any existing remote node server for the same port, and
-# starts a fresh one with nohup in the background.
+# remote host and kills any existing remote node server for the same port. The
+# bootstrapper generates credentials and starts the daemon separately, so this
+# script must not start a daemon before the key and certificate exist.
 #
 # Usage:
 #   ./scripts/deploy-ratatui-remote.sh \
 #     --host <remote-host> \
 #     --user <ssh-user> \
 #     --remote-port <remote-port> \
-#     --connect <local-endpoint> \
 #     --node-id <authority-node-id> \
+#     [--connect <local-endpoint>] \
 #     [--ssh-port <ssh-port>] \
 #     [--identity <ssh-key-path>] \
 #     [--local-bin <path>] \
-#     [--remote-bin <path>]
+#     [--remote-bin <path>] \
+#     [--node-key-path <path>] \
+#     [--node-cert-path <path>]
 #
 # Authentication:
 #   - Key-based: pass --identity <path> (preferred).
@@ -39,23 +46,27 @@ IDENTITY=""
 REMOTE_PORT=""
 CONNECT=""
 NODE_ID=""
+NODE_KEY_PATH=""
+NODE_CERT_PATH=""
 
 usage() {
   cat >&2 <<'EOF'
-Usage: deploy-ratatui-remote.sh --host <host> --user <user> --remote-port <port> --connect <endpoint> --node-id <id> [options]
+Usage: deploy-ratatui-remote.sh --host <host> --user <user> --remote-port <port> --node-id <id> [options]
 
 Required:
   --host          remote SSH host
   --user          remote SSH user
   --remote-port   port the remote daemon will listen on
-  --connect       local WaitAgent endpoint the remote daemon connects back to
   --node-id       authority node id for the remote daemon
 
 Options:
+  --connect       local WaitAgent endpoint for inbound mode (omit for outbound dial)
   --ssh-port      SSH port (default: 22)
   --identity      SSH private key path
   --local-bin     path to local waitagent binary (default: target/release/waitagent)
   --remote-bin    remote install path (default: $HOME/.local/bin/waitagent)
+  --node-key-path TLS private key path on the remote host
+  --node-cert-path TLS certificate path on the remote host
 
 Environment:
   WAITAGENT_SSH_PASSWORD    SSH password (only used when --identity is omitted)
@@ -123,6 +134,14 @@ while [[ $# -gt 0 ]]; do
       CONNECT="${2:-}"
       shift 2
       ;;
+    --node-key-path)
+      NODE_KEY_PATH="${2:-}"
+      shift 2
+      ;;
+    --node-cert-path)
+      NODE_CERT_PATH="${2:-}"
+      shift 2
+      ;;
     --node-id)
       NODE_ID="${2:-}"
       shift 2
@@ -139,7 +158,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$HOST" || -z "$USER" || -z "$REMOTE_PORT" || -z "$CONNECT" || -z "$NODE_ID" ]]; then
+if [[ -z "$HOST" || -z "$USER" || -z "$REMOTE_PORT" || -z "$NODE_ID" ]]; then
   echo "error: missing required argument" >&2
   usage
   exit 1
@@ -204,25 +223,12 @@ kill_existing() {
   "
 }
 
-start_daemon() {
-  # Build the start command. We run the ratatui node server on the remote host
-  # so it connects back to the local WaitAgent using the ratatui session backend
-  # instead of the tmux-based __remote-daemon.
-  remote "
-    set -e
-    nohup $(shq "$REMOTE_BIN") --port $(shq "$REMOTE_PORT") --connect $(shq "$CONNECT") --node-id $(shq "$NODE_ID") __ratatui-node-server >> $(shq "$LOG_FILE") 2>&1 </dev/null &
-    sleep 0.5
-    pgrep -f $(shq "waitagent.*--port $REMOTE_PORT.*__ratatui-node-server") >/dev/null
-  "
-}
-
 main() {
   ensure_remote_dir
   copy_binary
   kill_existing
-  start_daemon
   echo "Deployed $LOCAL_BIN -> $REMOTE:$REMOTE_BIN"
-  echo "Started ratatui node server on $REMOTE (port $REMOTE_PORT, log $LOG_FILE)"
+  echo "Remote binary ready on $REMOTE (port $REMOTE_PORT)"
 }
 
 main

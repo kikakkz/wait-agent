@@ -1778,6 +1778,8 @@ mod tests {
             connect: Some("10.0.0.8:7474".to_string()),
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
 
         let args = remote_runtime_owner_args(&network, None);
@@ -1801,6 +1803,8 @@ mod tests {
             connect: Some("10.0.0.8:7474".to_string()),
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
 
         let args = remote_runtime_owner_args(&network, Some(Path::new("/tmp/runtime-ready.sock")));
@@ -1816,6 +1820,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 
@@ -1961,6 +1967,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2049,6 +2056,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2171,6 +2179,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2226,6 +2235,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2316,6 +2326,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2382,6 +2393,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2464,6 +2476,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2494,6 +2507,7 @@ mod tests {
                 connect: None,
                 node_id: None,
                 public_endpoint: None,
+                ..RemoteNetworkConfig::default()
             },
             current_executable: PathBuf::from("/tmp/waitagent-test"),
         };
@@ -2522,6 +2536,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let path = remote_runtime_owner_socket_path(&network);
 
@@ -2553,6 +2569,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let socket_path = remote_runtime_owner_socket_path(&network);
         let socket_path_for_thread = socket_path.clone();

@@ -39,6 +39,8 @@ pub struct RemoteNetworkConfig {
     pub connect: Option<String>,
     pub node_id: Option<String>,
     pub public_endpoint: Option<String>,
+    pub node_key_path: Option<String>,
+    pub node_cert_path: Option<String>,
 }
 
 impl Default for RemoteNetworkConfig {
@@ -48,6 +50,8 @@ impl Default for RemoteNetworkConfig {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         }
     }
 }
@@ -111,6 +115,14 @@ impl RemoteNetworkConfig {
             args.push("--public".to_string());
             args.push(public_endpoint.clone());
         }
+        if let Some(node_key_path) = &self.node_key_path {
+            args.push("--node-key-path".to_string());
+            args.push(node_key_path.clone());
+        }
+        if let Some(node_cert_path) = &self.node_cert_path {
+            args.push("--node-cert-path".to_string());
+            args.push(node_cert_path.clone());
+        }
         args
     }
 }
@@ -161,6 +173,7 @@ pub enum Command {
     RatatuiListSessions(RatatuiListSessionsCommand),
     RatatuiNodeServer(RatatuiNodeServerCommand),
     RatatuiClient(RatatuiClientCommand),
+    GenerateNodeCredentials,
     Help(String),
     Version,
 }
@@ -293,6 +306,11 @@ impl Cli {
                 args.remove(0);
                 Command::RatatuiClient(parse_ratatui_client(args)?)
             }
+            "__generate-node-credentials" => {
+                args.remove(0);
+                parse_no_args(args)?;
+                Command::GenerateNodeCredentials
+            }
             "version" => Command::Version,
             "help" => Command::Help(help_text()),
             "--version" | "-V" => Command::Version,
@@ -376,6 +394,35 @@ fn parse_global_network_config(
                     return Err(CliError::InvalidValue("--public".to_string(), value));
                 }
                 network.public_endpoint = Some(value);
+            }
+            "--node-key-path" => {
+                explicit = true;
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--node-key-path".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue("--node-key-path".to_string(), value));
+                }
+                network.node_key_path = Some(value);
+            }
+            "--node-cert-path" => {
+                explicit = true;
+                args.remove(0);
+                let value = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CliError::MissingValue("--node-cert-path".to_string()))?;
+                args.remove(0);
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidValue(
+                        "--node-cert-path".to_string(),
+                        value,
+                    ));
+                }
+                network.node_cert_path = Some(value);
             }
             _ => break,
         }
@@ -691,6 +738,28 @@ mod tests {
             parse(&["waitagent", "__error-log"]).command,
             Command::ShowErrorLog
         ));
+    }
+
+    #[test]
+    fn parses_generate_node_credentials_command() {
+        assert!(matches!(
+            parse(&["waitagent", "__generate-node-credentials"]).command,
+            Command::GenerateNodeCredentials
+        ));
+    }
+
+    #[test]
+    fn parses_node_credential_path_flags() {
+        let cli = parse(&[
+            "waitagent",
+            "--node-key-path",
+            "/tmp/node.key",
+            "--node-cert-path",
+            "/tmp/node.crt",
+            "__generate-node-credentials",
+        ]);
+        assert_eq!(cli.network.node_key_path.as_deref(), Some("/tmp/node.key"));
+        assert_eq!(cli.network.node_cert_path.as_deref(), Some("/tmp/node.crt"));
     }
 
     #[test]

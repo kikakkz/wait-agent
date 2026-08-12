@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteHostProfile {
     pub name: String,
     pub host: String,
@@ -17,6 +17,7 @@ pub struct RemoteHostProfile {
     pub last_endpoint: Option<String>,
     pub last_connected_at: Option<String>,
     pub use_install_proxy: bool,
+    pub tls_pin_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +30,17 @@ pub enum RemoteHostAuthProfile {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl Default for RemoteHostAuthProfile {
+    fn default() -> Self {
+        Self::Password {
+            password_secret_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RemotePortPreference {
+    #[default]
     Auto,
     Port(u16),
 }
@@ -175,6 +185,9 @@ fn serialize_history(history: &RemoteHostHistory) -> String {
         if let Some(connected_at) = &host.last_connected_at {
             push_string(&mut out, "last_connected_at", connected_at);
         }
+        if let Some(tls_pin) = &host.tls_pin_sha256 {
+            push_string(&mut out, "tls_pin_sha256", tls_pin);
+        }
         out.push_str(&format!("use_install_proxy = {}\n", host.use_install_proxy));
         out.push('\n');
     }
@@ -244,6 +257,7 @@ struct RawProfile {
     last_remote_port: Option<String>,
     last_endpoint: Option<String>,
     last_connected_at: Option<String>,
+    tls_pin_sha256: Option<String>,
     use_install_proxy: Option<String>,
 }
 
@@ -261,6 +275,7 @@ impl RawProfile {
             "last_remote_port" => self.last_remote_port = Some(value),
             "last_endpoint" => self.last_endpoint = Some(value),
             "last_connected_at" => self.last_connected_at = Some(value),
+            "tls_pin_sha256" => self.tls_pin_sha256 = Some(value),
             "use_install_proxy" => self.use_install_proxy = Some(value),
             other => {
                 return Err(RemoteHostHistoryStoreError::new(format!(
@@ -298,6 +313,7 @@ impl RawProfile {
             last_remote_port: optional_u16(self.last_remote_port, "last_remote_port")?,
             last_endpoint: self.last_endpoint.filter(|value| !value.is_empty()),
             last_connected_at: self.last_connected_at.filter(|value| !value.is_empty()),
+            tls_pin_sha256: self.tls_pin_sha256.filter(|value| !value.is_empty()),
             use_install_proxy: optional_bool(self.use_install_proxy, "use_install_proxy")?
                 .unwrap_or(true),
         })
@@ -454,12 +470,15 @@ mod tests {
                 last_endpoint: Some("10.1.29.130:7476".to_string()),
                 last_connected_at: Some("2026-06-16T00:00:00Z".to_string()),
                 use_install_proxy: true,
+                tls_pin_sha256: Some("a1b2c3d4".to_string()),
             })
             .unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("ssh_password_secret_id"));
         assert!(content.contains("sudo_password_secret_id"));
+        assert!(content.contains("tls_pin_sha256"));
+        assert!(content.contains("a1b2c3d4"));
         assert!(!content.contains("12345679"));
         assert!(!content.contains("sudo-secret"));
 
@@ -472,6 +491,7 @@ mod tests {
                 password_secret_id: Some(ssh_secret_id.clone())
             }
         );
+        assert_eq!(loaded.hosts[0].tls_pin_sha256.as_deref(), Some("a1b2c3d4"));
         assert_eq!(
             secret_store
                 .get_secret(&ssh_secret_id)
@@ -532,6 +552,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         }
     }
 

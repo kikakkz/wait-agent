@@ -9,6 +9,8 @@ use crate::remote::network_state::command_network_config;
 pub fn run() -> Result<(), AppError> {
     let _args: Vec<String> = std::env::args().collect();
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse(std::env::args_os())?;
     let network = command_network_config(cli.network.clone(), cli.network_explicit, &cli.command);
     let dispatcher =

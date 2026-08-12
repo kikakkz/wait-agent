@@ -37,8 +37,14 @@ pbkdf2 = "0.13"
 polling = "3.11"
 prost = "0.13"
 prost-types = "0.13"
+rand = "0.8"
 ratatui = { version = "0.27.0", default-features = false, features = ["crossterm"] }
+rcgen = "0.12"
 russh = "0.61.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls-pemfile = "2"
+ssh-key = { version = "0.7.0-rc.10", features = ["ed25519", "rsa", "encryption"] }
+tokio-rustls = "0.26"
 alacritty_terminal = "0.25"
 rustix = { version = "1.1", features = ["termios"] }
 rustix-openpty = "0.2"
@@ -47,9 +53,12 @@ serde_json = "1"
 sha1 = "0.11"
 sha2 = "0.11"
 signal-hook = "0.3"
+thiserror = "1"
 tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
-tonic = { version = "0.12", features = ["transport"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tower = "0.4"
+hyper-util = "0.1"
 unicode-width = "0.1.14"
 
 [features]

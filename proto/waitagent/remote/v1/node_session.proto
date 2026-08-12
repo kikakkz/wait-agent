@@ -95,6 +95,14 @@ message ClientHello {
   ProtocolVersion max_supported_version = 4;
   NodeCapabilities capabilities = 5;
   optional ResumeHint resume = 6;
+
+  // Operator authentication: scheme used to produce challenge_response.
+  // E.g. "ssh-ed25519-challenge", "ssh-rsa-challenge", or "none".
+  string auth_scheme = 7;
+
+  // Signature over the server-issued operator_challenge using the operator's
+  // SSH private key, in SSH signature format.
+  bytes challenge_response = 8;
 }
 
 message ServerHello {
@@ -103,6 +111,10 @@ message ServerHello {
   ProtocolVersion negotiated_version = 3;
   google.protobuf.Duration heartbeat_interval = 4;
   RecoveryPolicy recovery_policy = 5;
+
+  // Random nonce the client must sign with its operator SSH private key.
+  // Empty when the server does not require mutual operator authentication.
+  bytes operator_challenge = 6;
 }
 
 message Heartbeat {

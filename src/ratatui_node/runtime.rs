@@ -10,7 +10,8 @@ use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
 use crate::remote::node::remote_node_ingress_server_runtime::{
-    start_owner_control_acceptor, OwnerLifecycleEvent, RemoteNodeIngressServerRuntime,
+    start_owner_control_acceptor, InternalEvent, OwnerLifecycleEvent,
+    RemoteNodeIngressServerRuntime,
 };
 use crate::remote::node::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest, RatatuiLocalAuthorityHostBackend,
@@ -81,6 +82,7 @@ pub(crate) struct SharedState {
     pub(crate) io: IoHandles,
     pub(crate) session_creation_port: Option<Arc<dyn SessionCreationPort>>,
     pub(crate) target_registry_port: Option<Arc<dyn TargetRegistryPort>>,
+    pub(crate) ingress_internal_tx: Mutex<Option<mpsc::Sender<InternalEvent>>>,
     pub(crate) process_monitor: Mutex<Option<crate::process_monitor::ProcessMonitor>>,
 }
 
@@ -163,6 +165,7 @@ impl SharedState {
             },
             session_creation_port: None,
             target_registry_port: None,
+            ingress_internal_tx: Mutex::new(None),
             process_monitor: Mutex::new(None),
         }))
     }
@@ -1118,6 +1121,9 @@ impl RatatuiNodeRuntime {
                     std::os::unix::net::UnixListener::bind(&owner_socket_path)
                 {
                     if let Some(owner_tx) = guard.owner_event_sender() {
+                        if let Ok(mut guard) = self.shared.ingress_internal_tx.lock() {
+                            *guard = Some(owner_tx.clone());
+                        }
                         let (_lifecycle_tx, _lifecycle_rx) =
                             std::sync::mpsc::channel::<OwnerLifecycleEvent>();
                         let _owner_acceptor =

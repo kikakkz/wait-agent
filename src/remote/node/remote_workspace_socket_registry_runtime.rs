@@ -180,6 +180,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let path = workspace_socket_registry_path(&network);
         crate::infra::best_effort::remove_file(&path);
@@ -221,6 +223,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let path = workspace_socket_registry_path(&network);
         crate::infra::best_effort::remove_file(&path);
@@ -256,6 +260,8 @@ mod tests {
             connect: None,
             node_id: None,
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let path = workspace_socket_registry_path(&network);
         crate::infra::best_effort::remove_file(&path);

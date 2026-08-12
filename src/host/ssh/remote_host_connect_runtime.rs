@@ -16,6 +16,8 @@ use crate::host::ssh::remote_port_probe::{
 use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, RemoteHostBootstrapPlan, RemoteHostBootstrapper,
 };
+use crate::infra::operator_auth;
+use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
 use crate::lifecycle::LifecycleError;
 use crate::ports::session_creation::{RemoteSessionCreationRequest, SessionCreationPort};
 use crate::ports::target_registry::TargetRegistryPort;
@@ -99,9 +101,18 @@ where
     B: RemoteHostBootstrapper,
     B::Error: ToString,
 {
+    /// Connect to a remote host, bootstrapping waitagent if necessary.
+    ///
+    /// `initiate_outbound_dial` is called synchronously on the caller's thread
+    /// after the remote daemon has been bootstrapped and before waiting for the
+    /// first online target. It receives the outbound dial request (remote
+    /// endpoint, TLS pin, and operator key path) and must arrange for the
+    /// control host to dial the remote daemon. If it returns an error, `connect`
+    /// returns immediately instead of waiting for the remote target.
     pub fn connect(
         &self,
         request: RemoteHostConnectRequest,
+        initiate_outbound_dial: impl FnOnce(OutboundNodeSessionRequest) -> Result<(), String>,
     ) -> Result<RemoteHostConnectOutcome, LifecycleError> {
         let mut profile = self.resolve_profile(&request)?;
         let should_save_profile =
@@ -151,7 +162,9 @@ where
             )
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         }
-        self.bootstrapper
+        plan.operator_public_key = operator_public_key_for_profile(&profile)?;
+        let bootstrap_result = self
+            .bootstrapper
             .ensure_waitagent_and_start(&plan)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
@@ -161,6 +174,7 @@ where
                 profile.last_remote_port = Some(port.port);
                 profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
                 profile.use_install_proxy = request.use_install_proxy;
+                profile.tls_pin_sha256 = Some(bootstrap_result.tls_pin_sha256);
                 self.save_connected_profile(&request, profile)?;
             }
             return Ok(RemoteHostConnectOutcome {
@@ -170,6 +184,15 @@ where
             });
         }
 
+        let outbound_request = OutboundNodeSessionRequest {
+            node_id: authority_node_id.clone(),
+            endpoint_uri: format!("tls://{}:{}", profile.host, bootstrap_result.remote_port),
+            tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
+            operator_key_path: operator_private_key_path_for_profile(&profile),
+        };
+        initiate_outbound_dial(outbound_request)
+            .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
+
         let default_target = self.wait_for_first_online_target(
             &authority_node_id,
             DEFAULT_ENDPOINT_POLL_INTERVAL,
@@ -178,6 +201,7 @@ where
         profile.last_remote_port = Some(port.port);
         profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
         profile.use_install_proxy = request.use_install_proxy;
+        profile.tls_pin_sha256 = Some(bootstrap_result.tls_pin_sha256);
         if should_save_profile {
             self.save_connected_profile(&request, profile)?;
         }
@@ -393,6 +417,7 @@ fn profile_from_direct_args(
         last_endpoint: None,
         last_connected_at: None,
         use_install_proxy: command.use_install_proxy.unwrap_or(true),
+        tls_pin_sha256: None,
     })
 }
 
@@ -486,6 +511,31 @@ fn authority_id_for_profile_port(profile: &RemoteHostProfile, remote_port: u16) 
     format!("{}#{}", profile.host, remote_port)
 }
 
+fn operator_public_key_for_profile(
+    profile: &RemoteHostProfile,
+) -> Result<Option<String>, LifecycleError> {
+    match &profile.auth {
+        RemoteHostAuthProfile::Key { key_path } => {
+            operator_auth::public_key_from_private_key_file(key_path)
+                .map(Some)
+                .map_err(|error| {
+                    LifecycleError::Protocol(format!(
+                        "failed to load operator private key `{}`: {error}",
+                        key_path.display()
+                    ))
+                })
+        }
+        RemoteHostAuthProfile::Password { .. } => Ok(None),
+    }
+}
+
+fn operator_private_key_path_for_profile(profile: &RemoteHostProfile) -> Option<PathBuf> {
+    match &profile.auth {
+        RemoteHostAuthProfile::Key { key_path } => Some(key_path.clone()),
+        RemoteHostAuthProfile::Password { .. } => None,
+    }
+}
+
 fn port_preference(value: &HistoryRemotePortPreference) -> RemotePortProbePreference {
     match value {
         HistoryRemotePortPreference::Auto => RemotePortProbePreference::Auto,
@@ -522,6 +572,7 @@ mod tests {
         ManagedSessionAddress, ManagedSessionTaskState, SessionAvailability,
     };
     use crate::domain::workspace::{WorkspaceInstanceId, WorkspaceSessionRole};
+    use crate::host::ssh::ssh_remote_host_bootstrapper::RemoteHostBootstrapResult;
     use crate::ports::session_creation::{
         RemoteSessionCreationError, RemoteSessionCreationRequest, SessionCreationPort,
     };
@@ -643,7 +694,7 @@ mod tests {
         fn ensure_waitagent_and_start(
             &self,
             plan: &RemoteHostBootstrapPlan,
-        ) -> Result<(), Self::Error> {
+        ) -> Result<RemoteHostBootstrapResult, Self::Error> {
             self.plans.lock().unwrap().push(plan.clone());
             if let Some(targets) = &self.catalog_targets {
                 targets.lock().unwrap().push(remote_target(
@@ -651,7 +702,10 @@ mod tests {
                     "seed",
                 ));
             }
-            Ok(())
+            Ok(RemoteHostBootstrapResult {
+                tls_pin_sha256: "deadbeef".to_string(),
+                remote_port: plan.start_plan.remote_port,
+            })
         }
     }
 
@@ -664,7 +718,7 @@ mod tests {
         fn ensure_waitagent_and_start(
             &self,
             _plan: &RemoteHostBootstrapPlan,
-        ) -> Result<(), Self::Error> {
+        ) -> Result<RemoteHostBootstrapResult, Self::Error> {
             Err("bootstrap failed".to_string())
         }
     }
@@ -736,15 +790,18 @@ mod tests {
         );
 
         let outcome = runtime
-            .connect(RemoteHostConnectRequest {
-                profile_name: Some("130".to_string()),
-                direct_profile: None,
-                save_profile_name: None,
-                replace_profile_name: None,
-                local_connect_endpoint: "10.1.26.84:7474".to_string(),
-                cwd_hint: None,
-                use_install_proxy: true,
-            })
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
             .unwrap();
 
         assert!(outcome.reused_existing_endpoint);
@@ -782,24 +839,27 @@ mod tests {
         );
 
         let outcome = runtime
-            .connect(RemoteHostConnectRequest {
-                profile_name: Some("130".to_string()),
-                direct_profile: None,
-                save_profile_name: None,
-                replace_profile_name: None,
-                local_connect_endpoint: "10.1.26.84:7474".to_string(),
-                cwd_hint: Some(PathBuf::from("/opt/data/workspace/app-insight")),
-                use_install_proxy: true,
-            })
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: Some("130".to_string()),
+                    direct_profile: None,
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: Some(PathBuf::from("/opt/data/workspace/app-insight")),
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
             .unwrap();
 
         assert!(!outcome.reused_existing_endpoint);
         assert_eq!(outcome.authority_node_id, "10.1.29.130#7476");
         assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
-        assert!(bootstrap_plans.lock().unwrap()[0]
+        assert!(!bootstrap_plans.lock().unwrap()[0]
             .start_plan
             .command
-            .contains("--connect '10.1.26.84:7474'"));
+            .contains("--connect"));
         assert!(!bootstrap_plans.lock().unwrap()[0]
             .start_plan
             .command
@@ -831,15 +891,18 @@ mod tests {
             unused_session_creation(),
         );
 
-        let result = runtime.connect(RemoteHostConnectRequest {
-            profile_name: None,
-            direct_profile: Some(profile()),
-            save_profile_name: Some("130".to_string()),
-            replace_profile_name: None,
-            local_connect_endpoint: "10.1.26.84:7474".to_string(),
-            cwd_hint: None,
-            use_install_proxy: true,
-        });
+        let result = runtime.connect(
+            RemoteHostConnectRequest {
+                profile_name: None,
+                direct_profile: Some(profile()),
+                save_profile_name: Some("130".to_string()),
+                replace_profile_name: None,
+                local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                cwd_hint: None,
+                use_install_proxy: true,
+            },
+            |_request| Ok(()),
+        );
 
         assert!(result.is_err());
         assert!(history.load().unwrap().hosts.is_empty());
@@ -876,15 +939,18 @@ mod tests {
         edited.ssh_user = "kk".to_string();
 
         runtime
-            .connect(RemoteHostConnectRequest {
-                profile_name: None,
-                direct_profile: Some(edited),
-                save_profile_name: Some("kk@10.1.29.140".to_string()),
-                replace_profile_name: Some("kk@10.1.29.130".to_string()),
-                local_connect_endpoint: "10.1.26.84:7474".to_string(),
-                cwd_hint: None,
-                use_install_proxy: true,
-            })
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: None,
+                    direct_profile: Some(edited),
+                    save_profile_name: Some("kk@10.1.29.140".to_string()),
+                    replace_profile_name: Some("kk@10.1.29.130".to_string()),
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
             .unwrap();
 
         let hosts = history.load().unwrap().hosts;
@@ -915,15 +981,18 @@ mod tests {
         );
 
         runtime
-            .connect(RemoteHostConnectRequest {
-                profile_name: None,
-                direct_profile: Some(profile()),
-                save_profile_name: None,
-                replace_profile_name: None,
-                local_connect_endpoint: "10.1.26.84:7474".to_string(),
-                cwd_hint: None,
-                use_install_proxy: true,
-            })
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: None,
+                    direct_profile: Some(profile()),
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: true,
+                },
+                |_request| Ok(()),
+            )
             .unwrap();
 
         assert!(history.load().unwrap().hosts.is_empty());
@@ -1013,15 +1082,18 @@ mod tests {
         );
 
         runtime
-            .connect(RemoteHostConnectRequest {
-                profile_name: None,
-                direct_profile: Some(profile()),
-                save_profile_name: None,
-                replace_profile_name: None,
-                local_connect_endpoint: "10.1.26.84:7474".to_string(),
-                cwd_hint: None,
-                use_install_proxy: false,
-            })
+            .connect(
+                RemoteHostConnectRequest {
+                    profile_name: None,
+                    direct_profile: Some(profile()),
+                    save_profile_name: None,
+                    replace_profile_name: None,
+                    local_connect_endpoint: "10.1.26.84:7474".to_string(),
+                    cwd_hint: None,
+                    use_install_proxy: false,
+                },
+                |_request| Ok(()),
+            )
             .unwrap();
 
         let plans = bootstrap_plans.lock().unwrap();
@@ -1044,6 +1116,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         }
     }
 

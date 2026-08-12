@@ -3638,6 +3638,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }
     }
 
@@ -3655,6 +3656,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }
     }
 
@@ -3801,6 +3803,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -3829,6 +3832,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -3853,6 +3857,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -3890,6 +3895,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
             RemoteHostProfile {
                 name: "second".to_string(),
@@ -3904,6 +3910,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
         ];
         state.selected = 0;
@@ -3935,6 +3942,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
 
@@ -3970,6 +3978,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
         let request = state
@@ -4018,6 +4027,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         };
 
         assert_eq!(saved_host_label(&profile), "k@127.0.0.1");
@@ -4039,6 +4049,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 1;
         let _ = state.sync_selected_profile();
@@ -4083,6 +4094,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
         state.selected = 0;
         let _ = state.sync_selected_profile();
@@ -4116,6 +4128,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
 
         assert_eq!(host_list_width(&state, 98), 29);
@@ -4138,6 +4151,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
 
         assert_eq!(host_list_width(&state, 98), 29);
@@ -4228,6 +4242,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
             RemoteHostProfile {
                 name: "b@127.0.0.2".to_string(),
@@ -4242,6 +4257,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
         ];
         state.set_focus(Focus::Hosts);
@@ -4594,6 +4610,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            ..RemoteHostProfile::default()
         }];
 
         state.selected = 0;
@@ -5248,6 +5265,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
             RemoteHostProfile {
                 name: "b@127.0.0.1".to_string(),
@@ -5262,6 +5280,7 @@ mod tests {
                 last_endpoint: None,
                 last_connected_at: None,
                 use_install_proxy: true,
+                ..RemoteHostProfile::default()
             },
         ];
         state.focus = Focus::Hosts;

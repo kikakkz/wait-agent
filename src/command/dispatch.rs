@@ -7,6 +7,7 @@ use crate::application::remote_session_creation_service::{
 use crate::application::target_registry_service::TargetRegistryService;
 use crate::cli::{Command, RatatuiClientCommand, RatatuiNodeServerCommand, RemoteNetworkConfig};
 use crate::error::AppError;
+use crate::infra::node_credentials::{self, NodeCredentialPaths};
 use crate::infra::settings_store::SettingsStore;
 use crate::ports::hooks_config::HooksConfigPort;
 use crate::ports::session_creation::SessionCreationPort;
@@ -72,6 +73,23 @@ impl CommandDispatcher {
             Command::RatatuiClient(command) => self
                 .ratatui_client(command)
                 .and_then(|runtime| runtime.run().map_err(AppError::from)),
+            Command::GenerateNodeCredentials => {
+                let paths = match (&self.network.node_key_path, &self.network.node_cert_path) {
+                    (Some(key_path), Some(cert_path)) => NodeCredentialPaths {
+                        key_path: key_path.into(),
+                        cert_path: cert_path.into(),
+                    },
+                    _ => NodeCredentialPaths::default_paths(),
+                };
+                let fingerprint =
+                    node_credentials::ensure_credentials(&paths).map_err(|error| {
+                        AppError::Lifecycle(crate::lifecycle::LifecycleError::Protocol(
+                            error.to_string(),
+                        ))
+                    })?;
+                println!("WAITAGENT_CREDENTIALS{}:{}", fingerprint, self.network.port);
+                Ok(())
+            }
             Command::Help(help) => {
                 print_banner();
                 println!("{help}");

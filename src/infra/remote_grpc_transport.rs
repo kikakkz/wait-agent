@@ -1,3 +1,4 @@
+use crate::infra::operator_auth;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
 use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
@@ -6,11 +7,15 @@ use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
 use crate::infra::remote_grpc_proto::v1::{
     ClientHello, NodeSessionEnvelope, ProtocolVersion, RecoveryPolicy, ServerHello,
 };
+use sha2::{Digest, Sha256};
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +26,7 @@ use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Response, Status};
+use tower::Service;
 
 const SERVER_ID: &str = "waitagent-remote-ingress";
 const HEARTBEAT_INTERVAL_SECONDS: i64 = 15;
@@ -28,11 +34,14 @@ const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
 const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const OPERATOR_AUTH_CHALLENGE_SIZE: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNodeSessionRequest {
     pub node_id: String,
     pub endpoint_uri: String,
+    pub tls_pin_sha256: Option<String>,
+    pub operator_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +87,12 @@ pub trait RemoteNodeTransport: Send + Sync {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GrpcRemoteNodeTransport;
+pub struct GrpcRemoteNodeTransport {
+    /// Optional TLS certificate path for inbound listeners.
+    tls_cert_path: Option<PathBuf>,
+    /// Optional TLS private key path for inbound listeners.
+    tls_key_path: Option<PathBuf>,
+}
 
 pub struct GrpcRemoteNodeTransportGuard {
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -94,7 +108,19 @@ pub struct RemoteNodeTransportError {
 
 impl GrpcRemoteNodeTransport {
     pub fn new() -> Self {
-        Self
+        Self {
+            tls_cert_path: None,
+            tls_key_path: None,
+        }
+    }
+
+    /// Configure the transport to serve inbound connections over TLS using the
+    /// given certificate and private key.
+    pub fn with_tls(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            tls_cert_path: Some(cert_path.into()),
+            tls_key_path: Some(key_path.into()),
+        }
     }
 
     pub fn endpoint(&self, endpoint_uri: &str) -> Result<Endpoint, RemoteNodeTransportError> {
@@ -154,11 +180,13 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         request: OutboundNodeSessionRequest,
         event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
     ) -> Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError> {
-        let endpoint = self.endpoint(&request.endpoint_uri)?;
+        let endpoint = self.endpoint(&tls_endpoint_uri(
+            &request.endpoint_uri,
+            &request.tls_pin_sha256,
+        ))?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (started_tx, started_rx) = mpsc::channel();
         let t_start = Instant::now();
-        let _endpoint_uri = request.endpoint_uri.clone();
 
         let worker = thread::Builder::new()
             .spawn(move || {
@@ -171,7 +199,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                         return;
                     }
                 };
-                let _t_runtime = t_start.elapsed();
 
                 runtime.block_on(async move {
                 let session_instance_id = format!("client-session-{}", now_millis());
@@ -191,15 +218,13 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
 
                 let tcp_start = Instant::now();
 
-                let channel = match endpoint.connect().await {
+                let channel = match connect_channel(&endpoint, &request.tls_pin_sha256).await {
                     Ok(channel) => {
                         let _t_tcp = tcp_start.elapsed();
-
                         channel
                     }
                     Err(error) => {
                         let _t_fail = tcp_start.elapsed();
-
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -219,12 +244,10 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 let mut inbound = match response {
                     Ok(response) => {
                         let _t_grpc = grpc_start.elapsed();
-
                         response.into_inner()
                     }
                     Err(error) => {
                         let _t_fail = grpc_start.elapsed();
-
                         let transport_error =
                             RemoteNodeTransportError::new(error.to_string());
                         let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
@@ -240,7 +263,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 let first_envelope = match inbound.message().await {
                     Ok(Some(envelope)) => {
                         let _t_hello = server_hello_start.elapsed();
-
                         envelope
                     }
                     Ok(None) => {
@@ -274,7 +296,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 };
                 let Some(Body::ServerHello(server_hello)) = first_envelope.body.as_ref() else {
                     let _t_fail = server_hello_start.elapsed();
-
                     let transport_error = RemoteNodeTransportError::new(
                         "grpc node session did not start with server_hello",
                     );
@@ -286,6 +307,46 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     let _ = started_tx.send(Err(transport_error));
                     return;
                 };
+
+                if !server_hello.operator_challenge.is_empty() {
+                    let Some(operator_key_path) = &request.operator_key_path else {
+                        let transport_error = RemoteNodeTransportError::new(
+                            "server requested operator authentication but no operator key path was configured",
+                        );
+                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                            node_id: Some(request.node_id.clone()),
+                            session_instance_id: None,
+                            message: transport_error.to_string(),
+                        });
+                        let _ = started_tx.send(Err(transport_error));
+                        return;
+                    };
+                    let challenge = server_hello.operator_challenge.clone();
+                    match operator_auth::sign_challenge(&challenge, operator_key_path) {
+                        Ok((auth_scheme, challenge_response)) => {
+                            if let Err(error) = outbound_session.send(auth_response_envelope(
+                                &request.node_id,
+                                &session_instance_id,
+                                &auth_scheme,
+                                &challenge_response,
+                            )) {
+                                let _ = started_tx.send(Err(error));
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let transport_error = RemoteNodeTransportError::new(error.to_string());
+                            let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                node_id: Some(request.node_id.clone()),
+                                session_instance_id: None,
+                                message: transport_error.to_string(),
+                            });
+                            let _ = started_tx.send(Err(transport_error));
+                            return;
+                        }
+                    }
+                }
+
                 let session = RemoteNodeSessionHandle {
                     node_id: request.node_id.clone(),
                     session_instance_id: server_hello.session_instance_id.clone(),
@@ -309,7 +370,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 loop {
                     tokio::select! {
                         _ = &mut shutdown_rx => {
-
                             break;
                         }
                         result = inbound.message() => {
@@ -328,11 +388,9 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                                     }
                                 }
                                 Ok(None) => {
-
                                     break;
                                 }
                                 Err(error) => {
-
                                     let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
                                         node_id: Some(request.node_id.clone()),
                                         session_instance_id: Some(session_instance_id.clone()),
@@ -355,7 +413,6 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         match started_rx.recv() {
             Ok(Ok(())) => {
                 let _t_total = t_start.elapsed();
-
                 Ok(GrpcRemoteNodeTransportGuard {
                     shutdown_tx: Some(shutdown_tx),
                     worker: Some(worker),
@@ -400,6 +457,8 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
         let local_addr = listener
             .local_addr()
             .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
+        let tls_cert_path = self.tls_cert_path.clone();
+        let tls_key_path = self.tls_key_path.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let worker = thread::Builder::new()
             .spawn(move || {
@@ -437,12 +496,41 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                     let service = TransportNodeSessionService {
                         event_tx,
                         session_shutdowns,
+                        authorized_operators_dir: Some(operator_auth::default_authorized_operators_dir()),
                     };
-                    let server = Server::builder()
+                    let mut server_builder = Server::builder()
                         .tcp_nodelay(true)
                         .tcp_keepalive(Some(TCP_KEEPALIVE_IDLE))
                         .http2_keepalive_interval(Some(HTTP2_KEEPALIVE_INTERVAL))
-                        .http2_keepalive_timeout(Some(HTTP2_KEEPALIVE_TIMEOUT))
+                        .http2_keepalive_timeout(Some(HTTP2_KEEPALIVE_TIMEOUT));
+                    if let (Some(cert_path), Some(key_path)) = (&tls_cert_path, &tls_key_path) {
+                        let (cert, key) = match (std::fs::read(cert_path), std::fs::read(key_path)) {
+                            (Ok(cert), Ok(key)) => (cert, key),
+                            (Err(error), _) | (_, Err(error)) => {
+                                let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                    node_id: None,
+                                    session_instance_id: None,
+                                    message: format!("failed to read TLS certificate/key: {error}"),
+                                });
+                                return;
+                            }
+                        };
+                        let identity = tonic::transport::Identity::from_pem(cert, key);
+                        match server_builder
+                            .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
+                        {
+                            Ok(builder) => server_builder = builder,
+                            Err(error) => {
+                                let _ = failure_tx.send(RemoteNodeTransportEvent::TransportFailed {
+                                    node_id: None,
+                                    session_instance_id: None,
+                                    message: format!("failed to configure TLS: {error}"),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    let server = server_builder
                         .add_service(NodeSessionServiceServer::new(service))
                         .serve_with_incoming_shutdown(incoming, async move {
                             let _ = shutdown_rx.await;
@@ -494,6 +582,7 @@ impl std::error::Error for RemoteNodeTransportError {}
 struct TransportNodeSessionService {
     event_tx: mpsc::Sender<RemoteNodeTransportEvent>,
     session_shutdowns: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
+    authorized_operators_dir: Option<PathBuf>,
 }
 
 type NodeSessionResponseStream =
@@ -525,6 +614,9 @@ impl NodeSessionService for TransportNodeSessionService {
             ));
         }
 
+        let operators = self.load_authorized_operators().await?;
+        let require_auth = !operators.is_empty();
+
         let session_instance_id = format!("server-session-{}", now_millis());
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
         let (session_shutdown_tx, session_shutdown_rx) = oneshot::channel();
@@ -537,14 +629,76 @@ impl NodeSessionService for TransportNodeSessionService {
             session_instance_id: session_instance_id.clone(),
             outbound_tx,
         };
+
+        let challenge = if require_auth {
+            let mut challenge = vec![0_u8; OPERATOR_AUTH_CHALLENGE_SIZE];
+            getrandom::fill(&mut challenge).map_err(|error| {
+                Status::internal(format!("failed to generate operator challenge: {error}"))
+            })?;
+            Some(challenge)
+        } else {
+            if operators.is_empty() {
+                ERROR_LOG.log_error(format!(
+                    "server: accepting node session for {} without operator authentication (no authorized keys)",
+                    node_id
+                ));
+            }
+            None
+        };
+
+        session
+            .send(server_hello_envelope(
+                &first_envelope,
+                &session_instance_id,
+                challenge.clone(),
+            ))
+            .map_err(|error| Status::unavailable(error.to_string()))?;
+
+        if let Some(challenge) = challenge {
+            let auth_envelope = match inbound.message().await? {
+                Some(envelope) => envelope,
+                None => {
+                    return Err(Status::unauthenticated(
+                        "node session closed before operator authentication response",
+                    ));
+                }
+            };
+            let Some(Body::ClientHello(auth_hello)) = auth_envelope.body.as_ref() else {
+                return Err(Status::unauthenticated(
+                    "operator authentication response must be a client_hello",
+                ));
+            };
+            if auth_hello.challenge_response.is_empty() {
+                return Err(Status::unauthenticated(
+                    "operator authentication response is empty",
+                ));
+            }
+            let mut verified = false;
+            for (_fingerprint, public_key) in &operators {
+                if operator_auth::verify_challenge(
+                    &challenge,
+                    &auth_hello.auth_scheme,
+                    &auth_hello.challenge_response,
+                    public_key,
+                )
+                .is_ok()
+                {
+                    verified = true;
+                    break;
+                }
+            }
+            if !verified {
+                return Err(Status::unauthenticated(
+                    "operator challenge signature invalid",
+                ));
+            }
+        }
+
         self.event_tx
             .send(RemoteNodeTransportEvent::SessionOpened {
                 session: session.clone(),
             })
             .map_err(|_| Status::unavailable("remote node ingress worker is unavailable"))?;
-        session
-            .send(server_hello_envelope(&first_envelope, &session_instance_id))
-            .map_err(|error| Status::unavailable(error.to_string()))?;
 
         let event_tx = self.event_tx.clone();
         let writer_node_id = node_id.clone();
@@ -597,12 +751,10 @@ impl NodeSessionService for TransportNodeSessionService {
             loop {
                 tokio::select! {
                     _ = &mut session_shutdown_rx => {
-
                         break;
                     }
                     maybe_envelope = outbound_rx.recv() => {
                         let Some(envelope) = maybe_envelope else {
-
                             break;
                         };
                         if response_tx.send(envelope).is_err() {
@@ -622,9 +774,24 @@ impl NodeSessionService for TransportNodeSessionService {
     }
 }
 
+impl TransportNodeSessionService {
+    async fn load_authorized_operators(&self) -> Result<Vec<(String, ssh_key::PublicKey)>, Status> {
+        let Some(dir) = &self.authorized_operators_dir else {
+            return Ok(Vec::new());
+        };
+        match operator_auth::list_authorized_operators(dir) {
+            Ok(operators) => Ok(operators),
+            Err(error) => Err(Status::internal(format!(
+                "failed to load authorized operators: {error}"
+            ))),
+        }
+    }
+}
+
 fn server_hello_envelope(
     client_hello: &NodeSessionEnvelope,
     session_instance_id: &str,
+    operator_challenge: Option<Vec<u8>>,
 ) -> NodeSessionEnvelope {
     NodeSessionEnvelope {
         message_id: format!("server-hello-{}", now_millis()),
@@ -645,6 +812,7 @@ fn server_hello_envelope(
                 observer_reopen_required: true,
                 replay_supported: true,
             }),
+            operator_challenge: operator_challenge.unwrap_or_default(),
         })),
     }
 }
@@ -663,8 +831,201 @@ fn client_hello_envelope(node_id: &str, session_instance_id: &str) -> NodeSessio
             max_supported_version: Some(ProtocolVersion { major: 1, minor: 0 }),
             capabilities: None,
             resume: None,
+            auth_scheme: "none".to_string(),
+            challenge_response: vec![],
         })),
     }
+}
+
+fn auth_response_envelope(
+    node_id: &str,
+    session_instance_id: &str,
+    auth_scheme: &str,
+    challenge_response: &[u8],
+) -> NodeSessionEnvelope {
+    NodeSessionEnvelope {
+        message_id: format!("client-auth-response-{}", now_millis()),
+        sent_at: Some(timestamp_now()),
+        session_instance_id: session_instance_id.to_string(),
+        correlation_id: None,
+        route: None,
+        body: Some(Body::ClientHello(ClientHello {
+            node_id: node_id.to_string(),
+            node_instance_id: session_instance_id.to_string(),
+            min_supported_version: Some(ProtocolVersion { major: 1, minor: 0 }),
+            max_supported_version: Some(ProtocolVersion { major: 1, minor: 0 }),
+            capabilities: None,
+            resume: None,
+            auth_scheme: auth_scheme.to_string(),
+            challenge_response: challenge_response.to_vec(),
+        })),
+    }
+}
+
+fn tls_endpoint_uri(endpoint_uri: &str, tls_pin_sha256: &Option<String>) -> String {
+    let bare = endpoint_uri
+        .strip_prefix("http://")
+        .or_else(|| endpoint_uri.strip_prefix("https://"))
+        .or_else(|| endpoint_uri.strip_prefix("tls://"))
+        .unwrap_or(endpoint_uri);
+    match tls_pin_sha256 {
+        Some(_) => format!("https://{bare}"),
+        None => {
+            if endpoint_uri.starts_with("https://") || endpoint_uri.starts_with("tls://") {
+                format!("https://{bare}")
+            } else {
+                format!("http://{bare}")
+            }
+        }
+    }
+}
+
+async fn connect_channel(
+    endpoint: &Endpoint,
+    tls_pin_sha256: &Option<String>,
+) -> Result<Channel, RemoteNodeTransportError> {
+    match tls_pin_sha256 {
+        Some(pin) => {
+            let connector = TlsPinConnector::new(pin.clone())?;
+            endpoint
+                .connect_with_connector(connector)
+                .await
+                .map_err(|error| RemoteNodeTransportError::new(error.to_string()))
+        }
+        None => endpoint
+            .connect()
+            .await
+            .map_err(|error| RemoteNodeTransportError::new(error.to_string())),
+    }
+}
+
+#[derive(Clone)]
+struct TlsPinConnector {
+    tls_connector: tokio_rustls::TlsConnector,
+    server_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl TlsPinConnector {
+    fn new(pin: String) -> Result<Self, RemoteNodeTransportError> {
+        let verifier = Arc::new(PinnedCertVerifier { pin });
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        let server_name = rustls::pki_types::ServerName::try_from("waitagent")
+            .map_err(|error| RemoteNodeTransportError::new(error.to_string()))?;
+        Ok(Self {
+            tls_connector: tokio_rustls::TlsConnector::from(Arc::new(config)),
+            server_name,
+        })
+    }
+}
+
+impl Service<tonic::transport::Uri> for TlsPinConnector {
+    type Response =
+        hyper_util::rt::tokio::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Error = std::io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: tonic::transport::Uri) -> Self::Future {
+        let connector = self.tls_connector.clone();
+        let server_name = self.server_name.clone();
+        Box::pin(async move {
+            let authority = uri
+                .authority()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing URI authority")
+                })?
+                .as_str();
+            let (host, port) = authority
+                .rsplit_once(':')
+                .map(|(host, port)| {
+                    let port = port.parse::<u16>().unwrap_or(443);
+                    (host.to_string(), port)
+                })
+                .unwrap_or_else(|| (authority.to_string(), 443));
+            let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+            let tls_stream = connector.connect(server_name, stream).await?;
+            Ok(hyper_util::rt::tokio::TokioIo::new(tls_stream))
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PinnedCertVerifier {
+    pin: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let spki = crate::infra::node_credentials::extract_spki_from_cert_der(end_entity.as_ref())
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        let fingerprint = Sha256::digest(&spki);
+        let fingerprint = hex_encode(&fingerprint);
+        if fingerprint.eq_ignore_ascii_case(&self.pin) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn timestamp_now() -> prost_types::Timestamp {
@@ -805,6 +1166,8 @@ mod tests {
                 max_supported_version: Some(ProtocolVersion { major: 1, minor: 0 }),
                 capabilities: None,
                 resume: None,
+                auth_scheme: "none".to_string(),
+                challenge_response: vec![],
             })),
         }
     }

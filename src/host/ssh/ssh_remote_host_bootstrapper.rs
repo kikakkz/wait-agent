@@ -5,6 +5,7 @@ use crate::host::ssh::remote_host_secret_store::{
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshAuth, RemoteSshExecutor, RemoteSshOutput, RemoteSshTarget, RusshRemoteSshExecutor,
 };
+use crate::infra::node_credentials::NodeCredentialPaths;
 use std::fmt;
 
 pub const WAITAGENT_INSTALL_SCRIPT_URL: &str =
@@ -17,9 +18,14 @@ pub struct RemoteWaitAgentStartPlan {
     pub remote_port: u16,
     pub local_connect_endpoint: String,
     pub authority_id: String,
+    pub credential_paths: NodeCredentialPaths,
     pub endpoint_preflight_command: String,
+    pub credentials_command: String,
     pub command: String,
     pub subcommand: String,
+    /// When true, the remote daemon listens for an outbound dial from the
+    /// control host instead of connecting back with `--connect`.
+    pub outbound_dial: bool,
 }
 
 impl RemoteWaitAgentStartPlan {
@@ -28,19 +34,54 @@ impl RemoteWaitAgentStartPlan {
         local_connect_endpoint: impl Into<String>,
         authority_id: impl Into<String>,
     ) -> Self {
+        Self::new_with_mode(
+            remote_port,
+            local_connect_endpoint,
+            authority_id,
+            true, /* outbound_dial */
+        )
+    }
+
+    pub fn new_with_mode(
+        remote_port: u16,
+        local_connect_endpoint: impl Into<String>,
+        authority_id: impl Into<String>,
+        outbound_dial: bool,
+    ) -> Self {
         let local_connect_endpoint = local_connect_endpoint.into();
         let authority_id = authority_id.into();
+        let credential_paths = NodeCredentialPaths::remote_default_paths();
+        let endpoint_preflight_command = if outbound_dial {
+            String::new()
+        } else {
+            endpoint_preflight_command(&local_connect_endpoint)
+        };
+        let command = if outbound_dial {
+            format!(
+                "nohup waitagent --port {remote_port} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                shell_single_quote(&authority_id),
+                remote_shell_path(&credential_paths.key_path),
+                remote_shell_path(&credential_paths.cert_path)
+            )
+        } else {
+            format!(
+                "nohup waitagent --port {remote_port} --connect {} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                shell_single_quote(&local_connect_endpoint),
+                shell_single_quote(&authority_id),
+                remote_shell_path(&credential_paths.key_path),
+                remote_shell_path(&credential_paths.cert_path)
+            )
+        };
         Self {
             remote_port,
-            endpoint_preflight_command: endpoint_preflight_command(&local_connect_endpoint),
-            command: format!(
-                "nohup waitagent --port {remote_port} --connect {} --node-id {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
-                shell_single_quote(&local_connect_endpoint),
-                shell_single_quote(&authority_id)
-            ),
+            credential_paths: credential_paths.clone(),
+            endpoint_preflight_command,
+            credentials_command: generate_credentials_command(remote_port, &credential_paths),
+            command,
             local_connect_endpoint,
             authority_id,
             subcommand: "__ratatui-node-server".to_string(),
+            outbound_dial,
         }
     }
 }
@@ -62,6 +103,8 @@ pub struct RemoteHostBootstrapPlan {
     /// Remote path where the deployed binary is installed. Used by the deploy
     /// script and for version/daemon checks.
     pub remote_bin_path: String,
+    /// OpenSSH-formatted operator public key to install on the remote host.
+    pub operator_public_key: Option<String>,
 }
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
@@ -99,6 +142,7 @@ impl RemoteHostBootstrapPlan {
             start_plan,
             deploy_script_path: None,
             remote_bin_path,
+            operator_public_key: None,
         }
     }
 
@@ -111,14 +155,28 @@ impl RemoteHostBootstrapPlan {
         self.deploy_script_path = Some(default_deploy_script_path());
         self.install_or_update_command = deploy_command(&self);
         self.start_plan.subcommand = "__ratatui-node-server".to_string();
-        self.start_plan.command = format!(
-            "nohup waitagent --port {} --connect {} --node-id {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
-            self.start_plan.remote_port,
-            shell_single_quote(&self.start_plan.local_connect_endpoint),
-            shell_single_quote(&self.start_plan.authority_id),
-            shell_single_quote(&self.start_plan.subcommand),
-            self.start_plan.remote_port,
-        );
+        self.start_plan.command = if self.start_plan.outbound_dial {
+            format!(
+                "nohup waitagent --port {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+                self.start_plan.remote_port,
+                shell_single_quote(&self.start_plan.authority_id),
+                remote_shell_path(&self.start_plan.credential_paths.key_path),
+                remote_shell_path(&self.start_plan.credential_paths.cert_path),
+                shell_single_quote(&self.start_plan.subcommand),
+                self.start_plan.remote_port,
+            )
+        } else {
+            format!(
+                "nohup waitagent --port {} --connect {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+                self.start_plan.remote_port,
+                shell_single_quote(&self.start_plan.local_connect_endpoint),
+                shell_single_quote(&self.start_plan.authority_id),
+                remote_shell_path(&self.start_plan.credential_paths.key_path),
+                remote_shell_path(&self.start_plan.credential_paths.cert_path),
+                shell_single_quote(&self.start_plan.subcommand),
+                self.start_plan.remote_port,
+            )
+        };
         self
     }
 }
@@ -126,8 +184,17 @@ impl RemoteHostBootstrapPlan {
 pub trait RemoteHostBootstrapper {
     type Error;
 
-    fn ensure_waitagent_and_start(&self, plan: &RemoteHostBootstrapPlan)
-        -> Result<(), Self::Error>;
+    fn ensure_waitagent_and_start(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<RemoteHostBootstrapResult, Self::Error>;
+}
+
+/// Result returned by a successful remote host bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHostBootstrapResult {
+    pub tls_pin_sha256: String,
+    pub remote_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,23 +267,35 @@ where
     fn ensure_waitagent_and_start(
         &self,
         plan: &RemoteHostBootstrapPlan,
-    ) -> Result<(), Self::Error> {
-        self.run_ssh_command(
-            plan,
-            &plan.start_plan.endpoint_preflight_command,
-            false,
-        )
-        .map_err(|error| {
-            RemoteHostBootstrapError::new(format!(
-                "remote host cannot reach local WaitAgent endpoint `{}`: {}. Pass `--public <host:port>` with an endpoint reachable from `{}`.",
-                plan.start_plan.local_connect_endpoint, error, plan.host
-            ))
-        })?;
+    ) -> Result<RemoteHostBootstrapResult, Self::Error> {
+        if !plan.start_plan.outbound_dial && !plan.start_plan.endpoint_preflight_command.is_empty()
+        {
+            self.run_ssh_command(
+                plan,
+                &plan.start_plan.endpoint_preflight_command,
+                false,
+            )
+            .map_err(|error| {
+                RemoteHostBootstrapError::new(format!(
+                    "remote host cannot reach local WaitAgent endpoint `{}`: {}. Pass `--public <host:port>` with an endpoint reachable from `{}`.",
+                    plan.start_plan.local_connect_endpoint, error, plan.host
+                ))
+            })?;
+        }
 
         if plan.deploy_script_path.is_some() {
             self.run_deploy_script(plan)?;
-            return Ok(());
+            let (tls_pin_sha256, remote_port) = self.generate_credentials_and_parse(plan)?;
+            if !self.remote_waitagent_daemon_is_running(plan)? {
+                self.run_ssh_command(plan, &plan.start_plan.command, false)?;
+            }
+            return Ok(RemoteHostBootstrapResult {
+                tls_pin_sha256,
+                remote_port,
+            });
         }
+
+        self.run_ssh_command(plan, &ensure_waitagent_home_command(), false)?;
 
         if !self.remote_waitagent_is_current(plan)? {
             if let Some(command) = &plan.install_reachability_preflight_command {
@@ -231,10 +310,21 @@ where
             }
             self.run_ssh_command(plan, &plan.install_or_update_command, true)?;
         }
-        if self.remote_waitagent_daemon_is_running(plan)? {
-            return Ok(());
+
+        let (tls_pin_sha256, remote_port) = self.generate_credentials_and_parse(plan)?;
+
+        if let Some(public_key) = &plan.operator_public_key {
+            self.install_operator_public_key(plan, public_key)?;
         }
-        self.run_ssh_command(plan, &plan.start_plan.command, false)
+
+        if !self.remote_waitagent_daemon_is_running(plan)? {
+            self.run_ssh_command(plan, &plan.start_plan.command, false)?;
+        }
+
+        Ok(RemoteHostBootstrapResult {
+            tls_pin_sha256,
+            remote_port,
+        })
     }
 }
 
@@ -303,6 +393,45 @@ where
         self.ssh_executor
             .exec(&target, &remote_command, stdin.as_deref())
             .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))
+    }
+
+    fn generate_credentials_and_parse(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+    ) -> Result<(String, u16), RemoteHostBootstrapError> {
+        let output = self.run_ssh_output(plan, &plan.start_plan.credentials_command, false)?;
+        if output.status != 0 {
+            return Err(RemoteHostBootstrapError::new(format!(
+                "remote credential generation failed with status {}{}",
+                output.status,
+                stderr_summary(&output.stderr)
+            )));
+        }
+        let (tls_pin_sha256, remote_port) = parse_credentials_output(&output.stdout)
+            .ok_or_else(|| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                RemoteHostBootstrapError::new(format!(
+                    "remote credential generation did not emit WAITAGENT_CREDENTIALS marker; stdout: {stdout}"
+                ))
+            })?;
+        Ok((tls_pin_sha256, remote_port))
+    }
+
+    fn install_operator_public_key(
+        &self,
+        plan: &RemoteHostBootstrapPlan,
+        public_key: &str,
+    ) -> Result<(), RemoteHostBootstrapError> {
+        let dir = "$HOME/.waitagent/authorized_operators";
+        let fingerprint = operator_public_key_fingerprint(public_key)
+            .map_err(|error| RemoteHostBootstrapError::new(error.to_string()))?;
+        let path = format!("{dir}/{fingerprint}.pub");
+        let command = format!(
+            "mkdir -p {dir} && printf '%s\\n' {} > {path}",
+            shell_single_quote(public_key)
+        );
+        self.run_ssh_command(plan, &command, true)?;
+        Ok(())
     }
 
     fn run_deploy_script(
@@ -470,13 +599,23 @@ fn deploy_command(plan: &RemoteHostBootstrapPlan) -> String {
         shell_single_quote(&plan.ssh_user),
         "--remote-port".to_string(),
         shell_single_quote(&plan.start_plan.remote_port.to_string()),
-        "--connect".to_string(),
-        shell_single_quote(&plan.start_plan.local_connect_endpoint),
-        "--node-id".to_string(),
-        shell_single_quote(&plan.start_plan.authority_id),
-        "--remote-bin".to_string(),
-        shell_single_quote(&plan.remote_bin_path),
     ];
+    if !plan.start_plan.outbound_dial {
+        parts.push("--connect".to_string());
+        parts.push(shell_single_quote(&plan.start_plan.local_connect_endpoint));
+    }
+    parts.push("--node-id".to_string());
+    parts.push(shell_single_quote(&plan.start_plan.authority_id));
+    parts.push("--node-key-path".to_string());
+    parts.push(shell_single_quote(
+        &plan.start_plan.credential_paths.key_path.to_string_lossy(),
+    ));
+    parts.push("--node-cert-path".to_string());
+    parts.push(shell_single_quote(
+        &plan.start_plan.credential_paths.cert_path.to_string_lossy(),
+    ));
+    parts.push("--remote-bin".to_string());
+    parts.push(shell_single_quote(&plan.remote_bin_path));
     if let Some(key_path) = &plan.key_path {
         parts.push("--identity".to_string());
         parts.push(shell_single_quote(key_path));
@@ -492,15 +631,68 @@ fn current_version_check_command() -> String {
     )
 }
 
-fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
+fn ensure_waitagent_home_command() -> String {
+    "mkdir -p $HOME/.waitagent".to_string()
+}
+
+fn generate_credentials_command(
+    remote_port: u16,
+    credential_paths: &NodeCredentialPaths,
+) -> String {
     format!(
-        "ps -eo args= | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -v 'grep -F' >/dev/null 2>&1",
-        shell_single_quote("waitagent"),
-        shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
-        shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
-        shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
-        shell_single_quote(&plan.start_plan.subcommand),
+        "waitagent --port {} --node-key-path {} --node-cert-path {} __generate-node-credentials",
+        shell_single_quote(&remote_port.to_string()),
+        remote_shell_path(&credential_paths.key_path),
+        remote_shell_path(&credential_paths.cert_path),
     )
+}
+
+fn parse_credentials_output(stdout: &[u8]) -> Option<(String, u16)> {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(payload) = line.strip_prefix("WAITAGENT_CREDENTIALS") else {
+            continue;
+        };
+        let Some((fingerprint, port)) = payload.rsplit_once(':') else {
+            continue;
+        };
+        let fingerprint = fingerprint.trim();
+        let port = port.trim().parse::<u16>().ok()?;
+        if !fingerprint.is_empty() {
+            return Some((fingerprint.to_string(), port));
+        }
+    }
+    None
+}
+
+fn operator_public_key_fingerprint(public_key: &str) -> Result<String, String> {
+    let public_key = ssh_key::PublicKey::from_openssh(public_key)
+        .map_err(|error| format!("failed to parse operator public key: {error}"))?;
+    Ok(crate::infra::operator_auth::public_key_fingerprint(
+        &public_key,
+    ))
+}
+
+fn daemon_running_check_command(plan: &RemoteHostBootstrapPlan) -> String {
+    if plan.start_plan.outbound_dial {
+        format!(
+            "ps -eo args= | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -v 'grep -F' >/dev/null 2>&1",
+            shell_single_quote("waitagent"),
+            shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
+            shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
+            shell_single_quote(&plan.start_plan.subcommand),
+        )
+    } else {
+        format!(
+            "ps -eo args= | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -F -- {} | grep -v 'grep -F' >/dev/null 2>&1",
+            shell_single_quote("waitagent"),
+            shell_single_quote(&format!("--port {}", plan.start_plan.remote_port)),
+            shell_single_quote(&format!("--connect {}", plan.start_plan.local_connect_endpoint)),
+            shell_single_quote(&format!("--node-id {}", plan.start_plan.authority_id)),
+            shell_single_quote(&plan.start_plan.subcommand),
+        )
+    }
 }
 
 pub fn install_reachability_preflight_command(env_prefixes: &[String]) -> String {
@@ -626,6 +818,19 @@ fn shell_single_quote(value: &str) -> String {
     out
 }
 
+/// Quote a path for embedding in a remote shell command.
+///
+/// Paths that start with `$HOME/` are left in double quotes so the remote
+/// shell expands the variable; local-style paths are single-quoted as usual.
+fn remote_shell_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    if s.starts_with("$HOME/") {
+        format!("\"{s}\"")
+    } else {
+        shell_single_quote(&s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +849,15 @@ mod tests {
     struct RecordingSshExecutor {
         calls: Rc<RefCell<SshCallLog>>,
         statuses: Rc<RefCell<Vec<u32>>>,
+        credentials_stdout: Rc<RefCell<Option<String>>>,
+    }
+
+    impl RecordingSshExecutor {
+        #[allow(dead_code)]
+        fn with_credentials_stdout(self, stdout: impl Into<String>) -> Self {
+            *self.credentials_stdout.borrow_mut() = Some(stdout.into());
+            self
+        }
     }
 
     impl RemoteSshExecutor for RecordingSshExecutor {
@@ -661,9 +875,18 @@ mod tests {
                 stdin.map(str::to_string),
             ));
             let status = self.statuses.borrow_mut().pop().unwrap_or(0);
+            let stdout = if command.contains("__generate-node-credentials") {
+                self.credentials_stdout
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_default()
+                    .into_bytes()
+            } else {
+                Vec::new()
+            };
             Ok(RemoteSshOutput {
                 status,
-                stdout: Vec::new(),
+                stdout,
                 stderr: Vec::new(),
             })
         }
@@ -673,7 +896,7 @@ mod tests {
     };
 
     #[test]
-    fn remote_host_bootstrap_plan_uses_install_script_and_connects_back_to_local_server() {
+    fn remote_host_bootstrap_plan_uses_install_script_and_outbound_dial() {
         let profile = RemoteHostProfile {
             name: "130".to_string(),
             host: "10.1.29.130".to_string(),
@@ -687,6 +910,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -708,18 +932,21 @@ mod tests {
             .install_or_update_command
             .contains("waitagent --version"));
         assert!(plan.install_or_update_command.contains("curl -fsSL"));
+        assert!(plan.start_plan.endpoint_preflight_command.is_empty());
+        assert!(!plan.start_plan.command.contains("--connect"));
         assert!(plan
             .start_plan
-            .endpoint_preflight_command
-            .contains("10.1.26.84"));
+            .command
+            .contains("--node-id '10.1.29.130#7476'"));
         assert!(plan
             .start_plan
-            .endpoint_preflight_command
-            .contains("'7474'"));
-        assert!(plan.start_plan.command.contains(
-            "waitagent --port 7476 --connect '10.1.26.84:7474' --node-id '10.1.29.130#7476' __ratatui-node-server"
-        ));
+            .command
+            .contains("waitagent --port 7476 --node-id"));
+        assert!(plan.start_plan.command.contains("--node-key-path"));
+        assert!(plan.start_plan.command.contains("--node-cert-path"));
+        assert!(plan.start_plan.command.contains("__ratatui-node-server"));
         assert!(plan.start_plan.command.contains("nohup"));
+        assert!(plan.start_plan.outbound_dial);
     }
 
     #[test]
@@ -746,6 +973,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -801,6 +1029,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -813,26 +1042,33 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 1, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
             },
         );
 
-        bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+        let result = bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
+        assert_eq!(result.tls_pin_sha256, "deadbeef");
+        assert_eq!(result.remote_port, 7476);
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 6);
         assert_eq!(calls[0].0.host, "10.1.29.130");
         assert_eq!(calls[0].0.user, "kk");
-        assert!(calls[0].1.contains("nc -z -w"));
+        assert!(calls[0].1.contains("mkdir -p"));
         assert_eq!(calls[0].2, None);
         assert!(calls[1].1.contains("waitagent --version"));
         assert_eq!(calls[1].2, None);
         assert!(calls[2].1.starts_with("sudo -S -p '' sh -lc "));
         assert_eq!(calls[2].2.as_deref(), Some("sudo-secret\n"));
-        assert!(calls[3].1.contains("ps -eo args="));
+        assert!(calls[3].1.contains("__generate-node-credentials"));
         assert_eq!(calls[3].2, None);
-        assert!(calls[4].1.contains("__ratatui-node-server"));
+        assert!(calls[4].1.contains("ps -eo args="));
         assert_eq!(calls[4].2, None);
+        assert!(calls[5].1.contains("__ratatui-node-server"));
+        assert_eq!(calls[5].2, None);
     }
 
     #[test]
@@ -859,6 +1095,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
         let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -877,23 +1114,27 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 1, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0, 1, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 6);
-        assert!(calls[0].1.contains("nc -z -w"));
+        assert_eq!(calls.len(), 7);
+        assert!(calls[0].1.contains("mkdir -p"));
         assert!(calls[1].1.contains("waitagent --version"));
         assert!(calls[2].1.contains("all_proxy="));
         assert!(calls[2].1.contains("https_proxy="));
         assert!(calls[2].1.contains(" || "));
         assert!(calls[2].1.contains(WAITAGENT_INSTALL_SCRIPT_URL));
         assert!(calls[3].1.starts_with("sudo -S -p '' sh -lc "));
-        assert!(calls[4].1.contains("ps -eo args="));
-        assert!(calls[5].1.contains("__ratatui-node-server"));
+        assert!(calls[4].1.contains("__generate-node-credentials"));
+        assert!(calls[5].1.contains("ps -eo args="));
+        assert!(calls[6].1.contains("__ratatui-node-server"));
     }
 
     #[test]
@@ -916,12 +1157,20 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
-        let plan = RemoteHostBootstrapPlan::from_profile(
+        let mut plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
             7476,
             "192.168.31.178:7474",
             "10.1.29.130#7476",
+        );
+        // Force inbound mode so the local-endpoint preflight is exercised.
+        plan.start_plan = RemoteWaitAgentStartPlan::new_with_mode(
+            plan.start_plan.remote_port,
+            plan.start_plan.local_connect_endpoint.clone(),
+            plan.start_plan.authority_id.clone(),
+            false,
         );
         let calls = Rc::new(RefCell::new(Vec::new()));
         let bootstrapper = SshRemoteHostBootstrapper::with_executor(
@@ -929,6 +1178,7 @@ mod tests {
             RecordingSshExecutor {
                 calls: calls.clone(),
                 statuses: Rc::new(RefCell::new(vec![1])),
+                credentials_stdout: Rc::new(RefCell::new(None)),
             },
         );
 
@@ -973,6 +1223,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -985,22 +1236,27 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 1, 0, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 4);
-        assert!(calls[0].1.contains("nc -z -w"));
+        assert_eq!(calls.len(), 5);
+        assert!(calls[0].1.contains("mkdir -p"));
         assert_eq!(calls[0].2, None);
         assert!(calls[1].1.contains("waitagent --version"));
         assert_eq!(calls[1].2, None);
-        assert!(calls[2].1.contains("ps -eo args="));
+        assert!(calls[2].1.contains("__generate-node-credentials"));
         assert_eq!(calls[2].2, None);
-        assert!(calls[3].1.contains("__ratatui-node-server"));
+        assert!(calls[3].1.contains("ps -eo args="));
         assert_eq!(calls[3].2, None);
+        assert!(calls[4].1.contains("__ratatui-node-server"));
+        assert_eq!(calls[4].2, None);
         assert!(!calls.iter().any(|(_, command, _)| command.contains("sudo")));
     }
 
@@ -1028,6 +1284,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
         let plan = RemoteHostBootstrapPlan::from_profile(
             &profile,
@@ -1040,24 +1297,28 @@ mod tests {
             store,
             RecordingSshExecutor {
                 calls: calls.clone(),
-                statuses: Rc::new(RefCell::new(vec![0, 0, 0])),
+                statuses: Rc::new(RefCell::new(vec![0, 0, 0, 0])),
+                credentials_stdout: Rc::new(RefCell::new(Some(
+                    "WAITAGENT_CREDENTIALSdeadbeef:7476\n".to_string(),
+                ))),
             },
         );
 
         bootstrapper.ensure_waitagent_and_start(&plan).unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 3);
-        assert!(calls[0].1.contains("nc -z -w"));
+        assert_eq!(calls.len(), 4);
+        assert!(calls[0].1.contains("mkdir -p"));
         assert!(calls[1].1.contains("waitagent --version"));
-        assert!(calls[2].1.contains("ps -eo args="));
+        assert!(calls[2].1.contains("__generate-node-credentials"));
+        assert!(calls[3].1.contains("ps -eo args="));
         assert!(!calls
             .iter()
             .any(|(_, command, _)| command.contains("nohup")));
     }
 
     #[test]
-    fn remote_host_bootstrap_plan_with_local_deploy_uses_repo_script_and_connect_args() {
+    fn remote_host_bootstrap_plan_with_local_deploy_uses_repo_script_and_outbound_args() {
         let profile = RemoteHostProfile {
             name: "130".to_string(),
             host: "10.1.29.130".to_string(),
@@ -1071,6 +1332,7 @@ mod tests {
             last_endpoint: None,
             last_connected_at: None,
             use_install_proxy: true,
+            tls_pin_sha256: None,
         };
 
         let plan = RemoteHostBootstrapPlan::from_profile(
@@ -1095,14 +1357,17 @@ mod tests {
         assert!(command.contains("kk"));
         assert!(command.contains("--remote-port"));
         assert!(command.contains("7476"));
-        assert!(command.contains("--connect"));
-        assert!(command.contains("10.1.26.84:7474"));
+        assert!(!command.contains("--connect"));
         assert!(command.contains("--node-id"));
         assert!(command.contains("10.1.29.130#7476"));
+        assert!(command.contains("--node-key-path"));
+        assert!(command.contains("--node-cert-path"));
         assert!(command.contains("--identity"));
         assert!(command.contains("/home/kk/.ssh/id_rsa"));
         assert!(command.contains("--remote-bin"));
         assert!(command.contains("$HOME/.local/bin/waitagent"));
         assert!(plan.start_plan.command.contains("__ratatui-node-server"));
+        assert!(!plan.start_plan.command.contains("--connect"));
+        assert!(plan.start_plan.command.contains("--node-id"));
     }
 }

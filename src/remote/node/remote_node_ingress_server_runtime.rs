@@ -12,8 +12,9 @@ use crate::infra::remote_grpc_proto::v1::{
     TargetPublished as GrpcTargetPublished,
 };
 use crate::infra::remote_grpc_transport::{
-    GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, RemoteNodeSessionHandle,
-    RemoteNodeTransport, RemoteNodeTransportEvent,
+    GrpcRemoteNodeTransport, GrpcRemoteNodeTransportGuard, OutboundNodeSessionRequest,
+    RemoteNodeSessionHandle, RemoteNodeTransport, RemoteNodeTransportError,
+    RemoteNodeTransportEvent,
 };
 use crate::infra::remote_node_paths::remote_node_ingress_owner_socket_path;
 use crate::infra::remote_protocol::{
@@ -210,6 +211,9 @@ pub(crate) enum InternalEvent {
     RetrySocketDiscovery {
         attempts_remaining: u8,
     },
+    InitiateOutboundConnection {
+        request: OutboundNodeSessionRequest,
+    },
     Shutdown,
 }
 
@@ -387,11 +391,17 @@ where
     }
 
     pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
-        let transport = GrpcRemoteNodeTransport::new();
+        let transport = match (
+            self.network.node_cert_path.as_ref(),
+            self.network.node_key_path.as_ref(),
+        ) {
+            (Some(cert), Some(key)) => GrpcRemoteNodeTransport::with_tls(cert, key),
+            _ => GrpcRemoteNodeTransport::new(),
+        };
         let (transport_tx, transport_rx) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel();
         let transport_guard = transport
-            .listen_inbound(self.network.listener_addr(), transport_tx)
+            .listen_inbound(self.network.listener_addr(), transport_tx.clone())
             .map_err(remote_node_ingress_error)?;
         let publication_runtime = self.publication_runtime.clone();
         let target_factory = self.target_factory.clone();
@@ -406,6 +416,7 @@ where
                 network,
                 RunNodeIngressServerLoopArgs {
                     transport_rx,
+                    transport_tx,
                     internal_rx,
                     internal_tx,
                     start_authority_socket_watcher: true,
@@ -1462,6 +1473,7 @@ enum IngressEventPriority {
 
 struct RunNodeIngressServerLoopArgs {
     transport_rx: mpsc::Receiver<RemoteNodeTransportEvent>,
+    transport_tx: mpsc::Sender<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
     start_authority_socket_watcher: bool,
@@ -1482,6 +1494,7 @@ fn run_node_ingress_server_loop<
 {
     let RunNodeIngressServerLoopArgs {
         transport_rx,
+        transport_tx,
         internal_rx,
         internal_tx,
         start_authority_socket_watcher,
@@ -1498,6 +1511,7 @@ fn run_node_ingress_server_loop<
         HashMap::<String, mpsc::Sender<GrpcNodeSessionEnvelope>>::new();
     let mut registered_workspace_sockets = BTreeSet::<String>::new();
     let (event_tx, event_rx) = mpsc::channel::<IngressServerEvent>();
+    let outbound_transport_tx = transport_tx.clone();
 
     let _transport_bridge = {
         let event_tx = event_tx.clone();
@@ -1539,8 +1553,22 @@ fn run_node_ingress_server_loop<
     let mut publication_revisions = ReceiverPublicationRevisionTable::default();
     let mut socket_discovery_retry_scheduled = false;
     let mut closed_session_instances = HashSet::<String>::new();
+    let mut outbound_guards = Vec::<GrpcRemoteNodeTransportGuard>::new();
+    let outbound_transport = GrpcRemoteNodeTransport::new();
+    let (outbound_guard_tx, outbound_guard_rx) =
+        mpsc::channel::<Result<GrpcRemoteNodeTransportGuard, RemoteNodeTransportError>>();
 
     loop {
+        while let Ok(result) = outbound_guard_rx.try_recv() {
+            match result {
+                Ok(guard) => outbound_guards.push(guard),
+                Err(error) => {
+                    // The worker thread already logged the error; nothing else
+                    // to do here.
+                    let _ = error;
+                }
+            }
+        }
         drain_ingress_events(
             &event_rx,
             &mut high_priority_events,
@@ -1607,6 +1635,24 @@ fn run_node_ingress_server_loop<
                 request_id,
             }) => {
                 pending_create_sessions.remove(&request_id);
+            }
+            IngressServerEvent::Internal(InternalEvent::InitiateOutboundConnection { request }) => {
+                // Do not block the single ingress loop on the TCP/TLS handshake and
+                // server hello exchange. Spawn a short-lived worker and drain the
+                // resulting guard through outbound_guard_rx on the next iterations.
+                let outbound_transport = outbound_transport.clone();
+                let outbound_guard_tx = outbound_guard_tx.clone();
+                let outbound_transport_tx = outbound_transport_tx.clone();
+                thread::spawn(move || {
+                    let result =
+                        outbound_transport.connect_outbound(request, outbound_transport_tx);
+                    if let Err(error) = &result {
+                        ERROR_LOG.log(format!(
+                            "[remote-node-ingress] outbound connection failed: {error}"
+                        ));
+                    }
+                    let _ = outbound_guard_tx.send(result);
+                });
             }
             IngressServerEvent::Internal(event) => {
                 handle_internal_event(
@@ -2189,7 +2235,8 @@ fn handle_internal_event(
         InternalEvent::Shutdown
         | InternalEvent::ShutdownOwner { .. }
         | InternalEvent::LocalCreateSession { .. }
-        | InternalEvent::LocalCreateSessionTimedOut { .. } => {}
+        | InternalEvent::LocalCreateSessionTimedOut { .. }
+        | InternalEvent::InitiateOutboundConnection { .. } => {}
     }
 }
 

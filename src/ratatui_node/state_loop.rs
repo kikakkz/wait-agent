@@ -31,6 +31,8 @@ use crate::host::ssh::remote_host_connect_runtime::{
 };
 use crate::host::ssh::remote_host_history_store::RemoteHostHistoryStore;
 use crate::host::ssh::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
+use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
+use crate::remote::node::remote_node_ingress_server_runtime::InternalEvent;
 use crate::remote::node::remote_node_session_sync_runtime::{
     LocalCatalogChangeReason, LocalCatalogChangeRequest,
 };
@@ -1370,7 +1372,17 @@ fn connect_remote_host_target(
         session_creation,
     );
 
-    let outcome = match runtime.connect(request) {
+    let outcome = match runtime.connect(request, |request: OutboundNodeSessionRequest| {
+        let guard = shared
+            .ingress_internal_tx
+            .lock()
+            .map_err(|_| "remote node ingress lock is poisoned".to_string())?;
+        let tx = guard
+            .as_ref()
+            .ok_or_else(|| "remote node ingress is not ready".to_string())?;
+        tx.send(InternalEvent::InitiateOutboundConnection { request })
+            .map_err(|_| "remote node ingress is not ready".to_string())
+    }) {
         Ok(outcome) => outcome,
         Err(error) => return CommandOutcome::Error(error.to_string()),
     };

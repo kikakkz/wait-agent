@@ -511,6 +511,8 @@ pub(super) fn run_remote_session_sync_loop<G, T, O, F, A, P>(
             OutboundNodeSessionRequest {
                 node_id: node_id.clone(),
                 endpoint_uri: endpoint_uri.clone(),
+                tls_pin_sha256: None,
+                operator_key_path: None,
             },
             transport_event_tx,
         ) {
@@ -1660,6 +1662,8 @@ mod tests {
             connect: None,
             node_id: Some("test-node".to_string()),
             public_endpoint: None,
+            node_key_path: None,
+            node_cert_path: None,
         };
         let shared = SharedState::new(network.clone()).expect("SharedState::new should succeed");
         let (tx, rx) = mpsc::channel();
