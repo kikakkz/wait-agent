@@ -2,6 +2,17 @@ use super::logical_key::LogicalKey;
 use crate::ratatui_node::runtime::RemoteNodeConnectionInfo;
 use std::sync::Arc;
 
+/// Outcome of an asynchronous remote-host connect operation, delivered back to
+/// the state loop so it can apply session/active-target mutations on its single
+/// writer thread.
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteHostConnectedOutcome {
+    pub target_id: String,
+    pub authority_node_id: String,
+    pub created_target: crate::domain::session_catalog::ManagedSessionRecord,
+    pub connection_info: Option<crate::ratatui_node::runtime::RemoteNodeConnectionInfo>,
+}
+
 /// Events that converge on `StateEventLoop`, the single writer of `SharedState`.
 ///
 /// All lifecycle mutations (local child exit, authority-host child exit,
@@ -111,6 +122,15 @@ pub(crate) enum StateEvent {
     /// Sent once at startup and again after the control plane recovers from a
     /// network outage.
     ReconnectSnapshotHosts,
+    /// The asynchronous remote-host connect operation finished. The state loop
+    /// applies session/active-target mutations and reports success or error to
+    /// the originating client.
+    RemoteHostConnectResult {
+        client_id: u64,
+        profile_name: String,
+        result: Box<Result<RemoteHostConnectedOutcome, String>>,
+        activate: bool,
+    },
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.

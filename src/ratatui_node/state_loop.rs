@@ -26,7 +26,10 @@ use super::snapshot::{
     build_snapshot, history_response_json, response_json, snapshot_json, ControlResponse,
     HistoryResponse, ServerStatus, SessionView,
 };
-use super::state_event::{ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, StateEvent};
+use super::state_event::{
+    ClientCommand, CommandOutcome, CreatedAuthorityHostTarget, RemoteHostConnectedOutcome,
+    StateEvent,
+};
 use crate::host::ssh::outbound_connection_snapshot_store::OutboundConnectionSnapshotStore;
 use crate::host::ssh::remote_host_connect_runtime::{
     operator_private_key_path_for_profile, RemoteHostConnectRequest, RemoteHostConnectRuntime,
@@ -62,12 +65,14 @@ impl StateEventLoop {
         settings_store: SettingsStore,
     ) -> Result<Self, LifecycleError> {
         let (tx, rx) = mpsc::channel::<StateEvent>();
+        let loop_tx = tx.clone();
         let authority_host_io_tx = authority_host_io.sender();
         let snapshot_store =
             OutboundConnectionSnapshotStore::new(OutboundConnectionSnapshotStore::default_path());
         std::thread::spawn(move || {
             if let Err(error) = run_state_event_loop(
                 shared,
+                loop_tx,
                 rx,
                 catalog_tx,
                 authority_host_io_tx,
@@ -92,6 +97,7 @@ impl StateEventLoop {
 #[allow(clippy::too_many_arguments)]
 fn run_state_event_loop(
     shared: Arc<SharedState>,
+    state_event_tx: mpsc::Sender<StateEvent>,
     rx: mpsc::Receiver<StateEvent>,
     catalog_tx: mpsc::Sender<LocalCatalogChangeRequest>,
     authority_host_io_tx: AuthorityHostIoHandle,
@@ -187,6 +193,25 @@ fn run_state_event_loop(
                     command,
                     &settings_store,
                     &snapshot_store,
+                    state_event_tx.clone(),
+                );
+            }
+
+            StateEvent::RemoteHostConnectResult {
+                client_id,
+                profile_name,
+                result,
+                activate,
+            } => {
+                handle_remote_host_connect_result(
+                    &shared,
+                    &client_writer,
+                    &connected_clients,
+                    &snapshot_store,
+                    client_id,
+                    profile_name,
+                    *result,
+                    activate,
                 );
             }
 
@@ -432,11 +457,23 @@ fn handle_client_command_event(
     command: ClientCommand,
     settings_store: &SettingsStore,
     snapshot_store: &OutboundConnectionSnapshotStore,
+    state_event_tx: mpsc::Sender<StateEvent>,
 ) {
     if let ClientCommand::GetHistory { target_id } = &command {
         let response = build_history_response(shared, target_id);
         let payload = history_response_json(&response);
         client_writer.send(ClientWriterRequest::Write { client_id, payload });
+        return;
+    }
+
+    if let ClientCommand::ConnectRemoteHost { profile_name } = &command {
+        connect_remote_host_target(
+            shared,
+            remote_owner,
+            client_id,
+            profile_name,
+            state_event_tx,
+        );
         return;
     }
 
@@ -458,6 +495,7 @@ fn handle_client_command_event(
             command,
             settings_store,
             snapshot_store,
+            state_event_tx.clone(),
         )
     };
     let response: ControlResponse = outcome.into();
@@ -827,7 +865,8 @@ fn handle_client_command(
     connected_clients: &HashSet<u64>,
     command: ClientCommand,
     settings_store: &SettingsStore,
-    snapshot_store: &OutboundConnectionSnapshotStore,
+    _snapshot_store: &OutboundConnectionSnapshotStore,
+    state_event_tx: mpsc::Sender<StateEvent>,
 ) -> CommandOutcome {
     match command {
         ClientCommand::Attach => CommandOutcome::Ok,
@@ -900,12 +939,13 @@ fn handle_client_command(
         }
 
         ClientCommand::ConnectRemoteHost { profile_name } => {
-            let outcome =
-                connect_remote_host_target(shared, remote_owner, &profile_name, snapshot_store);
-            if matches!(outcome, CommandOutcome::Message(_)) {
-                broadcast_snapshot(shared, client_writer, connected_clients);
-            }
-            outcome
+            connect_remote_host_target(
+                shared,
+                remote_owner,
+                0, // client_id is filled in by the event-loop dispatcher above
+                &profile_name,
+                state_event_tx,
+            )
         }
 
         ClientCommand::DetachAll => {
@@ -1468,35 +1508,33 @@ fn activate_target(
     }
 }
 
-/// Result of a successful outbound-dial remote host connection.
-struct RemoteHostConnectedOutcome {
-    target_id: String,
-}
-
 fn connect_remote_host_target(
     shared: &Arc<SharedState>,
     remote_owner: &RemoteRuntimeOwnerRuntime,
+    client_id: u64,
     profile_name: &str,
-    snapshot_store: &OutboundConnectionSnapshotStore,
+    state_event_tx: mpsc::Sender<StateEvent>,
 ) -> CommandOutcome {
-    match connect_remote_host_by_profile_name(
-        shared,
-        remote_owner,
-        profile_name,
-        snapshot_store,
-        true,
-    ) {
-        Ok(outcome) => CommandOutcome::Message(format!("connected {}", outcome.target_id)),
-        Err(error) => CommandOutcome::Error(error),
-    }
+    let profile_name = profile_name.to_string();
+    let shared = shared.clone();
+    let remote_owner = remote_owner.clone();
+    let state_event_tx = state_event_tx.clone();
+    std::thread::spawn(move || {
+        let result = perform_remote_host_connect(&shared, &remote_owner, &profile_name);
+        let _ = state_event_tx.send(StateEvent::RemoteHostConnectResult {
+            client_id,
+            profile_name: profile_name.clone(),
+            result: Box::new(result),
+            activate: true,
+        });
+    });
+    CommandOutcome::Ok
 }
 
-fn connect_remote_host_by_profile_name(
+fn perform_remote_host_connect(
     shared: &Arc<SharedState>,
     remote_owner: &RemoteRuntimeOwnerRuntime,
     profile_name: &str,
-    snapshot_store: &OutboundConnectionSnapshotStore,
-    activate: bool,
 ) -> Result<RemoteHostConnectedOutcome, String> {
     let Some(target_registry) = shared.target_registry_port.clone() else {
         return Err("target registry port not configured".to_string());
@@ -1539,6 +1577,9 @@ fn connect_remote_host_by_profile_name(
         })
         .map_err(|error| error.to_string())?;
 
+    let record = outcome.created_target;
+    let target = record.address.qualified_target();
+
     // Reload the profile so we capture the TLS pin / port that connect() saved.
     let profile = history_store.load().ok().and_then(|store| {
         store
@@ -1547,30 +1588,44 @@ fn connect_remote_host_by_profile_name(
             .find(|profile| profile.name == profile_name)
     });
 
-    if let Some(profile) = profile {
-        shared.record_remote_node_connection(
-            &outcome.authority_node_id,
-            RemoteNodeConnectionInfo {
-                mode: RemoteNodeConnectionMode::OutboundDial,
-                host: profile.host.clone(),
-                port: outcome
-                    .authority_node_id
-                    .rsplit_once('#')
-                    .and_then(|(_, port)| port.parse().ok())
-                    .unwrap_or(0),
-                tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
-                operator_key_path: operator_private_key_path_for_profile(&profile),
-                profile_name: profile.name.clone(),
-            },
-        );
-    }
-
-    let record = outcome.created_target;
-    let target = record.address.qualified_target();
+    let connection_info = profile.map(|profile| RemoteNodeConnectionInfo {
+        mode: RemoteNodeConnectionMode::OutboundDial,
+        host: profile.host.clone(),
+        port: outcome
+            .authority_node_id
+            .rsplit_once('#')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(0),
+        tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
+        operator_key_path: operator_private_key_path_for_profile(&profile),
+        profile_name: profile.name.clone(),
+    });
 
     remote_owner
         .upsert_session(&outcome.authority_node_id, &record)
         .map_err(|error| format!("failed to register remote session: {error}"))?;
+
+    Ok(RemoteHostConnectedOutcome {
+        target_id: target,
+        authority_node_id: outcome.authority_node_id,
+        created_target: record,
+        connection_info,
+    })
+}
+
+fn apply_remote_host_connect_outcome(
+    shared: &Arc<SharedState>,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    profile_name: &str,
+    activate: bool,
+    outcome: RemoteHostConnectedOutcome,
+) -> CommandOutcome {
+    if let Some(info) = outcome.connection_info {
+        shared.record_remote_node_connection(&outcome.authority_node_id, info);
+    }
+
+    let record = outcome.created_target;
+    let target = outcome.target_id;
 
     {
         let mut guard = shared
@@ -1582,9 +1637,9 @@ fn connect_remote_host_by_profile_name(
         guard.insert(target.clone(), record.clone());
     }
 
-    shared
-        .ensure_remote_session(&record)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = shared.ensure_remote_session(&record) {
+        return CommandOutcome::Error(error.to_string());
+    }
 
     if activate {
         *shared
@@ -1607,7 +1662,51 @@ fn connect_remote_host_by_profile_name(
         ));
     }
 
-    Ok(RemoteHostConnectedOutcome { target_id: target })
+    CommandOutcome::Message(format!("connected {target}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_remote_host_connect_result(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    _connected_clients: &HashSet<u64>,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    client_id: u64,
+    profile_name: String,
+    result: Result<RemoteHostConnectedOutcome, String>,
+    activate: bool,
+) {
+    let outcome = match result {
+        Ok(outcome) => apply_remote_host_connect_outcome(
+            shared,
+            snapshot_store,
+            &profile_name,
+            activate,
+            outcome,
+        ),
+        Err(message) => CommandOutcome::Error(message),
+    };
+    let response: ControlResponse = outcome.into();
+    let payload = response_json(&response);
+    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+}
+
+fn connect_remote_host_by_profile_name(
+    shared: &Arc<SharedState>,
+    remote_owner: &RemoteRuntimeOwnerRuntime,
+    profile_name: &str,
+    snapshot_store: &OutboundConnectionSnapshotStore,
+    activate: bool,
+) -> Result<RemoteHostConnectedOutcome, String> {
+    let outcome = perform_remote_host_connect(shared, remote_owner, profile_name)?;
+    apply_remote_host_connect_outcome(
+        shared,
+        snapshot_store,
+        profile_name,
+        activate,
+        outcome.clone(),
+    );
+    Ok(outcome)
 }
 
 fn reconnect_snapshot_hosts(
@@ -1775,7 +1874,8 @@ mod state_loop_tests {
         let (catalog_tx, _catalog_rx) = mpsc::channel::<LocalCatalogChangeRequest>();
         // Do not install the state sender into SharedState; tests close the loop
         // by dropping `tx`, and a lingering clone would prevent the loop from
-        // exiting.
+        // exiting. Use a dangling sender for the loop's self-event channel.
+        let (loop_tx, _loop_rx) = mpsc::channel::<StateEvent>();
         let shared_for_loop = shared.clone();
         let client_writer = super::super::client_writer::ClientWriter::start();
         let client_writer_for_loop = client_writer.clone();
@@ -1783,6 +1883,7 @@ mod state_loop_tests {
         let handle = std::thread::spawn(move || {
             let _ = run_state_event_loop(
                 shared_for_loop,
+                loop_tx,
                 rx,
                 catalog_tx,
                 super::super::authority_host_io_loop::AuthorityHostIoHandle::dangling(),

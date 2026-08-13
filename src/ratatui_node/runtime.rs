@@ -992,7 +992,7 @@ impl RatatuiNodeRuntime {
         // servers (with --connect) create an authority-host session once the
         // event loops are running, because authority-host sessions must be
         // registered with AuthorityHostIoLoop.
-        if network.connect.is_none() {
+        if network.node_id.is_none() && network.connect.is_none() {
             let _ = shared.create_local_session(DEFAULT_SESSION_ID, 80, 24);
         }
 
@@ -1072,16 +1072,18 @@ impl RatatuiNodeRuntime {
         // control plane) and outbound-dial peers (which wait for the control
         // plane to dial them). In both cases the remote peer must expose at
         // least one session for the viewer to attach to.
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let _ = self
-            .shared
-            .state_sender()
-            .send(StateEvent::CreateAuthorityHostSession {
-                request_id: "default-peer-session".to_string(),
-                cols: 80,
-                rows: 24,
-                reply_tx,
-            });
+        if self.network.node_id.is_some() {
+            let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+            let _ = self
+                .shared
+                .state_sender()
+                .send(StateEvent::CreateAuthorityHostSession {
+                    request_id: "default-peer-session".to_string(),
+                    cols: 80,
+                    rows: 24,
+                    reply_tx,
+                });
+        }
 
         // Start the agent signal listener so agent hooks can deliver lifecycle
         // events (UserPromptSubmit, PermissionRequest, etc.) to this server.
