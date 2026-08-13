@@ -1,7 +1,7 @@
 use crate::domain::agent_detector::{accepts_at_reference, DetectorRegistry};
 use crate::domain::agent_signal::AgentStateEffect;
 use crate::domain::session_catalog::{
-    ManagedSessionTaskState, SessionAvailability, SessionTransport,
+    ManagedSessionRecord, ManagedSessionTaskState, SessionAvailability, SessionTransport,
 };
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::settings_store::SettingsStore;
@@ -212,6 +212,21 @@ fn run_state_event_loop(
                     profile_name,
                     *result,
                     activate,
+                );
+            }
+
+            StateEvent::RemoteSessionCreateResult {
+                client_id,
+                authority_node_id,
+                result,
+            } => {
+                handle_remote_session_create_result(
+                    &shared,
+                    &client_writer,
+                    &connected_clients,
+                    client_id,
+                    &authority_node_id,
+                    *result,
                 );
             }
 
@@ -474,6 +489,11 @@ fn handle_client_command_event(
             profile_name,
             state_event_tx,
         );
+        return;
+    }
+
+    if let ClientCommand::CreateRemoteSession { authority_node_id } = &command {
+        create_remote_session_target(shared, client_id, authority_node_id, state_event_tx);
         return;
     }
 
@@ -1034,14 +1054,6 @@ fn handle_client_command(
             CommandOutcome::Ok
         }
 
-        ClientCommand::CreateRemoteSession { authority_node_id } => {
-            let outcome = create_remote_session_on_authority(shared, &authority_node_id);
-            if matches!(outcome, CommandOutcome::Message(_)) {
-                broadcast_snapshot(shared, client_writer, connected_clients);
-            }
-            outcome
-        }
-
         ClientCommand::SetPublic { endpoint, save } => {
             shared.set_public_endpoint_override(endpoint.clone());
             match endpoint {
@@ -1059,6 +1071,14 @@ fn handle_client_command(
                 }
                 None => CommandOutcome::Message("public endpoint cleared".to_string()),
             }
+        }
+
+        ClientCommand::CreateRemoteSession { .. } => {
+            // CreateRemoteSession is handled asynchronously in the event-loop
+            // dispatcher so it does not block the single writer thread.
+            CommandOutcome::Error(
+                "CreateRemoteSession must be handled by the event loop".to_string(),
+            )
         }
 
         ClientCommand::CloseSession { .. } => {
@@ -1767,12 +1787,30 @@ fn reconnect_snapshot_hosts(
     }
 }
 
-fn create_remote_session_on_authority(
+fn create_remote_session_target(
+    shared: &Arc<SharedState>,
+    client_id: u64,
+    authority_node_id: &str,
+    state_event_tx: mpsc::Sender<StateEvent>,
+) {
+    let authority_node_id = authority_node_id.to_string();
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        let result = perform_create_remote_session_on_authority(&shared, &authority_node_id);
+        let _ = state_event_tx.send(StateEvent::RemoteSessionCreateResult {
+            client_id,
+            authority_node_id: authority_node_id.clone(),
+            result: Box::new(result),
+        });
+    });
+}
+
+fn perform_create_remote_session_on_authority(
     shared: &Arc<SharedState>,
     authority_node_id: &str,
-) -> CommandOutcome {
+) -> Result<ManagedSessionRecord, String> {
     let Some(session_creation) = shared.session_creation_port.clone() else {
-        return CommandOutcome::Error("session creation port not configured".to_string());
+        return Err("session creation port not configured".to_string());
     };
 
     let request = RemoteSessionCreationRequest {
@@ -1782,39 +1820,63 @@ fn create_remote_session_on_authority(
         rows: 0,
     };
 
-    match session_creation.create_session(request) {
-        Ok(record) => {
-            let target = record.address.qualified_target();
-            {
-                let mut guard = shared
-                    .sessions
-                    .sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.retain(|_, session| session.address.id() != record.address.id());
-                guard.insert(target.clone(), record.clone());
-            }
-            if let Err(error) = shared.ensure_remote_session(&record) {
-                return CommandOutcome::Error(format!(
-                    "created remote session but failed to open viewer: {error}"
-                ));
-            }
-            *shared
-                .sessions
-                .active_target
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
-            let (cols, rows) = shared
-                .resize
-                .last_client_resize
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .unwrap_or((80, 24));
-            shared.resize_active_remote_session(cols, rows);
-            CommandOutcome::Message(format!("created remote session {target}"))
-        }
-        Err(error) => CommandOutcome::Error(error.to_string()),
+    session_creation
+        .create_session(request)
+        .map_err(|error| error.to_string())
+}
+
+fn handle_remote_session_create_result(
+    shared: &Arc<SharedState>,
+    client_writer: &ClientWriterHandle,
+    connected_clients: &HashSet<u64>,
+    client_id: u64,
+    _authority_node_id: &str,
+    result: Result<ManagedSessionRecord, String>,
+) {
+    let outcome = match result {
+        Ok(record) => apply_created_remote_session(shared, &record),
+        Err(message) => CommandOutcome::Error(message),
+    };
+    if matches!(outcome, CommandOutcome::Message(_)) {
+        broadcast_snapshot(shared, client_writer, connected_clients);
     }
+    let response: ControlResponse = outcome.into();
+    let payload = response_json(&response);
+    client_writer.send(ClientWriterRequest::Write { client_id, payload });
+}
+
+fn apply_created_remote_session(
+    shared: &Arc<SharedState>,
+    record: &ManagedSessionRecord,
+) -> CommandOutcome {
+    let target = record.address.qualified_target();
+    {
+        let mut guard = shared
+            .sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, session| session.address.id() != record.address.id());
+        guard.insert(target.clone(), record.clone());
+    }
+    if let Err(error) = shared.ensure_remote_session(record) {
+        return CommandOutcome::Error(format!(
+            "created remote session but failed to open viewer: {error}"
+        ));
+    }
+    *shared
+        .sessions
+        .active_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+    let (cols, rows) = shared
+        .resize
+        .last_client_resize
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or((80, 24));
+    shared.resize_active_remote_session(cols, rows);
+    CommandOutcome::Message(format!("created remote session {target}"))
 }
 
 impl From<CommandOutcome> for ControlResponse {

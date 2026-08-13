@@ -131,6 +131,14 @@ pub(crate) enum StateEvent {
         result: Box<Result<RemoteHostConnectedOutcome, String>>,
         activate: bool,
     },
+    /// The asynchronous remote session creation operation finished. The state
+    /// loop applies catalog/active-target mutations and reports success or error
+    /// to the originating client.
+    RemoteSessionCreateResult {
+        client_id: u64,
+        authority_node_id: String,
+        result: Box<Result<crate::domain::session_catalog::ManagedSessionRecord, String>>,
+    },
 }
 
 /// A command sent by a TUI client and processed by `StateEventLoop`.
