@@ -58,18 +58,20 @@ impl RemoteWaitAgentStartPlan {
         };
         let command = if outbound_dial {
             format!(
-                "nohup waitagent --port {remote_port} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                "nohup waitagent --port {remote_port} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null & {}",
                 shell_single_quote(&authority_id),
                 remote_shell_path(&credential_paths.key_path),
-                remote_shell_path(&credential_paths.cert_path)
+                remote_shell_path(&credential_paths.cert_path),
+                wait_for_port_ready_shell(remote_port)
             )
         } else {
             format!(
-                "nohup waitagent --port {remote_port} --connect {} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null &",
+                "nohup waitagent --port {remote_port} --connect {} --node-id {} --node-key-path {} --node-cert-path {} __ratatui-node-server >/tmp/waitagent-{remote_port}.log 2>&1 < /dev/null & {}",
                 shell_single_quote(&local_connect_endpoint),
                 shell_single_quote(&authority_id),
                 remote_shell_path(&credential_paths.key_path),
-                remote_shell_path(&credential_paths.cert_path)
+                remote_shell_path(&credential_paths.cert_path),
+                wait_for_port_ready_shell(remote_port)
             )
         };
         Self {
@@ -157,17 +159,18 @@ impl RemoteHostBootstrapPlan {
         self.start_plan.subcommand = "__ratatui-node-server".to_string();
         self.start_plan.command = if self.start_plan.outbound_dial {
             format!(
-                "nohup waitagent --port {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+                "nohup waitagent --port {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null & {}",
                 self.start_plan.remote_port,
                 shell_single_quote(&self.start_plan.authority_id),
                 remote_shell_path(&self.start_plan.credential_paths.key_path),
                 remote_shell_path(&self.start_plan.credential_paths.cert_path),
                 shell_single_quote(&self.start_plan.subcommand),
                 self.start_plan.remote_port,
+                wait_for_port_ready_shell(self.start_plan.remote_port),
             )
         } else {
             format!(
-                "nohup waitagent --port {} --connect {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null &",
+                "nohup waitagent --port {} --connect {} --node-id {} --node-key-path {} --node-cert-path {} {} >/tmp/waitagent-{}.log 2>&1 < /dev/null & {}",
                 self.start_plan.remote_port,
                 shell_single_quote(&self.start_plan.local_connect_endpoint),
                 shell_single_quote(&self.start_plan.authority_id),
@@ -175,6 +178,7 @@ impl RemoteHostBootstrapPlan {
                 remote_shell_path(&self.start_plan.credential_paths.cert_path),
                 shell_single_quote(&self.start_plan.subcommand),
                 self.start_plan.remote_port,
+                wait_for_port_ready_shell(self.start_plan.remote_port),
             )
         };
         self
@@ -644,6 +648,16 @@ fn generate_credentials_command(
         shell_single_quote(&remote_port.to_string()),
         remote_shell_path(&credential_paths.key_path),
         remote_shell_path(&credential_paths.cert_path),
+    )
+}
+
+/// Shell snippet that waits up to ~10 seconds for the remote waitagent to open
+/// its listening port. Embedded into the daemon start command so the SSH
+/// session does not return until the daemon is actually reachable, eliminating
+/// the race where the control host dials before the remote process is ready.
+fn wait_for_port_ready_shell(remote_port: u16) -> String {
+    format!(
+        "i=0; while [ $i -lt 50 ]; do if bash -c 'exec 3<>/dev/tcp/127.0.0.1/{remote_port}' >/dev/null 2>&1; then break; fi; sleep 0.2; i=$((i+1)); done; if [ $i -eq 50 ]; then exit 1; fi"
     )
 }
 
