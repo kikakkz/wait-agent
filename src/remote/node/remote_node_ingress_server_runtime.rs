@@ -1,6 +1,7 @@
 // Legacy tmux-era node ingress runtime kept during the ratatui migration; many items are currently unused.
 
 use crate::cli::{prepend_global_network_args, RemoteNetworkConfig};
+use crate::domain::session_catalog::ManagedSessionRecord;
 use crate::infra::error_log::ERROR_LOG;
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::{
@@ -36,8 +37,10 @@ use crate::remote::node::remote_node_session_runtime::{
     map_inbound_grpc_authority_event, map_outbound_grpc_envelope,
 };
 use crate::remote::node::remote_node_session_sync_runtime::{
-    LocalAuthorityHostBackend, LocalTargetFactory, RatatuiLocalAuthorityHostBackend,
-    RatatuiLocalTargetFactory, SessionSyncAuthorityManager,
+    compute_session_sync_delta, observe_local_session_catalog, send_source_publication,
+    LocalAuthorityHostBackend, LocalCatalogChangeRequest, LocalSessionCatalog, LocalTargetFactory,
+    RatatuiLocalAuthorityHostBackend, RatatuiLocalSessionCatalog, RatatuiLocalTargetFactory,
+    SessionSyncAuthorityManager, SessionSyncMode, SourcePublicationTracker,
 };
 #[cfg(target_os = "linux")]
 use crate::remote::node::remote_workspace_socket_registry_runtime::workspace_socket_registry_path;
@@ -81,10 +84,12 @@ pub struct RemoteNodeIngressServerRuntime<
     B: RemoteTargetPublicationBackend = crate::remote::publication::ratatui_target_publication_backend::RatatuiRemoteTargetPublicationBackend,
     F: LocalTargetFactory = RatatuiLocalTargetFactory,
     A: LocalAuthorityHostBackend = RatatuiLocalAuthorityHostBackend,
+    G: LocalSessionCatalog = RatatuiLocalSessionCatalog,
 > {
     publication_runtime: RemoteTargetPublicationRuntime<B>,
     target_factory: F,
     authority_backend: A,
+    local_session_catalog: G,
     network: RemoteNetworkConfig,
 }
 
@@ -103,6 +108,11 @@ struct ActiveNodeIngressSession {
     session: RemoteNodeSessionHandle,
     bridges: HashMap<PathBuf, ActiveAuthoritySocketBridge>,
     published_fingerprints: HashMap<String, String>,
+    source_publication_tracker: SourcePublicationTracker,
+    observed_sessions: HashMap<String, ManagedSessionRecord>,
+    published_sessions: HashMap<String, ManagedSessionRecord>,
+    observed_initialized: bool,
+    next_message_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -214,6 +224,7 @@ pub(crate) enum InternalEvent {
     InitiateOutboundConnection {
         request: OutboundNodeSessionRequest,
     },
+    LocalCatalogChanged,
     Shutdown,
 }
 
@@ -229,11 +240,12 @@ pub(crate) enum OwnerLifecycleEvent {
 
 // TODO(cleanup): transitional remote code, kept for Phase 8 wiring.
 #[allow(dead_code)]
-impl<B, F, A> RemoteNodeIngressServerRuntime<B, F, A>
+impl<B, F, A, G> RemoteNodeIngressServerRuntime<B, F, A, G>
 where
     B: RemoteTargetPublicationBackend,
     F: LocalTargetFactory,
     A: LocalAuthorityHostBackend,
+    G: LocalSessionCatalog + Clone,
     LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
 {
     pub fn new_with_backends(
@@ -241,11 +253,13 @@ where
         publication_runtime: RemoteTargetPublicationRuntime<B>,
         target_factory: F,
         authority_backend: A,
+        local_session_catalog: G,
     ) -> Self {
         RemoteNodeIngressServerRuntime {
             publication_runtime,
             target_factory,
             authority_backend,
+            local_session_catalog,
             network,
         }
     }
@@ -259,7 +273,8 @@ where
                 }
                 let listener =
                     UnixListener::bind(&socket_path).map_err(remote_node_ingress_error)?;
-                let guard = self.start()?;
+                let (_catalog_tx, catalog_rx) = mpsc::channel::<LocalCatalogChangeRequest>();
+                let guard = self.start(catalog_rx)?;
                 if guard.owner_event_sender().is_none() {
                     return Err(LifecycleError::Protocol(
                         "remote node ingress owner did not expose local control channel"
@@ -390,7 +405,10 @@ where
         shutdown_owner_with_control_socket(network)
     }
 
-    pub fn start(&self) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
+    pub fn start(
+        &self,
+        local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
+    ) -> Result<RemoteNodeIngressServerGuard, LifecycleError> {
         let transport = match (
             self.network.node_cert_path.as_ref(),
             self.network.node_key_path.as_ref(),
@@ -406,6 +424,7 @@ where
         let publication_runtime = self.publication_runtime.clone();
         let target_factory = self.target_factory.clone();
         let authority_backend = self.authority_backend.clone();
+        let local_session_catalog = self.local_session_catalog.clone();
         let network = self.network.clone();
         let shutdown_tx = internal_tx.clone();
         let worker = thread::spawn(move || {
@@ -413,12 +432,14 @@ where
                 publication_runtime,
                 target_factory,
                 authority_backend,
+                local_session_catalog,
                 network,
                 RunNodeIngressServerLoopArgs {
                     transport_rx,
                     transport_tx,
                     internal_rx,
                     internal_tx,
+                    local_catalog_rx,
                     start_authority_socket_watcher: true,
                 },
             );
@@ -431,7 +452,15 @@ where
     }
 }
 
-impl crate::ports::session_creation::SessionCreationPort for RemoteNodeIngressServerRuntime {
+impl<B, F, A, G> crate::ports::session_creation::SessionCreationPort
+    for RemoteNodeIngressServerRuntime<B, F, A, G>
+where
+    B: RemoteTargetPublicationBackend,
+    F: LocalTargetFactory + Sync,
+    A: LocalAuthorityHostBackend + Sync,
+    G: LocalSessionCatalog + Clone + Sync,
+    LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
+{
     fn create_session(
         &self,
         request: crate::ports::session_creation::RemoteSessionCreationRequest,
@@ -1476,6 +1505,7 @@ struct RunNodeIngressServerLoopArgs {
     transport_tx: mpsc::Sender<RemoteNodeTransportEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     internal_tx: mpsc::Sender<InternalEvent>,
+    local_catalog_rx: mpsc::Receiver<LocalCatalogChangeRequest>,
     start_authority_socket_watcher: bool,
 }
 
@@ -1483,10 +1513,12 @@ fn run_node_ingress_server_loop<
     B: RemoteTargetPublicationBackend,
     F: LocalTargetFactory,
     A: LocalAuthorityHostBackend,
+    G: LocalSessionCatalog,
 >(
     publication_runtime: RemoteTargetPublicationRuntime<B>,
     target_factory: F,
     authority_backend: A,
+    local_session_catalog: G,
     network: RemoteNetworkConfig,
     args: RunNodeIngressServerLoopArgs,
 ) where
@@ -1497,6 +1529,7 @@ fn run_node_ingress_server_loop<
         transport_tx,
         internal_rx,
         internal_tx,
+        local_catalog_rx,
         start_authority_socket_watcher,
     } = args;
     let mut sessions = HashMap::<String, ActiveNodeIngressSession>::new();
@@ -1528,6 +1561,21 @@ fn run_node_ingress_server_loop<
         thread::spawn(move || {
             while let Ok(event) = internal_rx.recv() {
                 if event_tx.send(IngressServerEvent::Internal(event)).is_err() {
+                    return;
+                }
+            }
+        })
+    };
+    let _catalog_bridge = {
+        let event_tx = event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(_request) = local_catalog_rx.recv() {
+                if event_tx
+                    .send(IngressServerEvent::Internal(
+                        InternalEvent::LocalCatalogChanged,
+                    ))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -1610,6 +1658,7 @@ fn run_node_ingress_server_loop<
                     internal_tx: internal_tx.clone(),
                     socket_discovery_retry_scheduled: &mut socket_discovery_retry_scheduled,
                     closed_session_instances: &mut closed_session_instances,
+                    local_session_catalog: &local_session_catalog,
                 },
             ),
             IngressServerEvent::Internal(InternalEvent::Shutdown) => break,
@@ -1660,6 +1709,7 @@ fn run_node_ingress_server_loop<
                     &mut registered_workspace_sockets,
                     internal_tx.clone(),
                     &mut socket_discovery_retry_scheduled,
+                    &local_session_catalog,
                     event,
                 );
             }
@@ -1730,11 +1780,12 @@ fn ingress_event_priority(event: &IngressServerEvent) -> IngressEventPriority {
     }
 }
 
-struct HandleTransportEventArgs<'a, B, F, A>
+struct HandleTransportEventArgs<'a, B, F, A, G>
 where
     B: RemoteTargetPublicationBackend,
     F: LocalTargetFactory,
     A: LocalAuthorityHostBackend,
+    G: LocalSessionCatalog,
 {
     publication_runtime: &'a RemoteTargetPublicationRuntime<B>,
     authority_manager: &'a mut SessionSyncAuthorityManager<F, A>,
@@ -1745,15 +1796,17 @@ where
     internal_tx: mpsc::Sender<InternalEvent>,
     socket_discovery_retry_scheduled: &'a mut bool,
     closed_session_instances: &'a mut HashSet<String>,
+    local_session_catalog: &'a G,
 }
 
 fn handle_transport_event<
     B: RemoteTargetPublicationBackend,
     F: LocalTargetFactory,
     A: LocalAuthorityHostBackend,
+    G: LocalSessionCatalog,
 >(
     event: RemoteNodeTransportEvent,
-    args: HandleTransportEventArgs<'_, B, F, A>,
+    args: HandleTransportEventArgs<'_, B, F, A, G>,
 ) where
     LifecycleError: From<<A as LocalAuthorityHostBackend>::Error>,
 {
@@ -1767,6 +1820,7 @@ fn handle_transport_event<
         internal_tx,
         socket_discovery_retry_scheduled,
         closed_session_instances,
+        local_session_catalog,
     } = args;
     match event {
         RemoteNodeTransportEvent::SessionOpened { session } => {
@@ -1780,7 +1834,28 @@ fn handle_transport_event<
                 session,
                 bridges: HashMap::new(),
                 published_fingerprints: HashMap::new(),
+                source_publication_tracker: SourcePublicationTracker::new(),
+                observed_sessions: HashMap::new(),
+                published_sessions: HashMap::new(),
+                observed_initialized: false,
+                next_message_id: 0,
             };
+
+            // Publish the current local session catalog as a full baseline to the
+            // new peer. This makes outbound-dial peers behave like `--connect`
+            // peers: the control plane can see existing sessions immediately.
+            active.source_publication_tracker.on_connected();
+            if let Err(error) = publish_local_catalog_baseline(
+                local_session_catalog,
+                &node_id,
+                &session_instance_id,
+                &mut active,
+            ) {
+                ERROR_LOG.log_error(format!(
+                    "ingress server: failed to publish baseline to {node_id}: {error}"
+                ));
+            }
+
             let outcome = refresh_authority_bridges(&node_id, &mut active, internal_tx.clone());
             if outcome.pending > 0 {
                 schedule_socket_discovery_retry(
@@ -1889,6 +1964,93 @@ fn handle_transport_event<
             }
         }
     }
+}
+
+fn publish_local_catalog_baseline<G: LocalSessionCatalog>(
+    local_session_catalog: &G,
+    node_id: &str,
+    session_instance_id: &str,
+    active: &mut ActiveNodeIngressSession,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    observe_local_session_catalog(
+        local_session_catalog,
+        node_id,
+        &mut active.observed_sessions,
+        &mut active.observed_initialized,
+    );
+
+    for session in active.observed_sessions.values() {
+        let publication = active.source_publication_tracker.on_baseline_state(
+            node_id,
+            session_instance_id,
+            &mut active.next_message_id,
+            session,
+        );
+        send_source_publication(
+            &active.session,
+            &mut active.source_publication_tracker,
+            &publication,
+        )?;
+    }
+
+    active.published_sessions = active.observed_sessions.clone();
+    Ok(())
+}
+
+fn publish_local_catalog_delta<G: LocalSessionCatalog>(
+    local_session_catalog: &G,
+    node_id: &str,
+    session_instance_id: &str,
+    active: &mut ActiveNodeIngressSession,
+) -> Result<(), crate::infra::remote_grpc_transport::RemoteNodeTransportError> {
+    let changed = observe_local_session_catalog(
+        local_session_catalog,
+        node_id,
+        &mut active.observed_sessions,
+        &mut active.observed_initialized,
+    );
+    if !changed {
+        return Ok(());
+    }
+
+    let delta = compute_session_sync_delta(
+        &active.published_sessions,
+        &active.observed_sessions,
+        SessionSyncMode::Delta,
+    );
+
+    for session in &delta.publish {
+        let Some(publication) = active.source_publication_tracker.on_state_changed(
+            node_id,
+            session_instance_id,
+            &mut active.next_message_id,
+            session,
+        ) else {
+            continue;
+        };
+        send_source_publication(
+            &active.session,
+            &mut active.source_publication_tracker,
+            &publication,
+        )?;
+    }
+
+    for session in &delta.exit {
+        let publication = active.source_publication_tracker.on_target_exited(
+            node_id,
+            session_instance_id,
+            &mut active.next_message_id,
+            session.address.session_id(),
+        );
+        send_source_publication(
+            &active.session,
+            &mut active.source_publication_tracker,
+            &publication,
+        )?;
+    }
+
+    active.published_sessions = active.observed_sessions.clone();
+    Ok(())
 }
 
 fn has_active_ingress_session_for_node(
@@ -2104,11 +2266,12 @@ fn local_create_session_rejected_grpc_envelope(
     }
 }
 
-fn handle_internal_event(
+fn handle_internal_event<G: LocalSessionCatalog>(
     sessions: &mut HashMap<String, ActiveNodeIngressSession>,
     registered_workspace_sockets: &mut BTreeSet<String>,
     internal_tx: mpsc::Sender<InternalEvent>,
     socket_discovery_retry_scheduled: &mut bool,
+    local_session_catalog: &G,
     event: InternalEvent,
 ) {
     match event {
@@ -2242,6 +2405,22 @@ fn handle_internal_event(
                 socket_discovery_retry_scheduled,
             );
         }
+        InternalEvent::LocalCatalogChanged => {
+            for active in sessions.values_mut() {
+                let node_id = active.session.node_id().to_string();
+                let session_instance_id = active.session.session_instance_id().to_string();
+                if let Err(error) = publish_local_catalog_delta(
+                    local_session_catalog,
+                    &node_id,
+                    &session_instance_id,
+                    active,
+                ) {
+                    ERROR_LOG.log_error(format!(
+                        "ingress server: failed to publish delta to {node_id}: {error}"
+                    ));
+                }
+            }
+        }
         InternalEvent::Shutdown
         | InternalEvent::ShutdownOwner { .. }
         | InternalEvent::LocalCreateSession { .. }
@@ -2331,7 +2510,7 @@ fn route_transport_envelope<B: RemoteTargetPublicationBackend>(
             publication_revisions,
         ),
         Some(Body::TargetPublicationAck(payload)) => {
-            handle_target_publication_ack(publication_runtime, node_id, &envelope, payload)
+            handle_target_publication_ack(publication_runtime, node_id, &envelope, payload, session)
         }
 
         Some(Body::TargetExited(payload)) => handle_target_exited(
@@ -2475,9 +2654,18 @@ fn handle_target_publication_ack<B: RemoteTargetPublicationBackend>(
     node_id: &str,
     envelope: &GrpcNodeSessionEnvelope,
     payload: &GrpcTargetPublicationAck,
+    session: Option<&mut ActiveNodeIngressSession>,
 ) -> Result<(), LifecycleError> {
     let mapped = map_target_publication_ack_envelope(node_id, envelope, payload)
         .map_err(remote_node_ingress_error)?;
+    if let Some(active) = session {
+        if let crate::infra::remote_protocol::ControlPlanePayload::TargetPublicationAck(
+            ref ack_payload,
+        ) = mapped.payload
+        {
+            active.source_publication_tracker.on_ack(ack_payload);
+        }
+    }
     publication_runtime.apply_discovered_remote_session_envelope(node_id, mapped)
 }
 

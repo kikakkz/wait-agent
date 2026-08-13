@@ -20,7 +20,7 @@ use crate::infra::error_log::ERROR_LOG;
 use crate::infra::operator_auth;
 use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
 use crate::lifecycle::LifecycleError;
-use crate::ports::session_creation::{RemoteSessionCreationRequest, SessionCreationPort};
+use crate::ports::session_creation::SessionCreationPort;
 use crate::ports::target_registry::TargetRegistryPort;
 use std::io::{self, Read};
 use std::sync::Arc;
@@ -77,6 +77,7 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     port_probe_factory: P,
     bootstrapper: B,
     target_registry: Arc<dyn TargetRegistryPort>,
+    #[allow(dead_code)]
     session_creation_service: Arc<dyn SessionCreationPort>,
 }
 
@@ -191,7 +192,6 @@ where
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
         if let Some(endpoint) = existing_endpoint {
-            let created = self.create_remote_session(&endpoint, request.cwd_hint.clone())?;
             if should_save_profile {
                 profile.last_remote_port = Some(port.port);
                 profile.last_endpoint = Some(format!("{}:{}", profile.host, port.port));
@@ -200,8 +200,8 @@ where
                 self.save_connected_profile(&request, profile)?;
             }
             return Ok(RemoteHostConnectOutcome {
-                authority_node_id: endpoint,
-                created_target: created,
+                authority_node_id: endpoint.address.authority_id().to_string(),
+                created_target: endpoint,
                 reused_existing_endpoint: true,
             });
         }
@@ -263,18 +263,15 @@ where
     fn find_online_target_for_authority(
         &self,
         authority_node_id: &str,
-    ) -> Result<Option<String>, LifecycleError> {
+    ) -> Result<Option<ManagedSessionRecord>, LifecycleError> {
         let targets = self
             .target_registry
             .list_targets()
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
-        Ok(targets
-            .into_iter()
-            .find(|target| {
-                target.availability == SessionAvailability::Online
-                    && target.address.authority_id() == authority_node_id
-            })
-            .map(|target| target.address.authority_id().to_string()))
+        Ok(targets.into_iter().find(|target| {
+            target.availability == SessionAvailability::Online
+                && target.address.authority_id() == authority_node_id
+        }))
     }
 
     /// Try to reuse a remote waitagent that is still running from a previous
@@ -283,7 +280,7 @@ where
     fn try_reuse_existing_connection(
         &self,
         profile: &RemoteHostProfile,
-        request: &RemoteHostConnectRequest,
+        _request: &RemoteHostConnectRequest,
         initiate_outbound_dial: &mut impl FnMut(OutboundNodeSessionRequest) -> Result<(), String>,
     ) -> Result<Option<RemoteHostConnectOutcome>, LifecycleError> {
         let Some(port) = profile.last_remote_port else {
@@ -317,15 +314,11 @@ where
             DEFAULT_ENDPOINT_POLL_INTERVAL,
             REUSE_CONNECTION_WAIT_TIMEOUT,
         ) {
-            Ok(_target) => {
-                let created =
-                    self.create_remote_session(&authority_node_id, request.cwd_hint.clone())?;
-                Ok(Some(RemoteHostConnectOutcome {
-                    authority_node_id,
-                    created_target: created,
-                    reused_existing_endpoint: true,
-                }))
-            }
+            Ok(target) => Ok(Some(RemoteHostConnectOutcome {
+                authority_node_id,
+                created_target: target,
+                reused_existing_endpoint: true,
+            })),
             Err(error) => {
                 ERROR_LOG.log(format!(
                     "[remote-host-connect] stored endpoint for {}:{} did not come online, falling back to SSH bootstrap: {error}",
@@ -363,21 +356,6 @@ where
             }
             thread::sleep(poll_interval);
         }
-    }
-
-    fn create_remote_session(
-        &self,
-        authority_node_id: &str,
-        cwd_hint: Option<PathBuf>,
-    ) -> Result<ManagedSessionRecord, LifecycleError> {
-        self.session_creation_service
-            .create_session(RemoteSessionCreationRequest {
-                authority_node_id: authority_node_id.to_string(),
-                cwd_hint,
-                cols: 0,
-                rows: 0,
-            })
-            .map_err(|error| LifecycleError::Protocol(error.to_string()))
     }
 
     fn save_connected_profile(
@@ -889,12 +867,10 @@ mod tests {
 
         assert!(outcome.reused_existing_endpoint);
         assert_eq!(outcome.authority_node_id, "10.1.29.130#7476");
+        assert_eq!(outcome.created_target.address.session_id(), "seed");
         assert_eq!(*probe_calls.lock().unwrap(), 1);
         assert_eq!(bootstrap_plans.lock().unwrap().len(), 1);
-        assert_eq!(
-            create_requests.lock().unwrap()[0].authority_node_id,
-            "10.1.29.130#7476"
-        );
+        assert!(create_requests.lock().unwrap().is_empty());
         assert_eq!(*registry.calls.lock().unwrap(), 1);
         crate::infra::best_effort::remove_file(path);
     }

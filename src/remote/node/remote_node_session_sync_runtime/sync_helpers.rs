@@ -135,12 +135,12 @@ pub(super) struct SourcePublicationState {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(super) struct PendingSourcePublication {
-    pub(super) target_id: String,
-    pub(super) revision: u64,
-    pub(super) envelope: GrpcNodeSessionEnvelope,
-    pub(super) retry_attempt: u32,
-    pub(super) next_retry_at: Option<Instant>,
+pub(crate) struct PendingSourcePublication {
+    pub(crate) target_id: String,
+    pub(crate) revision: u64,
+    pub(crate) envelope: GrpcNodeSessionEnvelope,
+    pub(crate) retry_attempt: u32,
+    pub(crate) next_retry_at: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -152,24 +152,24 @@ struct SourcePublicationRecord {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct SourcePublicationTracker {
+pub(crate) struct SourcePublicationTracker {
     records: HashMap<String, SourcePublicationRecord>,
     connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SourcePublicationAckOutcome {
+pub(crate) enum SourcePublicationAckOutcome {
     Cleared,
     Retained,
     Ignored,
 }
 
 impl SourcePublicationTracker {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub(super) fn on_connected(&mut self) {
+    pub(crate) fn on_connected(&mut self) {
         self.connected = true;
         for record in self.records.values_mut() {
             if let Some(pending) = record.pending.as_mut() {
@@ -178,11 +178,11 @@ impl SourcePublicationTracker {
         }
     }
 
-    pub(super) fn on_disconnected(&mut self) {
+    pub(crate) fn on_disconnected(&mut self) {
         self.connected = false;
     }
 
-    pub(super) fn on_state_changed(
+    pub(crate) fn on_state_changed(
         &mut self,
         node_id: &str,
         session_instance_id: &str,
@@ -198,7 +198,7 @@ impl SourcePublicationTracker {
         )
     }
 
-    pub(super) fn on_baseline_state(
+    pub(crate) fn on_baseline_state(
         &mut self,
         node_id: &str,
         session_instance_id: &str,
@@ -258,7 +258,7 @@ impl SourcePublicationTracker {
         Some(pending)
     }
 
-    pub(super) fn on_target_exited(
+    pub(crate) fn on_target_exited(
         &mut self,
         node_id: &str,
         session_instance_id: &str,
@@ -294,7 +294,7 @@ impl SourcePublicationTracker {
         pending
     }
 
-    pub(super) fn on_ack(
+    pub(crate) fn on_ack(
         &mut self,
         ack: &TargetPublicationAckPayload,
     ) -> SourcePublicationAckOutcome {
@@ -317,7 +317,7 @@ impl SourcePublicationTracker {
         }
     }
 
-    pub(super) fn on_publication_sent(&mut self, target_id: &str, revision: u64, now: Instant) {
+    pub(crate) fn on_publication_sent(&mut self, target_id: &str, revision: u64, now: Instant) {
         let Some(record) = self.records.get_mut(target_id) else {
             return;
         };
@@ -331,14 +331,14 @@ impl SourcePublicationTracker {
         pending.next_retry_at = Some(now + source_publication_retry_delay(pending.retry_attempt));
     }
 
-    pub(super) fn is_current_pending(&self, target_id: &str, revision: u64) -> bool {
+    pub(crate) fn is_current_pending(&self, target_id: &str, revision: u64) -> bool {
         self.records
             .get(target_id)
             .and_then(|record| record.pending.as_ref())
             .is_some_and(|pending| pending.revision == revision)
     }
 
-    pub(super) fn due_retry_publications(&self, now: Instant) -> Vec<PendingSourcePublication> {
+    pub(crate) fn due_retry_publications(&self, now: Instant) -> Vec<PendingSourcePublication> {
         if !self.connected {
             return Vec::new();
         }
@@ -358,7 +358,7 @@ impl SourcePublicationTracker {
             .collect()
     }
 
-    pub(super) fn next_retry_delay(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn next_retry_delay(&self, now: Instant) -> Option<Duration> {
         if !self.connected {
             return None;
         }
@@ -374,7 +374,7 @@ impl SourcePublicationTracker {
     }
 
     #[allow(dead_code)]
-    pub(super) fn pending_publications(&self) -> Vec<PendingSourcePublication> {
+    pub(crate) fn pending_publications(&self) -> Vec<PendingSourcePublication> {
         if !self.connected {
             return Vec::new();
         }
@@ -899,7 +899,7 @@ fn mark_discovered_remote_node_offline_best_effort<P>(
     });
 }
 
-fn send_source_publication(
+pub(crate) fn send_source_publication(
     session_handle: &RemoteNodeSessionHandle,
     tracker: &mut SourcePublicationTracker,
     publication: &PendingSourcePublication,
@@ -939,7 +939,7 @@ fn send_pending_source_publications(
     Ok(())
 }
 
-fn observe_current_local_sessions<G>(
+pub(crate) fn observe_current_local_sessions<G>(
     gateway: &G,
     node_id: &str,
     t_sync: Instant,
@@ -966,7 +966,7 @@ where
     Some(local_sessions_by_local_id(local_sessions))
 }
 
-fn observe_local_session_catalog<G>(
+pub(crate) fn observe_local_session_catalog<G>(
     gateway: &G,
     node_id: &str,
     observed_sessions: &mut HashMap<String, ManagedSessionRecord>,
@@ -1365,7 +1365,7 @@ where
     )
 }
 
-fn next_message_id_increment(next_message_id: &mut u64) {
+pub(crate) fn next_message_id_increment(next_message_id: &mut u64) {
     *next_message_id = next_message_id.saturating_add(1);
 }
 

@@ -149,7 +149,7 @@ pub(crate) struct ResizeState {
 pub(crate) struct IoHandles {
     state_tx: Mutex<Option<mpsc::Sender<StateEvent>>>,
     authority_host_io_tx: Mutex<Option<super::authority_host_io_loop::AuthorityHostIoHandle>>,
-    local_catalog_tx: Mutex<Option<mpsc::Sender<LocalCatalogChangeRequest>>>,
+    local_catalog_tx: Mutex<Vec<mpsc::Sender<LocalCatalogChangeRequest>>>,
 }
 
 impl SharedState {
@@ -186,7 +186,7 @@ impl SharedState {
             io: IoHandles {
                 state_tx: Mutex::new(None),
                 authority_host_io_tx: Mutex::new(None),
-                local_catalog_tx: Mutex::new(None),
+                local_catalog_tx: Mutex::new(Vec::new()),
             },
             session_creation_port: None,
             target_registry_port: None,
@@ -238,21 +238,21 @@ impl IoHandles {
             .unwrap_or_else(super::authority_host_io_loop::AuthorityHostIoHandle::dangling)
     }
 
-    pub(crate) fn set_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
+    pub(crate) fn add_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
         if let Ok(mut guard) = self.local_catalog_tx.lock() {
-            *guard = Some(tx);
+            guard.push(tx);
         }
     }
 
     pub(crate) fn notify_local_catalog_changed(&self, reason: LocalCatalogChangeReason) {
-        if let Ok(guard) = self.local_catalog_tx.lock() {
-            if let Some(tx) = guard.as_ref() {
-                let request = LocalCatalogChangeRequest {
-                    reason,
+        if let Ok(mut guard) = self.local_catalog_tx.lock() {
+            guard.retain(|tx| {
+                tx.send(LocalCatalogChangeRequest {
+                    reason: reason.clone(),
                     ack_tx: None,
-                };
-                let _ = tx.send(request);
-            }
+                })
+                .is_ok()
+            });
         }
     }
 }
@@ -293,8 +293,8 @@ impl SharedState {
         self.io.authority_host_io_sender()
     }
 
-    pub(crate) fn set_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
-        self.io.set_local_catalog_tx(tx);
+    pub(crate) fn add_local_catalog_tx(&self, tx: mpsc::Sender<LocalCatalogChangeRequest>) {
+        self.io.add_local_catalog_tx(tx);
     }
 
     pub(crate) fn notify_local_catalog_changed(&self, reason: LocalCatalogChangeReason) {
@@ -1036,6 +1036,8 @@ impl RatatuiNodeRuntime {
         // AuthorityHostIoLoop uses SharedState::state_sender() lazily so it
         // picks up the real sender once set_state_tx() is called below.
         let (catalog_tx, catalog_rx) = std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
+        let (ingress_catalog_tx, ingress_catalog_rx) =
+            std::sync::mpsc::channel::<LocalCatalogChangeRequest>();
         let authority_host_io = AuthorityHostIoLoop::start(self.shared.clone())?;
         let client_writer = ClientWriter::start();
         let state_event_loop = StateEventLoop::start(
@@ -1049,7 +1051,8 @@ impl RatatuiNodeRuntime {
         self.shared.set_state_tx(state_event_loop.sender());
         self.shared
             .set_authority_host_io_tx(authority_host_io.sender());
-        self.shared.set_local_catalog_tx(catalog_tx);
+        self.shared.add_local_catalog_tx(catalog_tx);
+        self.shared.add_local_catalog_tx(ingress_catalog_tx);
 
         // Monitor upstream connectivity so the state loop can distinguish a
         // transient control-plane outage from a permanent remote host failure.
@@ -1064,18 +1067,21 @@ impl RatatuiNodeRuntime {
         // Peer node servers host a default authority-host session for remote
         // viewers. Create it now that the IO loops are running; it will be
         // published through the local catalog to the remote authority.
-        if self.network.connect.is_some() {
-            let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-            let _ = self
-                .shared
-                .state_sender()
-                .send(StateEvent::CreateAuthorityHostSession {
-                    request_id: "default-peer-session".to_string(),
-                    cols: 80,
-                    rows: 24,
-                    reply_tx,
-                });
-        }
+        //
+        // This applies to both `--connect` peers (which actively dial the
+        // control plane) and outbound-dial peers (which wait for the control
+        // plane to dial them). In both cases the remote peer must expose at
+        // least one session for the viewer to attach to.
+        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+        let _ = self
+            .shared
+            .state_sender()
+            .send(StateEvent::CreateAuthorityHostSession {
+                request_id: "default-peer-session".to_string(),
+                cols: 80,
+                rows: 24,
+                reply_tx,
+            });
 
         // Start the agent signal listener so agent hooks can deliver lifecycle
         // events (UserPromptSubmit, PermissionRequest, etc.) to this server.
@@ -1169,8 +1175,9 @@ impl RatatuiNodeRuntime {
             ingress_publication_runtime,
             RatatuiLocalTargetFactory::new(shared.clone(), self.network.clone()),
             RatatuiLocalAuthorityHostBackend::new(shared.clone(), self.network.clone()),
+            RatatuiLocalSessionCatalog::new(shared.clone()),
         );
-        let _ingress_guard = match ingress_runtime.start() {
+        let _ingress_guard = match ingress_runtime.start(ingress_catalog_rx) {
             Ok(guard) => {
                 // Bind the same local control socket that legacy sidecar
                 // ingress owners use, so __remote-session-creation and Ctrl+W
