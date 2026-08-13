@@ -1889,15 +1889,16 @@ fn handle_transport_event<
                     return;
                 }
             }
-            let is_command = matches!(
+            let is_authority_event = matches!(
                 envelope.body.as_ref(),
                 Some(Body::OpenMirrorRequest(_))
                     | Some(Body::CloseMirrorRequest(_))
                     | Some(Body::ApplyPtyResize(_))
                     | Some(Body::RawPtyInput(_))
                     | Some(Body::PasteFileRequest(_))
+                    | Some(Body::CreateSessionRequest(_))
             );
-            if is_command {
+            if is_authority_event {
                 if let Some(active) = sessions.get(&session_instance_id) {
                     if let Some(event) = map_inbound_grpc_authority_event(envelope) {
                         authority_manager.handle_event(&active.session, event);
