@@ -1,0 +1,40 @@
+id: task.cloud-auth-impl-operator-key-rotation
+kind: task
+version: 1
+title: implement operator key rotation command
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/cloud-host-auth-design.md
+  section: 6.6
+  why:
+    - Operators need a way to rotate the control-host private key without re-imaging remote hosts.
+    - New public key must be pushed to managed hosts; old key can be removed after confirmation.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-auth-impl-keyring-secret-store.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Add CLI command `waitagent rotate-operator-key [--push-to-all]`.
+  - Generate new Ed25519 (or RSA 4096 fallback) operator keypair.
+  - Store new private key in keyring, replacing old entry.
+  - If --push-to-all, SSH into each saved profile and install new public key alongside old one.
+  - Optionally remove old public key from remote hosts after confirmation.
+  - Unit tests for key generation and fingerprint computation.
+  - cargo clippy -- -D warnings passes.
+verification:
+  - cargo test operator_auth -- --test-threads=1
+  - cargo test cli_smoke -- --test-threads=1
+  - cargo clippy -- -D warnings
+  - manual: rotate key, verify old key is rejected and new key is accepted by remote daemon
+touched_paths:
+  - src/cli.rs
+  - src/infra/operator_auth.rs
+  - src/host/ssh/ssh_remote_host_bootstrapper.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+notes:
+  - v1 does not automatically remove old keys from remote hosts to avoid accidental lockout.

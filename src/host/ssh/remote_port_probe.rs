@@ -1,6 +1,7 @@
 use crate::host::ssh::remote_host_history_store::{RemoteHostAuthProfile, RemoteHostProfile};
 use crate::host::ssh::remote_host_secret_store::{
-    FileRemoteHostSecretStore, RemoteHostSecretStore, RemoteHostSecretValue,
+    DefaultRemoteHostSecretStore, KeyringRemoteHostSecretStore, RemoteHostSecretStore,
+    RemoteHostSecretValue,
 };
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshExecutor, RemoteSshTarget, RusshRemoteSshExecutor,
@@ -73,17 +74,17 @@ impl RemotePortProbe for StaticRemotePortProbe {
 }
 
 #[derive(Debug, Clone)]
-pub struct SshRemotePortProbe<S = FileRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
+pub struct SshRemotePortProbe<S = DefaultRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
     profile: RemoteHostProfile,
     secret_store: S,
     ssh_executor: E,
 }
 
-impl SshRemotePortProbe<FileRemoteHostSecretStore, RusshRemoteSshExecutor> {
+impl SshRemotePortProbe<DefaultRemoteHostSecretStore, RusshRemoteSshExecutor> {
     pub fn new(profile: RemoteHostProfile) -> Self {
         Self {
             profile,
-            secret_store: FileRemoteHostSecretStore::default(),
+            secret_store: KeyringRemoteHostSecretStore,
             ssh_executor: RusshRemoteSshExecutor,
         }
     }

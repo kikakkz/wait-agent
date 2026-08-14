@@ -1,14 +1,13 @@
 kind: state
 version: 1
-current_task: task.ratatui-clipboard-paste-phase4-remote-file-transfer
+current_task: task.cloud-auth-impl-keyring-secret-store
 focus_statement: >
-  Completed the remote-node stale-sidebar-after-resume fix: outbound --connect
-  now signals RemoteNodeOffline, authority keepalive uses a wall-clock anchor
-  plus an active resume probe, and tests pass. The remaining backlog before
-  task.ratatui-phase-5-cloud is the ratatui-clipboard-paste epic and
-  task.ratatui-agent-sessions-hotkey. Phases 1-3 are done. Current focus is
-  Phase 4: remote peer file paste transport via chunked gRPC
-  (FilePasteChunk/FilePasteComplete).
+  Implementation of the cloud-host auth design has started. Current focus is
+  task.cloud-auth-impl-keyring-secret-store: unify operator private key, SSH
+  password, and sudo password in the OS keyring, implement KeyringSecretStore,
+  and migrate existing encrypted file secrets on first run. No file fallback is
+  allowed. After this task, the queue is: certificate rotation, startup reconnect
+  expiry fallback, operator key rotation, and LAN host acceptance.
 last_updated_from:
   file: .agents/tasks/backlog.yaml
-  reference: ratatui-clipboard-paste-phase2-file-path
+  reference: task.cloud-auth-impl-keyring-secret-store

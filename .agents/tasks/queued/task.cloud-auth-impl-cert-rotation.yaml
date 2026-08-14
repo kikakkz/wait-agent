@@ -1,0 +1,40 @@
+id: task.cloud-auth-impl-cert-rotation
+kind: task
+version: 1
+title: implement remote daemon certificate expiry and rotation during bootstrap
+status: backlog
+priority: high
+design_ref:
+  doc: docs/cloud-host-auth-design.md
+  section: 6.5
+  why:
+    - Remote daemon certificates must have a limited lifetime and be rotated before expiry.
+    - The bootstrapper checks expiry over SSH during connect and regenerates if needed.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-auth-impl-keyring-secret-store.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - __generate-node-credentials outputs certificate expiry along with the TLS pin.
+  - Bootstrapper parses expiry and compares against current time.
+  - If expiry is within 30 days (or already expired), bootstrapper regenerates the certificate.
+  - Updated TLS pin is saved to RemoteHostProfile and remote-hosts.toml.
+  - Unit tests for expiry parsing and rotation decision.
+  - cargo clippy -- -D warnings passes.
+verification:
+  - cargo test ssh_remote_host_bootstrapper -- --test-threads=1
+  - cargo test remote_host_connect_runtime -- --test-threads=1
+  - cargo clippy -- -D warnings
+  - manual: connect to a host, verify certificate is regenerated if within 30 days of expiry
+touched_paths:
+  - src/host/ssh/ssh_remote_host_bootstrapper.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+  - src/host/ssh/remote_host_history_store.rs
+  - src/infra/remote_grpc_transport.rs
+notes:
+  - Default certificate lifetime: 90 days.
+  - Renewal window: 30 days before expiry.

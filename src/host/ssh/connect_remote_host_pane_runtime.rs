@@ -6,7 +6,7 @@ use crate::host::ssh::remote_host_history_store::{
     RemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
-    FileRemoteHostSecretStore, RemoteHostSecretStore,
+    KeyringRemoteHostSecretStore, RemoteHostSecretStore,
 };
 use crate::host::ssh::remote_install_proxy_store::{
     no_proxy_for_install, RemoteInstallProxyProfile, RemoteInstallProxySettings,
@@ -3303,7 +3303,7 @@ fn delete_selected_host(
         return Err(format!("saved host profile `{profile_name}` was not found"));
     };
 
-    let secret_store = FileRemoteHostSecretStore::default();
+    let secret_store = KeyringRemoteHostSecretStore;
     let mut delete_errors = Vec::new();
     if let RemoteHostAuthProfile::Password {
         password_secret_id: Some(id),
@@ -3657,7 +3657,7 @@ fn saved_sudo_secret_id(state: &ConnectRemoteHostState) -> Option<String> {
 fn load_secret_value(
     id: &crate::host::ssh::remote_host_secret_store::RemoteHostSecretId,
 ) -> Result<String, String> {
-    FileRemoteHostSecretStore::default()
+    KeyringRemoteHostSecretStore
         .get_secret(id)
         .map_err(|error| error.to_string())?
         .map(|value| value.expose_secret().to_string())

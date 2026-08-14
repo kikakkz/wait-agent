@@ -1,0 +1,40 @@
+id: task.cloud-lan-host-kind
+kind: task
+version: 1
+title: add Cloud/LAN host kind to remote host profiles and enforce key auth for cloud hosts
+status: done
+priority: high
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: Background, 3
+  why:
+    - Cloud/public hosts are reachable directly and should require key authentication for both SSH and control-plane operator challenge.
+    - LAN hosts may be behind NAT and can use password or key authentication for SSH, but outbound dial is still used for first connect from the control host.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-operator-auth.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - RemoteHostProfile has a host_kind field with Cloud and Lan variants.
+  - Ctrl+W detail UI allows selecting Cloud or LAN.
+  - Cloud host profiles reject password auth with a clear error.
+  - LAN host profiles accept password or key auth.
+  - Existing profiles without host_kind default to Lan for backward compatibility.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test remote_host_history_store -- --test-threads=1
+  - cargo test remote_host_connect_runtime -- --test-threads=1
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/host/ssh/remote_host_history_store.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+  - src/host/ssh/ssh_remote_host_bootstrapper.rs
+  - src/ratatui_node/connect_remote_host_pane_runtime.rs
+  - src/cli.rs
+notes:
+  - Shipped in v0.1.27.
+  - Cloud vs LAN is currently a manual profile setting, not inferred from IP address.

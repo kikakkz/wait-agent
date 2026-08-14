@@ -1,6 +1,7 @@
 use crate::host::ssh::remote_host_history_store::{RemoteHostAuthProfile, RemoteHostProfile};
 use crate::host::ssh::remote_host_secret_store::{
-    FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
+    DefaultRemoteHostSecretStore, KeyringRemoteHostSecretStore, RemoteHostSecretId,
+    RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use crate::host::ssh::remote_ssh_executor::{
     RemoteSshAuth, RemoteSshExecutor, RemoteSshOutput, RemoteSshTarget, RusshRemoteSshExecutor,
@@ -223,15 +224,15 @@ impl fmt::Display for RemoteHostBootstrapError {
 impl std::error::Error for RemoteHostBootstrapError {}
 
 #[derive(Debug, Clone)]
-pub struct SshRemoteHostBootstrapper<S = FileRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
+pub struct SshRemoteHostBootstrapper<S = DefaultRemoteHostSecretStore, E = RusshRemoteSshExecutor> {
     secret_store: S,
     ssh_executor: E,
 }
 
-impl Default for SshRemoteHostBootstrapper<FileRemoteHostSecretStore, RusshRemoteSshExecutor> {
+impl Default for SshRemoteHostBootstrapper<DefaultRemoteHostSecretStore, RusshRemoteSshExecutor> {
     fn default() -> Self {
         Self {
-            secret_store: FileRemoteHostSecretStore::default(),
+            secret_store: KeyringRemoteHostSecretStore,
             ssh_executor: RusshRemoteSshExecutor,
         }
     }

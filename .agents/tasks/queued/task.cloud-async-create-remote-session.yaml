@@ -1,0 +1,35 @@
+id: task.cloud-async-create-remote-session
+kind: task
+version: 1
+title: asyncify CreateRemoteSession to avoid blocking StateEventLoop on Ctrl+S
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  section: 10.2, 12
+  why:
+    - Ctrl+S on a connected remote endpoint calls session_creation.create_session(), which waits on the remote-node ingress owner Unix socket.
+    - Synchronous execution inside StateEventLoop froze all input and session switching for up to 10 seconds.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-create-session-ingress-routing.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - CreateRemoteSession runs on a background thread and reports via StateEvent::RemoteSessionCreateResult.
+  - StateEventLoop remains responsive during remote session creation.
+  - Success activates the newly created remote target; failure shows a clear error message.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test ratatui_node -- --test-threads=1
+  - manual: Ctrl+S on a connected remote host, verify UI does not freeze and new session appears
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/ratatui_node/state_event.rs
+  - src/ratatui_node/state_loop.rs
+notes:
+  - Shipped in v0.1.31.
+  - Mirrors the existing ConnectRemoteHost async-result pattern.

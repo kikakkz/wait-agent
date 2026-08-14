@@ -82,3 +82,79 @@ history:
     source_of_truth:
       file: conversation follow-up
       reference: remote node offline after local resume
+  - task_id: task.cloud-outbound-dial-operator-auth
+    status: done
+    summary: >
+      Outbound-dial remote host connection implemented with TLS pin from remote
+      daemon certificate and operator public key challenge; credentials are not
+      regenerated when a compatible daemon is reused.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-lan-host-kind
+    status: done
+    summary: >
+      Added RemoteHostKind::{Cloud, Lan}; cloud hosts require key authentication,
+      LAN hosts allow password or key.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-outbound-dial-snapshot-reconnect
+    status: done
+    summary: >
+      Outbound-dial connections are persisted to ~/.waitagent/outbound-connections.toml
+      and recovered via ReconnectSnapshotHosts on startup or network-online.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-outbound-dial-retry-worker
+    status: done
+    summary: >
+      Background OutboundDialRetryWorker re-queues InitiateOutboundConnection on
+      RemoteNodeOffline with exponential backoff, cancelled on RemoteNodeOnline.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-outbound-dial-ingress-catalog-publish
+    status: done
+    summary: >
+      Ingress server publishes the default local session for outbound-dial peers,
+      so Ctrl+W first connect activates the existing default session.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-async-remote-connect-dedup
+    status: done
+    summary: >
+      Remote-host connect moved off StateEventLoop to a background thread; duplicate
+      local bash@local sidebar entries removed.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-async-create-remote-session
+    status: done
+    summary: >
+      Ctrl+S remote session creation asyncified via StateEvent::RemoteSessionCreateResult,
+      preventing StateEventLoop freeze.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-create-session-ingress-routing
+    status: done
+    summary: >
+      CreateSessionRequest is now routed to SessionSyncAuthorityManager in the ingress
+      server, fixing Ctrl+S for outbound-dial peers.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active
+  - task_id: task.cloud-auth-cert-pinning-design
+    status: done
+    summary: >
+      Cloud-host authentication architecture finalized as Approach A: keep TLS pin +
+      operator challenge, unify all secrets in OS keyring with no fallback,
+      operator-key rotation, 90-day remote daemon certificate rotation, and
+      startup snapshot reconnect expiry fallback. Design doc is
+      docs/cloud-host-auth-design.md.
+    source_of_truth:
+      file: .agents/tasks/backlog.yaml
+      reference: active

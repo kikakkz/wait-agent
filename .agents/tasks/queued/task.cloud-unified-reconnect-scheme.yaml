@@ -1,0 +1,37 @@
+id: task.cloud-unified-reconnect-scheme
+kind: task
+version: 1
+title: document and lock the dual-mode reconnect policy for outbound-dial and inbound --connect
+status: backlog
+priority: medium
+design_ref:
+  doc: docs/reconnection-plan.md
+  section: 2, 4
+  why:
+    - OutboundDial and InboundConnect are intentionally separate modes with different reconnect initiators.
+    - The code already reflects this separation; what is missing is a locked policy document so future changes do not blur the boundary.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-host-acceptance.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Document that OutboundDial reconnect is driven by the control host via snapshot + OutboundDialRetryWorker.
+  - Document that InboundConnect reconnect is driven by the remote peer dialing back; control host only listens.
+  - Document that both modes may coexist on the same host and that starting a daemon in a different mode requires restarting it.
+  - Document that snapshot recovery applies only to OutboundDial; InboundConnect peers are not stored in the snapshot.
+  - Update docs/reconnection-plan.md with the accepted dual-mode policy.
+  - If any code does not match the documented policy, split fixes into bounded implementation tasks.
+verification:
+  - design review
+  - update docs/reconnection-plan.md
+touched_paths:
+  - docs/reconnection-plan.md
+  - src/ratatui_node/state_loop.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+notes:
+  - The goal is not to merge the two modes into one, but to make the existing dual-mode behavior explicit and maintainable.
+  - Code changes are expected to be small; the main output is the accepted design doc.

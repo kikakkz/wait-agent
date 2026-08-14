@@ -88,7 +88,6 @@ pub(crate) struct RemoteNodeConnectionInfo {
     pub host: String,
     pub port: u16,
     pub tls_pin_sha256: String,
-    pub operator_key_path: Option<PathBuf>,
     pub profile_name: String,
 }
 
@@ -1057,6 +1056,20 @@ impl RatatuiNodeRuntime {
         // Monitor upstream connectivity so the state loop can distinguish a
         // transient control-plane outage from a permanent remote host failure.
         let _network_probe = NetworkProbe::start(state_event_loop.sender());
+
+        // Migrate any legacy file-based secrets into the OS keyring before
+        // attempting reconnections that may need them.
+        if let Err(error) =
+            crate::host::ssh::remote_host_secret_store::migrate_file_secrets_to_keyring()
+        {
+            ERROR_LOG.log(format!("[ratatui-node] secret migration failed: {error}"));
+        }
+
+        // Ensure the operator key used for gRPC challenge-response auth exists in
+        // the keyring before any remote peer connection is attempted.
+        if let Err(error) = crate::infra::operator_auth::ensure_operator_key_in_keyring() {
+            ERROR_LOG.log(format!("[ratatui-node] operator key setup failed: {error}"));
+        }
 
         // Reconnect to outbound-dial hosts that were active when the control
         // plane last shut down, or retry them once the network recovers.

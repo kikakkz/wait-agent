@@ -32,8 +32,7 @@ use super::state_event::{
 };
 use crate::host::ssh::outbound_connection_snapshot_store::OutboundConnectionSnapshotStore;
 use crate::host::ssh::remote_host_connect_runtime::{
-    operator_private_key_path_for_profile, RemoteHostConnectRequest, RemoteHostConnectRuntime,
-    SshRemotePortProbeFactory,
+    RemoteHostConnectRequest, RemoteHostConnectRuntime, SshRemotePortProbeFactory,
 };
 use crate::host::ssh::remote_host_history_store::RemoteHostHistoryStore;
 use crate::host::ssh::ssh_remote_host_bootstrapper::SshRemoteHostBootstrapper;
@@ -639,7 +638,6 @@ fn handle_remote_session_disconnected(
                             endpoint_uri: format!("tls://{}:{}", info.host, info.port),
                             tls_pin_sha256: Some(info.tls_pin_sha256.clone())
                                 .filter(|s| !s.is_empty()),
-                            operator_key_path: info.operator_key_path.clone(),
                         };
                         let ingress_tx = {
                             let guard = shared
@@ -1617,7 +1615,6 @@ fn perform_remote_host_connect(
             .and_then(|(_, port)| port.parse().ok())
             .unwrap_or(0),
         tls_pin_sha256: profile.tls_pin_sha256.clone().unwrap_or_default(),
-        operator_key_path: operator_private_key_path_for_profile(&profile),
         profile_name: profile.name.clone(),
     });
 

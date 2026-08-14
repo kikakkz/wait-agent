@@ -628,7 +628,6 @@ fn connect_grpc_node_session(
                 node_id: node_id.to_string(),
                 endpoint_uri: endpoint_uri.to_string(),
                 tls_pin_sha256: None,
-                operator_key_path: None,
             },
             event_tx,
         )

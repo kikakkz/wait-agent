@@ -1,0 +1,35 @@
+id: task.cloud-create-session-ingress-routing
+kind: task
+version: 1
+title: route CreateSessionRequest to ingress SessionSyncAuthorityManager for outbound-dial peers
+status: done
+priority: high
+design_ref:
+  doc: docs/remote-host-connect-and-session-creation-design.md
+  section: 9.3, 11, 4
+  why:
+    - Outbound-dial remote peers were dropping CreateSessionRequest because the ingress server's authority-event routing check did not include it.
+    - The remote node owns the resulting PTY and must create a normal local target-host session before session-sync publishes it.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-async-create-remote-session.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - CreateSessionRequest is routed to SessionSyncAuthorityManager::with_ingress_events in the ingress server.
+  - The routing check is renamed from is_command to is_authority_event to reflect the broader scope.
+  - Ctrl+S on an outbound-dial peer successfully creates a new remote session.
+  - cargo fmt --check and cargo clippy -- -D warnings pass.
+verification:
+  - cargo test remote_node_ingress_server_runtime -- --test-threads=1
+  - cargo test session_sync -- --test-threads=1
+  - manual: Ctrl+S on an outbound-dial peer, verify new session is created
+  - cargo clippy -- -D warnings
+touched_paths:
+  - src/remote/node/remote_node_ingress_server_runtime.rs
+notes:
+  - Shipped in v0.1.32.
+  - Root cause was a missing match arm in the ingress event routing logic.

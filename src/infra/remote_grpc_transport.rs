@@ -1,4 +1,4 @@
-use crate::infra::operator_auth;
+use crate::infra::operator_auth::{self, OperatorKeyStore};
 use crate::infra::remote_grpc_proto::v1::node_session_envelope::Body;
 use crate::infra::remote_grpc_proto::v1::node_session_service_client::NodeSessionServiceClient;
 use crate::infra::remote_grpc_proto::v1::node_session_service_server::{
@@ -41,7 +41,6 @@ pub struct OutboundNodeSessionRequest {
     pub node_id: String,
     pub endpoint_uri: String,
     pub tls_pin_sha256: Option<String>,
-    pub operator_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,20 +308,9 @@ impl RemoteNodeTransport for GrpcRemoteNodeTransport {
                 };
 
                 if !server_hello.operator_challenge.is_empty() {
-                    let Some(operator_key_path) = &request.operator_key_path else {
-                        let transport_error = RemoteNodeTransportError::new(
-                            "server requested operator authentication but no operator key path was configured",
-                        );
-                        let _ = event_tx.send(RemoteNodeTransportEvent::TransportFailed {
-                            node_id: Some(request.node_id.clone()),
-                            session_instance_id: None,
-                            message: transport_error.to_string(),
-                        });
-                        let _ = started_tx.send(Err(transport_error));
-                        return;
-                    };
+                    let keystore = operator_auth::KeyringOperatorKeyStore;
                     let challenge = server_hello.operator_challenge.clone();
-                    match operator_auth::sign_challenge(&challenge, operator_key_path) {
+                    match keystore.sign_challenge(&challenge) {
                         Ok((auth_scheme, challenge_response)) => {
                             if let Err(error) = outbound_session.send(auth_response_envelope(
                                 &request.node_id,

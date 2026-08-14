@@ -246,3 +246,31 @@ history:
     source_of_truth:
       file: .agents/tasks/queued/task.t5-07.yaml
       reference: status
+archived_blockers:
+  - id: blocker.engine-mode-remote-pane-flicker
+    title: engine-mode remote main-slot pane flickers due to recursive geometry coordination
+    status: fixed
+    discovered_at: 2026-07-26T09:30:00Z
+    fixed_at: 2026-07-26T02:50:00Z
+    summary: authority geometry coordinator used a tmux session-option semaphore to suppress self-triggered window-layout-changed recursion.
+  - id: blocker.remote-session-input-stuck-pipe-pane-orphaned
+    title: Remote session keystrokes stop reaching the shell because the authority target host is torn down
+    status: fixed
+    discovered_at: 2026-07-26T01:56:00Z
+    fixed_at: 2026-07-26T02:50:00Z
+    summary: removed stop_hosts_bound_to_session calls from gRPC session-close handlers so the authority target host lifetime follows the remote target session.
+  - id: blocker.engine-mode-remote-reconnect-mirror-not-reactivated
+    title: Engine mode remote reconnect leaves input stuck due to incomplete sequence reset
+    status: fixed
+    discovered_at: 2026-07-26T10:20:00Z
+    fixed_at: 2026-07-27T04:22:00Z
+    summary: added self-healing mirror reactivation in engine mode and aligned direct raw output seq tracker reset with raw mode.
+  - id: blocker.remote-reconnect-authority-host-lifecycle
+    title: Authority target host is torn down during remote reconnect, breaking input
+    status: fixed
+    discovered_at: 2026-07-27T05:30:00Z
+    summary: made live-authority socket independent of gRPC session instance, reused healthy target hosts on new session attach, and stopped the bridge from tearing down the listener on exit.
+  - id: blocker.task-state-drift
+    title: placeholder historical blocker
+    status: fixed
+    summary: archived during cloud/outbound-dial task sync; no active blockers remain after v0.1.32.

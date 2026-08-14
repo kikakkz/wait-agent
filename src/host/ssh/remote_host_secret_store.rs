@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -357,10 +357,21 @@ fn machine_bound_passphrase(id: &RemoteHostSecretId) -> Result<String, RemoteHos
     ))
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SecretToolRemoteHostSecretStore;
+/// The default remote host secret store used in production.
+pub type DefaultRemoteHostSecretStore = KeyringRemoteHostSecretStore;
 
-impl RemoteHostSecretStore for SecretToolRemoteHostSecretStore {
+#[derive(Debug, Clone, Default)]
+pub struct KeyringRemoteHostSecretStore;
+
+impl KeyringRemoteHostSecretStore {
+    fn entry(id: &RemoteHostSecretId) -> Result<keyring::Entry, RemoteHostSecretStoreError> {
+        keyring::Entry::new("waitagent", id.as_str()).map_err(|error| {
+            RemoteHostSecretStoreError::new(format!("keyring entry failed: {error}"))
+        })
+    }
+}
+
+impl RemoteHostSecretStore for KeyringRemoteHostSecretStore {
     type Error = RemoteHostSecretStoreError;
 
     fn put_secret(
@@ -368,78 +379,89 @@ impl RemoteHostSecretStore for SecretToolRemoteHostSecretStore {
         id: &RemoteHostSecretId,
         secret: RemoteHostSecretValue,
     ) -> Result<(), Self::Error> {
-        let mut child = Command::new("secret-tool")
-            .arg("store")
-            .arg("--label")
-            .arg(format!("WaitAgent remote host secret {}", id.as_str()))
-            .arg("application")
-            .arg("waitagent")
-            .arg("kind")
-            .arg("remote-host")
-            .arg("id")
-            .arg(id.as_str())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(secret.expose_secret().as_bytes())
-                .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-        if !output.status.success() {
-            return Err(RemoteHostSecretStoreError::new(format!(
-                "secret-tool store failed with status {}",
-                output.status
-            )));
-        }
-        Ok(())
+        let entry = Self::entry(id)?;
+        entry.set_password(secret.expose_secret()).map_err(|error| {
+            RemoteHostSecretStoreError::new(format!("keyring store failed: {error}"))
+        })
     }
 
     fn get_secret(
         &self,
         id: &RemoteHostSecretId,
     ) -> Result<Option<RemoteHostSecretValue>, Self::Error> {
-        let output = Command::new("secret-tool")
-            .arg("lookup")
-            .arg("application")
-            .arg("waitagent")
-            .arg("kind")
-            .arg("remote-host")
-            .arg("id")
-            .arg(id.as_str())
-            .output()
-            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-        if output.status.success() {
-            let mut value = String::from_utf8_lossy(&output.stdout).into_owned();
-            while value.ends_with(['\n', '\r']) {
-                value.pop();
-            }
-            return Ok(Some(RemoteHostSecretValue::new(value)));
+        let entry = Self::entry(id)?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(RemoteHostSecretValue::new(value))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(RemoteHostSecretStoreError::new(format!(
+                "keyring lookup failed: {error}"
+            ))),
         }
-        Ok(None)
     }
 
     fn delete_secret(&self, id: &RemoteHostSecretId) -> Result<(), Self::Error> {
-        let output = Command::new("secret-tool")
-            .arg("clear")
-            .arg("application")
-            .arg("waitagent")
-            .arg("kind")
-            .arg("remote-host")
-            .arg("id")
-            .arg(id.as_str())
-            .output()
-            .map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
-        if output.status.success() {
-            return Ok(());
+        let entry = Self::entry(id)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(RemoteHostSecretStoreError::new(format!(
+                "keyring delete failed: {error}"
+            ))),
+        }
+    }
+}
+
+/// Migrate secrets from the legacy file-based store to the OS keyring.
+///
+/// This is a one-shot operation run on first access after upgrade. It decrypts
+/// each file secret and stores it in the keyring, then deletes the file. If any
+/// step fails, the migration aborts and the caller must surface the error.
+pub fn migrate_file_secrets_to_keyring() -> Result<(), RemoteHostSecretStoreError> {
+    let file_store = FileRemoteHostSecretStore::default();
+    let keyring_store = KeyringRemoteHostSecretStore;
+    let root = waitagent_home().join("secrets").join("remote-host");
+    if !root.exists() {
+        return Ok(());
+    }
+
+    fn visit(
+        dir: &Path,
+        root: &Path,
+        file_store: &FileRemoteHostSecretStore,
+        keyring_store: &KeyringRemoteHostSecretStore,
+    ) -> Result<(), RemoteHostSecretStoreError> {
+        for entry in
+            fs::read_dir(dir).map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?
+        {
+            let entry =
+                entry.map_err(|error| RemoteHostSecretStoreError::new(error.to_string()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, root, file_store, keyring_store)?;
+                continue;
+            }
+            if let Some(id) = secret_id_from_file_path(root, &path) {
+                if let Some(secret) = file_store.get_secret(&id)? {
+                    keyring_store.put_secret(&id, secret)?;
+                }
+                let _ = fs::remove_file(&path);
+            }
         }
         Ok(())
     }
+
+    visit(&root, &root, &file_store, &keyring_store)?;
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+fn secret_id_from_file_path(root: &Path, path: &Path) -> Option<RemoteHostSecretId> {
+    let relative = path.strip_prefix(root).ok()?;
+    let id = relative
+        .with_extension("")
+        .to_string_lossy()
+        .replace(['/', '\\'], ".");
+    RemoteHostSecretId::new(id).ok()
 }
 
 #[cfg(test)]

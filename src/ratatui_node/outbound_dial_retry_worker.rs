@@ -108,7 +108,6 @@ fn run_retry_loop(
 mod tests {
     use super::*;
     use crate::remote::node::remote_node_ingress_server_runtime::InternalEvent;
-    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -117,7 +116,6 @@ mod tests {
             node_id: "test-node".to_string(),
             endpoint_uri: "tls://127.0.0.1:7474".to_string(),
             tls_pin_sha256: Some("deadbeef".to_string()),
-            operator_key_path: Some(PathBuf::from("/dev/null")),
         }
     }
 

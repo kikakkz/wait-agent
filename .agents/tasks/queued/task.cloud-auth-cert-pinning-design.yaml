@@ -1,0 +1,40 @@
+id: task.cloud-auth-cert-pinning-design
+kind: task
+version: 1
+title: design certificate pinning or mini-CA scheme for cloud host control-plane authentication
+status: done
+priority: high
+design_ref:
+  doc: docs/cloud-host-auth-design.md
+  section: 6, 10
+  why:
+    - The accepted design keeps TLS pin + operator challenge, unifies all secrets
+      in OS keyring with no fallback, adds operator-key rotation, remote daemon
+      certificate rotation, and startup snapshot reconnect expiry fallback.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-outbound-dial-operator-auth.done
+  - task.cloud-lan-host-kind.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Threat model documented in docs/cloud-host-auth-design.md.
+  - Authentication architecture documented and accepted.
+  - Unified keyring secret storage specified (no file fallback, no export/import).
+  - Operator key rotation command specified.
+  - Remote daemon certificate rotation policy specified.
+  - Startup snapshot reconnect expiry fallback specified.
+  - Confirmed decisions recorded in the design doc.
+verification:
+  - design review by user
+  - accepted status recorded in the design doc
+touched_paths:
+  - docs/cloud-host-auth-design.md
+  - docs/reconnection-plan.md
+  - AGENTS.md
+notes:
+  - Design accepted: Approach A with unified keyring storage and startup reconnect expiry fallback.
+  - Next step is user decision: implement the design or resume cloud-host acceptance validation.

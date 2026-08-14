@@ -632,9 +632,20 @@ where
         payload: crate::infra::remote_protocol::CreateSessionRequestPayload,
         correlation_id: Option<&str>,
     ) -> Result<(), LifecycleError> {
-        let _started = std::time::Instant::now();
+        let started = std::time::Instant::now();
+        ERROR_LOG.log(format!(
+            "[session-sync] create-session request id={} node={} correlation={:?}",
+            payload.request_id,
+            session_handle.node_id(),
+            correlation_id
+        ));
 
         let result = self.create_local_target_for_create_session(session_handle, &payload);
+        ERROR_LOG.log(format!(
+            "[session-sync] create-session result id={} result={result:?} elapsed={:?}",
+            payload.request_id,
+            started.elapsed()
+        ));
 
         match result {
             Ok(created) => session_handle

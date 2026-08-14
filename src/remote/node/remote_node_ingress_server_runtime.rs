@@ -1884,6 +1884,10 @@ fn handle_transport_event<
                 return;
             }
             if let Some(request_id) = grpc_create_session_reply_request_id(&envelope) {
+                let matched = pending_create_sessions.contains_key(&request_id);
+                ERROR_LOG.log(format!(
+                    "[ingress-create-session] recv reply id={request_id} matched={matched} session={session_instance_id}"
+                ));
                 if let Some(reply_tx) = pending_create_sessions.remove(&request_id) {
                     let _ = reply_tx.send(envelope);
                     return;
@@ -1899,6 +1903,14 @@ fn handle_transport_event<
                     | Some(Body::CreateSessionRequest(_))
             );
             if is_authority_event {
+                if let Some(body_name) = envelope.body.as_ref().map(|b| match b {
+                    Body::CreateSessionRequest(_) => "CreateSessionRequest",
+                    _ => "other-authority-event",
+                }) {
+                    ERROR_LOG.log(format!(
+                        "[ingress-create-session] recv authority event {body_name} session={session_instance_id}"
+                    ));
+                }
                 if let Some(active) = sessions.get(&session_instance_id) {
                     if let Some(event) = map_inbound_grpc_authority_event(envelope) {
                         authority_manager.handle_event(&active.session, event);
@@ -2105,6 +2117,9 @@ fn handle_local_create_session_request(
         .find(|active| active.session.node_id() == authority_node_id)
     else {
         let request_id = grpc_create_session_request_id(&envelope).unwrap_or_default();
+        ERROR_LOG.log(format!(
+            "[ingress-create-session] authority `{authority_node_id}` not connected, rejecting id={request_id}"
+        ));
         let _ = reply_tx.send(local_create_session_rejected_grpc_envelope(
             request_id,
             format!("remote authority `{authority_node_id}` is not connected"),
@@ -2112,12 +2127,16 @@ fn handle_local_create_session_request(
         return;
     };
     let request_id = grpc_create_session_request_id(&envelope).unwrap_or_default();
+    let session_instance_id = active.session.session_instance_id().to_string();
 
+    ERROR_LOG.log(format!(
+        "[ingress-create-session] sending request id={request_id} to node={authority_node_id} session={session_instance_id}"
+    ));
     pending_create_sessions.insert(request_id.clone(), reply_tx);
     let send_started = std::time::Instant::now();
     if active.session.send(envelope).is_err() {
         ERROR_LOG.log_error(format!(
-            "failed sending create-session request id={request_id} after {:?}",
+            "[ingress-create-session] failed sending create-session request id={request_id} after {:?}",
             send_started.elapsed()
         ));
         if let Some(reply_tx) = pending_create_sessions.remove(&request_id) {

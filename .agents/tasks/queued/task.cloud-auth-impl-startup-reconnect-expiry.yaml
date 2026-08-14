@@ -1,0 +1,41 @@
+id: task.cloud-auth-impl-startup-reconnect-expiry
+kind: task
+version: 1
+title: implement startup snapshot reconnect fallback for expired remote daemon certificates
+status: backlog
+priority: high
+design_ref:
+  doc: docs/cloud-host-auth-design.md
+  section: 6.5
+  why:
+    - If the control host is stopped while a certificate is valid and the certificate
+      expires before restart, the snapshot-driven gRPC dial will fail.
+    - The reconnect path must fall back to SSH bootstrapper to regenerate the certificate.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-auth-impl-cert-rotation.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - ReconnectSnapshotHosts attempts normal gRPC dial first.
+  - On TLS/certificate failure for an outbound-dial profile, trigger SSH bootstrapper check.
+  - Bootstrapper detects expired certificate and regenerates it.
+  - Updated TLS pin is saved and the gRPC dial is retried.
+  - If SSH also fails, the node is marked offline.
+  - Unit tests for the fallback path.
+  - cargo clippy -- -D warnings passes.
+verification:
+  - cargo test ratatui_node -- --test-threads=1
+  - cargo test remote_host_connect_runtime -- --test-threads=1
+  - cargo clippy -- -D warnings
+  - manual: simulate control-host stop past certificate expiry, verify startup reconnect recovers via SSH
+touched_paths:
+  - src/ratatui_node/state_loop.rs
+  - src/ratatui_node/runtime.rs
+  - src/host/ssh/remote_host_connect_runtime.rs
+  - src/host/ssh/ssh_remote_host_bootstrapper.rs
+notes:
+  - This fallback is only used during startup snapshot recovery, not during normal online reconnections.

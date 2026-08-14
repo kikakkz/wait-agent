@@ -640,9 +640,146 @@ next:
     design_ref:
       document: docs/ratatui-agent-sessions-hotkey-design.md
       authorizes: Section 9 (error handling), Section 10 (testing), and Section 11 (limitations).
+  - id: task.cloud-outbound-dial-operator-auth
+    title: implement outbound-dial remote host connection with operator public key auth and TLS pin
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 1 (store connection metadata) and Section 3 (reuse an existing daemon)
+        govern the TLS pin derived from the remote daemon certificate and the
+        operator public key installed on the remote host.
+  - id: task.cloud-lan-host-kind
+    title: add Cloud/LAN host kind to remote host profiles and enforce key auth for cloud hosts
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Background and Section 3: Cloud hosts are reachable directly and must use
+        key authentication; LAN hosts may use password or key.
+  - id: task.cloud-outbound-dial-snapshot-reconnect
+    title: persist outbound-dial connections and reconnect from snapshot on control-plane restart
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 1 (store connection metadata) and Section 2 (mode-aware reconnect)
+        authorize the outbound connection snapshot store and ReconnectSnapshotHosts
+        event.
+  - id: task.cloud-outbound-dial-retry-worker
+    title: add outbound-dial retry worker that re-queues InitiateOutboundConnection on RemoteNodeOffline
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 2 mode-aware reconnect table: OutboundDial reconnect is driven by
+        the control host with exponential backoff.
+  - id: task.cloud-outbound-dial-ingress-catalog-publish
+    title: publish default local session catalog from ingress server for outbound-dial peers
+    status: done
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 3 reuse path requires the remote daemon to expose a default
+        published session so first connect can activate it without creating a new one.
+  - id: task.cloud-async-remote-connect-dedup
+    title: async remote-host connect and deduplicate local bash@local entries in sidebar
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 16.2 (first connect activates the default published session) and
+        the ratatui-node single-writer event model.
+  - id: task.cloud-async-create-remote-session
+    title: asyncify CreateRemoteSession to avoid blocking StateEventLoop on Ctrl+S
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 10.2 / 12 (Ctrl-S creates a remote session) and the event-driven
+        single-writer StateEventLoop architecture.
+  - id: task.cloud-create-session-ingress-routing
+    title: route CreateSessionRequest to ingress SessionSyncAuthorityManager for outbound-dial peers
+    status: done
+    design_ref:
+      document: docs/remote-host-connect-and-session-creation-design.md
+      authorizes: >
+        Section 9.3 / 11 (remote node owns the resulting PTY) and Section 4
+        (local owner transport boundary).
+  - id: task.cloud-auth-cert-pinning-design
+    title: design certificate pinning or mini-CA scheme for cloud host control-plane authentication
+    status: done
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6 documents the accepted architecture: keep TLS pin + operator
+        challenge, unify all secrets in OS keyring with no fallback, add
+        operator-key rotation, remote daemon certificate rotation, and startup
+        snapshot reconnect expiry fallback. Section 10 records confirmed defaults.
+  - id: task.cloud-auth-impl-keyring-secret-store
+    title: implement unified OS keyring secret store and migrate existing file secrets
+    status: in_progress
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.3 specifies unified secret storage in OS keyring for operator
+        private key, SSH password, and sudo password, with no file fallback and
+        migration from the existing FileRemoteHostSecretStore.
+  - id: task.cloud-auth-impl-cert-rotation
+    title: implement remote daemon certificate expiry and rotation during bootstrap
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.5 specifies a 90-day certificate lifetime with 30-day renewal
+        window, checked by the bootstrapper over SSH during connect.
+  - id: task.cloud-auth-impl-startup-reconnect-expiry
+    title: implement startup snapshot reconnect fallback for expired remote daemon certificates
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.5 specifies that if snapshot gRPC dial fails due to an expired
+        certificate, the bootstrapper should regenerate the certificate over SSH.
+  - id: task.cloud-auth-impl-operator-key-rotation
+    title: implement operator key rotation command
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 6.6 specifies the `waitagent rotate-operator-key` command that
+        generates a new keypair, stores it in the keyring, and pushes the new
+        public key to managed hosts.
+  - id: task.cloud-auth-impl-acceptance
+    title: validate keyring storage, certificate rotation, and operator key rotation on LAN host
+    status: backlog
+    design_ref:
+      document: docs/cloud-host-auth-design.md
+      authorizes: >
+        Section 9 lists the migration and acceptance steps; LAN host validation
+        must pass before cloud-host validation resumes.
+  - id: task.cloud-unified-reconnect-scheme
+    title: document and lock the dual-mode reconnect policy for outbound-dial and inbound --connect
+    status: backlog
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        Section 2 mode-aware reconnect and Section 4 (connection direction is fixed
+        per daemon) already keep the two modes separate. This task documents the
+        policy: OutboundDial is recovered by control-host snapshot + retry worker;
+        InboundConnect is recovered by the remote peer dialing back; both modes
+        may coexist on the same host; mode switching restarts the daemon.
+  - id: task.cloud-host-acceptance
+    title: validate outbound-dial connection to a real cloud/public host
+    status: backlog
+    design_ref:
+      document: docs/reconnection-plan.md
+      authorizes: >
+        End-to-end validation of the outbound-dial / cloud-host path outside the
+        LAN.
   - id: task.ratatui-phase-5-cloud
     title: activate distributed control topologies on the server/client foundation
-    status: backlog
+    status: in_progress
 templates:
   - id: task-template.local-acceptance-cycle
     title: local acceptance rerun or bug-fix slice

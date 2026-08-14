@@ -1,0 +1,40 @@
+id: task.cloud-auth-impl-acceptance
+kind: task
+version: 1
+title: validate keyring storage, certificate rotation, and operator key rotation on LAN host
+status: backlog
+priority: high
+design_ref:
+  doc: docs/cloud-host-auth-design.md
+  section: 9
+  why:
+    - LAN host validation is lower risk than cloud-host validation and covers the same control-plane paths.
+    - Must verify keyring migration, certificate rotation, and operator key rotation end to end.
+source_of_truth:
+  file: .agents/tasks/backlog.yaml
+  reference: active
+depends_on:
+  - task.cloud-auth-impl-keyring-secret-store.done
+  - task.cloud-auth-impl-cert-rotation.done
+  - task.cloud-auth-impl-startup-reconnect-expiry.done
+  - task.cloud-auth-impl-operator-key-rotation.done
+linked_primitives:
+  - primitive.verification-refresh
+  - primitive.task-board-sync
+done_criteria:
+  - Verify SSH password and sudo password are stored in and read from OS keyring.
+  - Verify operator private key is stored in and read from OS keyring.
+  - Verify certificate is rotated when within 30 days of expiry.
+  - Verify startup reconnect recovers from expired certificate.
+  - Verify operator key rotation command works and remote daemon accepts new key.
+  - Update docs/local-acceptance-checklist.md with new checks.
+  - cargo test --release ratatui session_sync passes.
+verification:
+  - manual end-to-end on a LAN host
+  - cargo test --release ratatui session_sync
+  - cargo clippy -- -D warnings
+touched_paths:
+  - docs/local-acceptance-checklist.md
+  - docs/cloud-host-auth-design.md
+notes:
+  - Cloud-host validation (task.cloud-host-acceptance) resumes after LAN acceptance passes.

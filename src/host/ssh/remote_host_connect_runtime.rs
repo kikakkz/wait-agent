@@ -5,7 +5,7 @@ use crate::host::ssh::remote_host_history_store::{
     RemotePortPreference as HistoryRemotePortPreference,
 };
 use crate::host::ssh::remote_host_secret_store::{
-    FileRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
+    KeyringRemoteHostSecretStore, RemoteHostSecretId, RemoteHostSecretStore, RemoteHostSecretValue,
 };
 use crate::host::ssh::remote_install_proxy_store::{
     proxy_candidates, wrap_install_command_with_proxy, RemoteInstallProxyStore,
@@ -17,7 +17,7 @@ use crate::host::ssh::ssh_remote_host_bootstrapper::{
     install_reachability_preflight_command, RemoteHostBootstrapPlan, RemoteHostBootstrapper,
 };
 use crate::infra::error_log::ERROR_LOG;
-use crate::infra::operator_auth;
+use crate::infra::operator_auth::{self, OperatorKeyStore};
 use crate::infra::remote_grpc_transport::OutboundNodeSessionRequest;
 use crate::lifecycle::LifecycleError;
 use crate::ports::session_creation::SessionCreationPort;
@@ -79,6 +79,7 @@ pub struct RemoteHostConnectRuntime<H, P, B> {
     target_registry: Arc<dyn TargetRegistryPort>,
     #[allow(dead_code)]
     session_creation_service: Arc<dyn SessionCreationPort>,
+    operator_key_store: Arc<dyn OperatorKeyStore>,
 }
 
 impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
@@ -89,12 +90,31 @@ impl<H, P, B> RemoteHostConnectRuntime<H, P, B> {
         target_registry: Arc<dyn TargetRegistryPort>,
         session_creation_service: Arc<dyn SessionCreationPort>,
     ) -> Self {
+        Self::new_with_keystore(
+            history_store,
+            port_probe_factory,
+            bootstrapper,
+            target_registry,
+            session_creation_service,
+            Arc::new(operator_auth::KeyringOperatorKeyStore),
+        )
+    }
+
+    pub fn new_with_keystore(
+        history_store: H,
+        port_probe_factory: P,
+        bootstrapper: B,
+        target_registry: Arc<dyn TargetRegistryPort>,
+        session_creation_service: Arc<dyn SessionCreationPort>,
+        operator_key_store: Arc<dyn OperatorKeyStore>,
+    ) -> Self {
         Self {
             history_store,
             port_probe_factory,
             bootstrapper,
             target_registry,
             session_creation_service,
+            operator_key_store,
         }
     }
 }
@@ -112,9 +132,10 @@ where
     /// `initiate_outbound_dial` is called synchronously on the caller's thread
     /// after the remote daemon has been bootstrapped and before waiting for the
     /// first online target. It receives the outbound dial request (remote
-    /// endpoint, TLS pin, and operator key path) and must arrange for the
-    /// control host to dial the remote daemon. If it returns an error, `connect`
-    /// returns immediately instead of waiting for the remote target.
+    /// endpoint and TLS pin) and must arrange for the control host to dial the
+    /// remote daemon. The operator key is read from the OS keyring when signing
+    /// the gRPC challenge. If it returns an error, `connect` returns immediately
+    /// instead of waiting for the remote target.
     pub fn connect(
         &self,
         request: RemoteHostConnectRequest,
@@ -185,7 +206,7 @@ where
             )
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
         }
-        plan.operator_public_key = operator_public_key_for_profile(&profile)?;
+        plan.operator_public_key = operator_public_key_for_profile(&self.operator_key_store)?;
         let bootstrap_result = self
             .bootstrapper
             .ensure_waitagent_and_start(&plan)
@@ -210,8 +231,11 @@ where
             node_id: authority_node_id.clone(),
             endpoint_uri: format!("tls://{}:{}", profile.host, bootstrap_result.remote_port),
             tls_pin_sha256: Some(bootstrap_result.tls_pin_sha256.clone()),
-            operator_key_path: operator_private_key_path_for_profile(&profile),
         };
+        ERROR_LOG.log(format!(
+            "[remote-host-connect] queuing bootstrap dial for {}:{} node={}",
+            profile.host, bootstrap_result.remote_port, authority_node_id
+        ));
         initiate_outbound_dial(outbound_request)
             .map_err(|error| LifecycleError::Protocol(error.to_string()))?;
 
@@ -298,9 +322,12 @@ where
             node_id: authority_node_id.clone(),
             endpoint_uri: format!("tls://{}:{}", profile.host, port),
             tls_pin_sha256: Some(tls_pin_sha256),
-            operator_key_path: operator_private_key_path_for_profile(profile),
         };
 
+        ERROR_LOG.log(format!(
+            "[remote-host-connect] queuing reuse dial for {}:{} node={}",
+            profile.host, port, authority_node_id
+        ));
         if let Err(error) = initiate_outbound_dial(outbound_request) {
             ERROR_LOG.log(format!(
                 "[remote-host-connect] failed to queue reuse dial for {}:{}: {error}; falling back",
@@ -415,7 +442,7 @@ fn profile_from_direct_args(
     if command.ssh_password_stdin || command.sudo_password_stdin {
         stdin_passwords = Some(read_passwords_from_stdin()?);
     }
-    let secret_store = FileRemoteHostSecretStore::default();
+    let secret_store = KeyringRemoteHostSecretStore;
     let auth = match command.auth.as_deref().unwrap_or("password") {
         "password" => {
             let secret_id = if command.ssh_password_stdin {
@@ -582,30 +609,11 @@ fn authority_id_for_profile_port(profile: &RemoteHostProfile, remote_port: u16) 
 }
 
 fn operator_public_key_for_profile(
-    profile: &RemoteHostProfile,
+    keystore: &Arc<dyn OperatorKeyStore>,
 ) -> Result<Option<String>, LifecycleError> {
-    match &profile.auth {
-        RemoteHostAuthProfile::Key { key_path } => {
-            operator_auth::public_key_from_private_key_file(key_path)
-                .map(Some)
-                .map_err(|error| {
-                    LifecycleError::Protocol(format!(
-                        "failed to load operator private key `{}`: {error}",
-                        key_path.display()
-                    ))
-                })
-        }
-        RemoteHostAuthProfile::Password { .. } => Ok(None),
-    }
-}
-
-pub(crate) fn operator_private_key_path_for_profile(
-    profile: &RemoteHostProfile,
-) -> Option<PathBuf> {
-    match &profile.auth {
-        RemoteHostAuthProfile::Key { key_path } => Some(key_path.clone()),
-        RemoteHostAuthProfile::Password { .. } => None,
-    }
+    keystore.public_key_openssh().map(Some).map_err(|error| {
+        LifecycleError::Protocol(format!("failed to load operator public key: {error}"))
+    })
 }
 
 fn port_preference(value: &HistoryRemotePortPreference) -> RemotePortProbePreference {
@@ -634,6 +642,7 @@ mod tests {
     };
     use crate::domain::workspace::{WorkspaceInstanceId, WorkspaceSessionRole};
     use crate::host::ssh::ssh_remote_host_bootstrapper::RemoteHostBootstrapResult;
+    use crate::infra::operator_auth::MemoryOperatorKeyStore;
     use crate::ports::session_creation::{
         RemoteSessionCreationError, RemoteSessionCreationRequest, SessionCreationPort,
     };
@@ -641,6 +650,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    fn test_operator_key_store() -> Arc<dyn OperatorKeyStore> {
+        Arc::new(MemoryOperatorKeyStore::generate().unwrap())
+    }
 
     #[derive(Clone)]
     struct FakeRegistry {
@@ -833,7 +846,7 @@ mod tests {
             "10.1.29.130#7476",
             "seed",
         )]));
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history,
             FakeProbe {
                 calls: probe_calls.clone(),
@@ -848,6 +861,7 @@ mod tests {
                 create_requests.clone(),
                 Ok(remote_target("10.1.29.130#7476", "created-1")),
             )),
+            test_operator_key_store(),
         );
 
         let outcome = runtime
@@ -886,7 +900,7 @@ mod tests {
         let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
         let outbound_dial_calls = Arc::new(Mutex::new(Vec::new()));
         let dial_calls = outbound_dial_calls.clone();
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history,
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -901,6 +915,7 @@ mod tests {
                 Arc::new(Mutex::new(Vec::new())),
                 Ok(remote_target("10.1.29.130#7476", "created-1")),
             )),
+            test_operator_key_store(),
         );
 
         let outcome = runtime
@@ -941,7 +956,7 @@ mod tests {
         let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
         let catalog_targets = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history,
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -953,6 +968,7 @@ mod tests {
             },
             registry,
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         let outcome = runtime
@@ -997,7 +1013,7 @@ mod tests {
     fn remote_host_connect_does_not_save_direct_profile_when_bootstrap_fails() {
         let path = unique_path("remote-host-connect-failed-direct.toml");
         let history = RemoteHostHistoryStore::new(&path);
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history.clone(),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1006,6 +1022,7 @@ mod tests {
             FailingBootstrapper,
             Arc::new(FakeRegistry::new(Vec::new())),
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         let result = runtime.connect(
@@ -1037,7 +1054,7 @@ mod tests {
         history.upsert_profile(original).unwrap();
         let catalog_targets = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history.clone(),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1049,6 +1066,7 @@ mod tests {
             },
             registry,
             unused_session_creation(),
+            test_operator_key_store(),
         );
         let mut edited = profile();
         edited.name = "kk@10.1.29.140".to_string();
@@ -1083,7 +1101,7 @@ mod tests {
         let history = RemoteHostHistoryStore::new(&path);
         let catalog_targets = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             history.clone(),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1095,6 +1113,7 @@ mod tests {
             },
             registry,
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         runtime
@@ -1124,7 +1143,7 @@ mod tests {
             authority_id: "10.1.29.130#7476".to_string(),
             session_id: "seed".to_string(),
         });
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             RemoteHostHistoryStore::new(unique_path("remote-host-connect-delayed-signal.toml")),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1136,6 +1155,7 @@ mod tests {
             },
             registry,
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         let target = runtime
@@ -1153,7 +1173,7 @@ mod tests {
 
     #[test]
     fn wait_for_first_online_target_times_out_when_remote_never_publishes() {
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             RemoteHostHistoryStore::new(unique_path("remote-host-connect-timeout.toml")),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1165,6 +1185,7 @@ mod tests {
             },
             Arc::new(FakeRegistry::new(Vec::new())),
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         let error = runtime
@@ -1184,7 +1205,7 @@ mod tests {
         let catalog_targets = Arc::new(Mutex::new(Vec::new()));
         let bootstrap_plans = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(FakeRegistry::shared(catalog_targets.clone()));
-        let runtime = RemoteHostConnectRuntime::new(
+        let runtime = RemoteHostConnectRuntime::new_with_keystore(
             RemoteHostHistoryStore::new(unique_path("remote-host-connect-no-proxy.toml")),
             FakeProbe {
                 calls: Arc::new(Mutex::new(0)),
@@ -1196,6 +1217,7 @@ mod tests {
             },
             registry,
             unused_session_creation(),
+            test_operator_key_store(),
         );
 
         runtime
